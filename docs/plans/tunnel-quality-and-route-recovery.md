@@ -30,8 +30,130 @@ Affected repositories:
 - `avibe-bot-backend`: additive runtime-status contract, latest-snapshot
   persistence, and current health display.
 
-The cross-repository payload contract is frozen in
-`docs/plans/contracts/tunnel-quality-runtime-status-v1.schema.json`.
+The cross-repository payload contracts are frozen in
+`docs/plans/contracts/tunnel-quality-runtime-status-v1.schema.json` and
+`docs/plans/contracts/tunnel-quality-runtime-status-v2.schema.json`.
+
+## V2 Amendment: Request-Path Quality and Protocol Recovery
+
+The landed V1 implementation correctly detects connector availability, errors,
+loss, and QUIC edge RTT. The August 3 incident exposed a missing layer: four
+healthy QUIC connections reported about 73 ms edge RTT while persistent public
+requests intermittently took 1.8 seconds and fresh connections reached 2.7
+seconds. Switching the connector to HTTP/2 reduced the persistent-request worst
+case to about 620 ms, even though connector-level metrics remained healthy.
+
+This amendment is normative for V2 and overrides the V1 sections below where
+they conflict. V1 remains documented because older Avibe and avibe.bot versions
+continue to exchange that payload.
+
+### Decisions
+
+1. `cloudflared` protocol `auto` is a connectivity fallback, not a performance
+   policy. It prefers QUIC and falls back to HTTP/2 only when QUIC cannot connect.
+   Avibe owns performance-driven protocol selection.
+2. The user-facing grade is request-path-first once enough request samples exist.
+   Connector RTT remains visible diagnostic evidence, never a substitute for
+   request latency.
+3. Request-path measurements use an unauthenticated public `/health` request from
+   the Avibe host with one persistent HTTP session. This includes a local
+   client-to-Cloudflare leg, so absolute numbers are diagnostic; before/after
+   measurements on the same host are the recovery decision signal.
+4. A same-tunnel replica cannot be targeted through the public hostname.
+   Protocol evaluation therefore happens after promotion and old-connector
+   drain, with make-before-break rollback when the new path is not better.
+5. `transport_protocol` is persisted as `auto`, `quic`, or `http2`. Pinned
+   `quic`/`http2` modes permit route reselection but never change protocol.
+   `auto` may remember the last verified protocol across service restarts.
+6. No raw URL, response body, IP, connector identifier, or per-request sample is
+   reported to avibe.bot. Only the bounded V2 aggregate is uploaded.
+
+### Request-path sampling and grading
+
+The quality monitor performs three sequential `/health` requests during each
+15-second connector sample. Requests share a session so the metric models the
+steady-state API path rather than repeated DNS/TLS setup. Each request has a
+3.5-second timeout. The rolling window is 180 seconds and retains at most 48
+samples.
+
+The V2 aggregate contains sample and success counts, P50/P95/P99/maximum,
+failure rate, rates above 500/1000/2000 ms, confidence, and the protocol-local
+healthy P95 baseline. Confidence is `low` below 12 samples, `medium` from 12 to
+29, and `high` from 30 samples. A low-confidence request window is displayed but
+does not replace the connector grade or trigger recovery.
+
+| Request-path grade | Required properties |
+| --- | --- |
+| Good | P95 `< 350 ms`, P99 `< 750 ms`, and `< 2%` above 1 second |
+| Fair | P95 `< 600 ms`, P99 `< 1200 ms`, and `< 5%` above 1 second |
+| Poor | P95 `< 1000 ms`, P99 `< 2000 ms`, and `< 10%` above 1 second |
+| Critical | Any remaining measured window, or failure rate `>= 10%` |
+
+Automatic tail-latency recovery requires high confidence and one of:
+
+- P95 `>= 750 ms`, or P95 at least twice the protocol-local baseline;
+- at least 5 percent of requests above 1 second; or
+- P99 `>= 1500 ms` with at least 3 percent of requests above 1 second.
+
+The rolling high-confidence window is the persistence gate; a single short
+measurement cannot trigger rotation. Healthy minute-level P95 aggregates feed a
+24-hour p20 baseline independently for QUIC and HTTP/2.
+
+### Protocol-aware recovery
+
+Availability, connector error/loss, and QUIC RTT recovery continue to use the V1
+same-protocol candidate comparison. A `tail_latency` episode uses a staged
+request-path comparison:
+
+1. Capture the active request-path aggregate before creating a candidate.
+2. First start a new connector with the current explicit protocol to request a
+   new edge route. This preserves the cheaper V1 route-reselection behavior.
+3. Wait for four ready connections, atomically promote the candidate, and drain
+   the old connector. Public probes are not evaluated while both replicas are
+   eligible because Cloudflare cannot attribute them to one connector.
+4. Reset only the rolling request window, then collect 20 persistent public
+   probes over at least 30 seconds.
+5. Accept when availability and error gates pass and either P95 improves by 20
+   percent, P99 improves by 40 percent without P95 worsening by more than 25
+   percent, or the over-one-second rate is materially reduced. Maximum latency
+   is displayed but never decides a switch by itself.
+6. When same-protocol reselection is not materially better and the mode is
+   `auto`, repeat steps 2-5 with the opposite explicit protocol.
+7. If neither candidate is materially better, start a replacement using the
+   previous explicit protocol, promote it make-before-break, drain the rejected
+   connector, and record `no_improvement`.
+8. The existing cooldown and attempt budget apply to protocol attempts. A
+   successful `auto` attempt persists the verified protocol preference; pinned
+   modes never rewrite it.
+
+Recovery history adds previous/result protocol, P95, and P99. This makes a
+decision explainable when connector RTT is absent under HTTP/2 or unchanged
+under QUIC.
+
+### V2 surfaces
+
+Local Remote Access shows two independent lines:
+
+```text
+Connector: QUIC - 4/4 - RTT 79 ms
+Remote requests: P95 1.1 s - P99 2.3 s - 6% above 1 s
+```
+
+The overall badge follows request-path grade at medium/high confidence, while
+the connector line remains available for diagnosis. avibe.bot uses the same V2
+request-path grade and P95 in its latest-status card. Unsupported future schema
+versions remain ignorable, and the V2 parser continues accepting V1 during
+rolling deployment.
+
+### V2 acceptance scenarios
+
+| ID | Scenario | Required evidence |
+| --- | --- | --- |
+| RA-TQ-010 | Request-path tails override a healthy connector RTT grade | evaluator contract test |
+| RA-TQ-011 | HTTP/2 receives a request-path grade without QUIC RTT | evaluator contract test |
+| RA-TQ-012 | Auto mode evaluates the opposite protocol and keeps a material improvement | supervisor scenario test |
+| RA-TQ-013 | A non-improving protocol switch rolls back make-before-break | supervisor rollback test |
+| RA-TQ-014 | Avibe and avibe.bot exchange and display the bounded V2 aggregate | cross-repo contract and UI tests |
 
 ## Product Decisions
 

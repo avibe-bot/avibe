@@ -1,4 +1,4 @@
-version: 1
+version: 2
 capability:
   id: tunnel_quality
   name: remote-access tunnel quality and smooth route recovery
@@ -65,3 +65,33 @@ scenarios:
     kind: crash_recovery
     layer: scenario
     test: tests/test_tunnel_recovery.py::test_ra_tq_009_restart_promotes_ready_candidate
+  - id: RA-TQ-010
+    name: Request-path tails override a healthy connector RTT grade
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_tunnel_quality.py::test_ra_tq_010_request_path_tail_overrides_good_connector_rtt
+  - id: RA-TQ-011
+    name: HTTP2 receives a request-path grade without QUIC RTT
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_tunnel_quality.py::test_ra_tq_011_http2_uses_request_path_grade_without_rtt
+  - id: RA-TQ-012
+    name: Auto mode keeps a materially better alternate protocol
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_012_tail_recovery_keeps_better_alternate_protocol
+  - id: RA-TQ-013
+    name: Non-improving protocol switch rolls back make-before-break
+    status: covered
+    kind: rollback
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_013_tail_recovery_rolls_back_protocol
+  - id: RA-TQ-014
+    name: Local and cloud surfaces consume the bounded V2 aggregate
+    status: partial
+    kind: cross_repo_contract
+    layer: contract
+    test: tests/test_remote_access_vibe_cloud.py::test_ra_tq_014_runtime_status_payload_includes_v2_request_path
