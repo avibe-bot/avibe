@@ -186,11 +186,15 @@ that owner and fix only the remaining shared-loop and transport-attempt gaps.
    work; in particular, do not call `list_pending_request_callbacks` without a
    limit or scan an unbounded skipped-request backlog. A detached drain must be
    single-flight, time-bounded, and canceled/awaited during service stop. Keep
-   the cheap indexed reload and stale-run probes inline, but do not put callback
-   enqueue/storage work back in front of the sweep. Merely wrapping synchronous
-   storage in `create_task` is not isolation: use an async-compatible store path
-   or a bounded worker so a stalled database operation cannot block the event
-   loop.
+   only provably nonblocking in-memory decisions inline. Every storage touch on
+   the loop, including `store.maybe_reload()`, `request_store.maybe_reload()`,
+   and `_sweep_stale_runs()`, must use an async-compatible store path or a
+   bounded worker / separately tracked task with the same single-flight,
+   timeout, re-arm, and shutdown-join guarantees. An implementation may keep a
+   probe inline only when a contention test proves it cannot wait on a database
+   lock or storage I/O. Merely wrapping synchronous storage in `create_task` is
+   not isolation: a stalled operation must not block the event loop or prevent
+   the stale-run lane from making independent progress.
 2. Bound drain work, not Agent execution. The no-turn-duration-timeout invariant
    remains unchanged.
 3. Treat #1139's persisted Activity batch as the sole owner of output payload,
@@ -245,6 +249,8 @@ that owner and fix only the remaining shared-loop and transport-attempt gaps.
 - a hung request-admission store call, Run-callback lookup/enqueue,
   vault-callback storage/dispatch operation, or recovered-output send does not
   delay the other drains or stale-run sweeps;
+- a contended reload probe or stale-run store operation does not block the event
+  loop, suppress independent drain progress, or serialize unrelated tenants;
 - large request, Run-callback, and vault-callback backlogs drain in bounded pages
   and reliably re-arm;
 - after `maybe_reload()` consumes the only store change, timeout, cancellation,
