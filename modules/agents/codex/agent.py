@@ -538,26 +538,29 @@ class CodexAgent(BaseAgent):
                 )
             except Exception:
                 logger.warning("Failed to release Workbench turns during Codex refresh", exc_info=True)
+        if not hasattr(self, "_transport_locks"):
+            self._transport_locks = {}
         transport_items = list(self._transports.items())
-        transports = [transport for _, transport in transport_items]
-        self._transports.clear()
-        self._transport_last_activity.clear()
         self._session_last_activity.clear()
-        for cwd, _ in transport_items:
-            self._retire_model_hub_process_scope(cwd)
-
-        for transport in transports:
-            try:
-                await transport.stop()
-            except Exception as exc:
-                logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
+        stopped = 0
+        for cwd, transport in transport_items:
+            lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
+            async with lock:
+                if not self._detach_transport_generation(cwd, transport):
+                    continue
+                self._retire_model_hub_process_scope(cwd)
+                try:
+                    await transport.stop()
+                except Exception as exc:
+                    logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
+                stopped += 1
 
         for base_session_id in base_session_ids:
             self._session_mgr.invalidate_thread(base_session_id)
             self._turn_registry.clear_session(base_session_id)
             self._clear_thread_developer_instructions(base_session_id)
 
-        logger.info("Refreshed Codex auth state across %d transport(s)", len(transports))
+        logger.info("Refreshed Codex auth state across %d transport(s)", stopped)
 
     async def refresh_runtime_config(self, codex_config: Any) -> None:
         """Reload persisted runtime config before respawning app-server transports."""
@@ -573,30 +576,36 @@ class CodexAgent(BaseAgent):
         working_path: str,
     ) -> None:
         """Restart a Codex transport only when the resumed session owns that cwd."""
-        transport = self._transports.get(working_path)
-        if transport is None:
-            return
+        if not hasattr(self, "_transport_locks"):
+            self._transport_locks = {}
+        lock = self._transport_locks.setdefault(working_path, asyncio.Lock())
+        async with lock:
+            transport = self._transports.get(working_path)
+            if transport is None:
+                return
 
-        affected_sessions = self._session_mgr.sessions_for_cwd(working_path)
-        other_sessions = [session_id for session_id in affected_sessions if session_id != base_session_id]
-        if other_sessions:
-            logger.info(
-                "Skipping Codex resume preparation for %s; cwd=%s is shared by %d other session(s)",
-                base_session_id,
-                working_path,
-                len(other_sessions),
-            )
-            return
+            affected_sessions = self._session_mgr.sessions_for_cwd(working_path)
+            other_sessions = [session_id for session_id in affected_sessions if session_id != base_session_id]
+            if other_sessions:
+                logger.info(
+                    "Skipping Codex resume preparation for %s; cwd=%s is shared by %d other session(s)",
+                    base_session_id,
+                    working_path,
+                    len(other_sessions),
+                )
+                return
+            if not self._detach_transport_generation(working_path, transport):
+                logger.warning(
+                    "Failed to retire Codex transport generation during resume preparation for cwd=%s",
+                    working_path,
+                )
+                return
+            self._retire_model_hub_process_scope(working_path)
+            try:
+                await transport.stop()
+            except Exception as exc:
+                logger.warning("Failed to stop Codex transport during resume preparation: %s", exc)
 
-        try:
-            await transport.stop()
-        except Exception as exc:
-            logger.warning("Failed to stop Codex transport during resume preparation: %s", exc)
-            return
-
-        self._transports.pop(working_path, None)
-        self._transport_last_activity.pop(working_path, None)
-        self._retire_model_hub_process_scope(working_path)
         self._session_mgr.invalidate_thread(base_session_id)
         self._turn_registry.clear_session(base_session_id)
         self._clear_thread_developer_instructions(base_session_id)
@@ -613,19 +622,19 @@ class CodexAgent(BaseAgent):
         if not hasattr(self, "_session_last_activity"):
             self._session_last_activity = {}
         transport_items = list(self._transports.items())
-        transports = [transport for _, transport in transport_items]
-        self._transports.clear()
-        self._transport_last_activity.clear()
         self._session_last_activity.clear()
-        self._transport_locks.clear()
-        for cwd, _ in transport_items:
-            self._retire_model_hub_process_scope(cwd)
-
-        for transport in transports:
-            try:
-                await transport.stop()
-            except Exception as exc:
-                logger.warning("Failed to stop Codex transport during shutdown: %s", exc)
+        stopped = 0
+        for cwd, transport in transport_items:
+            lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
+            async with lock:
+                if not self._detach_transport_generation(cwd, transport):
+                    continue
+                self._retire_model_hub_process_scope(cwd)
+                try:
+                    await transport.stop()
+                except Exception as exc:
+                    logger.warning("Failed to stop Codex transport during shutdown: %s", exc)
+                stopped += 1
 
         for base_session_id in list(self._session_mgr.all_base_sessions()):
             session_key = self._session_mgr.get_session_key(base_session_id)
@@ -636,7 +645,8 @@ class CodexAgent(BaseAgent):
             self._clear_thread_developer_instructions(base_session_id)
 
         self._session_locks.clear()
-        logger.info("Stopped Codex runtime across %d transport(s)", len(transports))
+        self._transport_locks.clear()
+        logger.info("Stopped Codex runtime across %d transport(s)", stopped)
 
     def _bind_runtime_agent_session_id(self, request: AgentRequest) -> None:
         setter = getattr(self._session_mgr, "set_agent_session_id", None)
@@ -716,6 +726,7 @@ class CodexAgent(BaseAgent):
             bindings=tuple(bindings),
             known_activity_runtime_keys=known_activity_keys,
             known_fallback_route_keys=known_route_keys,
+            durable_session_workdir=cwd,
         )
 
     def _runtime_ownership_snapshot_for_cwd(self, cwd: str):
@@ -779,6 +790,26 @@ class CodexAgent(BaseAgent):
             return False
         return bool(registry.retire_if_current(identity, final_predicate))
 
+    def _detach_transport_generation(
+        self,
+        cwd: str,
+        transport: CodexTransport,
+    ) -> bool:
+        """Retire and detach the exact cached transport before stopping it."""
+        if self._transports.get(cwd) is not transport:
+            return False
+        if not self._retire_transport_activation(
+            cwd,
+            transport,
+            lambda: self._transports.get(cwd) is transport,
+        ):
+            return False
+        self._transports.pop(cwd, None)
+        if hasattr(self, "_transport_last_activity"):
+            self._transport_last_activity.pop(cwd, None)
+        self._cwd_inodes().pop(cwd, None)
+        return True
+
     def runtime_activation_identity_for_request(
         self,
         request: Any,
@@ -788,7 +819,33 @@ class CodexAgent(BaseAgent):
             metadata = getattr(request, "metadata", None)
             if isinstance(metadata, dict):
                 cwd = str(metadata.get("session_workdir") or "").strip()
-        return self._transport_activation_identity(self._transports.get(cwd)) if cwd else None
+        if cwd:
+            return self._transport_activation_identity(self._transports.get(cwd))
+
+        session_key = str(getattr(request, "session_key", "") or "").strip()
+        if not session_key:
+            return None
+        get_sessions = getattr(self._session_mgr, "get_sessions_by_session_key", None)
+        get_cwd = getattr(self._session_mgr, "get_cwd", None)
+        if not callable(get_sessions) or not callable(get_cwd):
+            raise ValueError("Codex Session route mapping is unavailable")
+
+        live_identities: dict[str, RuntimeActivationIdentity] = {}
+        for base_session_id in get_sessions(session_key):
+            mapped_cwd = str(get_cwd(base_session_id) or "").strip()
+            if not mapped_cwd or mapped_cwd in live_identities:
+                continue
+            transport = self._transports.get(mapped_cwd)
+            if transport is None:
+                continue
+            identity = self._transport_activation_identity(transport)
+            if identity is None:
+                raise ValueError("Codex runtime generation is not attached")
+            live_identities[mapped_cwd] = identity
+
+        if len(live_identities) > 1:
+            raise ValueError("multiple live Codex runtime resources match Session route")
+        return next(iter(live_identities.values()), None)
 
     def runtime_activation_identity_for_session_binding(
         self,
@@ -1117,9 +1174,26 @@ class CodexAgent(BaseAgent):
             current = self._transports.get(cwd)
             should_invalidate_cwd_sessions = current is None or current is transport
             if current is transport:
-                self._transports.pop(cwd, None)
-                self._transport_last_activity.pop(cwd, None)
-                self._cwd_inodes().pop(cwd, None)
+                if not self._detach_transport_generation(cwd, transport):
+                    logger.error(
+                        "Refusing to stop current Codex transport without retiring its generation for cwd=%s",
+                        cwd,
+                    )
+                    return
+            elif current is None:
+                identity = self._transport_activation_identity(transport)
+                registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
+                if identity is not None and registry is not None and registry.is_current(identity):
+                    if not self._retire_transport_activation(
+                        cwd,
+                        transport,
+                        lambda: self._transports.get(cwd) is None,
+                    ):
+                        logger.error(
+                            "Refusing to stop detached Codex transport without retiring its generation for cwd=%s",
+                            cwd,
+                        )
+                        return
             try:
                 await transport.stop()
             except Exception as exc:
@@ -1182,6 +1256,10 @@ class CodexAgent(BaseAgent):
                 else:
                     # Stop stale transport if any
                     if existing:
+                        if not self._detach_transport_generation(cwd, existing):
+                            raise RuntimeError(
+                                "Codex transport generation changed before replacement"
+                            )
                         await existing.stop()
                         if (
                             runtime_changed
