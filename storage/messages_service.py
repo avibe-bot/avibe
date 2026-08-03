@@ -488,23 +488,43 @@ def native_message_exists(
     native_message_id: str,
 ) -> bool:
     """True when a conversation-scoped native message has been recorded."""
+    return (
+        get_native_message(
+            conn,
+            platform=platform,
+            scope_id=scope_id,
+            native_message_id=native_message_id,
+        )
+        is not None
+    )
+
+
+def get_native_message(
+    conn: Connection,
+    *,
+    platform: str,
+    scope_id: str | None,
+    native_message_id: str,
+) -> Optional[dict[str, Any]]:
+    """Load one accepted Message by its conversation-scoped native identity."""
+
     platform = str(platform or "").strip()
     native_message_id = str(native_message_id or "").strip()
     if not platform or not native_message_id:
-        return False
+        return None
     scope_predicate = (
         messages.c.scope_id == scope_id
         if scope_id is not None
         else messages.c.scope_id.is_(None)
     )
-    row_id = conn.execute(
-        select(messages.c.id)
+    row = conn.execute(
+        select(messages)
         .where(messages.c.platform == platform)
         .where(scope_predicate)
         .where(messages.c.native_message_id == native_message_id)
         .limit(1)
-    ).scalar_one_or_none()
-    return row_id is not None
+    ).mappings().first()
+    return _row_to_payload(dict(row)) if row else None
 
 
 def get_quick_reply_chosen(conn: Connection, session_id: str, message_id: str) -> Optional[str]:

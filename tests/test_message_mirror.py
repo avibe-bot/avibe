@@ -27,6 +27,7 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_mirror import (
+    agent_message_exists,
     mirror_harness_inbound,
     mirror_inbound,
     persist_agent_message,
@@ -142,6 +143,29 @@ def test_persist_agent_keeps_result_footer_as_structured_content(isolated_state)
     content = json.loads(row["content_json"])
     assert content["kind"] == "result"
     assert content["result_footer"] == "✅ ⏱️ 5s · 🪙 1.2k tok"
+
+
+def test_agent_message_receipt_lookup_returns_text_footer_and_batch(isolated_state):
+    ctx = _slack_ctx()
+    mirror_inbound(ctx, "ping")
+    persist_agent_message(
+        ctx,
+        "result",
+        "Exact accepted assistant result",
+        result_footer="3.4s | 812 tok",
+        metadata={
+            "activity_ids": ["task-a", "task-b"],
+            "run_ids": ["run-a", "run-b"],
+        },
+        native_message_id="activity-batch-receipt",
+    )
+
+    accepted = agent_message_exists(ctx, "activity-batch-receipt")
+
+    assert accepted is not None
+    assert accepted["text"] == "Exact accepted assistant result"
+    assert accepted["content"]["result_footer"] == "3.4s | 812 tok"
+    assert accepted["metadata"]["activity_ids"] == ["task-a", "task-b"]
 
 
 def test_agent_output_provenance_is_hidden_metadata_and_deduplicated(isolated_state):
