@@ -192,3 +192,27 @@ observations:
       - key it on the status ACTUALLY written, since a service shutdown cancels the same coroutine and settles interrupted, where the report is still owed
       - owe neither report, because canceled means the user asked this fire to stop and a stopped fire owes no notice; the landed stamp still records the failure on the definition
       - keep the enqueue in the stamp's transaction rather than merging it into the settlement, which would reopen the window OBS-008 closed
+  - id: OBS-HARNESS-COMMAND-TASK-014
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-034
+    summary: >-
+      Withdrawing the escalation of a stopped fire assumed the row was still queued when
+      the settlement reached it.
+    previous_assumption: >-
+      cancel_run is enough to take an escalation back, because it is the same call the
+      user's own vibe runs cancel makes.
+    observed_behavior: >-
+      On a run the dispatch loop has already claimed, cancel_run writes only
+      cancel_requested, and nothing watches that flag for a turn:
+      _propagate_requested_cancellations observes command fires only, and the CLI's live
+      stop is gated on run_type == "agent_run". The escalation becomes claimable the
+      moment the stamp commits, which is several awaits before the settlement that
+      retracts it, so a stopped command could still answer by launching an Agent and
+      running it to completion.
+    required_updates:
+      - ask the question at the CLAIM, from the parent fire's row, inside the transaction that would otherwise start the work
+      - key it on the fire's cancel_requested as well as a written canceled, since the flag is set the instant the user asks
+      - hold the writer before those reads, because the claim now decides on a row another connection writes
+      - leave a shutdown-interrupted fire's escalation claimable, because there the report is still owed
+      - keep the retraction as the other half rather than replacing it, so a row that is never claimed is settled rather than left queued

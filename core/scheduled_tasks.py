@@ -7019,6 +7019,19 @@ class ScheduledTaskService:
         Found by LINKAGE rather than from the local ``escalation_run_id``: a
         ``CancelledError`` delivered anywhere after the stamp skips the assignment
         entirely, and the escalation is durable by then regardless.
+
+        THIS IS THE SECOND OF TWO GUARDS, and it is the weaker one. Retraction can only
+        take back a row that is still queued: ``cancel_run`` on an escalation the
+        dispatch loop has already claimed writes a flag, and the turn lane does not
+        watch that flag (see ``_propagate_requested_cancellations`` for why a turn's
+        stop belongs to the lane that owns it). So the claim itself refuses an
+        escalation whose fire is already cancelled
+        (``_escalates_a_stopped_fire``), which is what actually makes the ordering
+        between these two lanes irrelevant: whichever runs first, no Agent turn starts
+        for a stopped fire. What remains is only an escalation claimed BEFORE the user's
+        stop landed -- a turn that was legitimately in flight when the request arrived,
+        which is the same thing that happens to any other out-of-band turn and is
+        stopped from the turn lane, not from here.
         """
 
         try:
@@ -7037,10 +7050,9 @@ class ScheduledTaskService:
             or ""
         ).strip()
         if not escalation_id or status in TERMINAL_RUN_STATUSES:
-            # Already settled -- including the narrow case this cannot undo: an
-            # escalation claimed and delivered in the moment between the stamp and this
-            # retraction. The window is now that moment rather than the whole life of
-            # the queued row.
+            # Already settled -- including by the claim door, which refuses an
+            # escalation whose fire is cancelled and terminalizes it as ``canceled``
+            # exactly as this would have.
             return
         try:
             retracted = self.request_store.cancel_run(escalation_id)

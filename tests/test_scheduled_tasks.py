@@ -14509,6 +14509,89 @@ def test_a_stop_that_lands_after_the_stamp_retracts_the_escalation(
     assert stored is not None and stored.last_exit_code == 7
 
 
+def test_claiming_the_escalation_of_a_stopped_fire_is_refused_at_the_door(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-034 -- retraction is too late once the dispatch loop has claimed the turn.
+
+    SCT-033 takes the escalation back from whoever settles the fire ``canceled``, and
+    that works for exactly as long as the row is still queued. The dispatch loop runs on
+    the same loop as the fire's own coroutine, and the escalation becomes claimable the
+    moment the stamp commits -- well before this settlement reaches it. A claim is the
+    one transition retraction cannot undo: ``cancel_run`` on a running Agent Run writes
+    a flag, and the turn lane does not watch that flag, so the stopped job would launch
+    an Agent and run it to completion.
+
+    So the CLAIM answers the question, from the parent row, inside the transaction that
+    would otherwise start the work -- and then it no longer matters which of the two
+    lanes gets there first. Keyed on the fire's ``cancel_requested``, which is set the
+    instant the user asks, rather than on any status a claim would have to wait for.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_claimed_stop")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    real_mark = service.store.mark_task_result
+    claim_attempt: dict[str, Any] = {}
+
+    def _stop_it_then_claim_the_escalation(*args, **kwargs):
+        stamped = real_mark(*args, **kwargs)
+        if claim_attempt:
+            # The terminal projection stamps the definition again on its way out; only
+            # the FIRST stamp is the one that queued the escalation.
+            return stamped
+        # THE ordering: the escalation is durable, the user's stop lands, and the
+        # dispatch loop claims the escalation before the fire's settlement gets to it.
+        service.request_store.cancel_run(queued.id)
+        escalation = service.request_store.find_escalation_run(parent_run_id=queued.id)
+        assert escalation is not None, "the premise: the stamp queued an escalation"
+        claim_attempt["id"] = str(escalation["id"])
+        claim_attempt["claimed"] = service.request_store.claim(claim_attempt["id"])
+        return stamped
+
+    monkeypatch.setattr(
+        service.store, "mark_task_result", _stop_it_then_claim_the_escalation
+    )
+
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "canceled", (
+        f"the premise: the stop won the settlement race ({run['status']!r})"
+    )
+    assert claim_attempt.get("claimed") is None, (
+        "the dispatch loop was handed the escalation of a fire the user had already "
+        f"stopped: {claim_attempt.get('claimed')!r}"
+    )
+
+    escalation = service.request_store.get_run(str(claim_attempt["id"]))
+    assert escalation is not None, "the escalation row vanished rather than settling"
+    assert escalation["status"] == "canceled", (
+        "the refused claim left the escalation of a stopped fire non-terminal, so a "
+        f"later pass can start it: {escalation['status']!r}"
+    )
+    assert _escalation_runs(store) == [], (
+        "a claimable escalation survived the stop of the fire that queued it"
+    )
+
+    # The failure is still recorded on the definition; only the Agent turn is withdrawn.
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code == 7
+
+
 def test_teardown_between_the_stamp_and_the_settle_cancels_the_fire_itself(
     tmp_path: Path, monkeypatch
 ) -> None:

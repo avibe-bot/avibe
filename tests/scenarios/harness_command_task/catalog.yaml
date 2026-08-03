@@ -284,3 +284,15 @@ scenarios:
     # and the escalation rolls back with it; here the flag lands after that transaction
     # returned, so the durable turn has to be withdrawn by whoever settles the fire
     # ``canceled``. Neither report is owed -- a stopped fire owes no notice (SCT-027).
+  - id: SCT-034
+    name: claiming the escalation of a stopped fire is refused at the door
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_claiming_the_escalation_of_a_stopped_fire_is_refused_at_the_door
+    # The half SCT-033's retraction cannot reach. Retraction takes back a QUEUED row;
+    # once the dispatch loop has claimed the escalation, ``cancel_run`` writes a flag the
+    # turn lane does not watch, so the stopped job would launch an Agent anyway. The
+    # claim asks the parent fire itself, inside the transaction that would start the
+    # work, which is what makes the ordering between the two lanes irrelevant.

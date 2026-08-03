@@ -3496,14 +3496,65 @@ class SQLiteBackgroundTaskStore:
         _publish_queue_updated(queue_session_id)
         return row_to_publish is not None
 
+    def _escalates_a_stopped_fire(self, conn: Any, row: Any) -> bool:
+        """Is this claim about to start an Agent turn for a fire the user stopped?
+
+        A failed ``--on-failure agent`` fire commits its stamp and its escalation in ONE
+        transaction guarded on the fire not being cancelled, and whoever settles that
+        fire ``canceled`` takes the escalation back
+        (``_retract_escalation_of_stopped_fire``). Between those two moments the
+        escalation is a queued row like any other, so the dispatch loop can claim it --
+        and a claim is the one transition retraction cannot undo, because
+        ``cancel_run`` on a running Agent Run only writes a flag that nothing in the
+        turn lane is watching. The stopped job would then answer by starting an Agent.
+
+        So the claim asks the question itself, from the parent row, inside the
+        transaction that would otherwise start the work: the escalation exists only to
+        report ITS fire, and a fire the user stopped has nothing to report. Read from
+        ``run_type`` plus ``parent_run_id`` -- the durable linkage the stamp wrote --
+        rather than from anything the retraction has to reach first, so the ordering
+        between the two lanes stops mattering.
+
+        ``cancel_requested`` counts as well as a written ``canceled``: the flag is what
+        the fire's own settlement normalizes from, and it is set the instant the user
+        asks, which is earlier than any status this could wait for. A shutdown-
+        interrupted fire carries no flag, so its escalation is still claimed -- there
+        the report IS owed.
+        """
+
+        if str(row["run_type"] or "").strip() != "task_escalation":
+            return False
+        parent_run_id = str(row["parent_run_id"] or "").strip()
+        if not parent_run_id:
+            return False
+        parent = conn.execute(
+            select(agent_runs.c.status, agent_runs.c.cancel_requested)
+            .where(agent_runs.c.id == parent_run_id)
+            .limit(1)
+        ).mappings().first()
+        if parent is None:
+            return False
+        return bool(parent["cancel_requested"]) or normalize_run_status(parent["status"]) == "canceled"
+
     def claim_pending_run(self, run_id: str, *, started_at: str) -> Optional[dict[str, Any]]:
         row_to_publish = None
         payload = None
         with self.engine.begin() as conn:
+            # BEFORE the reads this claim decides on, because one of them is now
+            # another row: an escalation's parent fire, which a concurrent
+            # ``cancel_run`` writes. Holding the writer from the start means the
+            # decision cannot rest on a snapshot that goes stale before the UPDATE
+            # lands -- in WAL mode that is not a lost update but an unretryable
+            # ``SQLITE_BUSY_SNAPSHOT`` on the claim itself.
+            reserve_write_lock(conn)
             row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
             if not row:
                 return None
-            if bool(row["cancel_requested"]) or normalize_run_status(row["status"]) == "canceled":
+            if (
+                bool(row["cancel_requested"])
+                or normalize_run_status(row["status"]) == "canceled"
+                or self._escalates_a_stopped_fire(conn, row)
+            ):
                 conn.execute(
                     update(agent_runs)
                     .where(agent_runs.c.id == run_id)
