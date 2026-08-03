@@ -189,7 +189,10 @@ evidence, and restart recovery. First determine what remains.
    Dispatch or Delivery acceptance is not task success.
 4. If pre-fix rows still match the old premature-success signature, stamp
    `metadata.pre_settlement_migration=true` and render a quiet “legacy — delivery
-   only” marker. Do not rewrite historical status or invent result text.
+   only” marker. Route UI copy through `ui/src/i18n/en.json` and
+   `ui/src/i18n/zh.json`, and CLI/backend copy through the matching
+   `vibe/i18n/` catalogs; do not hardcode either locale. Do not rewrite
+   historical status or invent result text.
 
 ### PR7B — Cron liveness
 
@@ -259,6 +262,8 @@ For every PR:
 - use guarded writers and test the losing race, not only the happy winner;
 - keep tests hermetic; do not write real `~/.avibe` state;
 - run Ruff on changed Python files;
+- for any UI change, run `cd ui && npm run build` and verify the packaged
+  `ui/dist` contains the intended frontend change;
 - use the local Incus regression runner for cross-platform verification;
 - never restart the local `vibe` service for routine validation.
 
