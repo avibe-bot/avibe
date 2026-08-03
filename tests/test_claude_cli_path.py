@@ -16,6 +16,7 @@ from config.v2_compat import to_app_config
 from config.v2_config import AgentsConfig, ClaudeConfig, RuntimeConfig, SlackConfig, V2Config
 from core import git_runtime as git_runtime_module
 from core.handlers.session_handler import SessionHandler
+from core.runtime_ownership import SessionRuntimeDisposition
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
 
@@ -76,6 +77,14 @@ class _Controller:
         self.receiver_tasks = {}
         self.stored_session_mappings = {}
         self._working_path = working_path
+        self.runtime_ownership = SimpleNamespace(
+            snapshot=lambda _target: SimpleNamespace(
+                disposition=SessionRuntimeDisposition.RECLAIMABLE,
+                blocks_reclamation=False,
+                needs_session_delivery_wake=False,
+                needs_request_wake=False,
+            )
+        )
 
     def get_cwd(self, context) -> str:
         return str(self._working_path)
@@ -1584,7 +1593,12 @@ def test_evict_idle_sessions_force_evicts_stuck_active_session(monkeypatch, tmp_
 
     class _ClaudeAgent:
         @staticmethod
-        async def force_cleanup_stuck_active_session(composite_key: str) -> None:
+        async def force_cleanup_stuck_active_session(
+            composite_key: str,
+            *,
+            runtime_lock_held: bool = False,
+        ) -> None:
+            assert runtime_lock_held is True
             cleanup_calls.append(composite_key)
             handler.clear_session_tracking(composite_key)
 

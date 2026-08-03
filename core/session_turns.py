@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -132,6 +132,23 @@ _UNKNOWN_START_REPLAY_INSTRUCTION = (
     "[Avibe recovery: this request may have been delivered before restart. "
     "Before any irreversible action, check whether the work is already complete.]\n\n"
 )
+
+
+@dataclass(frozen=True)
+class RuntimeDeliveryObservation:
+    session_id: str
+    kind: str
+    delivery_id: str | None
+    delivery_state: str | None
+    delivery_version: int | None
+    delivery_attempt_id: str | None
+    delivery_target_turn_id: str | None
+    delivery_expected_native_turn_id: str | None
+    turn_id: str | None
+    turn_state: str | None
+    turn_version: int | None
+    start_attempt_id: str | None
+    native_turn_id: str | None
 
 
 def _start_replay_count(deliveries: list[dict[str, Any]]) -> int:
@@ -1072,6 +1089,8 @@ class SessionTurnManager:
         *,
         session_id: str,
         backend: str,
+        expected_head_id: str | None = None,
+        expected_head_version: int | None = None,
     ) -> str | None:
         """Claim the exact open FIFO head while the caller owns SQLite's writer slot."""
 
@@ -1085,6 +1104,11 @@ class SessionTurnManager:
             head = delivery_store.claimable_fifo_head(conn, session_id)
             queued = delivery_store.claimable_fifo_prefix(conn, session_id)
             if head is None or not queued or str(queued[0]["id"]) != str(head["id"]):
+                return None
+            if expected_head_id is not None and (
+                str(head["id"]) != expected_head_id
+                or int(head["version"]) != expected_head_version
+            ):
                 return None
             segment_payloads = _collect_delivery_segment(queued)
             segment = [
@@ -2610,11 +2634,18 @@ class SessionTurnManager:
         turn_id: str,
         *,
         context: Optional["MessageContext"] = None,
+        expected_start_attempt_id: str | None = None,
     ) -> bool:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, turn_id)
             if turn is None or turn["state"] != "starting":
+                return False
+            if (
+                expected_start_attempt_id is not None
+                and str(turn.get("start_attempt_id") or "")
+                != expected_start_attempt_id
+            ):
                 return False
             backend = str(turn.get("backend") or "").strip()
             if backend in self._draining_backends:
@@ -2672,6 +2703,11 @@ class SessionTurnManager:
                 latest is None
                 or latest["state"] != "starting"
                 or latest.get("start_attempt_id") != attempt_id
+                or (
+                    expected_start_attempt_id is not None
+                    and str(latest.get("start_attempt_id") or "")
+                    != expected_start_attempt_id
+                )
                 or fresh_delivery is None
                 or latest.get("initial_delivery_id") != fresh_delivery.get("id")
                 or any(row["state"] != "claimed" for row in fresh_deliveries)
@@ -2822,7 +2858,13 @@ class SessionTurnManager:
                     )
             return False
 
-    async def drain_delivery_queue(self, session_id: str) -> bool:
+    async def drain_delivery_queue(
+        self,
+        session_id: str,
+        *,
+        expected_head_id: str | None = None,
+        expected_head_version: int | None = None,
+    ) -> bool:
         turn_id: str | None = None
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -2845,6 +2887,8 @@ class SessionTurnManager:
                 conn,
                 session_id=session_id,
                 backend=backend,
+                expected_head_id=expected_head_id,
+                expected_head_version=expected_head_version,
             )
             if turn_id is None:
                 return False
@@ -3738,6 +3782,357 @@ class SessionTurnManager:
                 name=f"durable-terminal-resume:{session_id}",
             )
         return None
+
+    def scan_runtime_delivery_recovery(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+    ) -> tuple[list[RuntimeDeliveryObservation], bool]:
+        """Return bounded exact Session owners for passive PR3 recovery."""
+
+        page_limit = max(1, int(limit))
+        with self._sqlite_engine().connect() as conn:
+            live_turn = exists(
+                select(session_turn_rows.c.id)
+                .where(
+                    session_turn_rows.c.session_id == agent_sessions.c.id,
+                    session_turn_rows.c.state.in_(delivery_store.TURN_OWNER_STATES),
+                )
+                .correlate(agent_sessions)
+            )
+            head_id = (
+                select(delivery_rows.c.id)
+                .where(
+                    delivery_rows.c.session_id == agent_sessions.c.id,
+                    delivery_rows.c.state == "queued",
+                )
+                .order_by(delivery_rows.c.submitted_at, delivery_rows.c.id)
+                .limit(1)
+                .correlate(agent_sessions)
+                .scalar_subquery()
+            )
+            open_query = (
+                select(
+                    agent_sessions.c.id.label("session_id"),
+                    literal("open_head").label("kind"),
+                    delivery_rows.c.id.label("delivery_id"),
+                    delivery_rows.c.state.label("delivery_state"),
+                    delivery_rows.c.version.label("delivery_version"),
+                    delivery_rows.c.current_attempt_id.label("delivery_attempt_id"),
+                    delivery_rows.c.current_target_turn_id.label(
+                        "delivery_target_turn_id"
+                    ),
+                    delivery_rows.c.current_expected_native_turn_id.label(
+                        "delivery_expected_native_turn_id"
+                    ),
+                    literal(None).label("turn_id"),
+                    literal(None).label("turn_state"),
+                    literal(None).label("turn_version"),
+                    literal(None).label("start_attempt_id"),
+                    literal(None).label("native_turn_id"),
+                )
+                .join(delivery_rows, delivery_rows.c.id == head_id)
+                .where(
+                    agent_sessions.c.status == "active",
+                    agent_sessions.c.queue_hold_state == "open",
+                    ~live_turn,
+                )
+                .order_by(delivery_rows.c.submitted_at, delivery_rows.c.id)
+                .limit(page_limit + 1)
+            )
+            if occupied:
+                open_query = open_query.where(~agent_sessions.c.id.in_(occupied))
+            open_rows = [dict(row) for row in conn.execute(open_query).mappings()]
+
+            turn_candidates = (
+                select(
+                    session_turn_rows.c.session_id.label("session_id"),
+                    literal("turn_owner").label("kind"),
+                    delivery_rows.c.id.label("delivery_id"),
+                    delivery_rows.c.state.label("delivery_state"),
+                    delivery_rows.c.version.label("delivery_version"),
+                    delivery_rows.c.current_attempt_id.label("delivery_attempt_id"),
+                    delivery_rows.c.current_target_turn_id.label(
+                        "delivery_target_turn_id"
+                    ),
+                    delivery_rows.c.current_expected_native_turn_id.label(
+                        "delivery_expected_native_turn_id"
+                    ),
+                    session_turn_rows.c.id.label("turn_id"),
+                    session_turn_rows.c.state.label("turn_state"),
+                    session_turn_rows.c.version.label("turn_version"),
+                    session_turn_rows.c.start_attempt_id.label("start_attempt_id"),
+                    session_turn_rows.c.native_turn_id.label("native_turn_id"),
+                    session_turn_rows.c.created_at.label("sort_at"),
+                    literal(0).label("sort_kind"),
+                )
+                .join(
+                    delivery_rows,
+                    delivery_rows.c.id == session_turn_rows.c.initial_delivery_id,
+                )
+                .where(
+                    or_(
+                        session_turn_rows.c.state.in_(("waiting", "starting")),
+                        and_(
+                            session_turn_rows.c.state == "active",
+                            session_turn_rows.c.control_state.in_(
+                                (
+                                    "pending",
+                                    "interrupting",
+                                    "waiting_terminal",
+                                    "reconciling",
+                                )
+                            ),
+                        ),
+                    )
+                )
+                .order_by(
+                    session_turn_rows.c.created_at,
+                    session_turn_rows.c.id,
+                )
+                .limit(page_limit + 1)
+            )
+            if occupied:
+                turn_candidates = turn_candidates.where(
+                    ~session_turn_rows.c.session_id.in_(occupied)
+                )
+            fence_candidates = (
+                select(
+                    delivery_rows.c.session_id.label("session_id"),
+                    literal("delivery_fence").label("kind"),
+                    delivery_rows.c.id.label("delivery_id"),
+                    delivery_rows.c.state.label("delivery_state"),
+                    delivery_rows.c.version.label("delivery_version"),
+                    delivery_rows.c.current_attempt_id.label("delivery_attempt_id"),
+                    delivery_rows.c.current_target_turn_id.label(
+                        "delivery_target_turn_id"
+                    ),
+                    delivery_rows.c.current_expected_native_turn_id.label(
+                        "delivery_expected_native_turn_id"
+                    ),
+                    session_turn_rows.c.id.label("turn_id"),
+                    session_turn_rows.c.state.label("turn_state"),
+                    session_turn_rows.c.version.label("turn_version"),
+                    session_turn_rows.c.start_attempt_id.label("start_attempt_id"),
+                    session_turn_rows.c.native_turn_id.label("native_turn_id"),
+                    delivery_rows.c.submitted_at.label("sort_at"),
+                    literal(1).label("sort_kind"),
+                )
+                .select_from(
+                    delivery_rows.outerjoin(
+                        session_turn_rows,
+                        session_turn_rows.c.id
+                        == delivery_rows.c.current_target_turn_id,
+                    )
+                )
+                .where(delivery_rows.c.state.in_(delivery_store.FENCE_STATES))
+                .order_by(delivery_rows.c.submitted_at, delivery_rows.c.id)
+                .limit(page_limit + 1)
+            )
+            if occupied:
+                fence_candidates = fence_candidates.where(
+                    ~delivery_rows.c.session_id.in_(occupied)
+                )
+            turn_rows = [
+                dict(row) for row in conn.execute(turn_candidates).mappings()
+            ]
+            fence_rows = [
+                dict(row) for row in conn.execute(fence_candidates).mappings()
+            ]
+
+        by_session: dict[str, dict[str, Any]] = {}
+        for row in turn_rows + fence_rows + open_rows:
+            by_session.setdefault(str(row["session_id"]), row)
+        selected = list(by_session.values())[:page_limit]
+        observations = [
+            RuntimeDeliveryObservation(
+                session_id=str(row["session_id"]),
+                kind=str(row["kind"]),
+                delivery_id=str(row.get("delivery_id") or "") or None,
+                delivery_state=str(row.get("delivery_state") or "") or None,
+                delivery_version=(
+                    int(row["delivery_version"])
+                    if row.get("delivery_version") is not None
+                    else None
+                ),
+                delivery_attempt_id=(
+                    str(row.get("delivery_attempt_id") or "") or None
+                ),
+                delivery_target_turn_id=(
+                    str(row.get("delivery_target_turn_id") or "") or None
+                ),
+                delivery_expected_native_turn_id=(
+                    str(row.get("delivery_expected_native_turn_id") or "") or None
+                ),
+                turn_id=str(row.get("turn_id") or "") or None,
+                turn_state=str(row.get("turn_state") or "") or None,
+                turn_version=(
+                    int(row["turn_version"])
+                    if row.get("turn_version") is not None
+                    else None
+                ),
+                start_attempt_id=str(row.get("start_attempt_id") or "") or None,
+                native_turn_id=str(row.get("native_turn_id") or "") or None,
+            )
+            for row in selected
+        ]
+        has_more = (
+            len(open_rows) > page_limit
+            or len(turn_rows) > page_limit
+            or len(fence_rows) > page_limit
+            or len(by_session) > page_limit
+        )
+        return observations, has_more
+
+    def _runtime_observation_is_current(
+        self,
+        observation: RuntimeDeliveryObservation,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        with self._sqlite_engine().connect() as conn:
+            delivery = (
+                delivery_store.get_delivery(conn, observation.delivery_id)
+                if observation.delivery_id
+                else None
+            )
+            turn = (
+                delivery_store.get_turn(conn, observation.turn_id)
+                if observation.turn_id
+                else None
+            )
+        if observation.delivery_id and (
+            delivery is None
+            or str(delivery.get("session_id") or "") != observation.session_id
+            or str(delivery.get("state") or "") != observation.delivery_state
+            or int(delivery.get("version") or 0) != observation.delivery_version
+            or str(delivery.get("current_attempt_id") or "")
+            != str(observation.delivery_attempt_id or "")
+            or str(delivery.get("current_target_turn_id") or "")
+            != str(observation.delivery_target_turn_id or "")
+            or str(delivery.get("current_expected_native_turn_id") or "")
+            != str(observation.delivery_expected_native_turn_id or "")
+        ):
+            return None, None
+        if observation.turn_id and (
+            turn is None
+            or str(turn.get("session_id") or "") != observation.session_id
+            or str(turn.get("state") or "") != observation.turn_state
+            or int(turn.get("version") or 0) != observation.turn_version
+            or str(turn.get("start_attempt_id") or "")
+            != str(observation.start_attempt_id or "")
+            or str(turn.get("native_turn_id") or "")
+            != str(observation.native_turn_id or "")
+        ):
+            return None, None
+        return delivery, turn
+
+    async def recover_runtime_delivery_observation(
+        self,
+        observation: RuntimeDeliveryObservation,
+    ) -> bool:
+        """Re-enter only the exact owner seen by a bounded lane scan."""
+
+        delivery, turn = self._runtime_observation_is_current(observation)
+        if observation.delivery_id and delivery is None:
+            return False
+        if observation.turn_id and turn is None:
+            return False
+        if observation.kind == "open_head":
+            return await self.drain_delivery_queue(
+                observation.session_id,
+                expected_head_id=observation.delivery_id,
+                expected_head_version=observation.delivery_version,
+            )
+        if turn is not None and turn["state"] == "starting":
+            return await self._start_persisted_turn(
+                str(turn["id"]),
+                expected_start_attempt_id=str(turn.get("start_attempt_id") or ""),
+            )
+        if turn is not None and turn["state"] == "waiting":
+            with self._sqlite_engine().connect() as conn:
+                predecessor = conn.execute(
+                    select(session_turn_rows).where(
+                        session_turn_rows.c.control_successor_turn_id == turn["id"]
+                    )
+                ).mappings().first()
+            if predecessor is None:
+                return False
+            predecessor_id = str(predecessor["id"])
+            if predecessor["state"] == "terminal":
+                return bool(
+                    await self._resume_linked_control_successor(
+                        observation.session_id,
+                        predecessor_id,
+                    )
+                )
+            await self._run_pending_interrupt(observation.session_id, predecessor_id)
+            return True
+        if turn is not None and turn.get("control_state") in {
+            "pending",
+            "interrupting",
+            "waiting_terminal",
+            "reconciling",
+        }:
+            await self._run_pending_interrupt(
+                observation.session_id,
+                str(turn["id"]),
+            )
+            return True
+        if delivery is None:
+            return False
+        if delivery["state"] == "reserved":
+            context = self._delivery_context(observation.session_id)
+            self._hydrate_delivery_context(context, delivery)
+            result = await self.deliver(
+                self._request_from_delivery(
+                    delivery,
+                    has_attachments=bool(context.files),
+                ),
+                context=context,
+            )
+            return result.state != "reserved"
+        target_turn_id = str(delivery.get("current_target_turn_id") or "")
+        if delivery["state"] == "pending_steer" and target_turn_id:
+            await self._run_pending_steers(
+                observation.session_id,
+                target_turn_id,
+                self._delivery_context(observation.session_id),
+            )
+            return True
+        if delivery["state"] in {"steering", "reconciling_steer"}:
+            attempt_id = str(delivery.get("current_attempt_id") or "")
+            expected_native = str(
+                delivery.get("current_expected_native_turn_id") or ""
+            )
+            if not target_turn_id or not attempt_id or not expected_native:
+                return False
+            with self._sqlite_engine().connect() as conn:
+                target_turn = delivery_store.get_turn(conn, target_turn_id)
+            if target_turn is None:
+                return False
+            receipt = await self._reconcile_steer_attempt(
+                str(target_turn["backend"]),
+                SteerReconcileRequest(
+                    target_session_id=observation.session_id,
+                    expected_logical_turn_id=target_turn_id,
+                    expected_native_turn_id=expected_native,
+                    attempt_id=attempt_id,
+                ),
+            )
+            outcome = getattr(receipt, "outcome", SteerOutcome.UNKNOWN)
+            if (
+                str(getattr(outcome, "value", outcome))
+                == SteerOutcome.UNKNOWN.value
+                and delivery["state"] == "reconciling_steer"
+            ):
+                return False
+            result = await self._finish_steer(
+                str(delivery["id"]),
+                receipt,
+                context=None,
+            )
+            return result.state != "reconciling_steer"
+        return False
 
     async def recover_durable_delivery_state(
         self,

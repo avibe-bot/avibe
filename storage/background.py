@@ -267,6 +267,9 @@ _TIMEOUT_EXIT_CODE = 124
 # read as "running" and leave "waiting" unreachable. Waiter liveness is a
 # separate field (``process_alive``), not a state.
 _WATCH_RUNTIME_RUN_TYPE = "watch_runtime"
+EXECUTION_RUN_TYPES = frozenset(
+    {"task_run", "hook_send", "agent_run", "scheduled", "watch", "webhook"}
+)
 # SQLite caps how many parameters one statement may bind (999 on builds before
 # 3.32). Paged lookups stay far under it, but the unpaged harness lists resolve
 # every row in the store at once, so batch resolvers chunk their id lists: a few
@@ -3469,6 +3472,74 @@ class SQLiteBackgroundTaskStore:
             if result.rowcount:
                 row_to_publish = dict(
                     conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
+        return row_to_publish is not None
+
+    def scan_claimed_pre_execution_runs(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Read a bounded page of fallback claims that crossed no PID boundary."""
+
+        page_limit = max(1, int(limit))
+        query = (
+            select(
+                agent_runs.c.id,
+                agent_runs.c.status,
+                agent_runs.c.updated_at,
+                agent_runs.c.delivery_id,
+                agent_runs.c.pid,
+            )
+            .where(agent_runs.c.status.in_(_status_query_values("running")))
+            .where(agent_runs.c.pid.is_(None))
+            .where(agent_runs.c.delivery_id.is_(None))
+            .where(agent_runs.c.run_type.in_(EXECUTION_RUN_TYPES))
+            .order_by(agent_runs.c.created_at, agent_runs.c.id)
+            .limit(page_limit + 1)
+        )
+        if occupied:
+            query = query.where(~agent_runs.c.id.in_(occupied))
+        with self.engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(query).mappings()]
+        return rows[:page_limit], len(rows) > page_limit
+
+    def recover_claimed_pre_execution_run(
+        self,
+        *,
+        run_id: str,
+        expected_status: str,
+        expected_updated_at: str,
+    ) -> bool:
+        """Requeue one exact fallback claim if execution still has not started."""
+
+        now = _utc_now_iso()
+        row_to_publish = None
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status == expected_status)
+                .where(agent_runs.c.updated_at == expected_updated_at)
+                .where(agent_runs.c.pid.is_(None))
+                .where(agent_runs.c.delivery_id.is_(None))
+                .where(agent_runs.c.run_type.in_(EXECUTION_RUN_TYPES))
+                .values(
+                    status="queued",
+                    started_at=None,
+                    pid=None,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount:
+                row_to_publish = dict(
+                    conn.execute(
+                        select(agent_runs)
+                        .where(agent_runs.c.id == run_id)
+                        .limit(1)
+                    ).mappings().one()
                 )
         _publish_run_rows_updated([row_to_publish])
         return row_to_publish is not None

@@ -5422,6 +5422,7 @@ def test_boot_waits_for_backend_restore_before_delivery_recovery(
     monkeypatch,
     tmp_path,
 ):
+    """HFR-152: supervisor activation follows identity and owner recovery."""
     import uvicorn
 
     calls: list[str] = []
@@ -5445,6 +5446,9 @@ def test_boot_waits_for_backend_restore_before_delivery_recovery(
         session_turns=manager,
         _delivery_recovery_barrier=restore_barrier,
         _delivery_recovery_complete=recovery_complete,
+        runtime_work_supervisor=SimpleNamespace(
+            activate=AsyncMock(side_effect=lambda: calls.append("supervisor"))
+        ),
     )
 
     class _Server:
@@ -5475,4 +5479,4 @@ def test_boot_waits_for_backend_restore_before_delivery_recovery(
 
     asyncio.run(_run())
 
-    assert calls == ["delivery", "queue", "serve", "close"]
+    assert calls == ["delivery", "queue", "supervisor", "serve", "close"]

@@ -34,6 +34,12 @@ from core.system_prompt_injection import (
     get_enabled_agents_for_prompt,
 )
 from core.resource_governance import governor_from_controller
+from core.runtime_ownership import (
+    RuntimeResourceTarget,
+    RuntimeSessionBinding,
+    SessionRuntimeDisposition,
+    wake_runtime_ownership,
+)
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -91,6 +97,7 @@ class CodexAgent(BaseAgent):
         self._transports: Dict[str, CodexTransport] = {}
         self._transport_locks: Dict[str, asyncio.Lock] = {}
         self._transport_last_activity: Dict[str, float] = {}
+        self._session_last_activity: Dict[str, float] = {}
         # cwd inode at app-server spawn time, keyed like ``_transports``. A
         # cached app-server whose directory was deleted (even if re-created
         # with the same path) sits in a dead inode and fails every
@@ -514,6 +521,8 @@ class CodexAgent(BaseAgent):
         """Drop app-server runtime state so future turns pick up fresh auth."""
         if not hasattr(self, "_transport_last_activity"):
             self._transport_last_activity = {}
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
         base_session_ids = list(self._session_mgr.all_base_sessions())
         controller = getattr(self, "controller", None)
         turn_manager = getattr(controller, "session_turns", None)
@@ -530,6 +539,7 @@ class CodexAgent(BaseAgent):
         transports = [transport for _, transport in transport_items]
         self._transports.clear()
         self._transport_last_activity.clear()
+        self._session_last_activity.clear()
         for cwd, _ in transport_items:
             self._retire_model_hub_process_scope(cwd)
 
@@ -597,10 +607,13 @@ class CodexAgent(BaseAgent):
             self._transport_locks = {}
         if not hasattr(self, "_session_locks"):
             self._session_locks = {}
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
         transport_items = list(self._transports.items())
         transports = [transport for _, transport in transport_items]
         self._transports.clear()
         self._transport_last_activity.clear()
+        self._session_last_activity.clear()
         self._transport_locks.clear()
         for cwd, _ in transport_items:
             self._retire_model_hub_process_scope(cwd)
@@ -622,8 +635,113 @@ class CodexAgent(BaseAgent):
         self._session_locks.clear()
         logger.info("Stopped Codex runtime across %d transport(s)", len(transports))
 
+    def _runtime_ownership_target_for_cwd(
+        self,
+        cwd: str,
+    ) -> RuntimeResourceTarget | None:
+        sessions_for_cwd = getattr(self._session_mgr, "sessions_for_cwd", None)
+        all_base_sessions = getattr(self._session_mgr, "all_base_sessions", None)
+        get_cwd = getattr(self._session_mgr, "get_cwd", None)
+        get_session_key = getattr(self._session_mgr, "get_session_key", None)
+        if not all(
+            callable(method)
+            for method in (
+                sessions_for_cwd,
+                all_base_sessions,
+                get_cwd,
+                get_session_key,
+            )
+        ):
+            return None
+
+        bindings: list[RuntimeSessionBinding] = []
+        for base_session_id in sessions_for_cwd(cwd):
+            session_key = str(get_session_key(base_session_id) or "").strip()
+            bound_cwd = str(get_cwd(base_session_id) or "").strip()
+            if not session_key or bound_cwd != cwd:
+                return None
+            bindings.append(
+                RuntimeSessionBinding(
+                    session_anchor=base_session_id,
+                    workdir=cwd,
+                    activity_runtime_keys=(f"{base_session_id}:{cwd}",),
+                    fallback_route_keys=(session_key,),
+                )
+            )
+
+        known_activity_keys = tuple(
+            sorted(
+                f"{base_session_id}:{bound_cwd}"
+                for base_session_id in all_base_sessions()
+                if (bound_cwd := str(get_cwd(base_session_id) or "").strip())
+            )
+        )
+        known_route_keys = tuple(
+            sorted(
+                {
+                    session_key
+                    for base_session_id in all_base_sessions()
+                    if (
+                        session_key := str(
+                            get_session_key(base_session_id) or ""
+                        ).strip()
+                    )
+                }
+            )
+        )
+        return RuntimeResourceTarget(
+            backend="codex",
+            resource_key=cwd,
+            bindings=tuple(bindings),
+            known_activity_runtime_keys=known_activity_keys,
+            known_fallback_route_keys=known_route_keys,
+        )
+
+    def _runtime_ownership_snapshot_for_cwd(self, cwd: str):
+        target = self._runtime_ownership_target_for_cwd(cwd)
+        provider = getattr(self.controller, "runtime_ownership", None)
+        snapshot = getattr(provider, "snapshot", None)
+        if target is None or not callable(snapshot):
+            logger.error(
+                "Codex runtime ownership mapping unavailable for cwd=%s",
+                cwd,
+            )
+            return None
+        result = snapshot(target)
+        wake_runtime_ownership(self.controller, result)
+        return result
+
+    def runtime_ownership_snapshots(self) -> tuple[Any, ...] | None:
+        snapshots = []
+        for cwd in tuple(self._transports):
+            snapshot = self._runtime_ownership_snapshot_for_cwd(cwd)
+            if snapshot is None:
+                return None
+            snapshots.append(snapshot)
+        return tuple(snapshots)
+
+    def _stuck_active_sessions_for_cwd(
+        self,
+        cwd: str,
+        *,
+        now: float,
+        cap: float | None,
+    ) -> list[str]:
+        if cap is None:
+            return []
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
+        stuck = []
+        for base_session_id in self._session_mgr.sessions_for_cwd(cwd):
+            if not self._turn_registry.get_active_turn(base_session_id):
+                continue
+            last_progress = self._session_last_activity.get(base_session_id)
+            if last_progress is not None and now - last_progress >= cap:
+                stuck.append(base_session_id)
+        return stuck
+
     async def evict_idle_transports(self, idle_timeout: float) -> int:
-        """Stop idle Codex transports and invalidate stale thread mappings."""
+        """Stop idle Codex transports after two exact ownership snapshots."""
         if idle_timeout <= 0:
             return 0
         if not hasattr(self, "_transport_last_activity"):
@@ -632,14 +750,10 @@ class CodexAgent(BaseAgent):
             self._transport_locks = {}
         if not hasattr(self, "_session_locks"):
             self._session_locks = {}
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
 
-        # Absolute-time backstop: a transport whose turn is stuck "active"
-        # forever (turn/completed never arrives — wedged/silently-disconnected
-        # app-server) would otherwise be vetoed from eviction indefinitely and
-        # leak its app-server process until restart (#622/#623 analog). Once it
-        # has been idle past this cap, force-evict it despite the active turn.
         stuck_active_cap = self._stuck_active_idle_eviction_cap(idle_timeout)
-
         now = time.monotonic()
         evicted = 0
 
@@ -648,14 +762,26 @@ class CodexAgent(BaseAgent):
             if transport is None:
                 self._transport_last_activity.pop(cwd, None)
                 continue
-            idle_for = now - last_activity
+            ownership = self._runtime_ownership_snapshot_for_cwd(cwd)
+            if ownership is None:
+                continue
+            stuck_sessions = self._stuck_active_sessions_for_cwd(
+                cwd,
+                now=now,
+                cap=stuck_active_cap,
+            )
             has_active = self._has_active_turns_for_cwd(cwd)
-            if not self._is_transport_evictable(
-                has_active=has_active,
-                idle_for=idle_for,
-                idle_timeout=idle_timeout,
-                stuck_active_cap=stuck_active_cap,
-            ):
+            idle_for = now - last_activity
+            ordinary_candidate = (
+                not ownership.blocks_reclamation
+                and not has_active
+                and idle_for >= idle_timeout
+            )
+            stuck_candidate = bool(stuck_sessions) and ownership.disposition not in {
+                SessionRuntimeDisposition.TRANSITIONING,
+                SessionRuntimeDisposition.UNKNOWN,
+            }
+            if not ordinary_candidate and not stuck_candidate:
                 continue
 
             lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
@@ -666,32 +792,59 @@ class CodexAgent(BaseAgent):
                     continue
                 if current_last_activity is None:
                     continue
-                # Recheck from CURRENT state inside the lock: activity (and the
-                # active-turn flag) may have changed between the two passes.
-                idle_for = time.monotonic() - current_last_activity
-                has_active = self._has_active_turns_for_cwd(cwd)
-                if not self._is_transport_evictable(
-                    has_active=has_active,
-                    idle_for=idle_for,
-                    idle_timeout=idle_timeout,
-                    stuck_active_cap=stuck_active_cap,
-                ):
+                ownership = self._runtime_ownership_snapshot_for_cwd(cwd)
+                if ownership is None:
+                    continue
+                current_now = time.monotonic()
+                idle_for = current_now - current_last_activity
+                stuck_sessions = self._stuck_active_sessions_for_cwd(
+                    cwd,
+                    now=current_now,
+                    cap=stuck_active_cap,
+                )
+                if ownership.disposition in {
+                    SessionRuntimeDisposition.TRANSITIONING,
+                    SessionRuntimeDisposition.UNKNOWN,
+                }:
+                    continue
+                if ownership.blocks_reclamation and not stuck_sessions:
                     continue
 
-                if has_active:
+                settled_stuck_sessions: set[str] = set()
+                for base_session_id in stuck_sessions:
                     logger.warning(
-                        "Force-evicting stuck-active Codex transport for cwd=%s after %.1fs idle "
-                        "(active turn exceeded stuck-active cap of %.1fs; app-server presumed wedged)",
+                        "Settling stuck-active Codex session %s for cwd=%s after exact progress timeout",
+                        base_session_id,
                         cwd,
-                        idle_for,
-                        stuck_active_cap,
                     )
-                else:
-                    logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
+                    await self._settle_stuck_active_request(base_session_id)
+                    self._turn_registry.clear_session(base_session_id)
+                    settled_stuck_sessions.add(base_session_id)
+                    self._session_locks.pop(base_session_id, None)
+                    self._session_last_activity.pop(base_session_id, None)
+
+                if stuck_sessions:
+                    ownership = self._runtime_ownership_snapshot_for_cwd(cwd)
+                    if ownership is None or ownership.blocks_reclamation:
+                        continue
+
+                has_active = self._has_active_turns_for_cwd(cwd)
+                if has_active or idle_for < idle_timeout:
+                    continue
+
+                logger.info(
+                    "Evicting idle Codex transport for cwd=%s after %.1fs idle",
+                    cwd,
+                    idle_for,
+                )
                 try:
                     await transport.stop()
                 except Exception as exc:
-                    logger.warning("Failed to stop idle Codex transport for cwd=%s: %s", cwd, exc)
+                    logger.warning(
+                        "Failed to stop idle Codex transport for cwd=%s: %s",
+                        cwd,
+                        exc,
+                    )
                     continue
 
                 self._transports.pop(cwd, None)
@@ -700,17 +853,11 @@ class CodexAgent(BaseAgent):
                 self._retire_model_hub_process_scope(cwd)
 
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
-                    # A force-evicted stuck-active turn never emitted a terminal
-                    # result, so the Workbench status and SSE/runtime gate are
-                    # still owned by that turn. Settle it through the same
-                    # terminal-result path as normal completions before dropping
-                    # turn state. No-op for sessions with no active turn.
-                    await self._settle_stuck_active_request(base_session_id)
-                    # Keep the persisted thread mapping so a later transport restart
-                    # can resume the same Codex conversation for this Slack thread.
                     self._session_mgr.invalidate_thread(base_session_id)
-                    self._turn_registry.clear_session(base_session_id)
+                    if base_session_id not in settled_stuck_sessions:
+                        self._turn_registry.clear_session(base_session_id)
                     self._session_locks.pop(base_session_id, None)
+                    self._session_last_activity.pop(base_session_id, None)
                     self._clear_thread_developer_instructions(base_session_id)
 
                 evicted += 1
@@ -1739,6 +1886,7 @@ class CodexAgent(BaseAgent):
             raise RuntimeError("Codex turn/start returned no turn id")
 
         turn_state = self._turn_registry.finalize_turn_start_response(turn_id, request)
+        self._touch_session_activity(request.base_session_id)
         self._mark_runtime_turn_started(getattr(request, "context", None))
         bind_generated_image_snapshot = getattr(event_handler, "bind_generated_image_snapshot", None)
         if callable(bind_generated_image_snapshot):
@@ -1812,7 +1960,9 @@ class CodexAgent(BaseAgent):
             )
             return
 
-        self._touch_transport_activity(request.working_path)
+        if self._notification_is_real_progress(method):
+            self._touch_transport_activity(request.working_path)
+            self._touch_session_activity(request.base_session_id)
         await self._event_handler.handle_notification(method, params, request)
 
     async def _on_server_request(
@@ -1823,9 +1973,6 @@ class CodexAgent(BaseAgent):
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Handle server requests — auto-approve all."""
-        # A server request means this app-server is alive and actively driving a
-        # turn, so count it as activity for the stuck-active idle backstop.
-        self._touch_transport_activity(cwd)
         if method in (
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
@@ -1926,6 +2073,22 @@ class CodexAgent(BaseAgent):
             self._transport_last_activity = {}
         if cwd:
             self._transport_last_activity[cwd] = time.monotonic()
+
+    def _touch_session_activity(self, base_session_id: str) -> None:
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
+        if base_session_id:
+            self._session_last_activity[base_session_id] = time.monotonic()
+
+    @staticmethod
+    def _notification_is_real_progress(method: str) -> bool:
+        return method in {
+            "turn/started",
+            "item/completed",
+            "item/agentMessage/delta",
+            "item/commandExecution/outputDelta",
+            "item/reasoning/summaryTextDelta",
+        }
 
     def _has_active_turns_for_cwd(self, cwd: str) -> bool:
         for base_session_id in self._session_mgr.sessions_for_cwd(cwd):

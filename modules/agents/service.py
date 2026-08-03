@@ -77,9 +77,23 @@ class AgentService:
             await prepare()
 
     def backend_runtime_active(self, backend: str) -> bool:
+        agent = self.agents.get(backend)
+        ownership_probe = getattr(agent, "runtime_ownership_snapshots", None)
+        if callable(ownership_probe):
+            try:
+                snapshots = ownership_probe()
+            except Exception:
+                logger.exception(
+                    "Backend ownership probe failed closed for %s",
+                    backend,
+                )
+                return True
+            if snapshots is None:
+                return True
+            if any(snapshot.blocks_reclamation for snapshot in snapshots):
+                return True
         if self.activities.has_backend_work(backend):
             return True
-        agent = self.agents.get(backend)
         probe = getattr(agent, "runtime_has_active_turns", None)
         if not callable(probe):
             return False

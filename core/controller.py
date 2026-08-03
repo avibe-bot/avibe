@@ -30,6 +30,12 @@ from core.message_output import MessageOutput
 from core.processing_indicator import ProcessingIndicatorService
 from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT
 from core.runtime_commands import RuntimeCommandWatcher
+from core.runtime_ownership import RuntimeOwnershipProvider
+from core.runtime_recovery import (
+    FallbackRequestRecoveryHandler,
+    SessionDeliveryRecoveryHandler,
+)
+from core.runtime_work import RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import ScheduledTaskService
 from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
@@ -224,6 +230,16 @@ class Controller:
         from core.session_turns import SessionTurnManager
 
         self.session_turns = SessionTurnManager(self)
+        self.runtime_ownership = RuntimeOwnershipProvider(
+            self.session_turns._sqlite_engine()
+        )
+        self.runtime_work_supervisor = RuntimeWorkSupervisor()
+        self._runtime_work_tokens = [
+            self.runtime_work_supervisor.register(
+                RuntimeWorkLane.SESSION_DELIVERIES,
+                SessionDeliveryRecoveryHandler(self.session_turns),
+            )
+        ]
         # Durable Delivery recovery must not classify a Turn before backend
         # adapters have restored their restart-stable native identities.
         self._delivery_recovery_barrier = asyncio.Event()
@@ -258,6 +274,14 @@ class Controller:
         # Consolidated message dispatcher
         self.message_dispatcher = ConsolidatedMessageDispatcher(self)
         self.scheduled_task_service = ScheduledTaskService(self)
+        request_sqlite = self.scheduled_task_service.request_store.sqlite_backend
+        if request_sqlite is not None:
+            self._runtime_work_tokens.append(
+                self.runtime_work_supervisor.register(
+                    RuntimeWorkLane.REQUESTS,
+                    FallbackRequestRecoveryHandler(request_sqlite),
+                )
+            )
         self.watch_service = ManagedWatchService(self)
         self.runtime_command_watcher = RuntimeCommandWatcher(self)
         self.show_git_checkpoint_service = ShowGitCheckpointService()
@@ -915,6 +939,10 @@ class Controller:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
         self.scheduled_task_service.notify_transport_ready(platform)
+        supervisor = getattr(self, "runtime_work_supervisor", None)
+        notify_runtime_work = getattr(supervisor, "notify", None)
+        if callable(notify_runtime_work):
+            notify_runtime_work(RuntimeWorkLane.REQUESTS)
         notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
         if callable(notify_update_checker):
             notify_update_checker(platform)
@@ -1605,6 +1633,10 @@ class Controller:
             self.cleanup_task = None
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
+        supervisor = getattr(self, "runtime_work_supervisor", None)
+        stop_supervisor = getattr(supervisor, "stop", None)
+        if callable(stop_supervisor):
+            _stop_loop_coroutine(stop_supervisor(), "Runtime work supervisor")
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")

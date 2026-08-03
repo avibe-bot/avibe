@@ -42,6 +42,12 @@ from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
+from core.runtime_ownership import (
+    RuntimeResourceTarget,
+    RuntimeSessionBinding,
+    SessionRuntimeDisposition,
+    wake_runtime_ownership,
+)
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from vibe import backend_model_catalog
@@ -86,11 +92,17 @@ class SessionHandler(BaseHandler):
         self.active_sessions = getattr(controller, "claude_active_sessions", set())
         self.claude_system_prompts = getattr(controller, "claude_system_prompts", {})
         self.claude_session_creates = getattr(controller, "claude_session_creates", {})
+        self.claude_runtime_generation_locks = getattr(
+            controller,
+            "claude_runtime_generation_locks",
+            {},
+        )
         controller.session_last_activity = self.session_last_activity
         controller.session_turn_started = self.session_turn_started
         controller.claude_active_sessions = self.active_sessions
         controller.claude_system_prompts = self.claude_system_prompts
         controller.claude_session_creates = self.claude_session_creates
+        controller.claude_runtime_generation_locks = self.claude_runtime_generation_locks
 
     @staticmethod
     def _cached_claude_subagent_model(
@@ -142,10 +154,15 @@ class SessionHandler(BaseHandler):
         base_session_id: str,
         composite_key: str,
         native_session_id: Optional[str] = None,
+        *,
+        working_path: str,
+        fallback_session_key: str,
     ) -> None:
         """Attach the resolved Claude runtime keys to the connected client."""
         setattr(client, "_vibe_runtime_base_session_id", base_session_id)
         setattr(client, "_vibe_runtime_session_key", composite_key)
+        setattr(client, "_vibe_runtime_workdir", working_path)
+        setattr(client, "_vibe_runtime_fallback_session_key", fallback_session_key)
         if native_session_id:
             setattr(client, "_vibe_native_session_id", native_session_id)
         register_claude_owned_process(
@@ -203,7 +220,7 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude SDK client because Model Hub channel changed")
             await self._wait_for_claude_session_idle(composite_key)
-            await self.cleanup_session(
+            await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
@@ -222,7 +239,7 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude SDK client for %s because avibe system prompt changed",
                 composite_key,
             )
-            await self.cleanup_session(
+            await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
@@ -234,7 +251,7 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude SDK client for %s because caller context env changed",
                 composite_key,
             )
-            await self.cleanup_session(
+            await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
@@ -245,7 +262,7 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude SDK client for %s because Git PATH changed",
                 composite_key,
             )
-            await self.cleanup_session(
+            await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
@@ -263,6 +280,8 @@ class SessionHandler(BaseHandler):
             base_session_id,
             composite_key,
             stored_claude_session_id,
+            working_path=working_path,
+            fallback_session_key=session_key,
         )
         self.touch_session_activity(composite_key)
         return client
@@ -285,7 +304,7 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude subagent SDK client because Model Hub channel changed")
             await self._wait_for_claude_session_idle(composite_key)
-            await self.cleanup_session(
+            await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
@@ -302,7 +321,7 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude subagent SDK client for %s because caller context env changed",
                 composite_key,
             )
-            await self.cleanup_session(
+            await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
@@ -313,7 +332,7 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude subagent SDK client for %s because Git PATH changed",
                 composite_key,
             )
-            await self.cleanup_session(
+            await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
@@ -334,6 +353,8 @@ class SessionHandler(BaseHandler):
             base_session_id,
             composite_key,
             native_session_id,
+            working_path=working_path,
+            fallback_session_key=session_key,
         )
         self.touch_session_activity(composite_key)
         return client
@@ -795,7 +816,54 @@ class SessionHandler(BaseHandler):
             return ""
         return build_resume_preview(item.last_agent_message or item.last_agent_tail)
 
+    def _claude_runtime_generation_lock(self, composite_key: str) -> asyncio.Lock:
+        return self.claude_runtime_generation_locks.setdefault(
+            composite_key,
+            asyncio.Lock(),
+        )
+
+    def _claude_runtime_generation_key(
+        self,
+        context: MessageContext,
+        subagent_name: Optional[str],
+    ) -> str:
+        payload = context.platform_specific or {}
+        turn_source = str(payload.get("turn_source") or "human")
+        base_session_id = str(payload.get("turn_base_session_id") or "").strip()
+        working_path = self.get_working_path(context)
+        if not base_session_id:
+            base_session_id, working_path, _ = self.get_session_info(
+                context,
+                source=turn_source,
+            )
+        settings_key = self._get_settings_key(context)
+        routing = self._get_settings_manager(context).get_channel_routing(settings_key)
+        effective_agent = subagent_name or (routing.claude_agent if routing else None)
+        if effective_agent:
+            base_session_id = f"{base_session_id}:{effective_agent}"
+        return f"{base_session_id}:{working_path}"
+
     async def get_or_create_claude_session(
+        self,
+        context: MessageContext,
+        subagent_name: Optional[str] = None,
+        subagent_model: Optional[str] = None,
+        subagent_reasoning_effort: Optional[str] = None,
+        agent_system_prompt: Optional[str] = None,
+    ) -> ClaudeSDKClient:
+        """Resolve or create one Claude runtime generation under its exact lock."""
+
+        composite_key = self._claude_runtime_generation_key(context, subagent_name)
+        async with self._claude_runtime_generation_lock(composite_key):
+            return await self._get_or_create_claude_session_locked(
+                context,
+                subagent_name=subagent_name,
+                subagent_model=subagent_model,
+                subagent_reasoning_effort=subagent_reasoning_effort,
+                agent_system_prompt=agent_system_prompt,
+            )
+
+    async def _get_or_create_claude_session_locked(
         self,
         context: MessageContext,
         subagent_name: Optional[str] = None,
@@ -1226,6 +1294,8 @@ class SessionHandler(BaseHandler):
             base_session_id,
             composite_key,
             None if fork_session else stored_claude_session_id,
+            working_path=working_path,
+            fallback_session_key=session_key,
         )
         self.touch_session_activity(composite_key)
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")
@@ -1510,6 +1580,22 @@ class SessionHandler(BaseHandler):
         current_receiver_task=None,
         retire_model_hub_scope: bool = True,
     ):
+        """Clean up one Claude generation under the same lock used by creation."""
+
+        async with self._claude_runtime_generation_lock(composite_key):
+            await self._cleanup_session_locked(
+                composite_key,
+                current_receiver_task=current_receiver_task,
+                retire_model_hub_scope=retire_model_hub_scope,
+            )
+
+    async def _cleanup_session_locked(
+        self,
+        composite_key: str,
+        *,
+        current_receiver_task=None,
+        retire_model_hub_scope: bool = True,
+    ):
         """Clean up a specific session by composite key"""
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
@@ -1597,6 +1683,106 @@ class SessionHandler(BaseHandler):
         if exc is not None:
             logger.warning("Claude receiver ended with error during cleanup: %s", exc)
 
+    def _claude_runtime_ownership_target(
+        self,
+        composite_key: str,
+        client: ClaudeSDKClient,
+    ) -> RuntimeResourceTarget | None:
+        base_session_id = str(
+            getattr(client, "_vibe_runtime_base_session_id", "") or ""
+        ).strip()
+        workdir = str(getattr(client, "_vibe_runtime_workdir", "") or "").strip()
+        fallback_session_key = str(
+            getattr(client, "_vibe_runtime_fallback_session_key", "") or ""
+        ).strip()
+        runtime_key = str(
+            getattr(client, "_vibe_runtime_session_key", "") or ""
+        ).strip()
+        if (
+            not base_session_id
+            or not workdir
+            or not fallback_session_key
+            or runtime_key != composite_key
+        ):
+            logger.error(
+                "Claude runtime ownership mapping is incomplete for resource=%s",
+                composite_key,
+            )
+            return None
+        known_activity_keys = tuple(
+            sorted(
+                {
+                    str(getattr(candidate, "_vibe_runtime_session_key", "") or "")
+                    for candidate in self.claude_sessions.values()
+                    if getattr(candidate, "_vibe_runtime_session_key", None)
+                }
+            )
+        )
+        known_route_keys = tuple(
+            sorted(
+                {
+                    str(
+                        getattr(
+                            candidate,
+                            "_vibe_runtime_fallback_session_key",
+                            "",
+                        )
+                        or ""
+                    )
+                    for candidate in self.claude_sessions.values()
+                    if getattr(
+                        candidate,
+                        "_vibe_runtime_fallback_session_key",
+                        None,
+                    )
+                }
+            )
+        )
+        return RuntimeResourceTarget(
+            backend="claude",
+            resource_key=composite_key,
+            bindings=(
+                RuntimeSessionBinding(
+                    session_anchor=base_session_id,
+                    workdir=workdir,
+                    activity_runtime_keys=(runtime_key,),
+                    fallback_route_keys=(fallback_session_key,),
+                ),
+            ),
+            known_activity_runtime_keys=known_activity_keys,
+            known_fallback_route_keys=known_route_keys,
+        )
+
+    def _claude_runtime_ownership_snapshot(
+        self,
+        composite_key: str,
+        client: ClaudeSDKClient,
+    ):
+        target = self._claude_runtime_ownership_target(composite_key, client)
+        provider = getattr(self.controller, "runtime_ownership", None)
+        snapshot = getattr(provider, "snapshot", None)
+        if target is None or not callable(snapshot):
+            logger.error(
+                "Claude runtime ownership provider unavailable for resource=%s",
+                composite_key,
+            )
+            return None
+        result = snapshot(target)
+        wake_runtime_ownership(self.controller, result)
+        return result
+
+    def runtime_ownership_snapshots(self) -> tuple[Any, ...] | None:
+        snapshots = []
+        for composite_key, client in tuple(self.claude_sessions.items()):
+            snapshot = self._claude_runtime_ownership_snapshot(
+                composite_key,
+                client,
+            )
+            if snapshot is None:
+                return None
+            snapshots.append(snapshot)
+        return tuple(snapshots)
+
     async def evict_idle_sessions(
         self,
         idle_timeout: float,
@@ -1635,61 +1821,100 @@ class SessionHandler(BaseHandler):
         expired: list[tuple[str, float]] = []
 
         for composite_key, last_activity in list(self.session_last_activity.items()):
-            if composite_key not in self.claude_sessions:
+            client = self.claude_sessions.get(composite_key)
+            if client is None:
                 self.session_last_activity.pop(composite_key, None)
                 self.session_turn_started.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
+                continue
+            ownership = self._claude_runtime_ownership_snapshot(
+                composite_key,
+                client,
+            )
+            if ownership is None:
                 continue
             idle_for = now - last_activity
             if composite_key in self.active_sessions:
                 # Stuck-active backstop: only evict once well past the cap.
                 if stuck_threshold is not None and idle_for >= stuck_threshold:
+                    if ownership.disposition in {
+                        SessionRuntimeDisposition.TRANSITIONING,
+                        SessionRuntimeDisposition.UNKNOWN,
+                    }:
+                        continue
                     expired.append((composite_key, idle_for))
                 continue
-            if idle_for >= idle_timeout:
+            if not ownership.blocks_reclamation and idle_for >= idle_timeout:
                 expired.append((composite_key, idle_for))
 
         evicted = 0
         for composite_key, idle_for in expired:
-            current_last_activity = self.session_last_activity.get(composite_key)
-            if composite_key not in self.claude_sessions:
-                self.session_last_activity.pop(composite_key, None)
-                self.session_turn_started.pop(composite_key, None)
-                self.active_sessions.discard(composite_key)
-                continue
-            if current_last_activity is None:
-                continue
-            # Re-derive the decision from current state: a session may have been
-            # touched or (de)activated between the two passes.
-            recheck_idle = time.monotonic() - current_last_activity
-            if composite_key in self.active_sessions:
-                if stuck_threshold is None or recheck_idle < stuck_threshold:
+            lock = self._claude_runtime_generation_lock(composite_key)
+            async with lock:
+                client = self.claude_sessions.get(composite_key)
+                current_last_activity = self.session_last_activity.get(composite_key)
+                if client is None:
+                    self.session_last_activity.pop(composite_key, None)
+                    self.session_turn_started.pop(composite_key, None)
+                    self.active_sessions.discard(composite_key)
                     continue
-                logger.warning(
-                    "Force-evicting stuck-active Claude session %s after %.1fs idle "
-                    "(>= stuck-active threshold %.1fs; multiplier=%s idle_timeout=%ss); "
-                    "receiver never released the active flag",
+                if current_last_activity is None:
+                    continue
+                ownership = self._claude_runtime_ownership_snapshot(
                     composite_key,
-                    recheck_idle,
-                    stuck_threshold,
-                    stuck_active_multiplier,
-                    idle_timeout,
+                    client,
                 )
-            else:
-                if recheck_idle < idle_timeout:
+                if ownership is None:
                     continue
-                logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, recheck_idle)
-            if composite_key in self.active_sessions:
-                agent_service = getattr(self.controller, "agent_service", None)
-                claude_agent = getattr(agent_service, "agents", {}).get("claude") if agent_service else None
-                force_cleanup = getattr(claude_agent, "force_cleanup_stuck_active_session", None)
-                if callable(force_cleanup):
-                    await force_cleanup(composite_key)
+                # Re-derive the decision from current state under the exact
+                # runtime-generation lock used by creation.
+                recheck_idle = time.monotonic() - current_last_activity
+                if composite_key in self.active_sessions:
+                    if stuck_threshold is None or recheck_idle < stuck_threshold:
+                        continue
+                    if ownership.disposition in {
+                        SessionRuntimeDisposition.TRANSITIONING,
+                        SessionRuntimeDisposition.UNKNOWN,
+                    }:
+                        continue
+                    logger.warning(
+                        "Force-evicting stuck-active Claude session %s after %.1fs idle "
+                        "(>= stuck-active threshold %.1fs; multiplier=%s idle_timeout=%ss); "
+                        "receiver never released the active flag",
+                        composite_key,
+                        recheck_idle,
+                        stuck_threshold,
+                        stuck_active_multiplier,
+                        idle_timeout,
+                    )
+                    agent_service = getattr(self.controller, "agent_service", None)
+                    claude_agent = (
+                        getattr(agent_service, "agents", {}).get("claude")
+                        if agent_service
+                        else None
+                    )
+                    force_cleanup = getattr(
+                        claude_agent,
+                        "force_cleanup_stuck_active_session",
+                        None,
+                    )
+                    if callable(force_cleanup):
+                        await force_cleanup(
+                            composite_key,
+                            runtime_lock_held=True,
+                        )
+                    else:
+                        await self._cleanup_session_locked(composite_key)
                 else:
-                    await self.cleanup_session(composite_key)
-            else:
-                await self.cleanup_session(composite_key)
-            evicted += 1
+                    if ownership.blocks_reclamation or recheck_idle < idle_timeout:
+                        continue
+                    logger.info(
+                        "Evicting idle Claude session %s after %.1fs idle",
+                        composite_key,
+                        recheck_idle,
+                    )
+                    await self._cleanup_session_locked(composite_key)
+                evicted += 1
 
         return evicted
 

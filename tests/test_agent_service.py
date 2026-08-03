@@ -308,6 +308,38 @@ def test_agent_service_serializes_same_runtime_until_terminal_release() -> None:
     asyncio.run(_run())
 
 
+def test_hfr_142_gate_wait_does_not_refresh_backend_progress_clock() -> None:
+    """HFR-142: a request waiting on the runtime gate creates no progress."""
+
+    async def _run():
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        agent = _RuntimeAgent(release_first)
+        agent.session_last_activity = {"session:/repo": 17.0}
+        service.register(agent)
+
+        first_request = _request("first")
+        first = asyncio.create_task(service.handle_message("claude", first_request))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(
+            service.handle_message("claude", _request("second"))
+        )
+        await asyncio.sleep(0.05)
+
+        assert agent.started == ["first"]
+        assert agent.session_last_activity == {"session:/repo": 17.0}
+
+        service.release_runtime_turn(first_request.context)
+        release_first.set()
+        await asyncio.wait_for(first, timeout=3)
+        await asyncio.wait_for(second, timeout=3)
+        assert agent.session_last_activity == {"session:/repo": 17.0}
+
+    asyncio.run(_run())
+
+
 def test_agent_service_restart_barrier_preserves_same_runtime_fifo() -> None:
     async def _run():
         controller = _Controller()

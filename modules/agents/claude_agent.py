@@ -328,6 +328,9 @@ class ClaudeAgent(BaseAgent):
     def runtime_turn_keys(self) -> set[str]:
         return set(self.claude_sessions.keys()) | set(self.receiver_tasks.keys())
 
+    def runtime_ownership_snapshots(self):
+        return self.session_handler.runtime_ownership_snapshots()
+
     @staticmethod
     def _runtime_key_matches_session_base(runtime_key: str, session_bases: set[str]) -> bool:
         for session_base in session_bases:
@@ -441,6 +444,7 @@ class ClaudeAgent(BaseAgent):
         *,
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
+        runtime_lock_held: bool = False,
     ) -> None:
         """Drop Claude runtime state without canceling the current receiver task."""
 
@@ -450,6 +454,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=current_receiver_task,
                 preserve_pending_request_state=preserve_pending_request_state,
+                runtime_lock_held=runtime_lock_held,
             )
         finally:
             self._retire_steering_state(composite_key)
@@ -460,6 +465,7 @@ class ClaudeAgent(BaseAgent):
         *,
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
+        runtime_lock_held: bool = False,
     ) -> None:
 
         self._last_assistant_text.pop(composite_key, None)
@@ -475,7 +481,8 @@ class ClaudeAgent(BaseAgent):
             pending_requests = self._pending_requests.pop(composite_key, None) or []
             for pending_request in pending_requests:
                 self._requeue_request_activity(pending_request)
-        cleanup = getattr(self.session_handler, "cleanup_session", None)
+        cleanup_name = "_cleanup_session_locked" if runtime_lock_held else "cleanup_session"
+        cleanup = getattr(self.session_handler, cleanup_name, None)
         if callable(cleanup):
             await cleanup(composite_key, current_receiver_task=current_receiver_task)
             return
@@ -495,7 +502,12 @@ class ClaudeAgent(BaseAgent):
             if not cleanup_from_receiver:
                 await self._stop_receiver_task(receiver_task)
 
-    async def force_cleanup_stuck_active_session(self, composite_key: str) -> None:
+    async def force_cleanup_stuck_active_session(
+        self,
+        composite_key: str,
+        *,
+        runtime_lock_held: bool = False,
+    ) -> None:
         """Settle and drop a Claude session whose active flag is stale.
 
         SessionHandler owns the idle timer, but ClaudeAgent owns the pending
@@ -522,6 +534,7 @@ class ClaudeAgent(BaseAgent):
                 await self._cleanup_runtime_session(
                     composite_key,
                     preserve_pending_request_state=True,
+                    runtime_lock_held=runtime_lock_held,
                 )
             except Exception:
                 if context is not None:

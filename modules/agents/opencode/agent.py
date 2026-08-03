@@ -22,6 +22,11 @@ from core.backend_failure import emit_backend_failure
 from core.message_output import stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.resource_governance import governor_from_controller
+from core.runtime_ownership import (
+    RuntimeResourceTarget,
+    RuntimeSessionBinding,
+    wake_runtime_ownership,
+)
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -499,6 +504,57 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             return True
         server = self._client_manager._server_manager
         return bool(server is not None and server.runtime_has_active_turns())
+
+    def runtime_ownership_snapshots(self) -> tuple[Any, ...] | None:
+        """Map the one shared OpenCode server to its exact durable identities."""
+
+        server = self._client_manager._server_manager
+        if server is None:
+            return ()
+        bindings = tuple(
+            RuntimeSessionBinding(
+                session_anchor=base_session_id,
+                workdir=working_path,
+                activity_runtime_keys=(f"{base_session_id}:{working_path}",),
+                fallback_route_keys=(session_key,),
+            )
+            for base_session_id, (
+                _native_session_id,
+                working_path,
+                session_key,
+            ) in self._session_manager.list_all().items()
+            if working_path and session_key
+        )
+        if len(bindings) != len(self._session_manager.list_all()):
+            logger.error("OpenCode runtime ownership mapping is incomplete")
+            return None
+        target = RuntimeResourceTarget(
+            backend="opencode",
+            resource_key=server.base_url,
+            bindings=bindings,
+            known_activity_runtime_keys=tuple(sorted(self.runtime_turn_keys())),
+            known_fallback_route_keys=tuple(
+                sorted(
+                    session_key
+                    for (
+                        _native_session_id,
+                        _working_path,
+                        session_key,
+                    ) in self._session_manager.list_all().values()
+                )
+            ),
+            include_all_backend_sessions=True,
+            maps_all_backend_activities=True,
+            maps_all_backend_fallback_runs=True,
+        )
+        provider = getattr(self.controller, "runtime_ownership", None)
+        snapshot = getattr(provider, "snapshot", None)
+        if not callable(snapshot):
+            logger.error("OpenCode runtime ownership provider is unavailable")
+            return None
+        result = snapshot(target)
+        wake_runtime_ownership(self.controller, result)
+        return (result,)
 
     async def refresh_runtime_config(self, opencode_config, *, force: bool = False) -> None:
         """Reload runtime config and refresh the shared server.

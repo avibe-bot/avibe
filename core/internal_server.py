@@ -914,6 +914,10 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
             except Exception:
                 logger.exception("Failed to recover persisted Workbench Agent Run queues")
     finally:
+        supervisor = getattr(controller, "runtime_work_supervisor", None)
+        activate_supervisor = getattr(supervisor, "activate", None)
+        if callable(activate_supervisor):
+            await activate_supervisor()
         if recovery_complete is not None:
             recovery_complete.set()
     config = uvicorn.Config(
