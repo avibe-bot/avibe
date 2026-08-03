@@ -2679,6 +2679,11 @@ class ClaudeAgent(BaseAgent):
                 pending = self._pending_requests.get(composite_key) or []
                 pending_request = pending[0] if pending else None
                 if pending_request is not None:
+                    if self._request_activities(pending_request):
+                        # A bound claim set is one concrete outbound batch. Later
+                        # completions, even from the same Turn, wait for the next
+                        # normal flush and receive their own receipt.
+                        return registry.has_completed_output(self.name, composite_key)
                     pending_turn_ids = self._request_activity_turn_ids(pending_request)
                     activities = self._claim_activity_batch_for_turns(
                         registry,
@@ -2854,18 +2859,6 @@ class ClaudeAgent(BaseAgent):
         registry = self._activity_registry()
         detached_activities = self._detached_activity_outputs.get(composite_key)
         if detached_activities:
-            turn_ids = {
-                str(activity.turn_id or "").strip()
-                for activity in detached_activities
-            }
-            if registry is not None and any(turn_ids):
-                detached_activities.extend(
-                    self._claim_activity_batch_for_turns(
-                        registry,
-                        composite_key,
-                        turn_ids,
-                    )
-                )
             return "activity"
         if composite_key in self._detached_unsolicited_outputs:
             return "detached"
@@ -2880,17 +2873,7 @@ class ClaudeAgent(BaseAgent):
         if pending:
             pending_request = pending[0]
             retained = self._request_activities(pending_request)
-            retained_turn_ids = self._request_activity_turn_ids(pending_request)
             if retained:
-                if registry is not None and retained_turn_ids:
-                    self._attach_request_activities(
-                        pending_request,
-                        self._claim_activity_batch_for_turns(
-                            registry,
-                            composite_key,
-                            retained_turn_ids,
-                        ),
-                    )
                 return None
 
             pending_turn_ids = self._request_activity_turn_ids(pending_request)

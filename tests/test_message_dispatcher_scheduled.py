@@ -1026,12 +1026,15 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_attempts, ["run-origin", "run-origin"])
         self.assertTrue(observed_native_ids)
         self.assertEqual(len(set(observed_native_ids)), 1)
-        self.assertTrue(
-            observed_native_ids[0].endswith(
-                ":claude-activity-output:claude:runtime-restarted:"
-                "activity:activity-restarted:completion"
-            )
+        self.assertIn(
+            ":activity-batch:claude:runtime-restarted:batch:",
+            observed_native_ids[0],
         )
+        self.assertIn(
+            ":claude-activity-output:claude:runtime-restarted:batch:",
+            observed_native_ids[0],
+        )
+        self.assertTrue(observed_native_ids[0].endswith(":completion"))
         self.assertIn((("activity-restarted",), True), settlement_calls)
         self.assertFalse(
             recovered.has_completed_output("claude", "runtime-restarted")
@@ -1491,6 +1494,81 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             turn_id="turn-later",
         )
         self.assertEqual(later.id, "activity-later")
+
+    async def test_invisible_activity_propagates_incomplete_registry_settlement(self):
+        controller = _StubController()
+        registry = SessionActivityRegistry()
+        controller.agent_service = SimpleNamespace(
+            activities=registry,
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-invisible-incomplete",
+            session_id="sess-invisible-incomplete",
+            activity_id="activity-invisible-incomplete",
+            kind="local_agent",
+            run_id="run-invisible-incomplete",
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-invisible-incomplete",
+            activity_id="activity-invisible-incomplete",
+            status="completed",
+            expects_output=True,
+        )
+        claimed = registry.claim_completed_output_batch(
+            "claude",
+            "runtime-invisible-incomplete",
+        )
+
+        class _RunStore:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, _run_id, **_kwargs):
+                return None
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_RunStore(),
+            ),
+            patch.object(
+                registry,
+                "settle_completed_output_batch",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaises(ActivityOutputDeliveryError) as raised:
+                await dispatcher.emit_agent_message(
+                    MessageContext(
+                        user_id="scheduled",
+                        channel_id="C123",
+                        platform="slack",
+                    ),
+                    "result",
+                    "",
+                    level="silent",
+                    output=activity_completion_output(
+                        claimed[0],
+                        activities=claimed,
+                        detached=True,
+                        completes_turn=False,
+                    ),
+                )
+
+        self.assertFalse(raised.exception.delivered)
+        self.assertEqual(controller.im_client.sent, [])
+        self.assertTrue(
+            registry.has_completed_output("claude", "runtime-invisible-incomplete")
+        )
 
     async def test_real_scheduler_settles_run_before_activity_claim_is_consumed(self):
         from core.scheduled_tasks import ScheduledTaskService

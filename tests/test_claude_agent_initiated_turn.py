@@ -491,7 +491,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(service.activities.ack_completed_output(claimed))
         await asyncio.wait_for(waiter, timeout=1)
 
-    async def test_multiple_same_turn_activities_settle_as_one_delivery_batch(self):
+    async def test_separate_same_turn_flushes_keep_distinct_delivery_batches(self):
         agent, service = _build_agent()
         composite_key = "session-multi-activity:/tmp/work"
         context = SimpleNamespace(
@@ -556,7 +556,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [activity.id for activity in pending_request.output_activities],
-            ["task-build", "task-rebuild"],
+            ["task-build"],
         )
 
         await agent._receive_messages(
@@ -567,8 +567,16 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             composite_key=composite_key,
         )
 
-        output = agent.emit_result_message.await_args.kwargs["output"]
-        self.assertEqual(output.activity_id, "task-rebuild")
+        calls = agent.emit_result_message.await_args_list
+        self.assertEqual(len(calls), 2)
+        first_output = calls[0].kwargs["output"]
+        second_output = calls[1].kwargs["output"]
+        self.assertEqual(first_output.activity_ids, ("task-build",))
+        self.assertEqual(second_output.activity_ids, ("task-rebuild",))
+        self.assertNotEqual(
+            first_output.activity_batch_id,
+            second_output.activity_batch_id,
+        )
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
         self.assertEqual(pending_request.output_activities, [])
         await asyncio.wait_for(agent._wait_for_activity_output(composite_key), timeout=1)

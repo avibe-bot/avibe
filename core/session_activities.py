@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -163,9 +164,7 @@ def _activity_output_batch_id(activity: SessionActivity) -> str:
     assigned = str(activity.metadata.get("output_batch_id") or "").strip()
     if assigned:
         return assigned
-    turn_id = str(activity.turn_id or "").strip()
-    member_id = f"turn:{turn_id}" if turn_id else f"activity:{activity.id}"
-    return f"{activity.backend}:{activity.runtime_key}:{member_id}"
+    return f"{activity.backend}:{activity.runtime_key}:activity:{activity.id}"
 
 
 def _activity_output_idempotency_key(activity: SessionActivity) -> str:
@@ -535,7 +534,8 @@ class SessionActivityRegistry:
             recovered_only=recovered_only,
             limit=1,
         )
-        return claimed[0] if claimed else None
+        bound = self._bind_claimed_output_batch_or_requeue(claimed)
+        return bound[0] if bound else None
 
     def claim_completed_output_batch(
         self,
@@ -565,22 +565,58 @@ class SessionActivityRegistry:
                 identities.discard("")
                 if not identities:
                     return []
-            else:
-                head_turn_id = str(queue[0].activity.turn_id or "").strip()
-                if not head_turn_id:
-                    claimed = self._claim_completed_outputs(
-                        backend,
-                        runtime_key,
-                        limit=1,
-                    )
-                    return self.bind_completed_output_batch(claimed)
-                identities = {head_turn_id}
-            claimed = self._claim_completed_outputs(
-                backend,
-                runtime_key,
-                turn_ids=identities,
+            candidate = next(
+                (
+                    entry.activity
+                    for entry in queue
+                    if identities is None
+                    or str(entry.activity.turn_id or "").strip() in identities
+                ),
+                None,
             )
-            return self.bind_completed_output_batch(claimed)
+            if candidate is None:
+                return []
+            batch_id = str(candidate.metadata.get("output_batch_id") or "").strip()
+            if batch_id:
+                # A previously bound receipt is an immutable batch boundary. It
+                # may be a durable local-only retry and must not absorb a later
+                # completion merely because both Activities share one Turn.
+                claimed = self._claim_completed_outputs(
+                    backend,
+                    runtime_key,
+                    output_batch_id=batch_id,
+                )
+            else:
+                if identities is None:
+                    head_turn_id = str(candidate.turn_id or "").strip()
+                    if not head_turn_id:
+                        claimed = self._claim_completed_outputs(
+                            backend,
+                            runtime_key,
+                            unbound_only=True,
+                            limit=1,
+                        )
+                        return self._bind_claimed_output_batch_or_requeue(claimed)
+                    identities = {head_turn_id}
+                claimed = self._claim_completed_outputs(
+                    backend,
+                    runtime_key,
+                    turn_ids=identities,
+                    unbound_only=True,
+                )
+            return self._bind_claimed_output_batch_or_requeue(claimed)
+
+    def _bind_claimed_output_batch_or_requeue(
+        self,
+        activities: list[SessionActivity],
+    ) -> list[SessionActivity]:
+        """Bind one complete claim set or atomically restore it for retry."""
+
+        try:
+            return self.bind_completed_output_batch(activities)
+        except Exception:
+            self.requeue_completed_outputs(activities)
+            raise
 
     def bind_completed_output_batch(
         self,
@@ -590,7 +626,21 @@ class SessionActivityRegistry:
 
         if not activities:
             return []
-        batch_id = _activity_output_batch_id(activities[0])
+        assigned_ids = {
+            str(activity.metadata.get("output_batch_id") or "").strip()
+            for activity in activities
+            if str(activity.metadata.get("output_batch_id") or "").strip()
+        }
+        if len(assigned_ids) > 1:
+            raise RuntimeError("Activity output batch members have conflicting receipts")
+        batch_id = (
+            next(iter(assigned_ids))
+            if assigned_ids
+            else (
+                f"{activities[0].backend}:{activities[0].runtime_key}:"
+                f"batch:{uuid.uuid4().hex}"
+            )
+        )
         bound: list[SessionActivity] = []
         with self._lock:
             for activity in activities:
@@ -598,12 +648,13 @@ class SessionActivityRegistry:
                 claimed = self._claimed_completed_outputs.get(activity_key)
                 if claimed is None:
                     continue
-                if activity.metadata.get("output_batch_id") == batch_id:
-                    bound.append(activity)
+                current = claimed.entry.activity
+                if current.metadata.get("output_batch_id") == batch_id:
+                    bound.append(current)
                     continue
                 updated = replace(
-                    activity,
-                    metadata={**activity.metadata, "output_batch_id": batch_id},
+                    current,
+                    metadata={**current.metadata, "output_batch_id": batch_id},
                 )
                 self._persist_activity(updated, phase="awaiting_output")
                 self._claimed_completed_outputs[activity_key] = replace(
@@ -666,6 +717,8 @@ class SessionActivityRegistry:
         max_age_seconds: float = 0,
         recovered_only: bool = False,
         limit: int | None = None,
+        output_batch_id: str | None = None,
+        unbound_only: bool = False,
     ) -> list[SessionActivity]:
         key = (str(backend), str(runtime_key))
         identities = (
@@ -691,6 +744,15 @@ class SessionActivityRegistry:
                     retained.extend(queue)
                     break
                 activity = entry.activity
+                assigned_batch_id = str(
+                    activity.metadata.get("output_batch_id") or ""
+                ).strip()
+                if output_batch_id is not None and assigned_batch_id != output_batch_id:
+                    retained.append(entry)
+                    continue
+                if unbound_only and assigned_batch_id:
+                    retained.append(entry)
+                    continue
                 activity_key = self._activity_key(activity)
                 is_recovered = activity_key in self._recovered_output_ids
                 if recovered_only and not is_recovered:
@@ -815,12 +877,15 @@ class SessionActivityRegistry:
         settlement_error: BaseException | None = None,
         settle_terminal: Callable[[SessionActivity], bool] | None = None,
         terminal_activities: tuple[SessionActivity, ...] | None = None,
+        visible_output: bool = True,
     ) -> bool:
-        """Settle every claimed member protected by one delivered receipt.
+        """Settle every claimed member under its explicit visibility policy.
 
-        Claim release requires accepted-Message evidence or an Activity terminal
-        write/delete that actually succeeded. Run-settlement callbacks are invoked
-        outside the Registry lock and never count as anti-redelivery evidence.
+        A visible claim needs accepted-Message or terminal-Activity evidence.
+        Invisible output has no transport to repeat, so successful local settlement
+        may release it even when terminal snapshot cleanup fails. Run-settlement
+        callbacks are invoked outside the Registry lock and never count as durable
+        anti-redelivery evidence.
         """
 
         activities = self.claimed_completed_output_batch_for_output(output)
@@ -851,7 +916,8 @@ class SessionActivityRegistry:
                 claimed = self._claimed_completed_outputs.get(activity_key)
                 if claimed is None:
                     continue
-                claimed = replace(claimed, externally_retryable=False)
+                if visible_output:
+                    claimed = replace(claimed, externally_retryable=False)
                 terminal_activity = terminal_by_id.get(activity.id)
                 if terminal_activity is not None:
                     claimed = replace(
@@ -881,7 +947,7 @@ class SessionActivityRegistry:
                             persisted = True
                         except Exception:
                             pass
-                    if not persisted:
+                    if not persisted and visible_output:
                         logger.error(
                             "Delivered Activity lacks local terminal evidence "
                             "(activity=%s accepted_message=%s)",
@@ -889,8 +955,15 @@ class SessionActivityRegistry:
                             accepted_message_exists,
                             exc_info=True,
                         )
+                    elif not persisted:
+                        logger.warning(
+                            "Invisible Activity terminal evidence cleanup failed after "
+                            "local settlement (activity=%s)",
+                            activity.id,
+                            exc_info=True,
+                        )
                 evidence_safe[activity_key] = bool(
-                    persisted or accepted_message_exists
+                    persisted or accepted_message_exists or not visible_output
                 )
 
         terminal_settled = True
@@ -1004,6 +1077,7 @@ class SessionActivityRegistry:
             pending.extend(
                 claimed.entry.activity
                 for claimed in self._claimed_completed_outputs.values()
+                if claimed.externally_retryable
             )
             return any(identity in self._activity_run_ids(activity) for activity in pending)
 

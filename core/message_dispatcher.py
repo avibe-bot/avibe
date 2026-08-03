@@ -1174,6 +1174,7 @@ class ConsolidatedMessageDispatcher:
         *,
         accepted_message_exists: bool,
         settlement_error: BaseException | None = None,
+        visible_output: bool = True,
     ) -> bool | None:
         claimed = self._claimed_activity_batch_for_output(output_semantics)
         if claimed is None:
@@ -1204,6 +1205,7 @@ class ConsolidatedMessageDispatcher:
                 accepted_message_exists=accepted_message_exists,
                 settlement_error=settlement_error,
                 settle_terminal=(settle_terminal if settlement_error is not None else None),
+                visible_output=visible_output,
             )
         )
         if not settled:
@@ -1684,10 +1686,16 @@ class ConsolidatedMessageDispatcher:
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
                 if output_semantics.requires_delivery_for_run_settlement:
-                    self._settle_activity_output_claims(
+                    settlement_complete = self._settle_activity_output_claims(
                         output_semantics,
                         accepted_message_exists=False,
+                        visible_output=False,
                     )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Invisible Activity output local settlement is incomplete",
+                            delivered=False,
+                        )
                 return None
             finally:
                 if mutates_turn_lifecycle:

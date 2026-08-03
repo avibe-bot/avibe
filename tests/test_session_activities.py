@@ -391,6 +391,83 @@ def test_activity_batch_receipt_is_stable_for_every_member_after_restart():
     )
 
 
+def test_failed_batch_binding_restores_every_claim_to_the_retryable_queue():
+    registry = SessionActivityRegistry()
+    for activity_id in ("task-a", "task-b"):
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            turn_id="turn-1",
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+
+    with mock.patch.object(
+        registry,
+        "_persist_activity",
+        side_effect=RuntimeError("batch binding unavailable"),
+    ):
+        with pytest.raises(RuntimeError, match="batch binding unavailable"):
+            registry.claim_completed_output_batch("claude", "runtime-1")
+
+    assert registry.has_completed_output("claude", "runtime-1") is True
+    retried = registry.claim_completed_output_batch("claude", "runtime-1")
+    assert [activity.id for activity in retried] == ["task-a", "task-b"]
+    assert len({activity.metadata["output_batch_id"] for activity in retried}) == 1
+
+
+def test_requeued_bound_batch_does_not_absorb_later_same_turn_completion():
+    registry = SessionActivityRegistry()
+
+    def complete(activity_id: str) -> None:
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            turn_id="turn-1",
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+
+    complete("task-a")
+    first = registry.claim_completed_output_batch("claude", "runtime-1")
+    first_batch_id = first[0].metadata["output_batch_id"]
+    assert registry.requeue_completed_outputs(first) == 1
+    complete("task-b")
+
+    retried = registry.claim_completed_output_batch("claude", "runtime-1")
+    assert [activity.id for activity in retried] == ["task-a"]
+    assert retried[0].metadata["output_batch_id"] == first_batch_id
+    assert registry.settle_completed_output_batch(
+        activity_completion_output(
+            retried[0],
+            activities=retried,
+            detached=True,
+            completes_turn=False,
+        ),
+        accepted_message_exists=True,
+    ) is True
+
+    later = registry.claim_completed_output_batch("claude", "runtime-1")
+    assert [activity.id for activity in later] == ["task-b"]
+    assert later[0].metadata["output_batch_id"] != first_batch_id
+
+
 def test_batch_callbacks_run_after_all_claims_release_and_outside_registry_lock():
     registry = SessionActivityRegistry()
     for activity_id in ("task-a", "task-b"):
