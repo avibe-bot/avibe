@@ -244,9 +244,11 @@ class RuntimeOwnershipProvider:
             # explicitly is the ownership boundary: every following SELECT sees
             # the same WAL generation until this connection is rolled back.
             connection.exec_driver_sql("BEGIN")
+            # Lifecycle visibility and execution ownership are independent.
+            # An archived Session may still have a Turn, Delivery, Activity, or
+            # fallback Run whose native effects have not settled yet.
             session_query = select(agent_sessions).where(
                 agent_sessions.c.agent_backend == backend,
-                agent_sessions.c.status != "archived",
             )
             if not target.include_all_backend_sessions:
                 predicates = [

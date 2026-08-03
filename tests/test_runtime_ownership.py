@@ -53,6 +53,7 @@ def _session(
     workdir: str,
     backend: str = "codex",
     hold: str = "open",
+    status: str = "active",
 ) -> None:
     conn.execute(
         agent_sessions.insert().values(
@@ -68,7 +69,7 @@ def _session(
             workdir=workdir,
             native_session_id="",
             title=None,
-            status="active",
+            status=status,
             visibility="foreground",
             pinned=0,
             agent_status="idle",
@@ -585,6 +586,186 @@ def test_hfr_138_exact_delivery_representation_supersedes_fallback_run(
     assert snapshot.disposition is SessionRuntimeDisposition.RUNNABLE
     assert snapshot.sessions[0].delivery_ids == ("delivery-a",)
     assert snapshot.sessions[0].fallback_run_ids == ()
+    engine.dispose()
+
+
+@pytest.mark.parametrize("turn_state", ["starting", "active"])
+def test_archived_session_live_turn_still_owns_runtime(
+    tmp_path: Path,
+    turn_state: str,
+) -> None:
+    """An archived Session cannot hide a still-unsettled native Turn owner."""
+
+    engine = _engine(tmp_path, f"archived-turn-{turn_state}.sqlite")
+    with engine.begin() as conn:
+        _session(
+            conn,
+            "ses-archived",
+            anchor="base",
+            workdir="/work",
+            status="archived",
+        )
+        _delivery(conn, "delivery-a", "ses-archived")
+        claimed = delivery_store.claim_start_batch(
+            conn,
+            turn_id="turn-a",
+            session_id="ses-archived",
+            backend="codex",
+            deliveries=[delivery_store.get_delivery(conn, "delivery-a")],
+            dispatch_text="delivery-a",
+        )
+        if turn_state == "active":
+            turn = claimed["turn"]
+            assert delivery_store.bind_native_start(
+                conn,
+                "turn-a",
+                expected_version=int(turn["version"]),
+                runtime_key="base:/work",
+                runtime_turn_id="runtime-turn-a",
+                native_turn_id="native-turn-a",
+            )
+
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is SessionRuntimeDisposition.ACTIVE
+    assert snapshot.sessions[0].turn_ids == ("turn-a",)
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("delivery_state", "expected"),
+    [
+        ("queued", SessionRuntimeDisposition.RUNNABLE),
+        ("claimed", SessionRuntimeDisposition.ACTIVE),
+        ("steering", SessionRuntimeDisposition.ACTIVE),
+    ],
+)
+def test_archived_session_unresolved_delivery_still_owns_runtime(
+    tmp_path: Path,
+    delivery_state: str,
+    expected: SessionRuntimeDisposition,
+) -> None:
+    """Archival changes admission visibility, not unresolved Delivery ownership."""
+
+    engine = _engine(tmp_path, f"archived-delivery-{delivery_state}.sqlite")
+    with engine.begin() as conn:
+        _session(
+            conn,
+            "ses-archived",
+            anchor="base",
+            workdir="/work",
+            status="archived",
+        )
+        _delivery(conn, "delivery-a", "ses-archived")
+        if delivery_state == "claimed":
+            delivery_store.claim_start_batch(
+                conn,
+                turn_id="turn-a",
+                session_id="ses-archived",
+                backend="codex",
+                deliveries=[delivery_store.get_delivery(conn, "delivery-a")],
+                dispatch_text="delivery-a",
+            )
+        elif delivery_state == "steering":
+            delivery_store.claim_start_batch(
+                conn,
+                turn_id="turn-a",
+                session_id="ses-archived",
+                backend="codex",
+                deliveries=[delivery_store.get_delivery(conn, "delivery-a")],
+                dispatch_text="delivery-a",
+            )
+            turn = delivery_store.get_turn(conn, "turn-a")
+            active_turn = delivery_store.bind_native_start(
+                conn,
+                "turn-a",
+                expected_version=int(turn["version"]),
+                runtime_key="base:/work",
+                runtime_turn_id="runtime-turn-a",
+                native_turn_id="native-turn-a",
+            )
+            assert active_turn is not None
+            _delivery(conn, "delivery-steer", "ses-archived")
+            steer = delivery_store.get_delivery(conn, "delivery-steer")
+            assert delivery_store.open_steer_attempt(
+                conn,
+                "delivery-steer",
+                expected_version=int(steer["version"]),
+                turn_id="turn-a",
+                attempt_id="steer-a",
+                expected_native_turn_id="native-turn-a",
+            )
+
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is expected
+    assert "delivery-a" in snapshot.sessions[0].delivery_ids
+    if delivery_state == "steering":
+        assert "delivery-steer" in snapshot.sessions[0].delivery_ids
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("pid", "expected"),
+    [
+        (None, SessionRuntimeDisposition.TRANSITIONING),
+        (123, SessionRuntimeDisposition.ACTIVE),
+    ],
+)
+def test_archived_session_running_fallback_run_still_owns_runtime(
+    tmp_path: Path,
+    pid: int | None,
+    expected: SessionRuntimeDisposition,
+) -> None:
+    """Fallback Run ownership survives Session archival on both PID sides."""
+
+    engine = _engine(tmp_path, f"archived-run-{pid}.sqlite")
+    with engine.begin() as conn:
+        _session(
+            conn,
+            "ses-archived",
+            anchor="base",
+            workdir="/work",
+            status="archived",
+        )
+        _run(
+            conn,
+            "run-a",
+            status="running",
+            session_id="ses-archived",
+            pid=pid,
+        )
+
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is expected
+    assert snapshot.sessions[0].fallback_run_ids == ("run-a",)
+    engine.dispose()
+
+
+def test_archived_session_without_unresolved_owner_is_reclaimable(
+    tmp_path: Path,
+) -> None:
+    """Archival alone is not ownership and terminal history never pins."""
+
+    engine = _engine(tmp_path, "archived-terminal-history.sqlite")
+    with engine.begin() as conn:
+        _session(
+            conn,
+            "ses-archived",
+            anchor="base",
+            workdir="/work",
+            status="archived",
+        )
+        _run(
+            conn,
+            "run-terminal",
+            status="completed",
+            session_id="ses-archived",
+        )
+        _delivery(conn, "delivery-terminal", "ses-archived", "retired")
+
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is SessionRuntimeDisposition.RECLAIMABLE
+    assert snapshot.sessions[0].fallback_run_ids == ()
+    assert snapshot.sessions[0].delivery_ids == ()
     engine.dispose()
 
 
