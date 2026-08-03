@@ -864,6 +864,31 @@ def test_hfr_150_enqueue_captures_backend_before_session_and_agent_switch(
         engine.dispose()
 
 
+def test_hfr_150_legacy_blank_backend_uses_its_durable_session(tmp_path: Path) -> None:
+    """HFR-150: a legacy blank backend cannot disappear from its Session target."""
+
+    engine = _engine(tmp_path, "legacy-blank-backend.sqlite")
+    with engine.begin() as conn:
+        _session(conn, "ses-a", anchor="base", workdir="/work")
+        _run(
+            conn,
+            "run-a",
+            status="running",
+            backend="reviewer",
+            session_id="ses-a",
+        )
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == "run-a")
+            .values(agent_backend=None)
+        )
+
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is SessionRuntimeDisposition.TRANSITIONING
+    assert snapshot.sessions[0].fallback_run_ids == ("run-a",)
+    engine.dispose()
+
+
 def test_hfr_148_unknown_execution_type_fails_closed(tmp_path: Path) -> None:
     """HFR-148: an unnamed execution-bearing Run type cannot be reclaimed."""
 

@@ -388,6 +388,7 @@ class RuntimeOwnershipProvider:
                                 missing_run_backend,
                                 or_(
                                     resolved_agent.c.backend == backend,
+                                    resolved_run_session.c.agent_backend == backend,
                                     agent_runs.c.agent_name == backend,
                                 ),
                             ),
