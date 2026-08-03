@@ -995,6 +995,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     || voiceProcessing
     || voiceRetainedSession !== null
   );
+  const voiceCaptureActive = recording || voiceProcessing;
   const voiceDiscardAvailable = recording || voiceRetainedSession !== null;
 
   const update = (next: string) => {
@@ -1261,31 +1262,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />
         )}
-        {/* Destructive voice actions stay at the opposite edge from the primary
-            voice slot. This makes an accidental discard much harder than when
-            Finish and Trash are adjacent. */}
-        {voiceDiscardAvailable && (
-          <Button
-            type="button"
-            variant="destructive-soft"
-            size="icon"
-            onClick={() => {
-              if (recording) abortRecording();
-              else if (voiceRetainedSession) discardVoiceSession(voiceRetainedSession);
-            }}
-            aria-label={t(
-              recording
-                ? 'chat.compose.cancelRecording'
-                : 'chat.compose.voiceDiscard',
-            )}
-            className="size-9 shrink-0"
-          >
-            <Trash2 className="size-4" />
-          </Button>
-        )}
         {/* 36px (size-9) icon buttons: pink-soft Stop while a turn runs, else a
             flat mint Send — design-system variants, not a glowy brand CTA. */}
-        {!voiceFlowActive && (busyControls ? (
+        {!voiceCaptureActive && (busyControls ? (
           <>
             {/* Sending while a turn runs is allowed — the backend enqueues it
                 (202) instead of refusing (Enter does this too). Surface a visible
@@ -1335,6 +1314,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <Send className="size-4" />
           </Button>
         ))}
+        {/* Destructive voice actions stay at the opposite edge from the primary
+            voice slot. Finish is never adjacent to Trash; once a failed or
+            recovered recording is retained, Send remains available before the
+            rightmost Trash action. */}
+        {voiceDiscardAvailable && (
+          <Button
+            type="button"
+            variant="destructive-soft"
+            size="icon"
+            onClick={() => {
+              if (recording) abortRecording();
+              else if (voiceRetainedSession) discardVoiceSession(voiceRetainedSession);
+            }}
+            aria-label={t(
+              recording
+                ? 'chat.compose.cancelRecording'
+                : 'chat.compose.voiceDiscard',
+            )}
+            className="size-9 shrink-0"
+          >
+            <Trash2 className="size-4" />
+          </Button>
+        )}
       </div>
     </div>
   );
