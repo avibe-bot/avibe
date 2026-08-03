@@ -98,8 +98,12 @@ it. Do not let broken bindings or fake activity create immortal sessions.
 1. Build one provider that resolves the **current durable owners** of a session:
    Delivery rows whose `DELIVERY_STATE_MATRIX` ordering role is `claimable`,
    `fence`, or `turn_owned`; Turns in `waiting`, `starting`, or `active`; and any
-   nonterminal Run whose exact ownership is not already represented by those
-   rows. Consume the state policy instead of hard-coding Delivery state names:
+   nonterminal **execution-bearing** Run whose exact ownership is not already
+   represented by those rows. Reuse one explicit Run-type classification with
+   recovery/health: exclude `run_type=watch_runtime` supervisor heartbeats, and
+   fail closed on unknown Run types until they are deliberately classified; a
+   definition/session binding alone is not execution ownership. Consume the
+   state policy instead of hard-coding Delivery state names:
    terminal `accepted` / `retired` Delivery history does not pin a session,
    while unresolved fences and turn-owned states do. Reuse current Delivery/Turn
    storage and teardown APIs; do not restore PR2's discarded in-memory resolver
@@ -128,6 +132,8 @@ it. Do not let broken bindings or fake activity create immortal sessions.
 - queued work pins the exact target session;
 - unresolved fence and turn-owned Delivery states pin, while terminal Delivery
   history without a nonterminal Turn does not;
+- a `watch_runtime` heartbeat sharing the same definition/session does not pin,
+  while an execution-bearing watch Run does;
 - a pin admitted between eviction passes wins;
 - unrelated sessions are not pinned;
 - one positively missing binding fails open;
@@ -261,15 +267,22 @@ evidence, and restart recovery. First determine what remains.
    idempotently with monotonic `(completed_at, run_id)` ordering after a crash;
    replay of an older event must not overwrite a newer compatibility projection.
    Dispatch or Delivery acceptance is not task success.
-4. If pre-fix rows still match the old premature-success signature — scheduled
-   or watch `status=succeeded`, empty `result_text`, and `completed_at` within the
-   dispatch-time window of `created_at` — stamp
+4. Mark only rows with durable evidence that the old writer produced them. Use a
+   conservative fixed cutoff: `completed_at` must be strictly before
+   `2026-08-02T09:56:28Z`, when commit `89befed4` (#1134 / schema 0044) first made
+   the settlement fix available, or explicit persisted writer/version metadata
+   must identify pre-#1134 semantics. Then require the old premature-success
+   signature: scheduled or watch `status=succeeded`, empty `result_text`, and
+   `completed_at` within the dispatch-time window of `created_at`. Never use
+   upgrade time or the field signature alone; if timestamp/version evidence is
+   absent or ambiguous, leave the row unmarked. Stamp qualifying rows with
    `metadata.pre_settlement_migration=true` and render a quiet “legacy — delivery
-   only” marker. Do not mark honest failures, cancellations, or later terminal
-   results. Route UI copy through `ui/src/i18n/en.json` and
-   `ui/src/i18n/zh.json`, and CLI/backend copy through the matching
-   `vibe/i18n/` catalogs; do not hardcode either locale. Do not rewrite
-   historical status or invent result text.
+   only” marker. Pin the exact cutoff boundary and a legitimate fast, empty
+   post-#1134 terminal result in tests. Do not mark honest failures,
+   cancellations, or later terminal results. Route UI copy through
+   `ui/src/i18n/en.json` and `ui/src/i18n/zh.json`, and CLI/backend copy through
+   the matching `vibe/i18n/` catalogs; do not hardcode either locale. Do not
+   rewrite historical status or invent result text.
 
 ### PR7B — Cron liveness
 
