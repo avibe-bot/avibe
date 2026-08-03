@@ -3441,8 +3441,10 @@ class ScheduledTaskService:
         proceeding on "could not tell" is the same wager as proceeding on "yes".
 
         Proof of death releases the definition here rather than waiting for the next
-        start: the record is cleared and the fire runs, so a supervisor that ended while
-        the service was down does not hold its own schedule shut.
+        start: the record is retired, the interrupted fire is SETTLED (nothing else will
+        ever come back for it -- see ``_settle_recovered_command_fire``) and the new fire
+        runs, so a supervisor that ended while the service was down does not hold its own
+        schedule shut.
 
         Untrusted records do not block. Every kill path refuses them, so no pass will
         ever act on one; treating it as a live worker would wedge the definition for
@@ -3495,7 +3497,7 @@ class ScheduledTaskService:
                 return True
             if presence == "gone":
                 if run_id:
-                    self._clear_command_worker(run_id)
+                    self._settle_recovered_command_fire(run_id)
                 continue
             logger.warning(
                 "task %s still has a command worker pid=%s from run %s (%s); deferring "
@@ -3507,6 +3509,64 @@ class ScheduledTaskService:
             )
             return True
         return False
+
+    def _settle_recovered_command_fire(self, run_id: str) -> None:
+        """Close the fire whose retained worker has just been shown dead.
+
+        NO OTHER PASS COMES BACK FOR THIS ROW. ``recover_processing`` runs once, at
+        startup, and deliberately steps over a run that still names a worker; the only
+        other pass over stale rows -- ``sweep_stale_runs`` -- classifies orphans as
+        ``run_type == "agent_run"`` and never looks at a command fire. So the row here,
+        kept ``running`` by ``_reap_orphaned_command_workers`` because the process could
+        not be proven dead and proven dead only now, has nobody left to close it.
+        Releasing the definition without closing it would just trade a stuck schedule for
+        a run that reads ``running`` until the next restart, describing a backup that
+        ended long ago.
+
+        THE RECORD GOES FIRST, because it is readable only while the row is ``running``:
+        clearing after the settle would leave a dead process's name stamped on a terminal
+        row where nothing would ever read or retire it. Neither order can cost a live
+        process its only handle -- reaching this method IS the proof that there is no
+        live process.
+
+        Reported as ``restarted`` because that is what happened: the service died
+        mid-fire and the supervisor did not outlive it. It is the same sentence the
+        startup pass writes for every other run that restart cut off, so one
+        interruption is not told two ways depending on which pass could prove it. The
+        settle owes the notice, hence the drain nudge -- the user hears that the fire was
+        interrupted, rather than only seeing the next one succeed.
+
+        Best-effort by construction: the caller is a fire's own admission check, and a
+        store hiccup while closing the PREVIOUS run must not stop this one. Nothing is
+        lost by deferring -- the record is already gone, so the next start's
+        ``recover_processing`` settles the row it left behind (the same path the file
+        backend, which has no guarded per-run writer, relies on).
+        """
+
+        self._clear_command_worker(run_id)
+        settled_by = SETTLED_BY_RESTARTED
+        try:
+            supported, settled = self._settle_agent_run_without_result(
+                run_id,
+                settled_by=settled_by,
+                error=self._t(SETTLEMENT_I18N_KEYS[settled_by]),
+            )
+            if not supported or settled is None:
+                return
+            self._project_terminal_definition_result(
+                self.request_store.get_run(run_id),
+                execution_id=run_id,
+                expected_status=settled,
+            )
+        except Exception:
+            logger.warning(
+                "failed to settle interrupted command fire %s after its worker was "
+                "shown gone; leaving it for the next start",
+                run_id,
+                exc_info=True,
+            )
+            return
+        self._drain_dirty = True
 
     def _execution_interruption(self, execution_id: str) -> str:
         return self._inflight_cancellation_causes.get(

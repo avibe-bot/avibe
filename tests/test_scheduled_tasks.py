@@ -15910,6 +15910,81 @@ def test_a_failed_retention_write_keeps_the_stored_worker_record(
     )
 
 
+def test_a_recovered_fire_is_settled_when_its_worker_is_finally_shown_gone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-044 -- releasing the definition is only half of closing the old fire.
+
+    SCT-040 made a proven death release the definition immediately instead of waiting
+    for a restart, which left the interrupted run behind: NO OTHER PASS COMES BACK FOR
+    IT. ``recover_processing`` runs once at startup and steps over any row still naming
+    a worker -- this row's whole reason for surviving -- and ``sweep_stale_runs`` only
+    classifies orphans of ``run_type == "agent_run"``. So the run stayed ``running``
+    until the next restart while the backup it described was over, the definition read
+    as still executing, and the user was never told the fire had been interrupted at all.
+
+    Settled the same way the startup pass would have settled it, ``restarted``, since
+    that is what happened -- one interruption should not be told two ways depending on
+    which pass got to prove the death.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    # A worker whose death is PROVABLE: spawned, named, then reaped, so its recorded
+    # identity points at a pid the OS has fully released.
+    marker = "worker-that-died-while-the-service-was-down"
+    dead = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.exit(0)"],
+        env=process_identity_subprocess_env(marker),
+        **isolated_subprocess_kwargs(),
+    )
+    identity = capture_spawned_process_identity(dead.pid, marker)
+    dead.wait()
+    assert identity is not None
+
+    orphan = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert orphan is not None
+    assert service.request_store.record_command_worker(
+        orphan.id, serialize_process_identity(identity)
+    )
+
+    assert service._command_definition_has_live_worker(task.id) is False, (
+        "a worker proven dead must not defer the next fire"
+    )
+
+    row = service.request_store.get_run(orphan.id)
+    assert row is not None
+    assert row["status"] == "failed", (
+        "the recovered fire was released but never closed, so it reads as still running "
+        f"a command that ended before the service came back: {row['status']!r}"
+    )
+    assert row["completed_at"], "a terminal run with no completion time"
+    assert row["error"], (
+        "the interrupted fire settled with no explanation for the user to read"
+    )
+    assert (row["metadata"] or {}).get("interrupt_reason") == "restarted", (
+        "the interruption was recorded under a different cause than the startup pass "
+        f"uses for the same event: {row['metadata']!r}"
+    )
+    assert not [
+        worker
+        for worker in service.request_store.list_running_command_workers()
+        if worker["run_id"] == orphan.id
+    ], "the dead worker's record outlived the run it named"
+    settled = store.get_task(task.id)
+    assert settled is not None and settled.last_error, (
+        "the definition still shows no failure for a fire that was interrupted, so the "
+        "Harness lists it as healthy and the user never learns the command was cut off"
+    )
+
+
 def test_an_interrupted_command_fire_clears_the_previous_exit_code(
     tmp_path: Path, monkeypatch
 ) -> None:

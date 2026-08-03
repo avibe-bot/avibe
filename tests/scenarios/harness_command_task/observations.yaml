@@ -387,3 +387,42 @@ observations:
       - normalize the field at the store boundary so both backends answer the same contract
       - say in the docstring why the field is required, not merely that it is returned
       - assert the contract on both backends in one test, since a reader cannot tell them apart
+  - id: OBS-HARNESS-COMMAND-TASK-023
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-044
+      - SCT-040
+    summary: >-
+      Moving a transition earlier orphans whatever used to follow it.
+    previous_assumption: >-
+      Clearing the worker record on proof of death was enough, because that is exactly what
+      the startup reap does and the settle pass runs right after it.
+    observed_behavior: >-
+      Right after it, at startup, and nowhere else. Proving the death mid-life released the
+      definition with no pass left to close the run: ``recover_processing`` runs once and
+      skips any row still naming a worker, and the stale-run sweep only classifies orphans
+      of ``run_type == "agent_run"``. The fire stayed ``running`` until the next restart
+      while the command it described was long over, and its interruption was never reported.
+    required_updates:
+      - settle the recovered run in the same step that releases its definition
+      - reuse the startup pass's cause so one interruption is not reported two ways
+      - keep the settle best-effort: closing the previous fire must not block the next one
+  - id: OBS-HARNESS-COMMAND-TASK-024
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-043
+    summary: >-
+      A helper that resolves a null to a default answers a question that was never asked.
+    previous_assumption: >-
+      Rendering every task through the same routing fields is neutral: a command task simply
+      shows the defaults it would inherit.
+    observed_behavior: >-
+      Those defaults are claims. A command with ``--on-failure none`` has no Agent, no
+      session and no delivery at all, and the pane asserted all three -- contradicting the
+      on-failure field directly below it. The fix cannot key on the kind either, since a
+      command that escalates or that was created inside a conversation routes through
+      exactly those fields.
+    required_updates:
+      - show the routing fields only when something in them is actually bound
+      - state in the test which bindings must keep them visible, not only which hide them
+      - treat a "sensible default" label on an absent binding as a fabricated fact

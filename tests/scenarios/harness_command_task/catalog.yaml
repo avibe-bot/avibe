@@ -406,3 +406,34 @@ scenarios:
     # backend while looking healthy on the other. Normalized at the store boundary and
     # asserted on both backends in one test, because a reader cannot tell which one it
     # was handed.
+  - id: SCT-043
+    name: the task pane claims no Agent routing a pure command task does not have
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task drops the Agent routing a pure command task deliberately has none of
+    # Three label helpers resolve a stored null to a CONCRETE answer -- "Inherits default
+    # agent", "Reuse the same session", "Default · session location" -- which is true of a
+    # message task, whose null Agent really is the inherited one. A command created with
+    # the CLI's default ``--on-failure none`` is bound to nothing, so the same rendering
+    # described routing it deliberately has none of, one field above an "On failure:
+    # Notice only (no Agent)" that says the opposite. Gated on the BINDINGS, not on the
+    # kind: an escalation turn is routed by exactly these fields, and a command created
+    # from IM delivers its failure notice to a real conversation.
+  - id: SCT-044
+    name: a recovered fire is settled once its worker is finally shown gone
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_recovered_fire_is_settled_when_its_worker_is_finally_shown_gone
+    # SCT-040 let a proven death release the definition immediately instead of waiting for
+    # a restart, and left the interrupted run behind: no other pass comes back for it.
+    # ``recover_processing`` runs once at startup and steps over any row still naming a
+    # worker -- this row's whole reason for surviving -- and the stale-run sweep only
+    # classifies orphans of ``run_type == "agent_run"``. The run therefore read
+    # ``running`` until the next restart for a command that was over, the definition
+    # looked healthy, and the user was never told the fire had been cut off. Settled as
+    # ``restarted``, the same cause the startup pass writes, so one interruption is not
+    # told two ways depending on which pass proved the death.

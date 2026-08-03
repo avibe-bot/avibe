@@ -1220,6 +1220,14 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
   const { t } = useTranslation();
   const isCommand = taskIsCommand(task);
   const commandPreview = isCommand ? taskCommandPreview(task) : '';
+  const routesSomewhere =
+    !isCommand ||
+    taskOnFailure(task) === 'agent' ||
+    Boolean(task.agent_name) ||
+    Boolean(task.session_id) ||
+    Boolean(task.session_key) ||
+    Boolean(task.post_to) ||
+    Boolean(task.deliver_key);
   const title = definitionRowTitle(task, isCommand ? commandPreview : t('harness.kind.task'));
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -1263,20 +1271,33 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           </span>
         </DetailField>
       )}
-      <DetailField label={t('harness.detail.agent')}>
-        <DetailAgent agentName={task.agent_name} agent={agent} />
-      </DetailField>
-      <DetailField label={t('harness.detail.session')}>
-        <DetailSession summary={task} sessionId={task.session_id} />
-      </DetailField>
-      <div className="grid grid-cols-2 gap-4">
-        <DetailField label={t('harness.detail.sessionPolicy')}>
-          <span className="text-[12px] text-foreground">{sessionPolicyLabel(task.session_policy, t)}</span>
-        </DetailField>
-        <DetailField label={t('harness.detail.delivery')}>
-          <span className="text-[12px] text-foreground">{deliveryLabel(task.post_to, t)}</span>
-        </DetailField>
-      </div>
+      {/* Routing, and only where there is something to route. These three label
+          helpers all resolve a null to a CONCRETE answer — "Inherited default",
+          "Existing", "Session" — which is right for a message task, whose null
+          agent really is the inherited default. A command created with the CLI's
+          default ``--on-failure none`` is bound to nothing at all, so the same
+          rendering told the user it routes through an Agent it deliberately does
+          not have. Shown as soon as anything here is real: an escalation turn
+          (``--on-failure agent``), a pinned Agent, or a conversation a failure
+          notice is delivered to. */}
+      {routesSomewhere && (
+        <>
+          <DetailField label={t('harness.detail.agent')}>
+            <DetailAgent agentName={task.agent_name} agent={agent} />
+          </DetailField>
+          <DetailField label={t('harness.detail.session')}>
+            <DetailSession summary={task} sessionId={task.session_id} />
+          </DetailField>
+          <div className="grid grid-cols-2 gap-4">
+            <DetailField label={t('harness.detail.sessionPolicy')}>
+              <span className="text-[12px] text-foreground">{sessionPolicyLabel(task.session_policy, t)}</span>
+            </DetailField>
+            <DetailField label={t('harness.detail.delivery')}>
+              <span className="text-[12px] text-foreground">{deliveryLabel(task.post_to, t)}</span>
+            </DetailField>
+          </div>
+        </>
+      )}
       {/* A command task's ``prompt`` is empty by construction, so this field
           would render a bare em-dash under the heading "Message" — a promise of
           a message the task does not have. A command task that *also* carries

@@ -511,6 +511,44 @@ describe('TaskDetail command task', () => {
     expect(html).not.toContain('/chat/');
   });
 
+  it('drops the Agent routing a pure command task deliberately has none of', () => {
+    // SCT-043. The label helpers resolve a null to a concrete answer, so a
+    // command created with the CLI's default ``--on-failure none`` — no Agent,
+    // no session, no delivery — was described as routing through an "Inherited
+    // default" Agent with an "Existing" session policy delivering to "Session".
+    // Every one of those was invented, and the on-failure field right below
+    // already states that no Agent is involved.
+    const html = detail(task({ shell_command: 'make test' }));
+
+    expect(html).not.toContain(`>${i18n.t('harness.detail.agent')}<`);
+    expect(html).not.toContain(i18n.t('harness.detail.agentInherit'));
+    expect(html).not.toContain(`>${i18n.t('harness.detail.sessionPolicy')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.delivery')}<`);
+    expect(html).toContain(`>${i18n.t('harness.onFailure.none')}<`);
+  });
+
+  it('keeps the routing fields wherever there is something to route', () => {
+    // Not gated on the KIND: an escalation turn is routed by exactly these
+    // fields, and a command bound to a conversation delivers its failure notice
+    // there, so hiding them for every command would drop real answers.
+    const escalates = detail(task({ shell_command: 'make test', metadata: { on_failure: 'agent' } }));
+    expect(escalates).toContain(`>${i18n.t('harness.detail.agent')}<`);
+    expect(escalates).toContain(`>${i18n.t('harness.detail.delivery')}<`);
+
+    const bound = detail(task({ shell_command: 'make test', session_key: 'slack::channel::C123', post_to: 'thread' }));
+    expect(bound).toContain(`>${i18n.t('harness.detail.delivery')}<`);
+    expect(bound).toContain(`>${i18n.t('harness.delivery.thread')}<`);
+
+    const pinned = detail(task({ shell_command: 'make test', agent_name: 'claude' }));
+    expect(pinned).toContain(`>${i18n.t('harness.detail.agent')}<`);
+
+    // And a message task is untouched: its null agent really is the inherited one.
+    const message = detail(task({ prompt: 'Summarize #ops', message: 'Summarize #ops' }));
+    expect(message).toContain(`>${i18n.t('harness.detail.agent')}<`);
+    expect(message).toContain(i18n.t('harness.detail.agentInherit'));
+    expect(message).toContain(`>${i18n.t('harness.detail.sessionPolicy')}<`);
+  });
+
   it('drops the Message field a command task has nothing to put in', () => {
     const html = detail(commandTask);
 
