@@ -463,6 +463,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self._poll_loop = OpenCodePollLoop(self)
 
         self._active_requests: Dict[str, asyncio.Task] = {}
+        self._session_last_activity: Dict[str, float] = {}
         self._steering_states: Dict[str, _OpenCodeSteerState] = {}
         self._restored_poll_servers: Dict[asyncio.Task, _SteeringAwareOpenCodeServer] = {}
 
@@ -555,6 +556,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         result = snapshot(target)
         wake_runtime_ownership(self.controller, result)
         return (result,)
+
+    def record_runtime_turn_start(
+        self,
+        *,
+        runtime_key: str,
+        request: AgentRequest | None,
+    ) -> None:
+        del runtime_key
+        if request is not None:
+            self._session_last_activity[request.base_session_id] = time.monotonic()
 
     async def refresh_runtime_config(self, opencode_config, *, force: bool = False) -> None:
         """Reload runtime config and refresh the shared server.

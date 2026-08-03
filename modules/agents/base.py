@@ -165,6 +165,21 @@ class BaseAgent(ABC):
         if callable(mark_started):
             mark_started(context)
 
+    def record_runtime_turn_start(
+        self,
+        *,
+        runtime_key: str,
+        request: AgentRequest | None,
+    ) -> None:
+        """Establish the backend's exact per-Session progress baseline.
+
+        AgentService calls this once, after the matching runtime gate crosses
+        native acceptance. Backends with an inactivity clock override it; the
+        default intentionally does not manufacture progress.
+        """
+
+        return None
+
     async def record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
         """Persist source cooldown state when a terminal turn proves source loss."""
 

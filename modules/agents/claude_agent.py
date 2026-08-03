@@ -331,6 +331,15 @@ class ClaudeAgent(BaseAgent):
     def runtime_ownership_snapshots(self):
         return self.session_handler.runtime_ownership_snapshots()
 
+    def record_runtime_turn_start(
+        self,
+        *,
+        runtime_key: str,
+        request: AgentRequest | None,
+    ) -> None:
+        del request
+        self.session_handler.touch_session_activity(runtime_key)
+
     @staticmethod
     def _runtime_key_matches_session_base(runtime_key: str, session_bases: set[str]) -> bool:
         for session_base in session_bases:
@@ -687,15 +696,6 @@ class ClaudeAgent(BaseAgent):
         buffered_terminal = self._consume_terminal_barrier(composite_key) is not None
         return generation_changed or buffered_terminal
 
-    def _touch_steering_activity(self, composite_key: str) -> None:
-        touch_session_activity = getattr(
-            self.session_handler,
-            "touch_session_activity",
-            None,
-        )
-        if callable(touch_session_activity):
-            touch_session_activity(composite_key)
-
     @staticmethod
     def _ambiguous_steering_input_closer(client):
         end_input = getattr(client, "end_input", None)
@@ -795,7 +795,6 @@ class ClaudeAgent(BaseAgent):
                         composite_key,
                         barrier="unknown",
                     )
-                    self._touch_steering_activity(composite_key)
                     await self._end_ambiguous_steering_input(
                         composite_key,
                         end_input,
@@ -826,7 +825,6 @@ class ClaudeAgent(BaseAgent):
                             composite_key,
                             barrier="unknown",
                         )
-                        self._touch_steering_activity(composite_key)
                         await self._end_ambiguous_steering_input(
                             composite_key,
                             end_input,
@@ -856,7 +854,6 @@ class ClaudeAgent(BaseAgent):
                         composite_key,
                         barrier="unknown",
                     )
-                    self._touch_steering_activity(composite_key)
                     await self._end_ambiguous_steering_input(
                         composite_key,
                         end_input,
@@ -871,7 +868,6 @@ class ClaudeAgent(BaseAgent):
                 writers.discard(composite_key)
 
             self._advance_steering_generation(composite_key)
-            self._touch_steering_activity(composite_key)
             if (
                 self.claude_sessions.get(composite_key) is not client
                 or self.receiver_tasks.get(composite_key) is not receiver_task
@@ -1055,9 +1051,6 @@ class ClaudeAgent(BaseAgent):
                         preserve_pending_request_state=True,
                     )
                 try:
-                    touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
-                    if callable(touch_session_activity):
-                        touch_session_activity(composite_key)
                     claude_session_id = self._maybe_capture_session_id(
                         message,
                         base_session_id,
@@ -1123,6 +1116,7 @@ class ClaudeAgent(BaseAgent):
                         )
 
                     if message_type == "assistant":
+                        self.session_handler.touch_session_activity(composite_key)
                         toolcalls = []
                         text_parts = []
                         # AskUserQuestion detection disabled - SDK cannot respond
@@ -2481,6 +2475,7 @@ class ClaudeAgent(BaseAgent):
             mark_active = getattr(self.session_handler, "mark_session_active", None)
             if callable(mark_active):
                 mark_active(composite_key)
+            self.session_handler.touch_session_activity(composite_key)
             return True
 
         status = str(self._task_field(message, "status", "") or "").strip().lower()
@@ -2497,6 +2492,7 @@ class ClaudeAgent(BaseAgent):
             mark_active = getattr(self.session_handler, "mark_session_active", None)
             if callable(mark_active):
                 mark_active(composite_key)
+            self.session_handler.touch_session_activity(composite_key)
             return True
         if not terminal:
             logger.warning("Ignoring Claude %s with non-terminal status %r", event, status)

@@ -720,6 +720,16 @@ class CodexAgent(BaseAgent):
             snapshots.append(snapshot)
         return tuple(snapshots)
 
+    def record_runtime_turn_start(
+        self,
+        *,
+        runtime_key: str,
+        request: AgentRequest | None,
+    ) -> None:
+        del runtime_key
+        if request is not None:
+            self._touch_session_activity(request.base_session_id)
+
     def _stuck_active_sessions_for_cwd(
         self,
         cwd: str,
@@ -1886,7 +1896,6 @@ class CodexAgent(BaseAgent):
             raise RuntimeError("Codex turn/start returned no turn id")
 
         turn_state = self._turn_registry.finalize_turn_start_response(turn_id, request)
-        self._touch_session_activity(request.base_session_id)
         self._mark_runtime_turn_started(getattr(request, "context", None))
         bind_generated_image_snapshot = getattr(event_handler, "bind_generated_image_snapshot", None)
         if callable(bind_generated_image_snapshot):
@@ -2083,7 +2092,6 @@ class CodexAgent(BaseAgent):
     @staticmethod
     def _notification_is_real_progress(method: str) -> bool:
         return method in {
-            "turn/started",
             "item/completed",
             "item/agentMessage/delta",
             "item/commandExecution/outputDelta",

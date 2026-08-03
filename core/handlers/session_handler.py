@@ -126,7 +126,6 @@ class SessionHandler(BaseHandler):
         if composite_key not in self.active_sessions:
             self.session_turn_started[composite_key] = time.monotonic()
         self.active_sessions.add(composite_key)
-        self.touch_session_activity(composite_key)
 
     def mark_session_idle(self, composite_key: str) -> None:
         if not composite_key:

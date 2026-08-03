@@ -5372,83 +5372,23 @@ def test_capture_scheduled_provenance_keeps_delivery_drops_routing():
         assert routing not in spec
 
 
-def test_boot_queue_recovery_stops_when_durable_owner_recovery_fails(
+def test_boot_publishes_app_then_waits_for_controller_recovery(
     monkeypatch,
     tmp_path,
 ):
+    """HFR-152: HTTP serving waits for controller-owned runtime recovery."""
     import uvicorn
 
     calls: list[str] = []
-
-    async def fail_delivery_recovery(*, service_restart=False):
-        assert service_restart is True
-        calls.append("delivery")
-        raise RuntimeError("owner recovery failed")
-
-    async def recover_queue():
-        calls.append("queue")
-        return []
-
-    manager = SimpleNamespace(
-        recover_durable_delivery_state=fail_delivery_recovery,
-        recover_persisted_agent_run_queue=recover_queue,
-    )
-    controller = SimpleNamespace(session_turns=manager)
-
-    class _Server:
-        def __init__(self, _config):
-            pass
-
-        async def serve(self, *, sockets):
-            assert len(sockets) == 1
-            calls.append("serve")
-
-    listener = SimpleNamespace(close=lambda: calls.append("close"))
-    monkeypatch.setattr(internal_server, "create_app", lambda _controller: object())
-    monkeypatch.setattr(
-        internal_server,
-        "_bind_socket",
-        lambda _path: (listener, tmp_path / "internal.sock"),
-    )
-    monkeypatch.setattr(uvicorn, "Config", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(uvicorn, "Server", _Server)
-
-    asyncio.run(internal_server.serve(controller))
-
-    assert calls == ["delivery", "serve", "close"]
-
-
-def test_boot_waits_for_backend_restore_before_delivery_recovery(
-    monkeypatch,
-    tmp_path,
-):
-    """HFR-152: supervisor activation follows identity and owner recovery."""
-    import uvicorn
-
-    calls: list[str] = []
-    restore_barrier = asyncio.Event()
+    app_created = asyncio.Event()
     recovery_complete = asyncio.Event()
-
-    async def recover_deliveries(*, service_restart=False):
-        assert service_restart is True
-        calls.append("delivery")
-        return []
-
-    async def recover_queue():
-        calls.append("queue")
-        return []
-
     manager = SimpleNamespace(
-        recover_durable_delivery_state=recover_deliveries,
-        recover_persisted_agent_run_queue=recover_queue,
+        recover_durable_delivery_state=AsyncMock(),
+        recover_persisted_agent_run_queue=AsyncMock(),
     )
     controller = SimpleNamespace(
         session_turns=manager,
-        _delivery_recovery_barrier=restore_barrier,
         _delivery_recovery_complete=recovery_complete,
-        runtime_work_supervisor=SimpleNamespace(
-            activate=AsyncMock(side_effect=lambda: calls.append("supervisor"))
-        ),
     )
 
     class _Server:
@@ -5461,7 +5401,13 @@ def test_boot_waits_for_backend_restore_before_delivery_recovery(
             calls.append("serve")
 
     listener = SimpleNamespace(close=lambda: calls.append("close"))
-    monkeypatch.setattr(internal_server, "create_app", lambda _controller: object())
+
+    def _create_app(_controller):
+        calls.append("app")
+        app_created.set()
+        return object()
+
+    monkeypatch.setattr(internal_server, "create_app", _create_app)
     monkeypatch.setattr(
         internal_server,
         "_bind_socket",
@@ -5472,11 +5418,13 @@ def test_boot_waits_for_backend_restore_before_delivery_recovery(
 
     async def _run() -> None:
         serving = asyncio.create_task(internal_server.serve(controller))
-        await asyncio.sleep(0)
-        assert calls == []
-        restore_barrier.set()
+        await app_created.wait()
+        assert calls == ["app"]
+        manager.recover_durable_delivery_state.assert_not_awaited()
+        manager.recover_persisted_agent_run_queue.assert_not_awaited()
+        recovery_complete.set()
         await serving
 
     asyncio.run(_run())
 
-    assert calls == ["delivery", "queue", "supervisor", "serve", "close"]
+    assert calls == ["app", "serve", "close"]

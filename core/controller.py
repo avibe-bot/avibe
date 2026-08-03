@@ -240,9 +240,10 @@ class Controller:
                 SessionDeliveryRecoveryHandler(self.session_turns),
             )
         ]
-        # Durable Delivery recovery must not classify a Turn before backend
-        # adapters have restored their restart-stable native identities.
-        self._delivery_recovery_barrier = asyncio.Event()
+        # The internal server publishes the Session gate before waiting on this
+        # event. Controller startup owns backend restoration, durable owner
+        # recovery, and supervisor activation, then releases HTTP serving and
+        # the scheduler/watch services together.
         self._delivery_recovery_complete = asyncio.Event()
 
         self._init_model_hub()
@@ -939,10 +940,6 @@ class Controller:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
         self.scheduled_task_service.notify_transport_ready(platform)
-        supervisor = getattr(self, "runtime_work_supervisor", None)
-        notify_runtime_work = getattr(supervisor, "notify", None)
-        if callable(notify_runtime_work):
-            notify_runtime_work(RuntimeWorkLane.REQUESTS)
         notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
         if callable(notify_update_checker):
             notify_update_checker(platform)
@@ -964,10 +961,8 @@ class Controller:
         workbench_platforms = {"avibe"}
         if self.primary_platform == "avibe":
             workbench_platforms.add("")
-        try:
-            await self._restore_active_polls(workbench_platforms)
-        finally:
-            self._delivery_recovery_barrier.set()
+        await self._restore_active_polls(workbench_platforms)
+        await self._recover_runtime_owners()
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
@@ -995,6 +990,46 @@ class Controller:
             self.cleanup_task is None or self.cleanup_task.done()
         ):
             self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
+
+    async def _recover_runtime_owners(self) -> None:
+        """Restore durable execution owners before any producer can admit work."""
+
+        delivery_recovery_ok = True
+        recover_deliveries = getattr(
+            self.session_turns,
+            "recover_durable_delivery_state",
+            None,
+        )
+        if callable(recover_deliveries):
+            try:
+                recovered = await recover_deliveries(service_restart=True)
+                if recovered:
+                    logger.info(
+                        "Recovered durable Session delivery owners for %s",
+                        ",".join(recovered),
+                    )
+            except Exception:
+                delivery_recovery_ok = False
+                logger.exception("Failed to recover durable Session delivery owners")
+
+        recover_queue = getattr(
+            self.session_turns,
+            "recover_persisted_agent_run_queue",
+            None,
+        )
+        if callable(recover_queue) and delivery_recovery_ok:
+            try:
+                recovered = await recover_queue()
+                if recovered:
+                    logger.info(
+                        "Recovered persisted Workbench Agent Run queues for %s",
+                        ",".join(recovered),
+                    )
+            except Exception:
+                logger.exception("Failed to recover persisted Workbench Agent Run queues")
+
+        await self.runtime_work_supervisor.activate()
+        self._delivery_recovery_complete.set()
 
     # Utility methods used by handlers
 
@@ -1493,8 +1528,6 @@ class Controller:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             self.show_git_checkpoint_service.start()
-            self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
-            self._im_thread.start()
             # Internal Unix-socket ASGI server for the Web UI / future
             # ``vibe agent run --sync`` cross-process callers. Lives on
             # the same loop as the IM dispatch path so they share one
@@ -1506,6 +1539,8 @@ class Controller:
             except Exception:
                 logger.exception("internal dispatch server failed to schedule; UI fallback will use the queue path")
                 self._internal_server_task = None
+            self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
+            self._im_thread.start()
             self._loop.run_forever()
             if self._im_run_exception and not isinstance(self._im_run_exception, (KeyboardInterrupt, SystemExit)):
                 raise self._im_run_exception

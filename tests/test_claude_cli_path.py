@@ -2207,7 +2207,7 @@ def test_cleanup_session_preserves_new_receiver_during_disconnect(monkeypatch, t
         assert events["old_receiver_cancelled"].is_set()
         assert controller.receiver_tasks[composite_key] is new_receiver
         assert composite_key in handler.active_sessions
-        assert composite_key in handler.session_last_activity
+        assert composite_key not in handler.session_last_activity
         new_receiver.cancel()
         with pytest.raises(asyncio.CancelledError):
             await new_receiver

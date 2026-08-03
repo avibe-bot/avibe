@@ -227,6 +227,7 @@ class AgentService:
         gate.backend = agent.name
         gate.agent = agent
         gate.runtime_started = False
+        gate.runtime_progress_token = ""
         gate.task = asyncio.current_task()
         gate.context = request.context
         gate.request = request
@@ -408,6 +409,8 @@ class AgentService:
         gate = self._turn_gates.get(runtime_key)
         if gate is None or gate.token != runtime_token:
             return
+        if gate.runtime_started:
+            return
         gate.runtime_started = True
         gate.liveness_probe = self._capture_backend_liveness(gate, context)
         self._start_runtime_liveness_monitor(runtime_key, gate, runtime_token)
@@ -420,6 +423,28 @@ class AgentService:
                 runtime_key=runtime_key,
                 runtime_turn_id=runtime_token,
             )
+        self._record_runtime_turn_start(
+            gate,
+            runtime_key=runtime_key,
+            runtime_token=runtime_token,
+        )
+
+    @staticmethod
+    def _record_runtime_turn_start(
+        gate: "_RuntimeTurnGate",
+        *,
+        runtime_key: str,
+        runtime_token: str,
+    ) -> None:
+        if gate.runtime_progress_token == runtime_token:
+            return
+        record_start = getattr(gate.agent, "record_runtime_turn_start", None)
+        if callable(record_start):
+            record_start(
+                runtime_key=runtime_key,
+                request=gate.request,
+            )
+        gate.runtime_progress_token = runtime_token
 
     def _capture_backend_liveness(
         self,
@@ -641,6 +666,7 @@ class AgentService:
         gate.token = uuid.uuid4().hex
         gate.backend = agent_name
         gate.agent = self.agents.get(agent_name)
+        gate.runtime_progress_token = ""
         gate.context = context
         gate.request = None
         # The backend already produced output, so the turn is unambiguously
@@ -674,6 +700,11 @@ class AgentService:
                     register(context)
                 except Exception:
                     logger.debug("register_agent_initiated_turn failed", exc_info=True)
+        self._record_runtime_turn_start(
+            gate,
+            runtime_key=runtime_key,
+            runtime_token=gate.token,
+        )
         return gate.token
 
     def release_runtime_turn(self, context: Any) -> None:
@@ -712,6 +743,7 @@ class AgentService:
         gate.token = ""
         gate.backend = ""
         gate.runtime_started = False
+        gate.runtime_progress_token = ""
         gate.agent = None
         gate.task = None
         gate.context = None
@@ -913,6 +945,7 @@ class _RuntimeTurnGate:
     token: str = ""
     backend: str = ""
     runtime_started: bool = False
+    runtime_progress_token: str = ""
     agent: BaseAgent | None = None
     task: asyncio.Task | None = None
     context: Any = None

@@ -958,6 +958,8 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     gate = service._get_turn_gate(runtime_key)
     gate.token = "runtime-token"
     gate.backend = "claude"
+    gate.request = _request("first")
+    gate.agent = SimpleNamespace(record_runtime_turn_start=Mock())
     context = SimpleNamespace(
         platform_specific={
             "agent_runtime_turn_key": runtime_key,
@@ -966,8 +968,13 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     )
 
     service.mark_runtime_turn_started(context)
+    service.mark_runtime_turn_started(context)
 
     assert gate.runtime_started is True
+    gate.agent.record_runtime_turn_start.assert_called_once_with(
+        runtime_key=runtime_key,
+        request=gate.request,
+    )
 
     stale_context = SimpleNamespace(
         platform_specific={
@@ -980,6 +987,7 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     service.mark_runtime_turn_started(stale_context)
 
     assert gate.runtime_started is False
+    gate.agent.record_runtime_turn_start.assert_called_once()
 
 
 def test_agent_service_contains_terminal_owner_failure_after_releasing_gate() -> None:
