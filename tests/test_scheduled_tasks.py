@@ -13144,6 +13144,40 @@ def test_command_task_failure_records_the_exit_code_and_stderr(
     assert "status 7" in (stored.last_error or "")
 
 
+def test_command_failure_text_is_written_in_the_configured_language(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-022 -- the outcome a command fire generates is user-visible copy.
+
+    ``last_error`` is rendered verbatim inside the failure notice, ``vibe task list``
+    and the Workbench, all of which are otherwise translated. Generating it in English
+    put an English sentence in the middle of a Chinese notice.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    service.controller.config = SimpleNamespace(language="zh")
+
+    exited = _fire_command_task(
+        service,
+        _add_command_task(store, shell_command="echo boom >&2; exit 7", cwd=str(tmp_path)),
+    )
+    assert "命令退出" in (exited["error"] or ""), (
+        f"a Chinese install got an English command outcome: {exited['error']!r}"
+    )
+    assert "boom" in (exited["error"] or ""), "the stderr detail was lost in translation"
+
+    missing = tmp_path / "gone"
+    no_spawn = _fire_command_task(
+        service, _add_command_task(store, shell_command="true", cwd=str(missing))
+    )
+    assert "工作目录不存在" in (no_spawn["error"] or ""), (
+        f"the no-spawn outcome stayed English: {no_spawn['error']!r}"
+    )
+    assert str(missing) in (no_spawn["error"] or ""), "the translation dropped the path"
+
+
 def test_command_task_timeout_fails_the_run_with_the_timeout_exit_code(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -14296,6 +14330,178 @@ def test_canceling_a_running_command_run_actually_stops_the_command(
     assert stored is not None and stored.last_exit_code is None, (
         "a cancelled fire stamped an exit code the command never produced"
     )
+
+
+def test_canceling_a_run_whose_task_was_removed_still_stops_the_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-020 -- removing the task must not make its running command unkillable.
+
+    ``remove_task`` drops the definition immediately and leaves the in-flight Run
+    alive, which is the ONLY way a user can react to a command that is misbehaving
+    right now. Deciding command-ness by asking the live store therefore answered
+    "not a command" exactly when the answer mattered, the cancellation was ignored,
+    and the child ran on to its ``--timeout`` -- six hours by default. The run
+    carries an immutable snapshot of what it launched; that is what decides.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    started = tmp_path / "orphan-started"
+    task = _add_command_task(
+        store,
+        shell_command=f"touch {started.name}; sleep 3600",
+        cwd=str(tmp_path),
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _remove_then_cancel() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started, so nothing was cancelled"
+
+        assert store.remove_task(task.id), "the definition was not removed"
+        assert store.get_task(task.id) is None
+        service.request_store.cancel_run(request.id)
+        service._propagate_requested_cancellations()
+        await asyncio.wait_for(
+            asyncio.gather(service._inflight_executions[request.id], return_exceptions=True),
+            timeout=10,
+        )
+
+    try:
+        asyncio.run(_remove_then_cancel())
+    except asyncio.TimeoutError:  # pragma: no cover - the defect this test reproduces
+        pytest.fail("removing the task left its cancelled command running")
+
+
+def test_a_crashed_service_reaps_the_command_worker_it_left_running(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-023 -- a service that dies without unwinding must not leak its command.
+
+    Every ORDERLY stop reaches the child through the awaiting coroutine's
+    ``CancelledError``. A SIGKILL or a crash delivers none: the isolated supervisor
+    and the backup, deployment or migration under it keep running, unowned, and the
+    next cron fire starts a SECOND one beside it. Nothing on disk named that child,
+    so the restart could not have found it even in principle.
+
+    The crash is simulated by abandoning the in-flight coroutine and constructing a
+    fresh service over the same state, which is what a restart does; the assertion
+    is that the abandoned fire then ends on its own, because its worker was killed.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    started = tmp_path / "worker-started"
+    task = _add_command_task(
+        store,
+        shell_command=f"touch {started.name}; sleep 3600",
+        cwd=str(tmp_path),
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _crash_then_restart() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started, so nothing was orphaned"
+
+        workers = service.request_store.list_running_command_workers()
+        assert workers, "the fire recorded no worker, so a restart cannot find it"
+        assert workers[0]["run_id"] == request.id
+
+        # The restart. Its ``__init__`` reaps before ``recover_processing`` settles
+        # the row the identity is stored on.
+        _scheduled_service_with_ledger(tmp_path, store, [])
+
+        await asyncio.wait_for(
+            asyncio.gather(
+                service._inflight_executions[request.id], return_exceptions=True
+            ),
+            timeout=15,
+        )
+
+    try:
+        asyncio.run(_crash_then_restart())
+    except asyncio.TimeoutError:  # pragma: no cover - the defect this test reproduces
+        pytest.fail("the restart left the orphaned command worker running")
+
+
+def test_an_interrupted_command_fire_clears_the_previous_exit_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-021 -- an interrupted fire is still a fire with no status of its own.
+
+    SCT-017 gave the command fire's own stamp authority over ``last_exit_code``,
+    ``None`` included. A cancelled or shutdown-interrupted fire never reaches that
+    stamp: ``run_supervised_command`` raises, and settlement projects the run through
+    the generic lane, which by design leaves the column alone so a message task cannot
+    blank a command's code. The result was "exited 7" on the row beside a run the user
+    had just stopped -- the same fabricated fact SCT-017 removed, one lane over.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    started = tmp_path / "interrupted-started"
+    task = _add_command_task(
+        store,
+        shell_command=f"touch {started.name}; sleep 3600",
+        cwd=str(tmp_path),
+    )
+    # What a previous fire of this definition left behind.
+    assert store.mark_task_result(
+        task.id, error="exited 7", exit_code=7, records_command_outcome=True
+    )
+    assert ScheduledTaskStore().get_task(task.id).last_exit_code == 7
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _cancel_mid_flight() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started"
+        service.request_store.cancel_run(request.id)
+        service._propagate_requested_cancellations()
+        await asyncio.wait_for(
+            asyncio.gather(service._inflight_executions[request.id], return_exceptions=True),
+            timeout=10,
+        )
+
+    asyncio.run(_cancel_mid_flight())
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code is None, (
+        "an interrupted command fire kept the previous fire's exit code: "
+        f"{stored.last_exit_code!r}"
+    )
+    assert stored.last_error, "the interruption was not recorded on the definition"
 
 
 def test_a_failed_one_shot_command_task_is_disabled_and_escalates_together(

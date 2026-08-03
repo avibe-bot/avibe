@@ -1,0 +1,59 @@
+version: 1
+capability: harness_command_task
+observations:
+  - id: OBS-HARNESS-COMMAND-TASK-001
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-019
+    summary: A command Run recorded its exit code and output but never the command it ran, so every reader had to go back to a mutable definition.
+    previous_assumption: The definition is a good enough source for "what did this run execute", because a task's command rarely changes.
+    observed_behavior: Failure notices drain asynchronously, so an edited definition made the notice name a command that never ran, and a removed one made it name nothing at all.
+    required_updates:
+      - stamp an immutable {shell, argv} snapshot into the Run's own metadata at enqueue
+      - build that snapshot inside the transactional SQLite enqueue from the authoritative run_definitions row, not from a caller argument the writer then discards
+      - read the snapshot first in the notice body and the Workbench Run detail, falling back to the definition only for pre-snapshot rows
+  - id: OBS-HARNESS-COMMAND-TASK-002
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-013
+      - SCT-020
+    summary: Whether an in-flight Run was a command was decided by asking the live definition store.
+    previous_assumption: A Run's definition is still present for as long as the Run is in flight.
+    observed_behavior: remove_task drops the definition immediately and leaves the Run alive, which is exactly how a user reacts to a misbehaving command; the cancellation was then classified as an Agent turn and ignored, and the child ran on to its --timeout (six hours by default).
+    required_updates:
+      - classify an in-flight execution from data fixed for the life of the fire (the Run's command snapshot)
+      - keep the live-definition lookup only as the fallback for Runs enqueued before the snapshot existed
+  - id: OBS-HARNESS-COMMAND-TASK-003
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-017
+      - SCT-021
+    summary: last_exit_code survived fires that produced no exit status of their own.
+    previous_assumption: Writing the column only when a value exists is the safe default, because a message task has no code and must not blank a command's.
+    observed_behavior: A fire that never spawned, and later a fire cancelled or interrupted mid-flight, both left the previous fire's code on the row, so the task pane read "exited 7" beside a run that never produced a 7.
+    required_updates:
+      - give the command fire's own stamp authority over the column, None included
+      - extend that authority to the terminal projection lane, which settles cancelled and shutdown-interrupted command fires
+      - leave the column alone for every non-command lane
+  - id: OBS-HARNESS-COMMAND-TASK-004
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-022
+    summary: The outcome text a command fire generates is user-visible copy, not an internal log line.
+    previous_assumption: last_error is diagnostic detail, so an f-string is fine.
+    observed_behavior: The generated English sentence is stored and then rendered verbatim inside otherwise-translated failure notices, vibe task list, and the Workbench.
+    required_updates:
+      - route every generated command outcome through vibe/i18n/
+      - keep the untranslatable parts (a worker's own stderr, the configured path) inside the localized template
+  - id: OBS-HARNESS-COMMAND-TASK-005
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-023
+    summary: A command child was reachable only through the coroutine awaiting it, which a crash never runs.
+    previous_assumption: Every stop of a command fire arrives as a CancelledError on the awaiting coroutine, which the runner turns into a tree teardown.
+    observed_behavior: SIGKILL and a process crash deliver no CancelledError at all, so the isolated supervisor and the backup or migration under it kept running unowned; nothing on disk named that child, so the restart could not find it even in principle, and the next cron fire started a second one beside it.
+    required_updates:
+      - persist the worker identity on the Run via on_spawn and clear it when the child is reaped
+      - reap surviving workers at startup, before recover_processing settles the very rows the identity is stored on
+      - authorise the kill by process identity (start time plus inherited marker), never by pid alone, because the number is recycled across a crash
+      - share the identity serialize/parse helpers with the watch lane instead of copying them

@@ -4203,9 +4203,17 @@ def test_task_add_rejects_timeout_without_command(monkeypatch) -> None:
     assert payload["code"] == "timeout_requires_command"
 
 
-def test_task_add_rejects_negative_timeout(monkeypatch) -> None:
+@pytest.mark.parametrize("timeout", ["-1", "inf", "nan"])
+def test_task_add_rejects_an_unusable_timeout(monkeypatch, timeout: str) -> None:
+    """``inf`` is the trap: ``float`` accepts it and ``>= 0`` waves it through.
+
+    The documented spelling for "no timeout" is ``0``. A stored ``Infinity`` is not a
+    JSON number, so it breaks the readers -- the Workbench falls back to displaying
+    the six-hour default while the executor waits forever.
+    """
+
     _bare_terminal_caller(monkeypatch)
-    args = _parse_task_add(["--cron", "0 * * * *", "--shell", "./a.sh", "--timeout", "-1"])
+    args = _parse_task_add(["--cron", "0 * * * *", "--shell", "./a.sh", "--timeout", timeout])
 
     result, payload = _capture_stderr_json(cli.cmd_task_add, args)
 

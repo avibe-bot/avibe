@@ -43,6 +43,7 @@ capabilities:
     name: Scheduled command tasks and their failure visibility
     status: active
     catalog: tests/scenarios/harness_command_task/catalog.yaml
+    observations: tests/scenarios/harness_command_task/observations.yaml
     scenario_tests:
       - tests/test_harness_failure_visibility.py
       - tests/test_scheduled_command_task_integration.py

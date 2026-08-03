@@ -897,6 +897,35 @@ NOTICE_FAILED = "failed"
 #: Terminal notice states: never delivered again, and no longer blocking a streak.
 NOTICE_TERMINAL_STATES = frozenset({NOTICE_SENT, NOTICE_SKIPPED, NOTICE_FAILED})
 
+#: Where a command run records WHAT IT RAN, inside the run's own ``metadata``.
+#: Entry: ``{"shell": str | None, "argv": list[str]}``. Read by
+#: ``core.scheduled_tasks.command_snapshot_of_run`` and by the Workbench run detail.
+COMMAND_SNAPSHOT_METADATA_KEY = "command"
+
+#: Where a command run records the ISOLATED SUPERVISOR it spawned, so a service that
+#: dies without unwinding can still find and kill the orphan on the next start.
+#: Entry: the ``core.process_isolation.serialize_process_identity`` payload. Distinct
+#: from the ``pid`` column, which holds the SERVICE pid and gates startup recovery.
+COMMAND_WORKER_METADATA_KEY = "command_worker"
+
+
+def command_snapshot_from_definition_row(row: Any) -> Optional[dict[str, Any]]:
+    """The ``{"shell", "argv"}`` record of what a scheduled definition row would run.
+
+    ``None`` for anything that is not a command *task*: a message task has both
+    columns NULL, and a watch fills them with its WAITER command, which is not the
+    work a watch run performs.
+    """
+
+    if str(row["definition_type"] or "") != "scheduled":
+        return None
+    shell_command = row["shell_command"] or None
+    argv = _json_loads(row["command_json"], None)
+    argv = [str(part) for part in argv] if isinstance(argv, (list, tuple)) else []
+    if not shell_command and not argv:
+        return None
+    return {"shell": str(shell_command) if shell_command else None, "argv": argv}
+
 
 class _UnstampableInstant(str):
     """A ``next_attempt_at`` that is not JSON text, carried through an expectation.
@@ -2759,6 +2788,7 @@ class SQLiteBackgroundTaskStore:
             reserve_write_lock(conn)
             definition = conn.execute(
                 select(
+                    run_definitions.c.definition_type,
                     run_definitions.c.agent_name,
                     run_definitions.c.session_policy,
                     run_definitions.c.session_id,
@@ -2769,6 +2799,8 @@ class SQLiteBackgroundTaskStore:
                     run_definitions.c.message,
                     run_definitions.c.message_payload_json,
                     run_definitions.c.metadata_json,
+                    run_definitions.c.command_json,
+                    run_definitions.c.shell_command,
                     run_definitions.c.enabled,
                     run_definitions.c.deleted_at,
                 )
@@ -2787,6 +2819,18 @@ class SQLiteBackgroundTaskStore:
                 metadata = _json_loads(definition["metadata_json"], {})
                 if not isinstance(metadata, dict):
                     metadata = {}
+                # A run is an immutable record of one execution, so WHAT it executed
+                # belongs on it -- the definition it came from is editable and
+                # deletable, and the failure-notice drain reads long after the fire.
+                # Taken here rather than trusted from the caller because this method
+                # replaces the caller's metadata wholesale with the authoritative row,
+                # and a snapshot a caller can forget to pass is a snapshot production
+                # will be missing.
+                snapshot = command_snapshot_from_definition_row(definition)
+                if snapshot is not None:
+                    metadata[COMMAND_SNAPSHOT_METADATA_KEY] = snapshot
+                else:
+                    metadata.pop(COMMAND_SNAPSHOT_METADATA_KEY, None)
                 values.update(
                     agent_name=identity["name"] if identity else current_name,
                     agent_id=identity["id"] if identity else None,
@@ -3401,6 +3445,76 @@ class SQLiteBackgroundTaskStore:
                 )
         _publish_run_rows_updated([row_to_publish])
         return row_to_publish is not None
+
+    def record_command_worker(
+        self,
+        run_id: str,
+        identity: Optional[dict[str, Any]],
+    ) -> bool:
+        """Remember (or forget) the isolated supervisor a command run has spawned.
+
+        Written the instant the child exists and cleared the instant it is reaped, so
+        the window in which a SIGKILLed service leaves an untracked orphan is the
+        spawn itself. Restricted to ``running`` rows because a terminal run's worker
+        is by definition already gone, and re-stamping one would hand startup
+        recovery a pid that has since been recycled.
+
+        Read-modify-write of ``metadata_json`` inside one transaction: the column is
+        a whole-blob JSON document, so a bare UPDATE of the key would drop whatever
+        the enqueue and the notice machinery put there.
+        """
+
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status.in_(_status_query_values("running")))
+                .limit(1)
+            ).mappings().first()
+            if not row:
+                return False
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if identity is None:
+                if COMMAND_WORKER_METADATA_KEY not in metadata:
+                    return False
+                metadata.pop(COMMAND_WORKER_METADATA_KEY, None)
+            else:
+                metadata[COMMAND_WORKER_METADATA_KEY] = dict(identity)
+            result = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status.in_(_status_query_values("running")))
+                .values(metadata_json=_json_dumps(metadata), updated_at=now)
+            )
+            return bool(result.rowcount)
+
+    def list_running_command_workers(self) -> list[dict[str, Any]]:
+        """Every ``running`` run that still names a command worker.
+
+        Called at startup BEFORE ``recover_processing_runs`` settles these rows, which
+        is the only moment the association between a run and its orphaned child is
+        still on disk.
+        """
+
+        with self.engine.connect() as conn:
+            rows = list(
+                conn.execute(
+                    select(agent_runs.c.id, agent_runs.c.metadata_json)
+                    .where(agent_runs.c.status.in_(_status_query_values("running")))
+                ).mappings()
+            )
+        workers: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                continue
+            identity = metadata.get(COMMAND_WORKER_METADATA_KEY)
+            if isinstance(identity, dict):
+                workers.append({"run_id": str(row["id"]), "identity": identity})
+        return workers
 
     def update_run_status(
         self,

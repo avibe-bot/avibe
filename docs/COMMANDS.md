@@ -719,7 +719,12 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
-vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <expr> | --at <timestamp>) (--message <text> | --message-file <file> | --shell <cmd> | -- <argv>...) [options]
+# Agent task, and a command task that escalates to an Agent on failure
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <expr> | --at <timestamp>) (--message <text> | --message-file <file>) [options]
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <expr> | --at <timestamp>) (--shell <cmd> | -- <argv>...) --on-failure agent [options]
+
+# Pure command task: no Agent, and therefore no session target
+vibe task add (--cron <expr> | --at <timestamp>) (--shell <cmd> | -- <argv>...) [options]
 ```
 
 Important options:

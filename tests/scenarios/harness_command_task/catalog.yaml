@@ -157,3 +157,31 @@ scenarios:
     # Workbench read side:
     # tests/test_scheduled_command_task_integration.py::test_cli_created_command_task_records_a_nonzero_exit
     # ui/src/components/workbench/HarnessPage.test.tsx::RunDetail command run
+  - id: SCT-020
+    name: cancelling a run whose task was removed still stops the command
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_canceling_a_run_whose_task_was_removed_still_stops_the_command
+  - id: SCT-021
+    name: an interrupted command fire clears the exit code the last fire left
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_an_interrupted_command_fire_clears_the_previous_exit_code
+  - id: SCT-022
+    name: generated command failure text follows the configured language
+    status: covered
+    kind: config
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_command_failure_text_is_written_in_the_configured_language
+  - id: SCT-023
+    name: a restart after a crash reaps the command worker the dead service left running
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_crashed_service_reaps_the_command_worker_it_left_running

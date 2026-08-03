@@ -3153,10 +3153,14 @@ def _reject_session_flags_for_command_task(args, *, help_command: str) -> None:
 
 
 def _validate_task_timeout(timeout: Optional[float], *, help_command: str) -> None:
-    if timeout is None or timeout >= 0:
+    # ``isfinite`` and not just ``>= 0``: ``float("inf") >= 0`` is True, so ``--timeout
+    # inf`` used to be stored and then waited on forever, while every reader of the
+    # definition -- JSON output, the Workbench -- rejects a non-finite number and shows
+    # the default instead. The documented spelling for "no timeout" is 0.
+    if timeout is None or (math.isfinite(timeout) and timeout >= 0):
         return
     raise TaskCliError(
-        "--timeout must be >= 0",
+        "--timeout must be a finite number of seconds >= 0",
         code="invalid_timeout",
         hint="Use 0 for no timeout, or a positive number of seconds.",
         help_command=help_command,

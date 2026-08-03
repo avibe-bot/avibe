@@ -72,7 +72,16 @@ from core.delivery_evidence import (
     STAGE_PERSIST,
     DeliveryEvidence,
 )
+from core.process_isolation import (
+    PersistedProcessIdentity,
+    inspect_process_identity,
+    process_identity_from_payload,
+    serialize_process_identity,
+    terminate_process_tree_by_pid,
+)
 from storage.background import (
+    COMMAND_SNAPSHOT_METADATA_KEY,
+    COMMAND_WORKER_METADATA_KEY,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
     NOTICE_FAILED,
@@ -569,22 +578,19 @@ COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS = 21600.0
 #: than deadlocked on a full pipe.
 COMMAND_TASK_OUTPUT_CAP_BYTES = 64 * 1024
 
-#: Where a command run records WHAT IT RAN, inside the run's own ``metadata``.
-#: Entry: ``{"shell": str | None, "argv": list[str]}``.
-#:
-#: A run row carried an exit code and output but never the command, so every reader
-#: -- the failure notice, ``vibe runs show``, the Workbench run detail -- had to go
-#: back to the definition for the copy. The definition is mutable and deletable, and
-#: the notice drain is asynchronous, so by the time a reader asked, the answer could
-#: be a command that never ran (the user rewrote it after the fire) or no answer at
-#: all (the user deleted the task). A run is an immutable record of one execution;
-#: what it executed belongs ON it.
-COMMAND_SNAPSHOT_METADATA_KEY = "command"
-
-
 def command_snapshot(task: Any) -> Optional[dict[str, Any]]:
     """The ``{"shell", "argv"}`` record of what a command definition would run.
 
+    A run row carried an exit code and output but never the command, so every reader
+    -- the failure notice, ``vibe runs show``, the Workbench run detail -- had to go
+    back to the definition for the copy. The definition is mutable and deletable, and
+    the notice drain is asynchronous, so by the time a reader asked, the answer could
+    be a command that never ran (the user rewrote it after the fire) or no answer at
+    all (the user deleted the task). A run is an immutable record of one execution;
+    what it executed belongs ON it.
+
+    The SQLite backend stamps the same key from the authoritative definition row
+    inside its enqueue transaction; this is the file backend's copy of that write.
     ``None`` for a definition that has no command, so a caller can merge the result
     unconditionally without stamping an empty key onto every Agent run's metadata.
     """
@@ -1910,6 +1916,73 @@ class TaskExecutionStore:
         tmp_path.replace(processing_path)
         return True
 
+    def record_command_worker(
+        self,
+        request_id: str,
+        identity: Optional[dict[str, Any]],
+    ) -> bool:
+        """Remember (or forget) the isolated supervisor this in-flight fire spawned.
+
+        See ``SQLiteBackgroundTaskStore.record_command_worker``. The file backend
+        keeps the same key in the processing payload's ``metadata`` so a store
+        swapped in by a test observes the same contract.
+        """
+
+        if self._sqlite is not None:
+            return self._sqlite.record_command_worker(request_id, identity)
+        processing_path = self._request_path(request_id, state="processing")
+        try:
+            payload = json.loads(processing_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        metadata = payload.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        if identity is None:
+            if COMMAND_WORKER_METADATA_KEY not in metadata:
+                return False
+            metadata.pop(COMMAND_WORKER_METADATA_KEY, None)
+        else:
+            metadata[COMMAND_WORKER_METADATA_KEY] = dict(identity)
+        payload["metadata"] = metadata
+        payload["updated_at"] = _utc_now_iso()
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=self.processing_dir,
+            suffix=".tmp",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            json.dump(payload, handle, indent=2)
+            tmp_path = Path(handle.name)
+        tmp_path.replace(processing_path)
+        return True
+
+    def list_running_command_workers(self) -> list[dict[str, Any]]:
+        """Every in-flight fire that still names a command worker."""
+
+        if self._sqlite is not None:
+            return self._sqlite.list_running_command_workers()
+        self._ensure_dirs()
+        workers: list[dict[str, Any]] = []
+        for path in sorted(self.processing_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            metadata = payload.get("metadata")
+            identity = (
+                metadata.get(COMMAND_WORKER_METADATA_KEY)
+                if isinstance(metadata, dict)
+                else None
+            )
+            if isinstance(identity, dict):
+                workers.append({"run_id": path.stem, "identity": identity})
+        return workers
+
     @staticmethod
     def queued_run_payload(request: TaskExecutionRequest) -> dict[str, Any]:
         """The ``agent_runs`` payload ``enqueue`` would write for *request*.
@@ -2950,6 +3023,10 @@ class ScheduledTaskService:
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._drain_dirty = True
         self._recover_activity_lifecycle()
+        # BEFORE ``recover_processing``, which nulls ``pid`` and settles these rows:
+        # the run is the only place the orphan's identity is recorded, so once it is
+        # terminal the child can never be found again.
+        self._reap_orphaned_command_workers()
         self.request_store.recover_processing(
             interruption_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_RESTARTED]),
             cancellation_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
@@ -2966,6 +3043,81 @@ class ScheduledTaskService:
         config = getattr(self.controller, "config", None)
         lang = str(getattr(config, "language", "en") or "en")
         return i18n_t(key, lang, **kwargs)
+
+    def _record_command_worker(
+        self,
+        execution_id: str,
+        identity: Optional[PersistedProcessIdentity],
+    ) -> None:
+        """Stamp (or clear) the command worker on a fire, never failing the fire.
+
+        Best-effort on purpose: this is bookkeeping for a crash that may never
+        happen, and a store hiccup here must not turn a command that ran fine into
+        a reported failure. It is also called from ``on_spawn``, whose exception
+        would abort the runner between the spawn and the handshake and leave behind
+        the very orphan it exists to prevent.
+        """
+
+        try:
+            self.request_store.record_command_worker(
+                execution_id,
+                serialize_process_identity(identity) if identity is not None else None,
+            )
+        except Exception:
+            logger.debug(
+                "failed to record command worker for %s", execution_id, exc_info=True
+            )
+
+    def _reap_orphaned_command_workers(self) -> None:
+        """Kill command workers this host left running when the service died.
+
+        Identity, not pid: between the crash and this pass the OS is free to reuse
+        the number, so a bare ``kill(pid)`` here would be a coin flip on the user's
+        other processes. ``terminate_process_tree_by_pid`` re-reads the live
+        process's start time and its ``AVIBE_PROCESS_IDENTITY`` marker and refuses
+        on any mismatch, and ``process_identity_from_payload`` refuses a record it
+        cannot fully trust -- in both directions the safe answer is to leave the
+        process alone and just drop the record.
+
+        The tree, not the leaf: the worker is a supervisor, and the backup or
+        migration doing the side effects is its child.
+        """
+
+        try:
+            workers = self.request_store.list_running_command_workers()
+        except Exception:
+            logger.debug("failed to list command workers for recovery", exc_info=True)
+            return
+        for worker in workers:
+            run_id = str(worker.get("run_id") or "")
+            payload = worker.get("identity")
+            pid = payload.get("pid") if isinstance(payload, dict) else None
+            expected = (
+                process_identity_from_payload(payload, pid)
+                if isinstance(pid, int) and not isinstance(pid, bool)
+                else None
+            )
+            if expected is not None and inspect_process_identity(expected.pid) is not None:
+                logger.warning(
+                    "reaping orphaned command worker pid=%s from run %s",
+                    expected.pid,
+                    run_id,
+                )
+                try:
+                    terminate_process_tree_by_pid(
+                        expected.pid,
+                        logger,
+                        f"scheduled command worker {run_id}",
+                        expected_identity=expected,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Unexpected error reaping command worker pid=%s run_id=%s",
+                        expected.pid,
+                        run_id,
+                    )
+            if run_id:
+                self._record_command_worker(run_id, None)
 
     def _execution_interruption(self, execution_id: str) -> str:
         return self._inflight_cancellation_causes.get(
@@ -3253,10 +3405,21 @@ class ScheduledTaskService:
         return SETTLED_BY_RESTARTED
 
     def _is_command_execution(self, request: TaskExecutionRequest) -> bool:
-        """Is this in-flight request a command fire rather than an Agent turn?"""
+        """Is this in-flight request a command fire rather than an Agent turn?
+
+        Answered from the REQUEST, which is fixed for the life of the fire, before
+        falling back to the live definition. Asking the store first got this wrong in
+        the one case where the answer decides whether a child process lives: removing
+        a task drops the definition and leaves its Run in flight, so a user cancelling
+        a misbehaving command was told it was not a command and the child ran on to
+        its ``--timeout``. The fallback still covers runs enqueued before the snapshot
+        existed, whose definition is the only record there is.
+        """
 
         if request.request_type not in {"task_run", "scheduled"} or not request.task_id:
             return False
+        if command_snapshot_of_run({"metadata": request.metadata}) is not None:
+            return True
         task = self.store.get_task(request.task_id)
         return bool(task is not None and task.has_command)
 
@@ -5855,14 +6018,20 @@ class ScheduledTaskService:
         task policy: where to run, how long to allow, and how the outcome is written
         to the definition and the run row.
 
-        No pid registry and no ``on_spawn`` callback, deliberately. The runner is the
-        only thing that ever kills this child, and every stop reaches it the same way:
-        a timeout kills the tree from inside, while a service stop and a
-        ``vibe runs cancel`` both cancel the awaiting coroutine, which the runner turns
-        into a tree teardown (see ``_propagate_requested_cancellations`` for how the
-        cancel flag becomes that cancellation). The run row's ``pid`` column keeps its
-        existing meaning (the SERVICE pid, written by ``mark_execution_started`` for the
-        recovery gate) and must not be repurposed.
+        Every ORDERLY stop reaches the child through the runner: a timeout kills the
+        tree from inside, while a service stop and a ``vibe runs cancel`` both cancel
+        the awaiting coroutine, which the runner turns into a tree teardown (see
+        ``_propagate_requested_cancellations`` for how the cancel flag becomes that
+        cancellation). A SIGKILLed or crashed service reaches it through none of them:
+        no ``CancelledError`` is ever delivered, and the isolated supervisor keeps its
+        command running -- so a later fire of the same cron would start a second
+        backup or migration beside the orphan. ``on_spawn`` therefore persists the
+        worker identity on the run for ``_reap_orphaned_command_workers`` to find on
+        the next start, and the ``finally`` clears it the moment the child is reaped.
+
+        That identity lives in the run's ``metadata``, NOT in its ``pid`` column: that
+        column holds the SERVICE pid, written by ``mark_execution_started`` for the
+        recovery gate, and must not be repurposed.
         """
 
         error: Optional[str] = None
@@ -5880,7 +6049,7 @@ class ScheduledTaskService:
             # Do NOT spawn: ``create_subprocess_exec`` would raise a bare
             # ``NotADirectoryError``/``FileNotFoundError`` whose text does not name the
             # directory the user configured.
-            error = f"working directory does not exist: {spawn_cwd}"
+            error = self._t("harness.command.workdirMissing", cwd=spawn_cwd)
         else:
             effective_timeout = (
                 task.timeout_seconds
@@ -5894,13 +6063,20 @@ class ScheduledTaskService:
                     cwd=spawn_cwd,
                     timeout_seconds=effective_timeout,
                     label=f"scheduled task {task.id}",
+                    on_spawn=lambda pid, identity: self._record_command_worker(
+                        execution_id, identity
+                    ),
                     max_output_bytes=COMMAND_TASK_OUTPUT_CAP_BYTES,
                 )
             except SupervisedCommandStartupError as exc:
                 # Its own clause, BEFORE the broad one: the class subclasses
                 # ``RuntimeError``, so a single ``except Exception`` would swallow it and
                 # report the worker's startup failure as an ordinary command error.
-                error = exc.detail or "command supervisor exited during startup"
+                # ``exc.detail`` is the worker's own stderr, which no catalog can
+                # translate; only the fallback is ours to localize.
+                error = exc.detail or self._t(
+                    "harness.command.supervisorExitedDuringStartup"
+                )
             except Exception as exc:
                 error = str(exc)
                 logger.error(
@@ -5915,15 +6091,29 @@ class ScheduledTaskService:
                     # capped readers' buffers across the kill for exactly this.
                     stdout_value = result.stdout
                     stderr_value = result.stderr
-                    error = f"command timed out after {int(effective_timeout)} second(s)"
+                    error = self._t(
+                        "harness.command.timedOut", seconds=int(effective_timeout)
+                    )
                 else:
                     stdout_value = result.stdout
                     stderr_value = result.stderr
                     if exit_code:
-                        error = f"command exited with status {exit_code}"
                         detail = _last_nonempty_line(result.stderr)
-                        if detail:
-                            error = f"{error}: {detail}"
+                        error = (
+                            self._t(
+                                "harness.command.exitedWithDetail",
+                                code=exit_code,
+                                detail=detail,
+                            )
+                            if detail
+                            else self._t("harness.command.exited", code=exit_code)
+                        )
+            finally:
+                # Reached on success, on failure, and on the ``CancelledError`` a
+                # stop raises: by the time control is here the runner has reaped
+                # the tree, so the stored identity now names a dead pid that the
+                # OS is free to hand to something else.
+                self._record_command_worker(execution_id, None)
 
         # THE ESCALATION IS COMPOSED BEFORE THE STAMP AND QUEUED BY IT. A definition
         # carrying ``on_failure == "agent"`` owes the user ONE Agent turn per failed
@@ -6617,11 +6807,24 @@ class ScheduledTaskService:
             str(run.get("source_kind") or "") == "scheduler"
             and task.schedule_type == "at"
         )
+        # A COMMAND fire that ends here ended without reaching its own result stamp --
+        # cancelled, or interrupted by shutdown -- so this projection IS that fire's
+        # authoritative outcome, and it has no exit status to report. Saying so
+        # (``records_command_outcome``) is what clears the previous fire's code;
+        # without it the row read "exited 7" beside a run the user had just stopped.
+        # Only for command runs: the generic lane must never blank the column on
+        # behalf of a message task, which never had a code of its own.
+        records_command_outcome = (
+            command_snapshot_of_run(run) is not None or task.has_command
+        )
+        raw_exit_code = run.get("exit_code")
         try:
             recorded = self.store.mark_task_result(
                 task.id,
                 error=error,
                 disable_one_shot=retire_one_shot,
+                exit_code=int(raw_exit_code) if raw_exit_code is not None else None,
+                records_command_outcome=records_command_outcome,
                 expected_binding=(
                     task.session_id,
                     task.session_key,

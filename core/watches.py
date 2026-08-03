@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -23,7 +22,9 @@ from core.process_isolation import (
     inspect_process_identity,
     process_group_exists,
     process_group_identity_status,
+    process_identity_from_payload,
     process_identity_matches,
+    serialize_process_identity,
     terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
 )
@@ -64,50 +65,11 @@ def _payload_float(payload: dict[str, Any], key: str, default: float) -> float:
     return float(payload[key])
 
 
-def _serialize_process_identity(identity: PersistedProcessIdentity) -> dict[str, Any]:
-    return {
-        "pid": identity.pid,
-        "create_time": identity.create_time,
-        "worker_fingerprint": identity.worker_fingerprint,
-    }
-
-
-def _valid_worker_fingerprint(value: Any) -> bool:
-    if not isinstance(value, str) or not value.startswith("sha256:") or len(value) != 71:
-        return False
-    return all(char in "0123456789abcdef" for char in value[7:])
-
-
 def _process_identity_from_runtime_entry(
     entry: dict[str, Any],
     pid: int,
 ) -> PersistedProcessIdentity | None:
-    payload = entry.get("process_identity")
-    if not isinstance(payload, dict):
-        return None
-    identity_pid = payload.get("pid")
-    create_time = payload.get("create_time")
-    worker_fingerprint = payload.get("worker_fingerprint")
-    try:
-        normalized_create_time = float(create_time)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if (
-        not isinstance(identity_pid, int)
-        or isinstance(identity_pid, bool)
-        or identity_pid != pid
-        or not isinstance(create_time, (int, float))
-        or isinstance(create_time, bool)
-        or not math.isfinite(normalized_create_time)
-        or normalized_create_time <= 0
-        or not _valid_worker_fingerprint(worker_fingerprint)
-    ):
-        return None
-    return PersistedProcessIdentity(
-        pid=identity_pid,
-        create_time=normalized_create_time,
-        worker_fingerprint=worker_fingerprint,
-    )
+    return process_identity_from_payload(entry.get("process_identity"), pid)
 
 
 def _entry_updated_timestamp(entry: dict[str, Any]) -> float | None:
@@ -1236,7 +1198,7 @@ class ManagedWatchService:
             }
             identity = self._active_process_identities.get(watch_id)
             if identity is not None:
-                entry["process_identity"] = _serialize_process_identity(identity)
+                entry["process_identity"] = serialize_process_identity(identity)
             payload["watches"][watch_id] = entry
         try:
             self.runtime_store.write(payload)

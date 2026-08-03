@@ -33,6 +33,13 @@
         "invalidCommand": "The watch worker command is invalid."
       }
     },
+    "command": {
+      "workdirMissing": "Working directory does not exist: {cwd}",
+      "supervisorExitedDuringStartup": "Command supervisor exited during startup.",
+      "timedOut": "Command timed out after {seconds} second(s).",
+      "exited": "Command exited with status {code}.",
+      "exitedWithDetail": "Command exited with status {code}: {detail}"
+    },
     "queueCoalesced": {
       "summary": "[Avibe Harness] The same watch/task callback fired {count} times within a rolling {window}-second window. The queued callbacks were coalesced into this single Agent turn.",
       "messagesLabel": "Coalesced callback messages:",

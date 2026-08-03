@@ -73,7 +73,16 @@ def _isolate(tmp_path: Path, monkeypatch) -> None:
 
 
 def _store(tmp_path: Path) -> ScheduledTaskStore:
-    return ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    """The SQLite definition store, i.e. the one production actually uses.
+
+    ``tmp_path`` is unused now that ``_isolate`` has pointed the state dir at it; the
+    parameter stays so every call site keeps naming the sandbox it depends on. A
+    file-backed store here would leave the definition absent from ``run_definitions``,
+    and the request store's transactional enqueue re-reads that row -- so the two
+    layers would only agree in the test.
+    """
+
+    return ScheduledTaskStore()
 
 
 def _service(tmp_path: Path, calls: list) -> ScheduledTaskService:
@@ -252,7 +261,7 @@ def test_a_fire_with_no_exit_code_clears_the_one_the_last_fire_left(
     second = _fire(_service(tmp_path, []), task)
 
     assert second["status"] == "failed"
-    assert "working directory does not exist" in (second["error"] or "")
+    assert "Working directory does not exist" in (second["error"] or "")
     assert second["exit_code"] is None, (
         f"a fire that never spawned must not carry an exit code: {second['exit_code']!r}"
     )
@@ -261,7 +270,7 @@ def test_a_fire_with_no_exit_code_clears_the_one_the_last_fire_left(
         "the definition kept the previous fire's exit code beside a failure that "
         f"never ran a command: {stored.last_exit_code!r}"
     )
-    assert stored.last_error and "working directory does not exist" in stored.last_error
+    assert stored.last_error and "Working directory does not exist" in stored.last_error
 
 
 def test_cli_created_argv_command_task_runs(

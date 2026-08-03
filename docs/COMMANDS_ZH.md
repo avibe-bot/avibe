@@ -697,7 +697,12 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
-vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <表达式> | --at <时间戳>) (--message <文本> | --message-file <文件> | --shell <命令> | -- <argv>...) [options]
+# Agent 任务，以及失败后升级给 Agent 的命令任务
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <表达式> | --at <时间戳>) (--message <文本> | --message-file <文件>) [options]
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <表达式> | --at <时间戳>) (--shell <命令> | -- <argv>...) --on-failure agent [options]
+
+# 纯命令任务：不涉及 Agent，因此也不接受 session 目标
+vibe task add (--cron <表达式> | --at <时间戳>) (--shell <命令> | -- <argv>...) [options]
 ```
 
 重要参数：

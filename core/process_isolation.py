@@ -70,6 +70,61 @@ def capture_spawned_process_identity(
     )
 
 
+def serialize_process_identity(identity: PersistedProcessIdentity) -> dict[str, Any]:
+    """The JSON form of a captured identity, for any store that persists one."""
+
+    return {
+        "pid": identity.pid,
+        "create_time": identity.create_time,
+        "worker_fingerprint": identity.worker_fingerprint,
+    }
+
+
+def _valid_worker_fingerprint(value: Any) -> bool:
+    if not isinstance(value, str) or not value.startswith("sha256:") or len(value) != 71:
+        return False
+    return all(char in "0123456789abcdef" for char in value[7:])
+
+
+def process_identity_from_payload(
+    payload: Any,
+    pid: int,
+) -> PersistedProcessIdentity | None:
+    """Rebuild a persisted identity, or ``None`` if the payload cannot be trusted.
+
+    Deliberately strict, because the ONLY consumer of the result is a kill: a
+    payload that has been truncated, hand-edited, or written by an older format
+    must produce ``None`` (leave the process alone) rather than a plausible-looking
+    identity that authorises signalling some unrelated pid.
+    """
+
+    if not isinstance(payload, dict):
+        return None
+    identity_pid = payload.get("pid")
+    create_time = payload.get("create_time")
+    worker_fingerprint = payload.get("worker_fingerprint")
+    try:
+        normalized_create_time = float(create_time)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        not isinstance(identity_pid, int)
+        or isinstance(identity_pid, bool)
+        or identity_pid != pid
+        or not isinstance(create_time, (int, float))
+        or isinstance(create_time, bool)
+        or not math.isfinite(normalized_create_time)
+        or normalized_create_time <= 0
+        or not _valid_worker_fingerprint(worker_fingerprint)
+    ):
+        return None
+    return PersistedProcessIdentity(
+        pid=identity_pid,
+        create_time=normalized_create_time,
+        worker_fingerprint=worker_fingerprint,
+    )
+
+
 def process_identity_matches(
     expected: PersistedProcessIdentity,
     live: ProcessIdentity,
