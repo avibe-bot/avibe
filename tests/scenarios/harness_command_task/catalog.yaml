@@ -335,3 +335,16 @@ scenarios:
     # an identity that could not be CAPTURED does not refuse, because the usual cause is
     # a supervisor that already exited and an uncapturable identity cannot be made
     # trustworthy by persisting it.
+  - id: SCT-038
+    name: a refused terminal stamp reports itself in the user's language
+    status: covered
+    kind: observability
+    layer: contract
+    backend: shared
+    test: tests/test_i18n_backend_keys.py::test_the_command_fires_refusal_sentences_resolve_in_every_language
+    # The refusal sentence is copy THIS MODULE composes, and it lands in the run
+    # ledger's ``error`` -- the column the Harness detail pane, ``vibe runs show`` and
+    # the failure notice render verbatim, and the one the settlement reasons already
+    # fill through ``vibe/i18n``. What stays untranslated there is quoted text nobody
+    # here wrote (``str(exc)``, a worker's own stderr), so the line is between our copy
+    # and quoted material, not one convention per channel.

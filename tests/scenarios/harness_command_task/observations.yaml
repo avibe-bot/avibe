@@ -279,3 +279,25 @@ observations:
       - do NOT refuse when the identity could not be captured, since the dominant cause is a supervisor that already exited and no persisted record can be trusted for a process that could not be inspected
       - call on_spawn inside the runner's protected block, so a refusing callback reaps the tree instead of leaking the orphan it is protecting against
       - keep the clear path best-effort, because the record it removes protects nothing and a leftover record is dropped by the next start anyway
+  - id: OBS-HARNESS-COMMAND-TASK-018
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-038
+    summary: >-
+      "One string convention per outcome channel" was the wrong line to draw.
+    previous_assumption: >-
+      The run's ``error`` column carries plain operator text in this module -- ``str(exc)``,
+      a worker's stderr, a pause reason -- so a generated refusal sentence should match
+      that convention rather than split the channel between translated and untranslated
+      values.
+    observed_behavior: >-
+      The channel was already mixed, and correctly so: the command lane fills the very
+      same ``error`` from ``harness.command.timedOut`` / ``exited``, and the settlement
+      reasons in ``core/run_settlement.py`` are translated for exactly this reason. The
+      real line is between copy WE compose and text we merely quote; a hard-coded English
+      refusal handed a Chinese install a mixed-language failure in the Harness detail pane
+      and the failure notice.
+    required_updates:
+      - translate the refused-terminal-stamp sentence through vibe/i18n on both call sites
+      - keep quoted material (str(exc), worker stderr) untranslated, since nobody here authored it
+      - guard both refusal keys with a resolution test that also fails if zh.json is filled with the English string

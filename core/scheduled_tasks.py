@@ -651,14 +651,15 @@ def command_snapshot_of_run(run: Any) -> Optional[SimpleNamespace]:
     )
 
 #: What a fire reports when its terminal stamp was REFUSED by the guarded
-#: full-row write (HFR-261/HFR-264). Plain text, like every other value that
-#: reaches ``last_error`` and the run ledger's ``error`` from this module (the
-#: rebind/pause details right below, ``str(exc)``, the reclaim's pause reason), so
-#: one outcome channel does not carry two different string conventions.
-_TASK_RESULT_NOT_RECORDED_ERROR = (
-    "the result of this run could not be recorded: the task was reclaimed, "
-    "repointed or removed while it was running, so its stored state is unchanged"
-)
+#: full-row write (HFR-261/HFR-264). Translated, not plain text: this is a sentence
+#: THIS MODULE composes for a user, and it lands in the run ledger's ``error`` --
+#: the same column ``harness.command.timedOut`` / ``exited`` and the settlement
+#: reasons in ``core/run_settlement.py`` already fill through ``vibe/i18n``, rendered
+#: verbatim in the Harness detail pane, the CLI and the failure notice. The values
+#: that stay untranslated on this channel are the ones nobody here wrote -- ``str(exc)``
+#: from an arbitrary exception, a worker's own stderr -- so "one convention per
+#: channel" is the wrong reading: the line is between OUR copy and QUOTED text.
+_TASK_RESULT_NOT_RECORDED_I18N_KEY = "harness.task.resultNotRecorded"
 
 #: "No value was supplied", as distinct from "the supplied value is ``None``".
 #: A reclaim snapshot records a session's ``model`` / ``reasoning_effort`` as
@@ -6501,7 +6502,7 @@ class ScheduledTaskService:
                 task.id,
             )
             if not error:
-                error = _TASK_RESULT_NOT_RECORDED_ERROR
+                error = self._t(_TASK_RESULT_NOT_RECORDED_I18N_KEY)
         # An ``at`` command task just disabled itself; the APScheduler job must drop.
         self.reconcile_jobs()
         return TaskExecutionResult(
@@ -6701,7 +6702,7 @@ class ScheduledTaskService:
                 task.id,
             )
             if not error:
-                error = _TASK_RESULT_NOT_RECORDED_ERROR
+                error = self._t(_TASK_RESULT_NOT_RECORDED_I18N_KEY)
             reconcile_delivery_on_return = not complete_on_return
             complete_on_return = True
         if binding_change is not None:

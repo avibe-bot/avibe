@@ -58,7 +58,7 @@ from core.scheduled_tasks import (
     TaskDispatchResult,
     TaskExecutionRequest,
     TaskExecutionStore,
-    _TASK_RESULT_NOT_RECORDED_ERROR,
+    _TASK_RESULT_NOT_RECORDED_I18N_KEY,
     _agent_run_message_for_request,
     build_session_key_for_context,
     normalize_agent_run_delivery_intent,
@@ -67,6 +67,7 @@ from core.scheduled_tasks import (
     session_anchor_for_target,
 )
 from core.watch_worker import WATCH_WORKER_ERROR_PREFIX
+from vibe.i18n import t as i18n_t
 from modules.im import MessageContext
 from storage import message_deliveries
 from storage.db import create_sqlite_engine
@@ -11380,9 +11381,7 @@ def test_a_refused_result_stamp_cannot_complete_the_run_ok(tmp_path: Path, monke
         "the run ledger recorded a success for a fire whose terminal stamp the "
         f"database refused (status={run['status']!r}); the stored task never moved"
     )
-    from core.scheduled_tasks import _TASK_RESULT_NOT_RECORDED_ERROR
-
-    assert run["error"] == _TASK_RESULT_NOT_RECORDED_ERROR, (
+    assert run["error"] == i18n_t(_TASK_RESULT_NOT_RECORDED_I18N_KEY, "en"), (
         f"the refusal reached the ledger without saying why: {run['error']!r}"
     )
 
@@ -11440,7 +11439,7 @@ def test_refused_task_stamp_fails_durable_run_and_reconciles_its_delivery(
     run = service.request_store.get_run(queued.id)
     assert run is not None
     assert run["status"] == "failed"
-    assert run["error"] == _TASK_RESULT_NOT_RECORDED_ERROR
+    assert run["error"] == i18n_t(_TASK_RESULT_NOT_RECORDED_I18N_KEY, "en")
     assert reconciled == [(queued.id, session_id)]
 
 

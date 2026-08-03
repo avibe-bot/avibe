@@ -50,6 +50,9 @@
       "exited": "\u547d\u4ee4\u9000\u51fa\uff0c\u72b6\u6001\u7801 {code}\u3002",
       "exitedWithDetail": "\u547d\u4ee4\u9000\u51fa\uff0c\u72b6\u6001\u7801 {code}\uff1a{detail}"
     },
+    "task": {
+      "resultNotRecorded": "\u65e0\u6cd5\u8bb0\u5f55\u672c\u6b21\u8fd0\u884c\u7684\u7ed3\u679c\uff1a\u4efb\u52a1\u5728\u8fd0\u884c\u671f\u95f4\u88ab\u56de\u6536\u3001\u6539\u7ed1\u6216\u5220\u9664\uff0c\u5176\u5b58\u50a8\u72b6\u6001\u672a\u53d1\u751f\u53d8\u5316\u3002"
+    },
     "queueCoalesced": {
       "summary": "[Avibe Harness] 同一个 watch/task callback 在滚动 {window} 秒窗口内触发了 {count} 次。已将这些排队 callback 合并为一次 Agent turn。",
       "messagesLabel": "已合并的 callback 消息：",
