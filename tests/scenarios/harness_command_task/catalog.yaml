@@ -361,3 +361,33 @@ scenarios:
     # escalation prompt, ``last_exit_code`` and the run row -- for a command that never
     # started. The negative half is the discriminator's proof: a command that ran and
     # exited 3 still reports 3, or the fix would blind every failing cron job.
+  - id: SCT-040
+    name: a definition does not fire while its own worker may be alive
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_definition_does_not_fire_while_its_own_worker_may_be_alive
+    # Single flight per definition was stated (``_execution_lock_key`` keys a fire on its
+    # own task id) and enforced only in memory, so it lapsed across exactly the restart
+    # that leaves a supervisor running: the record is RETAINED because the tree could not
+    # be shown dead, and the next cron tick then started a second copy over the same
+    # dataset. The fire now consults the durable record by identity, for its own
+    # definition only, and defers on "present" and on "unknown" alike. It looks and never
+    # signals -- reaping to make room would destroy the work it was scheduled to protect
+    # -- and proof of death both releases the schedule and retires the record, so a dead
+    # worker cannot hold its own definition shut until the next restart.
+  - id: SCT-041
+    name: a failed retention write keeps the stored worker record
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_failed_retention_write_keeps_the_stored_worker_record
+    # The last write in the path SCT-036 built, breaking SCT-036's own invariant: a
+    # locked database while re-stamping the attempt count answered "did not retain", and
+    # the caller's next line clears the record. A store hiccup, which says nothing about
+    # the process, thereby did the one thing the path exists to prevent. The stored record
+    # survives a failed write untouched, so "kept" is the honest answer, and the attempt
+    # cap is charged only for attempts actually made. The test fails the re-stamp alone,
+    # leaving the clear working, or a kept record could not be told from an undeletable one.

@@ -30,6 +30,12 @@ ProcessLivenessStatus = Literal["alive", "gone", "unknown"]
 #: was already gone, or neither could be shown. Only the last one keeps the record.
 ProcessReapOutcome = Literal["reaped", "gone", "unconfirmed"]
 
+#: What a LOOK established about a managed tree, with nothing signalled: something of
+#: it is still there, it is provably gone, or this pass could not tell. A caller
+#: deciding whether it may start a second copy of that work must treat the last two
+#: differently -- only "gone" is permission.
+ProcessTreePresence = Literal["present", "gone", "unknown"]
+
 
 @dataclass(frozen=True)
 class ProcessIdentity:
@@ -655,6 +661,55 @@ def terminate_process_tree_by_pid(
         return True
     logger.error("%s process group pgid=%s survived forced termination", label, pgid)
     return False
+
+
+def orphaned_process_tree_presence(
+    logger: logging.Logger,
+    label: str,
+    *,
+    expected_identity: PersistedProcessIdentity,
+) -> ProcessTreePresence:
+    """Answer whether a recorded tree is still out there, WITHOUT signalling it.
+
+    The read-only twin of ``reap_orphaned_process_tree``, asking the same question
+    along the same two paths -- the leader by identity, then the group it leads -- for
+    a caller with the opposite intent. The reap wants to stop a survivor; this wants
+    to know whether starting a *second* copy of that work would collide with one, and
+    a probe that killed the first copy to answer would be no answer at all.
+
+    The three verdicts are not two. ``present`` and ``unknown`` both forbid a second
+    copy, but for different reasons and with different remedies -- one is a running
+    process, the other is a pass that could not look -- and only ``gone`` is proof
+    that the recorded tree has stopped, which is what lets a caller both proceed and
+    retire the record.
+    """
+
+    if not isinstance(expected_identity, PersistedProcessIdentity):
+        # Nothing trustworthy was recorded, so there is no tree this can vouch for.
+        return "gone"
+    pid = expected_identity.pid
+    liveness = probe_process_liveness(pid)
+    if liveness == "unknown":
+        return "unknown"
+    if liveness == "alive":
+        live_identity = inspect_process_identity(pid)
+        if live_identity is None:
+            # Occupied, but unreadable: cannot show it is ours, cannot show it is not.
+            return "unknown"
+        if process_identity_matches(expected_identity, live_identity):
+            return "present"
+        # A stranger holds the recycled number. Our leader has exited -- which, as the
+        # reap's own comment says, only starts the question: the group may live on.
+
+    if not process_group_exists(pid, logger, label):
+        return "gone"
+    status = process_group_identity_status(pid, expected_identity, logger, label)
+    if status == "match":
+        return "present"
+    if status == "mismatch":
+        # Members, every one of them another tree's: this pgid was recycled too.
+        return "gone"
+    return "unknown"
 
 
 def reap_orphaned_process_tree(

@@ -324,3 +324,46 @@ observations:
       - report it with the supervisor sentence alone, the way the handshake failure already does
       - keep a real command's status intact, since blanking every failing fire's exit code would be the worse defect
       - leave the watch lane's exit code alone, where a cycle status drives retry_exit_codes and there is no "no status" to spell
+  - id: OBS-HARNESS-COMMAND-TASK-020
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-040
+      - SCT-036
+    summary: >-
+      A rule enforced only in memory is suspended by the crash it exists to survive.
+    previous_assumption: >-
+      Keying a command fire on its definition is enough to serialize a fire against
+      itself, so one definition can never have two copies of its command running.
+    observed_behavior: >-
+      That key lives in ``self._inflight_sessions``, which a restart empties. The retained
+      worker record is the durable statement that a copy may still be running, and nothing
+      on the dispatch path read it: after the crash that leaves a backup's tree alive, the
+      next tick of the same cron claimed a fire and spawned a second writer over the same
+      dataset -- while the first copy's record sat one table away naming it.
+    required_updates:
+      - read the durable record on the dispatch path, scoped to the firing definition
+      - defer on "cannot tell" as well as on "still there", since proceeding is the same wager either way
+      - look without signalling, because the record exists so a later pass can kill that tree
+      - release the definition and retire the record the moment the earlier worker is proven gone
+      - requeue rather than drop the deferred fire, and record the skip so the row never looks sweepable
+  - id: OBS-HARNESS-COMMAND-TASK-021
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-041
+      - SCT-036
+    summary: >-
+      "I could not write" is not "there is nothing to protect" either.
+    previous_assumption: >-
+      The retain path's return value reports whether the record was retained, so a failed
+      re-stamp of the attempt count is honestly reported as a retention that did not
+      happen.
+    observed_behavior: >-
+      The caller's next line clears the record on that answer, so a locked database during
+      a bookkeeping write discarded the only durable name of a process that had just been
+      shown NOT dead -- the same category error as SCT-031 and SCT-036, now in the write
+      rather than the read. The already-stored record was never touched by the failed
+      write, so the give-up answer was not even accurate.
+    required_updates:
+      - keep the record when the write fails, and log it at warning rather than debug
+      - reserve the give-up answer for a spent attempt cap or a row that is no longer running
+      - charge the attempt cap only for attempts that were actually stored

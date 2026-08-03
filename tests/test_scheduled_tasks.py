@@ -29,7 +29,13 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_mirror import mirror_harness_inbound
 from core.message_output import MessageOutput, stop_output_for
 import core.process_isolation as process_isolation
-from core.process_isolation import fingerprint_process_marker
+from core.process_isolation import (
+    capture_spawned_process_identity,
+    fingerprint_process_marker,
+    isolated_subprocess_kwargs,
+    process_identity_subprocess_env,
+    serialize_process_identity,
+)
 from core.run_settlement import (
     RUN_INTERRUPTION_REASONS,
     SETTLED_BY_BACKEND_REFRESH,
@@ -15658,6 +15664,198 @@ def test_an_enumeration_that_fails_leaves_the_records_it_could_not_read(
     assert row is not None and row["status"] != "running", (
         "a fire carrying no worker record was held open by a read failure that had "
         "nothing to do with it"
+    )
+
+
+def test_a_definition_does_not_fire_while_its_own_worker_may_be_alive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-040 -- single flight per definition must survive the restart that breaks it.
+
+    ``_execution_lock_key`` keys a command fire on its definition "so a fire is still
+    serialized against itself", but ``self._inflight_sessions`` is memory: the rule
+    lapses at exactly the moment a survivor is most likely. The service dies, the
+    supervisor's tree keeps running, the startup reap RETAINS its record because it
+    could not prove it dead -- and then the next tick of the same cron starts a second
+    copy of that backup over the same dataset.
+
+    So a command fire consults the durable record too, by identity, and only for its
+    own definition: another definition's live worker is not its business. It looks and
+    never signals -- the retained record exists so a later start can kill that tree, and
+    a fire that reaped it to make room would destroy the work it was scheduled to
+    protect. Proof of death releases the definition here rather than a restart later.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    second_copy = tmp_path / "second-copy-ran"
+    other_ran = tmp_path / "other-definition-ran"
+    task = _add_command_task(
+        store, shell_command=f"touch {second_copy}", cwd=str(tmp_path)
+    )
+    other = _add_command_task(store, shell_command=f"touch {other_ran}", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _drain_and_wait() -> None:
+        await service._drain_requests()
+        for execution in list(service._inflight_executions.values()):
+            await execution
+
+    marker = "surviving-command-worker"
+    survivor = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        env=process_identity_subprocess_env(marker),
+        **isolated_subprocess_kwargs(),
+    )
+    try:
+        identity = capture_spawned_process_identity(survivor.pid, marker)
+        assert identity is not None
+        # A fire from the previous life: claimed, ``running``, still naming the process
+        # that outlived the service -- what the startup reap leaves behind on a maybe.
+        orphan = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert orphan is not None
+        assert service.request_store.record_command_worker(
+            orphan.id, serialize_process_identity(identity)
+        )
+
+        asyncio.run(service._run_task(task.id))
+        assert not second_copy.exists(), (
+            "the cron tick started a second copy of a command whose first copy is still "
+            "running -- two writers over one dataset"
+        )
+        deferred = [
+            request
+            for request in service.request_store.list_pending()
+            if request.task_id == task.id
+        ]
+        assert deferred, (
+            "the deferred fire was dropped rather than requeued; it must run once the "
+            "earlier worker is shown gone"
+        )
+
+        # The drain reaches the same row on its own tick and must answer it the same way,
+        # recording the skip so an indefinitely deferred fire never looks sweepable.
+        asyncio.run(_drain_and_wait())
+        assert not second_copy.exists(), (
+            "the drain ran the second copy the scheduler had just refused to run"
+        )
+        row = service.request_store.get_run(deferred[0].id)
+        assert row is not None and (row["metadata"] or {}).get(
+            "last_skip_reason"
+        ) == "session_busy", (
+            "a fire deferred by a live worker recorded no skip reason, so the stale-run "
+            f"sweep sees an idle queued row: {row and row['metadata']!r}"
+        )
+
+        assert any(
+            worker["run_id"] == orphan.id
+            for worker in service.request_store.list_running_command_workers()
+        ), "the fire cleared the live worker's record, the only handle on that process"
+        assert survivor.poll() is None, (
+            "the fire SIGNALLED the earlier worker to make room for itself"
+        )
+
+        # Scoped to the definition: another definition's fire is not held up by it.
+        asyncio.run(service._run_task(other.id))
+        assert other_ran.exists(), (
+            "one definition's live worker blocked every other definition's fire"
+        )
+    finally:
+        survivor.kill()
+        survivor.wait()
+
+    # Proven dead now, so the record is retired and the definition fires again.
+    asyncio.run(_drain_and_wait())
+    assert second_copy.exists(), (
+        "the deferred fire never ran after its blocking worker exited; a dead worker's "
+        "record would hold its own schedule shut until the next restart"
+    )
+    assert not [
+        worker
+        for worker in service.request_store.list_running_command_workers()
+        if worker["run_id"] == orphan.id
+    ], "the proven-dead worker's record was left to block later fires forever"
+
+
+def test_a_failed_retention_write_keeps_the_stored_worker_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-041 -- the last write in the retain path is not allowed to lose the record.
+
+    SCT-036 established the invariant one call up: every maybe keeps the record, a
+    failure to look included. The retain path itself then broke it at the end -- a
+    locked database while re-stamping the attempt count answered "did not retain", and
+    the caller's next line clears the record. A store hiccup, which says nothing at all
+    about the process, thereby did the one thing the whole path exists to prevent.
+
+    The stored record survives a failed write untouched, so the honest answer is that it
+    was kept: it simply keeps the attempt count it had, this pass is not charged against
+    the cap, and the next start looks again.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    orphan = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert orphan is not None
+    identity = {
+        "pid": 424242,
+        "create_time": 1.0,
+        "worker_fingerprint": fingerprint_process_marker("unreapable-worker"),
+    }
+    assert service.request_store.record_command_worker(orphan.id, identity)
+
+    # A worker that could not be shown dead, and a re-stamp that fails the way a
+    # momentary lock does. Neither is a fact about the process.
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "reap_orphaned_process_tree",
+        lambda *_a, **_kw: "unconfirmed",
+    )
+    real_record = type(service.request_store).record_command_worker
+
+    def _cannot_write(self, run_id, identity):
+        if identity is None:
+            # Only the re-stamp fails. The clear on the caller's next line must still
+            # work, or this test cannot tell a kept record from an undeletable one.
+            return real_record(self, run_id, identity)
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(
+        type(service.request_store), "record_command_worker", _cannot_write
+    )
+
+    service._reap_orphaned_command_workers()
+
+    monkeypatch.setattr(
+        type(service.request_store), "record_command_worker", real_record
+    )
+
+    workers = {
+        worker["run_id"]: worker["identity"]
+        for worker in service.request_store.list_running_command_workers()
+    }
+    assert orphan.id in workers, (
+        "a failed attempt-count write discarded the identity of a worker that could not "
+        "be shown dead -- that row was the only place it was written"
+    )
+    assert workers[orphan.id].get("reap_attempts") is None, (
+        "the write failed, so nothing was stored and nothing may be charged against the "
+        "attempt cap"
+    )
+    row = service.request_store.get_run(orphan.id)
+    assert row is not None and row["status"] == "running", (
+        "the row must stay ``running`` for the next start's enumeration to see it"
     )
 
 

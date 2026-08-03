@@ -3705,13 +3705,21 @@ class SQLiteBackgroundTaskStore:
         still on disk. A failure here is not a licence to settle them: the caller
         leaves the records untouched, and ``recover_processing_runs`` reads the record
         off each row rather than trusting this list.
+
+        Also called per fire, to ask whether the definition about to run still has a
+        worker recorded from an earlier one -- hence ``definition_id`` in each entry.
+        Without it a caller can see that *some* worker survives but not whose, and "some
+        command is running" is not a reason to skip a different one.
         """
 
         with self.engine.connect() as conn:
             rows = list(
                 conn.execute(
-                    select(agent_runs.c.id, agent_runs.c.metadata_json)
-                    .where(agent_runs.c.status.in_(_status_query_values("running")))
+                    select(
+                        agent_runs.c.id,
+                        agent_runs.c.definition_id,
+                        agent_runs.c.metadata_json,
+                    ).where(agent_runs.c.status.in_(_status_query_values("running")))
                 ).mappings()
             )
         workers: list[dict[str, Any]] = []
@@ -3721,7 +3729,14 @@ class SQLiteBackgroundTaskStore:
                 continue
             identity = metadata.get(COMMAND_WORKER_METADATA_KEY)
             if isinstance(identity, dict):
-                workers.append({"run_id": str(row["id"]), "identity": identity})
+                definition_id = row["definition_id"]
+                workers.append(
+                    {
+                        "run_id": str(row["id"]),
+                        "definition_id": str(definition_id) if definition_id else None,
+                        "identity": identity,
+                    }
+                )
         return workers
 
     def update_run_status(

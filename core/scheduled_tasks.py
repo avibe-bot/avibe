@@ -74,6 +74,7 @@ from core.delivery_evidence import (
 )
 from core.process_isolation import (
     PersistedProcessIdentity,
+    orphaned_process_tree_presence,
     process_identity_from_payload,
     reap_orphaned_process_tree,
     serialize_process_identity,
@@ -3345,8 +3346,18 @@ class ScheduledTaskService:
 
         ``True`` means the record was kept and the run must stay ``running`` for
         ``list_running_command_workers`` to find it again. ``False`` is the give-up
-        answer: the attempts are spent, so the run settles and reports like any other
-        interrupted fire rather than being held open by a process that never exits.
+        answer, and it has exactly two grounds: the attempts are spent, or the row is
+        no longer ``running`` and so cannot hold a record at all. Then the run settles
+        and reports like any other interrupted fire rather than being held open by a
+        process that never exits.
+
+        A WRITE THAT FAILS IS NOT A GROUND. The caller's next line clears the record,
+        which is the one outcome this whole path exists to prevent: a locked database or
+        a lost connection during the re-stamp says nothing about the process, and
+        answering ``False`` there would hand a still-running backup's only durable name
+        to the very code that deletes it. The already-stored record survives the failed
+        write untouched -- it simply keeps the attempt count it had, so this pass is not
+        charged against the cap and the next start looks again.
         """
 
         identity = dict(payload) if isinstance(payload, dict) else {}
@@ -3375,10 +3386,112 @@ class ScheduledTaskService:
             # process is precisely the one we could not inspect our way back to.
             return bool(self.request_store.record_command_worker(run_id, identity))
         except Exception:
-            logger.debug(
-                "failed to retain unreaped command worker for %s", run_id, exc_info=True
+            logger.warning(
+                "failed to re-stamp the attempt count on the command worker record for "
+                "run %s; keeping the record as stored",
+                run_id,
+                exc_info=True,
             )
-            return False
+            return True
+
+    def _command_fire_definition_id(self, request: TaskExecutionRequest) -> Optional[str]:
+        """The definition id when this request is a command fire, else ``None``."""
+
+        if request.request_type not in {"task_run", "scheduled"}:
+            return None
+        task_id = request.task_id
+        if not task_id:
+            return None
+        task = self.store.get_task(task_id)
+        if task is None or not task.has_command:
+            return None
+        return task_id
+
+    def _command_definition_has_live_worker(self, task_id: str) -> bool:
+        """Whether a previous fire of this definition may still be running.
+
+        SINGLE FLIGHT PER DEFINITION IS THE RULE (see ``_execution_lock_key``), and
+        ``self._inflight_sessions`` only enforces it for as long as this process lives.
+        A crash is exactly when it stops being enforced and exactly when a survivor is
+        most likely: the supervisor's tree outlives the service, its record is retained
+        by ``_reap_orphaned_command_workers`` precisely because it could not be shown
+        dead, and the next tick of the same cron would then start a SECOND copy of that
+        backup or migration -- two writers over one dataset, which is worse than a late
+        fire in every case.
+
+        A LOOK, NEVER A SIGNAL: the retained record's whole purpose is to let a later
+        start kill that tree, so a fire must not resolve the collision by killing the
+        earlier copy. ``orphaned_process_tree_presence`` answers on identity and returns
+        the three answers apart, and ``present``/``unknown`` both defer the new fire --
+        proceeding on "could not tell" is the same wager as proceeding on "yes".
+
+        Proof of death releases the definition here rather than waiting for the next
+        start: the record is cleared and the fire runs, so a supervisor that ended while
+        the service was down does not hold its own schedule shut.
+
+        Untrusted records do not block. Every kill path refuses them, so no pass will
+        ever act on one; treating it as a live worker would wedge the definition for
+        good, which is the mirror of the reap's own reading of the same payload.
+        """
+
+        try:
+            workers = self.request_store.list_running_command_workers()
+        except Exception:
+            # Unreadable, so unknown -- and unknown defers. Deferring costs a late fire
+            # that the next tick retries; guessing "clear" costs a second writer.
+            logger.warning(
+                "failed to check for a live command worker on task %s; deferring the "
+                "fire",
+                task_id,
+                exc_info=True,
+            )
+            return True
+        for worker in workers:
+            if str(worker.get("definition_id") or "") != task_id:
+                continue
+            run_id = str(worker.get("run_id") or "")
+            if run_id and run_id in self._inflight_executions:
+                # This process's own fire, already covered by the in-memory lock the
+                # callers check first; not an orphan and not this method's business.
+                continue
+            payload = worker.get("identity")
+            pid = payload.get("pid") if isinstance(payload, dict) else None
+            expected = (
+                process_identity_from_payload(payload, pid)
+                if isinstance(pid, int) and not isinstance(pid, bool)
+                else None
+            )
+            if expected is None:
+                continue
+            try:
+                presence = orphaned_process_tree_presence(
+                    logger,
+                    f"scheduled command worker {run_id}",
+                    expected_identity=expected,
+                )
+            except Exception:
+                logger.warning(
+                    "failed to inspect command worker from run %s; deferring the fire "
+                    "for task %s",
+                    run_id,
+                    task_id,
+                    exc_info=True,
+                )
+                return True
+            if presence == "gone":
+                if run_id:
+                    self._clear_command_worker(run_id)
+                continue
+            logger.warning(
+                "task %s still has a command worker pid=%s from run %s (%s); deferring "
+                "this fire",
+                task_id,
+                expected.pid,
+                run_id,
+                presence,
+            )
+            return True
+        return False
 
     def _execution_interruption(self, execution_id: str) -> str:
         return self._inflight_cancellation_causes.get(
@@ -4133,6 +4246,15 @@ class ScheduledTaskService:
         if lock_key is not None and lock_key in self._inflight_sessions:
             self.request_store.requeue(request.id)
             return
+        command_definition_id = self._command_fire_definition_id(request)
+        if command_definition_id is not None and self._command_definition_has_live_worker(
+            command_definition_id
+        ):
+            # Requeued, not dropped: the row stays the definition's one pending fire and
+            # runs as soon as the earlier worker is shown gone.
+            self.request_store.requeue(request.id)
+            self._drain_dirty = True
+            return
         self._spawn_execution(request, lock_key)
         execution = self._inflight_executions.get(request.id)
         if execution is not None:
@@ -4170,6 +4292,15 @@ class ScheduledTaskService:
                 # The next drain tick picks it up once the session frees.
                 # Recorded so it can clear a stale transport reason — this row is
                 # making progress and must not look sweepable.
+                self.request_store.record_skip_reason(pending.id, reason=SKIP_REASON_SESSION_BUSY)
+                continue
+            command_definition_id = self._command_fire_definition_id(pending)
+            if command_definition_id is not None and self._command_definition_has_live_worker(
+                command_definition_id
+            ):
+                # Same reason as the lock above and recorded the same way: the definition
+                # is busy -- here with a worker this process did not start -- so the row
+                # keeps waiting and must not look sweepable while it does.
                 self.request_store.record_skip_reason(pending.id, reason=SKIP_REASON_SESSION_BUSY)
                 continue
             request = self.request_store.claim(pending.id)
