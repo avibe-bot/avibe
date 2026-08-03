@@ -13763,6 +13763,95 @@ def test_archiving_the_session_gives_a_killed_escalation_its_notice_back(
     assert notice["state"] == "pending"
 
 
+def _start_the_escalation(escalation_id: str) -> None:
+    """Move an escalation to ``running``, the way the executor does when it claims it."""
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == escalation_id)
+                .values(status="running", started_at="2026-07-28T09:00:01+00:00")
+            )
+    finally:
+        engine.dispose()
+
+
+def test_archiving_the_session_gives_an_already_running_escalation_its_notice_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-009 -- an escalation teardown kills MID-TURN owes the same fallback.
+
+    Teardown treats the two halves of "not yet terminal" differently: it flags all four
+    active statuses ``cancel_requested`` and lets the executor honour it, but only
+    ``pending``/``queued`` are terminalized on the spot. So an escalation the executor
+    had already claimed is not canceled by this transaction -- it is canceled a moment
+    later, out here, by the executor.
+
+    That is the same silence as the queued case and it is harder to see. The re-arm ran
+    only for ``pending``/``queued``, so an escalation cancelled at ``running`` settled
+    ``canceled`` (owing nothing, as a cancel does) while the parent's notice stayed
+    suppressed by ``escalation_run_id`` on the promise of a turn that was killed before
+    it reported anything. What the re-arm must key on is "teardown has condemned this
+    escalation", which is exactly the set teardown cancel-requests -- not the narrower
+    set it happens to terminalize in the same statement.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_running_esc")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    escalations = _escalation_runs(store)
+    assert len(escalations) == 1, f"the premise: one escalation is queued ({escalations!r})"
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "the premise: the escalation suppressed the notice"
+    )
+
+    # The window: the executor claims the turn, then teardown lands.
+    _start_the_escalation(escalations[0]["id"])
+
+    from storage.workbench_sessions_service import archive_session
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            archive_session(conn, session_id)
+        with engine.begin() as conn:
+            condemned = (
+                conn.execute(
+                    select(agent_runs.c.cancel_requested).where(
+                        agent_runs.c.id == escalations[0]["id"]
+                    )
+                )
+                .scalars()
+                .first()
+            )
+    finally:
+        engine.dispose()
+
+    assert condemned, (
+        "the premise: teardown condemns a running escalation too, it just leaves the "
+        "terminalizing to the executor"
+    )
+    notice = store._sqlite.owed_failure_notice(run["id"])
+    assert notice is not None, (
+        "the turn was killed before it could report anything and no notice replaced "
+        "it, so this failure is reported by nothing at all"
+    )
+    assert notice["state"] == "pending"
+
+
 def test_hard_deleting_the_session_gives_a_killed_escalation_its_notice_back(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -13823,6 +13912,78 @@ def test_hard_deleting_the_session_gives_a_killed_escalation_its_notice_back(
         "run and no notice replaced it: this failure is reported by nothing at all"
     )
     assert notice["state"] == "pending"
+
+
+def test_hard_deleting_the_session_also_cancels_the_runs_bound_to_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-010 -- a deleted Session must not leave claimable runs behind it.
+
+    ``agent_runs.session_id`` carries no foreign key, so deleting the Session row does
+    not touch the runs bound to it: they stay ``queued``, and the executor will happily
+    claim one against a Session that no longer exists. The archival half of this same
+    function cancels them; the delete half only stopped mattering less because the row
+    it removes hid the problem.
+
+    For a command-task escalation the cost is precise. The re-arm above has already
+    handed the failure back to the notice ladder on the grounds that the turn can never
+    run -- so if the turn is nonetheless claimed and dies on the missing Session, that
+    death reports the SAME failure a second time, from the lane meant to replace it.
+    Terminalizing here is what makes the re-arm's premise true.
+    """
+
+    from storage.models import agent_sessions
+    from storage.session_reclaim import RECLAIM_PAUSE
+    from storage.sessions_service import _delete_agent_session_rows
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_delete_orphan")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    escalations = _escalation_runs(store)
+    assert len(escalations) == 1, f"the premise: one escalation is queued ({escalations!r})"
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            deleted = _delete_agent_session_rows(
+                conn,
+                select(agent_sessions.c.id).where(agent_sessions.c.id == session_id),
+                reclaim_mode=RECLAIM_PAUSE,
+                reclaim_reason="new_session",
+            )
+        with engine.begin() as conn:
+            settled = (
+                conn.execute(
+                    select(agent_runs.c.status, agent_runs.c.cancel_requested).where(
+                        agent_runs.c.id == escalations[0]["id"]
+                    )
+                )
+                .mappings()
+                .first()
+            )
+    finally:
+        engine.dispose()
+
+    assert deleted == 1, "the premise: the empty Session row was torn down"
+    assert settled is not None, "the escalation row itself should survive as history"
+    assert settled["status"] == "canceled", (
+        "the escalation is still claimable against a Session that no longer exists: "
+        f"{settled['status']!r}"
+    )
+    assert settled["cancel_requested"], (
+        "and nothing recorded that the teardown is what ended it"
+    )
 
 
 def _repoint_definition_session(definition_id: str, session_id: str) -> None:
@@ -13945,6 +14106,56 @@ def test_the_escalation_prompt_prepends_the_stored_message_and_names_the_run(
     assert "run-abc123" in prompt and "vibe runs show run-abc123" in prompt, (
         f"the report must say how to read the full output: {prompt!r}"
     )
+
+
+def test_an_escalating_command_runs_in_its_bound_sessions_workdir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-008 -- the relative commands the docs promise have to resolve somewhere.
+
+    ``--cwd`` is REFUSED for a definition bound to an existing Session, on the rule
+    that the Session owns its working directory (`cwd_with_existing_session`), so the
+    CLI stores ``cwd=None``. For a message task that is complete: the Agent turn starts
+    in the Session's workdir. A command task has no Agent turn to inherit it from, so
+    the stored ``None`` fell through to the ``~/.avibe`` fallback -- meaning
+    ``--shell './scripts/sync.sh'``, the form the docs use, ran from the product state
+    directory with no way to override it: the flag that would fix it is the one the
+    Session rule rejects.
+
+    So the binding has to supply what it refused to let the user state.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "marker").write_text("bound-session-workdir\n", encoding="utf-8")
+
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=project, anchor="avibe_task_cwd")
+    task = store.add_task(
+        session_key="",
+        session_id=session_id,
+        # The exact shape ``vibe task add --shell ... --on-failure agent
+        # --session-id ...`` stores: an existing binding, and NO cwd.
+        session_policy="existing",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        cwd=None,
+        deliver_key="slack::channel::C123",
+        shell_command="cat marker",
+        metadata={"origin": "cli", "on_failure": "agent"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded", (
+        "the command could not read a file sitting in its own Session's workdir, so it "
+        f"ran somewhere else: {run['error']!r}"
+    )
+    assert _escalation_runs(store) == [], "a succeeded fire must not escalate"
 
 
 def test_a_failed_one_shot_command_task_is_disabled_and_escalates_together(

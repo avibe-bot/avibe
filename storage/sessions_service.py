@@ -2243,14 +2243,36 @@ def _delete_agent_session_rows(
         # Session, since a notice is delivered to the scope. Same reason as the archive
         # path in ``workbench_sessions_service``, and in this same transaction.
         #
-        # The delete half is the quieter of the two: it cancels nothing, so the
-        # escalation is left queued against a row that no longer exists and no
-        # cancel-shaped guard could ever see it.
+        # The delete half used to be the quieter of the two: it cancelled nothing, so
+        # the escalation was left queued against a row that no longer exists and no
+        # cancel-shaped guard could ever see it. The cancel below closes that.
         from storage.background import (
+            TEARDOWN_CONDEMNED_RUN_STATUSES,
             rearm_notices_for_escalations_canceled_with_session,
         )
 
         rearm_notices_for_escalations_canceled_with_session(conn, session_id, now=now)
+        # Also before the branch, and for the same reason. ``agent_runs.session_id``
+        # carries no foreign key, so deleting the Session row leaves its runs ``queued``
+        # and claimable against a Session that is gone -- and for an escalation that is
+        # not merely untidy: the re-arm just above handed the failure to the notice
+        # ladder on the grounds that the turn can never run, so a turn that IS claimed
+        # and then dies on the missing Session reports the same failure twice, the
+        # second time from the lane meant to replace the first. Terminalizing here is
+        # what makes that premise true. In-flight runs are cancel-requested only; the
+        # executor owns the transition for work it has already claimed.
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.session_id == session_id)
+            .where(agent_runs.c.status.in_(TEARDOWN_CONDEMNED_RUN_STATUSES))
+            .values(cancel_requested=1, cancel_requested_at=now, updated_at=now)
+        )
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.session_id == session_id)
+            .where(agent_runs.c.status.in_(("pending", "queued")))
+            .values(status="canceled", completed_at=now, updated_at=now)
+        )
         has_retained_history = bool(
             conn.execute(
                 select(messages.c.id)
@@ -2278,18 +2300,6 @@ def _delete_agent_session_rows(
                     if current_anchor
                     else f"superseded:{session_id}"
                 )
-            )
-            conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.session_id == session_id)
-                .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
-                .values(cancel_requested=1, cancel_requested_at=now, updated_at=now)
-            )
-            conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.session_id == session_id)
-                .where(agent_runs.c.status.in_(("pending", "queued")))
-                .values(status="canceled", completed_at=now, updated_at=now)
             )
             retire_session_delivery_owners(conn, session_id)
             delivery_store.set_draft(conn, session_id, None)

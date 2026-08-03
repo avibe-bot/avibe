@@ -838,6 +838,36 @@ def test_naive_one_shot_uses_its_task_timezone_in_rows_counts_and_next_fire(stor
     assert (counts["waiting"], counts["finished"]) == (1, 1)
 
 
+def test_searching_tasks_looks_at_what_a_command_task_actually_runs(store) -> None:
+    """SCT-011 -- a command task is findable by its command, like a watch already is.
+
+    Search offers a different field list per definition type, and the ``scheduled``
+    branch was written when every task was a prompt: it reads ``message``/``prompt``
+    but not ``shell_command``/``command_json``. A command task stores its instruction
+    in the latter and can leave ``message`` empty (nothing is being said to an Agent),
+    so the only text distinguishing it was the one text search would not read. The
+    ``watch`` branch has always read both columns; tasks now share them.
+
+    ``cwd`` is deliberately still excluded here: task rows overwhelmingly share one
+    working directory, so matching on it would return almost everything.
+    """
+
+    _task(store, "deploy-task", name="nightly", shell_command="./scripts/sync.sh --dry-run")
+    _task(store, "argv-task", name="probe", command=["curl", "-sf", "https://health.local"])
+    _task(store, "prompt-task", name="digest", prompt="summarise the day")
+
+    def _found(query: str) -> set[str]:
+        page = store.list_scheduled_tasks_page(page_request=PageRequest(limit=50), query=query)
+        return {row["id"] for row in page.items}
+
+    assert _found("sync.sh") == {"deploy-task"}, "a shell command task is unfindable"
+    assert _found("health.local") == {"argv-task"}, "an argv command task is unfindable"
+    assert _found("summarise") == {"prompt-task"}, "and message search still works"
+    # The chips count the same rows the list returns, because both go through
+    # ``_definitions_query``; a field added to one but not the other splits them.
+    assert store.count_scheduled_tasks(query="sync.sh")["total"] == 1
+
+
 def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_path: Path) -> None:
     """Only the cycle that changes enabled -> disabled owns retirement state."""
     from core.watches import ManagedWatchStore

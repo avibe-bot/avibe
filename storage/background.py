@@ -223,6 +223,16 @@ RUN_STATUS_ALIASES: dict[str, str] = {
     "canceled": "canceled",
 }
 _LIKE_ESCAPE = "\\"
+# Every run status Session teardown condemns, which is deliberately WIDER than the
+# set it terminalizes in the same statement. Teardown flags all four
+# ``cancel_requested`` and then flips only ``pending``/``queued`` to ``canceled`` on
+# the spot; a run the executor has already claimed is canceled a moment later, by the
+# executor, out of that transaction. For anything that has to compensate for a
+# teardown cancel, the decision is made here, so this is the set to key on.
+# ``storage.sessions_service._delete_agent_session_rows`` uses this directly;
+# ``_ACTIVE_RUN_STATUSES`` in ``storage.workbench_sessions_service`` still mirrors it
+# to keep that module's import graph unchanged, so widen the two together.
+TEARDOWN_CONDEMNED_RUN_STATUSES = ("pending", "queued", "processing", "running")
 # What a task/watch is *doing*, which is not what ``enabled`` records.
 #
 # ``enabled`` is a switch: it says whether the scheduler may fire the row, and
@@ -1390,6 +1400,13 @@ def rearm_notices_for_escalations_canceled_with_session(
     The notice ladder is the right fallback precisely because it does not need the
     session: a notice is delivered to the scope, not into a conversation.
 
+    Escalations teardown has merely condemned count too, not only the ones it
+    terminalizes on the spot (``TEARDOWN_CONDEMNED_RUN_STATUSES``). A turn already
+    under way is the worse case, since it can have reported nothing yet while looking
+    like it will. Re-arming one that did manage to report costs a duplicate, which is
+    the bias the design already accepts; the alternative costs silence, which it does
+    not.
+
     MUST be called inside the SAME transaction as the cancel it compensates for. Two
     commits are not one decision: a teardown that committed the cancel and then failed
     here would leave exactly the silence this closes.
@@ -1407,7 +1424,11 @@ def rearm_notices_for_escalations_canceled_with_session(
             select(agent_runs.c.parent_run_id)
             .where(agent_runs.c.session_id == normalized)
             .where(agent_runs.c.run_type == "task_escalation")
-            .where(agent_runs.c.status.in_(("pending", "queued")))
+            # Not just the queued ones. An escalation the executor had already claimed
+            # is condemned by this same teardown, only terminalized later and
+            # elsewhere -- and it is the worse case, because a turn killed mid-flight
+            # can have reported nothing while still looking like it was under way.
+            .where(agent_runs.c.status.in_(TEARDOWN_CONDEMNED_RUN_STATUSES))
         )
         .scalars()
         .all()
@@ -3140,6 +3161,15 @@ class SQLiteBackgroundTaskStore:
                         run_definitions.c.schedule_type,
                         run_definitions.c.cron,
                         run_definitions.c.run_at,
+                        # A command task's instruction lives here, not in
+                        # ``message``/``prompt`` -- which it may leave empty, since
+                        # nothing is being said to an Agent. Without these two the only
+                        # text that distinguishes such a row is the one text search
+                        # would not read. ``cwd`` stays out on purpose (the ``watch``
+                        # branch keeps it): task rows overwhelmingly share one working
+                        # directory, so matching on it returns almost everything.
+                        run_definitions.c.command_json,
+                        run_definitions.c.shell_command,
                     ]
                 )
             elif definition_type == "watch":

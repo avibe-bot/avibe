@@ -52,6 +52,9 @@ from storage.models import (
 )
 
 # Raw ``agent_runs.status`` values that are not yet terminal — archive cancels these.
+# Mirrors ``background.TEARDOWN_CONDEMNED_RUN_STATUSES``, which the compensating logic
+# for these cancels keys on (an escalation cancelled here owes its parent a failure
+# notice back); widen the two together, and do not narrow this one alone.
 _ACTIVE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 _PENDING_RUN_STATUSES = ("pending", "queued")
 

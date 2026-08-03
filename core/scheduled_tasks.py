@@ -5639,6 +5639,46 @@ class ScheduledTaskService:
                             session_id,
                         )
 
+    def _bound_session_workdir(self, task: ScheduledTask) -> Optional[str]:
+        """Where a command with no stored ``cwd`` should run: its binding's directory.
+
+        ``--cwd`` is REFUSED for a definition bound to an existing Session
+        (``cwd_with_existing_session``), on the rule that the Session owns its working
+        directory -- so an escalating command task legitimately stores ``cwd=None``. A
+        message task loses nothing to that: the Agent turn starts in the Session's
+        workdir. A command has no turn to inherit it from, so ``None`` fell through to
+        the ``~/.avibe`` fallback and ``--shell './scripts/sync.sh'`` -- the form the
+        docs use -- ran from the product state directory, with the one flag that could
+        have said otherwise rejected by the Session rule.
+
+        Read live rather than copied into the definition at creation time, so the
+        command follows a Session whose workdir was later changed, and so a per-run
+        binding that does not exist yet simply reads as "no answer" (``None``) instead
+        of a stale one. Best effort by design: a missing row, a NULL workdir or a read
+        failure all fall back rather than failing the fire, and the fallback is still
+        validated by the ``isdir`` check below.
+        """
+
+        session_id = str(task.session_id or "").strip()
+        if not session_id:
+            return None
+        try:
+            from storage.sessions_service import SQLiteSessionsService
+
+            service = SQLiteSessionsService(paths.get_sqlite_state_path())
+            row = service.get_agent_session_by_id(session_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Could not read the workdir of Session %s bound to task %s: %s",
+                session_id,
+                task.id,
+                exc,
+            )
+            return None
+        if not row:
+            return None
+        return str(row.get("workdir") or "").strip() or None
+
     async def _execute_command_task(
         self, task: ScheduledTask, *, execution_id: str, disable_one_shot: bool
     ) -> TaskExecutionResult:
@@ -5664,7 +5704,7 @@ class ScheduledTaskService:
         stdout_value: Optional[str] = None
         stderr_value: Optional[str] = None
 
-        spawn_cwd = task.cwd
+        spawn_cwd = task.cwd or self._bound_session_workdir(task)
         if not spawn_cwd:
             stable_cwd = paths.get_vibe_remote_dir()
             stable_cwd.mkdir(parents=True, exist_ok=True)

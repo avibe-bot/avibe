@@ -152,6 +152,16 @@ is where most of step 4's real work lives.
 `--cwd` keeps its current meaning and default (caller directory) and becomes
 the command's working directory for command tasks.
 
+One consequence needs naming, because it has no `--cwd` to fix it: a definition
+bound to an *existing* Session must not pass `--cwd` at all
+(`cwd_with_existing_session` — the Session owns its directory), so an escalating
+command task legitimately stores `cwd=None`. A message task loses nothing there,
+since the Agent turn starts in the Session's workdir; a command has no turn to
+inherit from. So the command reads that workdir itself at fire time
+(`_bound_session_workdir`) rather than falling through to `~/.avibe`. Read live,
+not copied at creation, so it follows a Session whose workdir later changes and
+reads as "no answer" for a per-run binding that does not exist yet.
+
 `vibe task update` accepts the same new fields. Switching a definition between
 message and command mode via update is rejected (`task_mode_immutable`) —
 delete and recreate — because the write-guard model
@@ -404,7 +414,15 @@ The *opposite* bias is not accepted, and two teardown paths had to be taught so
   **in the same transaction** as the teardown. `escalation_run_id` is left on the
   row as the audit trail of what was attempted. The notice ladder is the right
   fallback precisely because it needs no Session: a notice is delivered to the
-  scope.
+  scope. Two details decide whether that re-arm actually holds. It keys on
+  `TEARDOWN_CONDEMNED_RUN_STATUSES` — every status teardown *cancel-requests*,
+  not the narrower pair it terminalizes in the same statement — because an
+  escalation the executor already claimed is condemned by the same transaction
+  and merely dies later, having possibly reported nothing. And both teardown
+  halves now cancel the runs bound to the Session before the row goes: with no
+  foreign key on `agent_runs.session_id`, a delete otherwise leaves the turn
+  claimable against a Session that is gone, and its death would report the same
+  failure a second time from the very lane meant to replace it.
 - **A binding that moved mid-fire.** `mark_task_result` derives its
   compare-and-set expectation from the mirror it *reloads*, so a `/new` reclaim
   committed while the command ran becomes its own expectation and the stamp

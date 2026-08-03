@@ -69,3 +69,31 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_cli_task_command.py::test_task_update_rewords_escalation_guidance_on_an_agent_command_task
+  - id: SCT-008
+    name: a command with no stored cwd runs in the workdir of the Session it is bound to
+    status: covered
+    kind: config
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_an_escalating_command_runs_in_its_bound_sessions_workdir
+  - id: SCT-009
+    name: an escalation killed mid-turn by teardown still hands back its failure notice
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_archiving_the_session_gives_an_already_running_escalation_its_notice_back
+  - id: SCT-010
+    name: deleting a Session leaves no claimable escalation bound to it
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hard_deleting_the_session_also_cancels_the_runs_bound_to_it
+  - id: SCT-011
+    name: a command task is findable by the command it runs
+    status: covered
+    kind: config
+    layer: unit
+    backend: shared
+    test: tests/test_harness_definition_lifecycle.py::test_searching_tasks_looks_at_what_a_command_task_actually_runs
