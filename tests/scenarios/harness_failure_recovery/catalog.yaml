@@ -2330,6 +2330,34 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_tasks.py::test_service_stop_terminalizes_inflight_run_without_replay
+  - id: HFR-102
+    name: every canceled task execution projects a result and only scheduler one-shots retire
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_canceled_task_execution_projects_every_result_and_only_retires_scheduler_one_shots
+  - id: HFR-103
+    name: service shutdown settles the durable Turn without draining held work
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_service_stop_terminalizes_transferred_durable_turn_without_draining_held_queue
+  - id: HFR-104
+    name: restart recovery fails executed Runs and preserves separately owned rows
+    status: covered
+    kind: restart
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_restart_recovery_terminalizes_started_rows_and_preserves_other_owners
+  - id: HFR-105
+    name: every teardown settlement surface is reached or explicitly owned elsewhere
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_every_teardown_settlement_surface_is_reached_or_explicitly_owned_elsewhere
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

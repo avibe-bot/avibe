@@ -23,10 +23,16 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_mirror import mirror_harness_inbound
 from core.message_output import MessageOutput, stop_output_for
 from core.run_settlement import (
+    RUN_INTERRUPTION_REASONS,
     SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_RESTARTED,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
+    SETTLEMENT_I18N_KEYS,
+    SETTLEMENT_TERMINAL_STATUS,
+    SETTLEMENTS_WITHOUT_RESULT,
+    TEARDOWN_SETTLEMENT_SURFACE_OWNERS,
 )
 from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
@@ -1807,11 +1813,11 @@ def test_service_stop_terminalizes_inflight_run_without_replay(
     assert not (request_store.completed_dir / f"{request.id}.json").exists()
 
 
-def test_service_stop_settles_claim_cancelled_before_execution_starts(
+def test_service_stop_keeps_claim_cancelled_before_execution_starts_queued(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """A claimed Run is settled even if teardown wins before its coroutine starts."""
+    """A bare claim stays queued when teardown wins before coroutine entry."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     task_path = tmp_path / "scheduled_tasks.json"
     store = ScheduledTaskStore(task_path)
@@ -1844,11 +1850,354 @@ def test_service_stop_settles_claim_cancelled_before_execution_starts(
 
     settled = request_store.get_run(request.id)
     assert settled is not None
-    assert settled["status"] == "failed"
-    assert settled["metadata"]["interrupt_reason"] == "restarted"
-    retired = ScheduledTaskStore(task_path).get_task(task.id)
-    assert retired is not None
-    assert retired.enabled is False
+    assert settled["status"] == "queued"
+    assert "interrupt_reason" not in settled["metadata"]
+    preserved = ScheduledTaskStore(task_path).get_task(task.id)
+    assert preserved is not None
+    assert preserved.enabled is True
+    assert preserved.last_run_at is None
+    assert preserved.last_error is None
+
+
+@pytest.mark.parametrize(
+    ("schedule_type", "source_kind", "expected_enabled"),
+    [
+        ("cron", "scheduler", True),
+        ("at", "cli", True),
+        ("at", "scheduler", False),
+    ],
+)
+def test_canceled_task_execution_projects_every_result_and_only_retires_scheduler_one_shots(
+    tmp_path: Path,
+    monkeypatch,
+    schedule_type: str,
+    source_kind: str,
+    expected_enabled: bool,
+) -> None:
+    """HFR-102: every interrupted fire records a result; only owned one-shots retire."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    task_path = tmp_path / "scheduled_tasks.json"
+    store = ScheduledTaskStore(task_path)
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="record this interruption",
+        schedule_type=schedule_type,
+        cron="0 * * * *" if schedule_type == "cron" else None,
+        run_at=(
+            "2026-03-31T09:00:00+08:00"
+            if schedule_type == "at"
+            else None
+        ),
+        timezone_name="Asia/Shanghai",
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_task_run(
+        task.id,
+        source_kind=source_kind,
+        task=task,
+    )
+    started = asyncio.Event()
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        started.set()
+        await asyncio.Event().wait()
+
+    settings_manager = SimpleNamespace(
+        get_store=lambda: SimpleNamespace(
+            get_user=lambda *_args, **_kwargs: None,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(
+            platform_settings_managers={"slack": settings_manager},
+            message_handler=SimpleNamespace(
+                handle_scheduled_message=_handle_scheduled_message,
+            ),
+        ),
+        store=store,
+        request_store=request_store,
+    )
+    service.scheduler = _StubScheduler()
+    service.scheduler.jobs[task.id] = SimpleNamespace(id=task.id)
+
+    async def _cancel() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions[request.id]
+        await asyncio.wait_for(started.wait(), timeout=1)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        await asyncio.sleep(0)
+
+    asyncio.run(_cancel())
+
+    settled = request_store.get_run(request.id)
+    projected = ScheduledTaskStore(task_path).get_task(task.id)
+    assert settled is not None and settled["status"] == "failed"
+    assert projected is not None
+    assert projected.enabled is expected_enabled
+    assert projected.last_run_at is not None
+    assert projected.last_error == settled["error"]
+    assert (task.id in service.scheduler.jobs) is expected_enabled
+
+
+@pytest.mark.parametrize("user_stopped", [False, True])
+def test_service_stop_terminalizes_transferred_durable_turn_without_draining_held_queue(
+    tmp_path: Path,
+    monkeypatch,
+    user_stopped: bool,
+) -> None:
+    """HFR-103: shutdown settles the exact durable Turn, Delivery, and linked Run."""
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _make_avibe_session(monkeypatch, tmp_path, agent_backend="codex")
+    request_store = TaskExecutionStore()
+    run_id = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="durable prompt interrupted by shutdown",
+        agent_name="codex",
+    ).id
+    _force_run_columns(
+        request_store,
+        run_id,
+        status="running",
+        started_at=_ago(30),
+        pid=1234,
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        delivery_id = message_deliveries.new_delivery_id()
+        turn_id = message_deliveries.new_turn_id()
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id=session_id,
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=session["scope_id"],
+                session_id=session_id,
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="durable prompt interrupted by shutdown",
+                native_message_id=f"agent_run:{run_id}",
+                metadata={},
+            ),
+            dispatch_text="durable prompt interrupted by shutdown",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            run_id,
+            session_id=session_id,
+            delivery_id=delivery_id,
+        )
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="codex",
+            deliveries=[delivery],
+            dispatch_text="durable prompt interrupted by shutdown",
+        )
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert turn is not None
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            runtime_key="runtime-key",
+            runtime_turn_id="runtime-turn",
+            native_turn_id="native-turn",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "native_acceptance"},
+        )
+        message_deliveries.set_queue_hold(conn, session_id, held=True)
+        queued = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            author="user",
+            source="user",
+            message_type="user",
+            text="keep me held",
+            native_message_id="held-after-shutdown",
+        )
+        successor_delivery_id = None
+        successor_turn_id = None
+        if not user_stopped:
+            successor_delivery_id = message_deliveries.new_delivery_id()
+            successor_turn_id = message_deliveries.new_turn_id()
+            successor_delivery = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=successor_delivery_id,
+                session_id=session_id,
+                priority="p0",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=session["scope_id"],
+                    session_id=session_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="do not start this replacement",
+                    native_message_id="replacement-after-shutdown",
+                    metadata={},
+                ),
+                dispatch_text="do not start this replacement",
+            )
+            message_deliveries.insert_turn(
+                conn,
+                turn_id=successor_turn_id,
+                session_id=session_id,
+                initial_delivery_id=successor_delivery_id,
+                state="waiting",
+                backend="codex",
+            )
+            assert message_deliveries.cas_delivery(
+                conn,
+                successor_delivery_id,
+                expected_version=int(successor_delivery["version"]),
+                expected_states=("reserved",),
+                values={
+                    "state": "interrupt_waiting",
+                    "turn_id": successor_turn_id,
+                    "turn_role": "initial",
+                    "turn_position": 0,
+                },
+            ) is not None
+            active = message_deliveries.get_turn(conn, turn_id)
+            assert active is not None
+            assert message_deliveries.cas_turn(
+                conn,
+                turn_id,
+                expected_version=int(active["version"]),
+                expected_states=("active",),
+                values={
+                    "control_state": "interrupting",
+                    "control_mode": "replace",
+                    "control_successor_delivery_id": successor_delivery_id,
+                    "control_successor_turn_id": successor_turn_id,
+                },
+            ) is not None
+        if user_stopped:
+            active = message_deliveries.get_turn(conn, turn_id)
+            assert active is not None
+            assert message_deliveries.cas_turn(
+                conn,
+                turn_id,
+                expected_version=int(active["version"]),
+                expected_states=("active",),
+                values={"control_mode": "stop_only"},
+            ) is not None
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .values(cancel_requested=1)
+            )
+
+    dispatch_started = asyncio.Event()
+    prompts: list[str] = []
+
+    async def _never_returns(_controller, _context, text, **_kwargs):
+        prompts.append(text)
+        dispatch_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", _never_returns)
+    controller = SimpleNamespace(
+        config=SimpleNamespace(language="en"),
+        set_agent_status=lambda *_args, **_kwargs: None,
+        _get_session_key=lambda ctx: f"avibe::{ctx.channel_id}",
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    manager = SessionTurnManager(controller)
+    manager._engine = engine
+    controller.session_turns = manager
+    controller.scheduled_task_service = service
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={
+            "task_execution_id": run_id,
+            "task_trigger_kind": "agent_run",
+            "accepted_agent_run_ids": [run_id],
+            "agent_session_target": {"agent_backend": "codex"},
+        },
+    )
+
+    async def _stop() -> None:
+        await manager._run(
+            session_id,
+            context,
+            "durable prompt interrupted by shutdown",
+            source=SOURCE_SCHEDULED,
+            logical_turn_id=turn_id,
+            delivery_id=delivery_id,
+            durable_preallocated=True,
+        )
+        await asyncio.wait_for(dispatch_started.wait(), timeout=1)
+        await service.stop()
+
+    asyncio.run(_stop())
+
+    settled = request_store.get_run(run_id)
+    assert settled is not None
+    expected_status = "canceled" if user_stopped else "failed"
+    expected_reason = SETTLED_BY_STOPPED if user_stopped else SETTLED_BY_RESTARTED
+    assert settled["status"] == expected_status
+    assert settled["metadata"]["interrupt_reason"] == expected_reason
+    with engine.connect() as conn:
+        terminal_turn = message_deliveries.get_turn(conn, turn_id)
+        accepted = message_deliveries.get_delivery(conn, delivery_id)
+        held = message_deliveries.get_delivery(conn, queued["id"])
+        successor_turn = (
+            message_deliveries.get_turn(conn, successor_turn_id)
+            if successor_turn_id
+            else None
+        )
+        successor_delivery = (
+            message_deliveries.get_delivery(conn, successor_delivery_id)
+            if successor_delivery_id
+            else None
+        )
+        assert message_deliveries.queue_is_held(conn, session_id) is True
+    assert terminal_turn is not None
+    assert terminal_turn["state"] == "terminal"
+    assert terminal_turn["terminal_outcome"] == expected_status
+    assert terminal_turn["settled_by"] == expected_reason
+    assert terminal_turn["terminal_evidence_kind"] == (
+        "service_shutdown_after_user_stop"
+        if user_stopped
+        else "service_shutdown"
+    )
+    assert accepted is not None and accepted["state"] == "accepted"
+    assert held is not None and held["state"] == "queued"
+    if successor_turn_id:
+        assert successor_turn is not None
+        assert successor_turn["state"] == "terminal"
+        assert successor_turn["terminal_outcome"] == "not_written"
+        assert successor_delivery is not None
+        assert successor_delivery["state"] == "queued"
+        assert successor_delivery["priority"] == "p3"
+        assert successor_delivery["turn_id"] is None
+    assert manager.in_flight == {}
+    assert prompts == ["durable prompt interrupted by shutdown"]
 
 
 def test_service_stop_preserves_terminal_run_that_won_the_race(
@@ -1898,8 +2247,238 @@ def test_service_stop_preserves_terminal_run_that_won_the_race(
     assert "interrupt_reason" not in settled["metadata"]
 
 
+def test_restart_recovery_terminalizes_started_rows_and_preserves_other_owners(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """HFR-104: startup fails executed Runs while preserving every exempt owner."""
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    definition_store = ScheduledTaskStore()
+    scheduler_at = definition_store.add_task(
+        session_key="slack::channel::C123",
+        prompt="scheduler at",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    scheduler_cron = definition_store.add_task(
+        session_key="slack::channel::C123",
+        prompt="scheduler cron",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    manual_at = definition_store.add_task(
+        session_key="slack::channel::C123",
+        prompt="manual at",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    request_store = TaskExecutionStore()
+
+    started_runs: dict[str, str] = {}
+    for label, task, source_kind in (
+        ("scheduler_at", scheduler_at, "scheduler"),
+        ("scheduler_cron", scheduler_cron, "scheduler"),
+        ("manual_at", manual_at, "cli"),
+    ):
+        request = request_store.enqueue_task_run(
+            task.id,
+            source_kind=source_kind,
+            task=task,
+        )
+        assert request_store.claim(request.id) is not None
+        _force_run_columns(request_store, request.id, pid=4321)
+        started_runs[label] = request.id
+
+    pre_execution = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="claimed but coroutine never entered",
+    )
+    assert request_store.claim(pre_execution.id) is not None
+
+    watch_runtime = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="watch runtime bookkeeping",
+    )
+    assert request_store.claim(watch_runtime.id) is not None
+    _force_run_columns(
+        request_store,
+        watch_runtime.id,
+        run_type="watch_runtime",
+        pid=4321,
+    )
+
+    deferred = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="activity owns terminal settlement",
+    )
+    assert request_store.claim(deferred.id) is not None
+    _force_run_columns(
+        request_store,
+        deferred.id,
+        pid=4321,
+        result_payload_json=json.dumps({"deferred_terminal_status": "succeeded"}),
+    )
+
+    stopped = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="user stopped before restart",
+    )
+    assert request_store.claim(stopped.id) is not None
+    _force_run_columns(request_store, stopped.id, pid=4321)
+    assert request_store.cancel_run(stopped.id)
+
+    delivery_owned = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="durable Turn owns this row",
+        agent_name="codex",
+    )
+    assert request_store.claim(delivery_owned.id) is not None
+    _force_run_columns(request_store, delivery_owned.id, pid=4321)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        delivery = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            author="harness",
+            source="harness",
+            message_type="harness",
+            text="durable Turn owns this row",
+            native_message_id=f"agent_run:{delivery_owned.id}",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            delivery_owned.id,
+            session_id=session_id,
+            delivery_id=str(delivery["id"]),
+        )
+
+    natural = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="natural terminal wins",
+    )
+    claimed_natural = request_store.claim(natural.id)
+    assert claimed_natural is not None
+    request_store.complete(claimed_natural, ok=True)
+
+    held_queued = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="held queue stays queued",
+        agent_name="codex",
+        metadata={"workbench_queue_holds_run": True},
+    )
+
+    restarted_store = TaskExecutionStore()
+    restarted_store.recover_processing()
+
+    for run_id in started_runs.values():
+        settled = restarted_store.get_run(run_id)
+        assert settled is not None
+        assert settled["status"] == "failed"
+        assert settled["metadata"]["interrupt_reason"] == "restarted"
+        assert settled["error"]
+        assert settled["completed_at"] is not None
+
+    assert restarted_store.get_run(pre_execution.id)["status"] == "queued"
+    assert restarted_store.get_run(watch_runtime.id)["status"] == "running"
+    assert restarted_store.get_run(deferred.id)["status"] == "running"
+    assert restarted_store.get_run(delivery_owned.id)["status"] == "running"
+    assert restarted_store.get_run(natural.id)["status"] == "succeeded"
+    assert restarted_store.get_run(held_queued.id)["status"] == "queued"
+    recovered_stopped = restarted_store.get_run(stopped.id)
+    assert recovered_stopped["status"] == "canceled"
+    assert recovered_stopped["metadata"]["interrupt_reason"] == SETTLED_BY_STOPPED
+
+    projected = ScheduledTaskStore()
+    recovered_scheduler_at = projected.get_task(scheduler_at.id)
+    recovered_scheduler_cron = projected.get_task(scheduler_cron.id)
+    recovered_manual_at = projected.get_task(manual_at.id)
+    assert recovered_scheduler_at is not None
+    assert recovered_scheduler_cron is not None
+    assert recovered_manual_at is not None
+    assert recovered_scheduler_at.enabled is False
+    assert recovered_scheduler_cron.enabled is True
+    assert recovered_manual_at.enabled is True
+    for definition in (
+        recovered_scheduler_at,
+        recovered_scheduler_cron,
+        recovered_manual_at,
+    ):
+        assert definition.last_run_at is not None
+        assert definition.last_error
+
+
+def test_every_teardown_settlement_surface_is_reached_or_explicitly_owned_elsewhere() -> None:
+    """HFR-105: every settlement surface is reached or explicitly owned elsewhere."""
+    assert TEARDOWN_SETTLEMENT_SURFACE_OWNERS == {
+        "run_row": "claimed_request",
+        "definition_projection": "claimed_request",
+        "durable_turn": "session_turn_manager",
+        "delivery_binding": "session_turn_manager",
+        "session_projection_and_queue": "session_turn_manager",
+        "scheduler_runtime_ownership": "scheduled_task_service",
+        "backend_runtime": "backend_runtime_cleanup",
+        "callback_and_failure_notice": "terminal_run_projection",
+        "restart_recovery": "startup_recovery",
+        "runtime_registries": "existing_runtime_owners",
+    }
+    assert set(SETTLEMENTS_WITHOUT_RESULT) == set(SETTLEMENT_I18N_KEYS)
+    assert set(SETTLEMENTS_WITHOUT_RESULT) == set(SETTLEMENT_TERMINAL_STATUS)
+    assert SETTLED_BY_RESTARTED in RUN_INTERRUPTION_REASONS
+
+    from storage.background import RUN_INTERRUPTION_REASONS as storage_reasons
+
+    assert storage_reasons == RUN_INTERRUPTION_REASONS
+
+
+def test_file_recovery_distinguishes_bare_started_and_user_stopped_claims(
+    tmp_path: Path,
+) -> None:
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+
+    bare = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="claim only",
+    )
+    assert request_store.claim(bare.id) is not None
+
+    started = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="started",
+    )
+    assert request_store.claim(started.id) is not None
+    assert request_store.mark_execution_started(started.id)
+
+    stopped = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="stopped",
+    )
+    assert request_store.claim(stopped.id) is not None
+    assert request_store.mark_execution_started(stopped.id)
+    assert request_store.cancel_run(stopped.id)
+
+    request_store.recover_processing()
+
+    assert request_store.get_run(bare.id)["status"] == "queued"
+    recovered_started = request_store.get_run(started.id)
+    assert recovered_started["status"] == "failed"
+    assert recovered_started["metadata"]["interrupt_reason"] == SETTLED_BY_RESTARTED
+    recovered_stopped = request_store.get_run(stopped.id)
+    assert recovered_stopped["status"] == "canceled"
+    assert recovered_stopped["metadata"]["interrupt_reason"] == SETTLED_BY_STOPPED
+
+
 def test_restart_recovers_running_row_and_preserves_same_session_fifo(monkeypatch, tmp_path) -> None:
-    """HFR-004: a crash-held row restarts queued and each successor runs once."""
+    """A bare-claimed row restarts queued and each successor runs once."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
@@ -2228,6 +2807,7 @@ def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypat
     started = asyncio.Event()
 
     async def fake_execute(claimed):
+        assert request_store.mark_execution_started(claimed.id)
         started.set()
         await asyncio.Event().wait()
 
@@ -2996,10 +3576,9 @@ def test_late_terminal_result_cannot_reopen_a_stopped_run(tmp_path: Path, monkey
 # only thing that can close them, which also makes it the only thing that can
 # WRONGLY close a healthy run — so the negative cases matter as much as the positive.
 #
-# Note on staging: ``ScheduledTaskService.__init__`` runs ``recover_processing()``,
-# which requeues every ``running`` row (that is how a restart's in-flight runs get
-# retried, and why the orphan class here is about owners lost WITHIN a live process).
-# So these tests build the service first and stage the stale row afterwards.
+# Note on staging: ``ScheduledTaskService.__init__`` runs ``recover_processing()``.
+# It requeues bare claims and terminalizes executions whose coroutine had started,
+# so these tests build the service first and stage the live-process orphan after it.
 # ---------------------------------------------------------------------------
 
 
@@ -4549,9 +5128,6 @@ def test_agent_run_early_failure_settles_only_the_exact_run(tmp_path: Path, monk
             agent_name="codex",
         )
         run_ids.append(request.id)
-    claimed = request_store.claim(run_ids[0])
-    assert claimed is not None
-
     async def _submit_scheduled(_sid, _ctx, _text):
         raise AssertionError("the direct execution path should be patched below")
 
@@ -4565,6 +5141,8 @@ def test_agent_run_early_failure_settles_only_the_exact_run(tmp_path: Path, monk
         store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
         request_store=request_store,
     )
+    claimed = request_store.claim(run_ids[0])
+    assert claimed is not None
 
     async def _raise_early(**_kwargs):
         raise RuntimeError("target session vanished")
@@ -7266,18 +7844,18 @@ def test_claimed_request_refreshes_agent_name_after_archive(monkeypatch, tmp_pat
             prompt="continue",
             agent_name=agent.name,
         )
-        claimed = request_store.claim(request.id)
-        assert claimed is not None
-        assert claimed.agent_name == "pm"
-
-        archived = agent_store.archive("pm")
-        assert archived is not None
         calls: list[dict[str, Any]] = []
         service = ScheduledTaskService(
             controller=SimpleNamespace(),
             store=ScheduledTaskStore(),
             request_store=request_store,
         )
+        claimed = request_store.claim(request.id)
+        assert claimed is not None
+        assert claimed.agent_name == "pm"
+
+        archived = agent_store.archive("pm")
+        assert archived is not None
 
         async def _execute_request(**kwargs):
             calls.append(kwargs)
@@ -7308,6 +7886,12 @@ def test_claimed_request_keeps_agent_identity_when_archive_lands_after_refresh(
             prompt="continue",
             agent_name=agent.name,
         )
+        calls: list[dict[str, Any]] = []
+        service = ScheduledTaskService(
+            controller=SimpleNamespace(),
+            store=ScheduledTaskStore(),
+            request_store=request_store,
+        )
         claimed = request_store.claim(request.id)
         assert claimed is not None
 
@@ -7322,12 +7906,6 @@ def test_claimed_request_keeps_agent_identity_when_archive_lands_after_refresh(
             return refreshed
 
         request_store.refresh_claimed_request = _refresh_then_archive  # type: ignore[method-assign]
-        calls: list[dict[str, Any]] = []
-        service = ScheduledTaskService(
-            controller=SimpleNamespace(),
-            store=ScheduledTaskStore(),
-            request_store=request_store,
-        )
 
         async def _execute_request(**kwargs):
             calls.append(kwargs)

@@ -231,6 +231,24 @@ SETTLEMENT_TERMINAL_STATUS: Final = {
     SETTLED_BY_INTERRUPTED: "failed",
 }
 
+#: Auditable ownership map for every state surface touched by infrastructure
+#: teardown. This is a declaration, not a lifecycle writer: each value names the
+#: existing owner that must either settle the surface or deliberately leave it to
+#: another exact owner. The contract test mirrors the full key set so adding a
+#: surface forces an ownership and consuming-test decision in the same change.
+TEARDOWN_SETTLEMENT_SURFACE_OWNERS: Final = {
+    "run_row": "claimed_request",
+    "definition_projection": "claimed_request",
+    "durable_turn": "session_turn_manager",
+    "delivery_binding": "session_turn_manager",
+    "session_projection_and_queue": "session_turn_manager",
+    "scheduler_runtime_ownership": "scheduled_task_service",
+    "backend_runtime": "backend_runtime_cleanup",
+    "callback_and_failure_notice": "terminal_run_projection",
+    "restart_recovery": "startup_recovery",
+    "runtime_registries": "existing_runtime_owners",
+}
+
 
 # ----- staleness-sweep reason text ----------------------------------------
 #
