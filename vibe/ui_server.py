@@ -7828,6 +7828,8 @@ async def asr_transcribe():
 
     from core.audio_asr import (
         AudioAsrEmptyTranscriptError,
+        AudioAsrInvalidDictationError,
+        AudioAsrProtocolError,
         AudioAsrService,
         AudioAsrTimeoutError,
         AudioAsrUnavailableError,
@@ -7836,19 +7838,22 @@ async def asr_transcribe():
     from modules.im.base import FileAttachment
 
     payload = request.json or {}
+    finalize_only = payload.get("finalize_only") is True
     data_b64 = payload.get("data") or ""
-    if not isinstance(data_b64, str) or not data_b64:
-        return jsonify({"error": "data is required"}), 400
-    if data_b64.startswith("data:") and "," in data_b64:
-        data_b64 = data_b64.split(",", 1)[1]
-    try:
-        raw = base64.b64decode(data_b64)
-    except Exception:
-        return jsonify({"error": "invalid base64"}), 400
-    if not raw:
-        return jsonify({"error": "empty audio"}), 400
-    if len(raw) > 25 * 1024 * 1024:
-        return jsonify({"error": "file_too_large"}), 413
+    raw = b""
+    if not finalize_only:
+        if not isinstance(data_b64, str) or not data_b64:
+            return jsonify({"error": "data is required"}), 400
+        if data_b64.startswith("data:") and "," in data_b64:
+            data_b64 = data_b64.split(",", 1)[1]
+        try:
+            raw = base64.b64decode(data_b64)
+        except Exception:
+            return jsonify({"error": "invalid base64"}), 400
+        if not raw:
+            return jsonify({"error": "empty audio"}), 400
+        if len(raw) > 25 * 1024 * 1024:
+            return jsonify({"error": "file_too_large"}), 413
 
     name = (payload.get("name") or "voice.webm").strip() or "voice.webm"
     mime = (payload.get("mime") or "audio/webm").strip()
@@ -7863,36 +7868,69 @@ async def asr_transcribe():
         return jsonify({"error": "asr_unavailable"}), 400
     audio_asr_config = getattr(config, "audio_asr", None)
     max_file_bytes = getattr(audio_asr_config, "max_file_bytes", None)
-    if max_file_bytes is not None and len(raw) > max_file_bytes:
+    if max_file_bytes is not None and raw and len(raw) > max_file_bytes:
         return jsonify({"error": "file_too_large"}), 413
 
-    suffix = Path(name).suffix or ".webm"
-    tmp_path = Path(tempfile.gettempdir()) / f"vibe_asr_{uuid.uuid4().hex[:8]}{suffix}"
-    tmp_path.write_bytes(raw)
-    try:
+    dictation_id = payload.get("dictation_id")
+    if not isinstance(dictation_id, str) or not dictation_id:
+        dictation_id = f"legacy-{uuid.uuid4().hex}"
+    sequence = payload.get("sequence", 0)
+    overlap_ms = payload.get("overlap_ms", 0)
+    final = payload.get("final", True)
+    receipts = payload.get("receipts", [])
+    before = payload.get("before", "")
+    after = payload.get("after", "")
+    if (
+        not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or not isinstance(overlap_ms, int)
+        or isinstance(overlap_ms, bool)
+        or not isinstance(final, bool)
+        or not isinstance(receipts, list)
+        or not all(isinstance(receipt, str) for receipt in receipts)
+        or not isinstance(before, str)
+        or not isinstance(after, str)
+    ):
+        return jsonify({"error": "invalid_dictation"}), 422
+
+    tmp_path = None
+    attachment = None
+    if raw:
+        suffix = Path(name).suffix or ".webm"
+        tmp_path = Path(tempfile.gettempdir()) / f"vibe_asr_{uuid.uuid4().hex[:8]}{suffix}"
+        tmp_path.write_bytes(raw)
         attachment = FileAttachment(name=name, mimetype=mime, local_path=str(tmp_path), size=len(raw))
+    try:
         try:
-            transcripts = await service.transcribe_attachments(
-                [attachment],
-                raise_on_empty=True,
-                raise_on_timeout=True,
-                raise_on_unavailable=True,
-                timeout_seconds=120.0,
+            result = await service.transcribe_voice_segment(
+                attachment,
+                dictation_id=dictation_id,
+                sequence=sequence,
+                overlap_ms=overlap_ms,
+                final=final,
+                finalize_only=finalize_only,
+                receipts=receipts,
+                before=before,
+                after=after,
+                timeout_seconds=155.0,
             )
         except AudioAsrEmptyTranscriptError:
             return jsonify({"error": "transcription_empty"}), 422
+        except AudioAsrInvalidDictationError:
+            return jsonify({"error": "invalid_dictation"}), 422
         except AudioAsrTimeoutError:
             return jsonify({"error": "transcription_timeout"}), 504
         except AudioAsrUnavailableError:
             return jsonify({"error": "asr_unavailable"}), 503
+        except AudioAsrProtocolError:
+            return jsonify({"error": "transcription_failed"}), 502
     finally:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-    if not transcripts:
-        return jsonify({"error": "transcription_failed"}), 502
-    return jsonify({"text": transcripts[0].text})
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+    return jsonify(result)
 
 
 @app.route("/api/asr/telemetry", methods=["POST"])

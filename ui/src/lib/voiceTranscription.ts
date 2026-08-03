@@ -15,7 +15,14 @@ import {
 export const VOICE_SEGMENT_MS = 60_000;
 export const VOICE_TRANSCRIPTION_CONCURRENCY = 2;
 
-const COMPATIBILITY_UPSTREAM_TIMEOUT_MS = 120_000;
+const ASR_UPSTREAM_TIMEOUT_MS = 120_000;
+const CLEANUP_UPSTREAM_TIMEOUT_MS = 30_000;
+const SERVER_FINALIZATION_ALLOWANCE_MS = 5_000;
+const COMPATIBILITY_UPSTREAM_TIMEOUT_MS = (
+  ASR_UPSTREAM_TIMEOUT_MS
+  + CLEANUP_UPSTREAM_TIMEOUT_MS
+  + SERVER_FINALIZATION_ALLOWANCE_MS
+);
 const COMPATIBILITY_UPLOAD_BUDGET_MS = 30_000;
 const COMPATIBILITY_CSRF_ALLOWANCE_MS = 4_000;
 export const VOICE_TRANSCRIPTION_TIMEOUT_MS = (
@@ -70,24 +77,50 @@ export type VoiceTranscriptionDependencies = {
   telemetry?: (event: VoiceTelemetryEvent) => void;
 };
 
+export type VoiceCleanupOutcome = 'success' | 'fallback';
+
+export type VoiceDictationResult = {
+  text: string;
+  cleanup: VoiceCleanupOutcome;
+};
+
 export type VoiceTranscriptionSegment = {
-  blob: Blob;
+  blob: Blob | null;
+  sequence: number;
+  final: boolean;
   durationMs?: number;
   overlapMs?: number;
   attemptCount?: number;
-  text?: string;
+  receipt?: string;
   error?: unknown;
 };
-
-const isEmptyVoiceSegment = (segment: VoiceTranscriptionSegment): boolean => (
-  segment.error instanceof VoiceTranscriptionError
-  && segment.error.code === 'empty'
-  && !segment.text
-);
 
 type VoiceSegmentTranscriptionDependencies = VoiceTranscriptionDependencies & {
   transcribe?: (blob: Blob) => Promise<string>;
 };
+
+type VoiceFinalizationDependencies = VoiceTranscriptionDependencies & {
+  finalize?: (input: {
+    blob: Blob | null;
+    sequence: number;
+    receipts: string[];
+  }) => Promise<VoiceDictationResult>;
+};
+
+type VoiceRequestMetadata = {
+  dictationId: string;
+  sequence: number;
+  overlapMs: number;
+  final: boolean;
+  finalizeOnly: boolean;
+  receipts: string[];
+  before: string;
+  after: string;
+};
+
+type VoiceServerResponse =
+  | { kind: 'receipt'; receipt: string; sequence: number }
+  | { kind: 'text'; text: string; cleanup?: VoiceCleanupOutcome };
 
 const normalizedMimeType = (blob: Blob): string =>
   blob.type.split(';', 1)[0]?.trim().toLowerCase() || 'audio/webm';
@@ -160,20 +193,35 @@ const responseError = async (response: Response): Promise<VoiceTranscriptionErro
   return new VoiceTranscriptionError('failed', { status: response.status });
 };
 
-const responseText = async (response: Response): Promise<string> => {
+const responsePayload = async (response: Response): Promise<VoiceServerResponse> => {
   if (!response.ok) throw await responseError(response);
   const payload = await response.json().catch(() => null) as unknown;
   if (
     payload == null
     || typeof payload !== 'object'
     || Array.isArray(payload)
-    || typeof (payload as { text?: unknown }).text !== 'string'
   ) {
     throw new VoiceTranscriptionError('failed', { status: response.status });
   }
-  const { text } = payload as { text: string };
-  if (!text.trim()) throw new VoiceTranscriptionError('empty', { status: response.status });
-  return text;
+  const body = payload as { text?: unknown; cleanup?: unknown; receipt?: unknown; sequence?: unknown };
+  if (
+    typeof body.receipt === 'string'
+    && body.receipt.length > 0
+    && Number.isInteger(body.sequence)
+    && (body.sequence as number) >= 0
+  ) {
+    return { kind: 'receipt', receipt: body.receipt, sequence: body.sequence as number };
+  }
+  if (typeof body.text === 'string') {
+    if (!body.text.trim()) {
+      throw new VoiceTranscriptionError('empty', { status: response.status });
+    }
+    const cleanup = body.cleanup === 'success' || body.cleanup === 'fallback'
+      ? body.cleanup
+      : undefined;
+    return { kind: 'text', text: body.text, cleanup };
+  }
+  throw new VoiceTranscriptionError('failed', { status: response.status });
 };
 
 const readBlobAsBase64 = async (blob: Blob): Promise<string> => {
@@ -196,32 +244,50 @@ const readBlobAsBase64 = async (blob: Blob): Promise<string> => {
 };
 
 const transcribeLocally = async (
-  blob: Blob,
+  blob: Blob | null,
   localFetch: VoiceFetch,
   signal: AbortSignal,
-): Promise<string> => {
+  metadata?: VoiceRequestMetadata,
+): Promise<VoiceServerResponse> => {
   try {
-    const data = await readBlobAsBase64(blob);
+    const data = blob ? await readBlobAsBase64(blob) : undefined;
     const response = await localFetch('/api/asr/transcribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: voiceRecordingFileName(blob),
-        mime: normalizedMimeType(blob),
+        ...(blob
+          ? {
+              name: voiceRecordingFileName(blob),
+              mime: normalizedMimeType(blob),
+            }
+          : {}),
         data,
+        ...(metadata
+          ? {
+              dictation_id: metadata.dictationId,
+              sequence: metadata.sequence,
+              overlap_ms: metadata.overlapMs,
+              final: metadata.final,
+              finalize_only: metadata.finalizeOnly,
+              receipts: metadata.receipts,
+              before: metadata.before,
+              after: metadata.after,
+            }
+          : {}),
       }),
       signal,
     });
-    return await responseText(response);
+    return await responsePayload(response);
   } catch (error) {
     throw normalizeTranscriptionError(error, signal);
   }
 };
 
-export const transcribeVoiceBlob = async (
-  blob: Blob,
+const requestVoiceServer = async (
+  blob: Blob | null,
   dependencies: VoiceTranscriptionDependencies = {},
-): Promise<string> => {
+  metadata?: VoiceRequestMetadata,
+): Promise<VoiceServerResponse> => {
   const cloudFetch = dependencies.cloudFetch ?? avibeFetch;
   const localFetch = dependencies.localFetch ?? apiFetch;
   const timeoutMs = dependencies.timeoutMs ?? VOICE_TRANSCRIPTION_TIMEOUT_MS;
@@ -250,8 +316,8 @@ export const transcribeVoiceBlob = async (
         providerStage,
         outcome,
         dictationId: dependencies.dictationId,
-        sizeBytes: blob.size,
-        mimeType: normalizedMimeType(blob),
+        sizeBytes: blob?.size ?? 0,
+        mimeType: blob ? normalizedMimeType(blob) : undefined,
         durationMs: dependencies.durationMs,
         elapsedMs: overrides.elapsedMs ?? Date.now() - startedAt,
         httpStatus: overrides.httpStatus ?? error?.status,
@@ -289,14 +355,27 @@ export const transcribeVoiceBlob = async (
   };
   try {
     const form = new FormData();
-    form.set('file', blob, voiceRecordingFileName(blob));
-    const response = await cloudFetch('/api/cloud/audio/transcriptions', {
-      method: 'POST',
-      body: form,
-      signal: timeout.signal,
-      onAttempt: handleCloudAttempt,
-    });
-    const text = await responseText(response);
+    if (blob) form.set('file', blob, voiceRecordingFileName(blob));
+    if (metadata) {
+      form.set('dictation_id', metadata.dictationId);
+      form.set('sequence', String(metadata.sequence));
+      form.set('overlap_ms', String(metadata.overlapMs));
+      form.set('final', String(metadata.final));
+      if (metadata.finalizeOnly) form.set('finalize_only', 'true');
+      for (const receipt of metadata.receipts) form.append('receipt', receipt);
+      if (metadata.before) form.set('before', metadata.before);
+      if (metadata.after) form.set('after', metadata.after);
+    }
+    const response = await cloudFetch(
+      metadata ? '/api/cloud/voice/dictations' : '/api/cloud/audio/transcriptions',
+      {
+        method: 'POST',
+        body: form,
+        signal: timeout.signal,
+        onAttempt: handleCloudAttempt,
+      },
+    );
+    const payload = await responsePayload(response);
     report(
       'cloud',
       'response',
@@ -305,15 +384,15 @@ export const transcribeVoiceBlob = async (
       undefined,
       { attemptCount: cloudAttemptCount },
     );
-    return text;
+    return payload;
   } catch (error) {
     if (error instanceof CloudUnavailableError && !error.uploadStarted) {
       report('cloud', 'token', 'fallback', cloudStageStartedAt);
       const localStartedAt = Date.now();
       try {
-        const text = await transcribeLocally(blob, localFetch, timeout.signal);
+        const payload = await transcribeLocally(blob, localFetch, timeout.signal, metadata);
         report('local', 'response', 'success', localStartedAt);
-        return text;
+        return payload;
       } catch (localError) {
         const normalized = normalizeTranscriptionError(localError, timeout.signal);
         report(
@@ -349,21 +428,53 @@ export const transcribeVoiceBlob = async (
   }
 };
 
+export const transcribeVoiceBlob = async (
+  blob: Blob,
+  dependencies: VoiceTranscriptionDependencies = {},
+): Promise<string> => {
+  const response = await requestVoiceServer(blob, dependencies);
+  if (response.kind !== 'text') throw new VoiceTranscriptionError('failed');
+  if (!response.text.trim()) throw new VoiceTranscriptionError('empty');
+  return response.text;
+};
+
 const transcribeVoiceSegment = async (
   segment: VoiceTranscriptionSegment,
   dependencies: VoiceSegmentTranscriptionDependencies,
 ): Promise<void> => {
+  if (segment.final || !segment.blob) return;
   const { transcribe, ...transcriptionDependencies } = dependencies;
   segment.error = undefined;
   segment.attemptCount = (segment.attemptCount ?? 0) + 1;
   try {
-    segment.text = transcribe
-      ? await transcribe(segment.blob)
-      : await transcribeVoiceBlob(segment.blob, {
-          ...transcriptionDependencies,
-          durationMs: segment.durationMs,
-          attemptCount: segment.attemptCount,
-        });
+    if (transcribe) {
+      segment.receipt = await transcribe(segment.blob);
+      return;
+    }
+    const dictationId = transcriptionDependencies.dictationId;
+    if (!dictationId) throw new VoiceTranscriptionError('failed');
+    const response = await requestVoiceServer(
+      segment.blob,
+      {
+        ...transcriptionDependencies,
+        durationMs: segment.durationMs,
+        attemptCount: segment.attemptCount,
+      },
+      {
+        dictationId,
+        sequence: segment.sequence,
+        overlapMs: segment.overlapMs ?? 0,
+        final: false,
+        finalizeOnly: false,
+        receipts: [],
+        before: '',
+        after: '',
+      },
+    );
+    if (response.kind !== 'receipt' || response.sequence !== segment.sequence) {
+      throw new VoiceTranscriptionError('failed');
+    }
+    segment.receipt = response.receipt;
   } catch (error) {
     segment.error = error;
   }
@@ -397,6 +508,7 @@ export class VoiceTranscriptionQueue {
   }
 
   enqueue(segment: VoiceTranscriptionSegment): Promise<void> {
+    if (segment.final) return Promise.resolve();
     const task = new Promise<void>((resolve) => {
       this.pending.push({ segment, resolve });
     });
@@ -449,7 +561,7 @@ export const transcribeVoiceSegments = async (
     ...transcriptionDependencies
   } = dependencies;
   const queue = segments.filter((segment) => (
-    !segment.text && !isEmptyVoiceSegment(segment)
+    !segment.final && !segment.receipt
   ));
   const concurrency = Math.max(1, Math.floor(requestedConcurrency));
   const worker = async () => {
@@ -468,103 +580,68 @@ export const transcribeVoiceSegments = async (
   );
 };
 
-const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
-const WORD_CHARACTER = /[\p{L}\p{N}]/u;
-const CLOSING_PUNCTUATION = /^[,.;:!?%)\]}，。；：！？）》】」』]/u;
-const OPENING_PUNCTUATION = /[([{（《【「『]$/u;
-const DOMAIN_SUFFIX = /^(?:\p{L}{2,63}|xn--[a-z0-9-]{1,59})(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)*(?:[/:?#]|$)/iu;
-const EXPLICIT_URL_OR_EMAIL = /^(?:[a-z][a-z\d+.-]*:\/\/|www\.|[^@\s]+@)/iu;
-
-const continuesDomain = (leftToken: string, rightToken: string): boolean => {
-  if (!leftToken.endsWith('.')) return false;
-  const suffix = rightToken.match(DOMAIN_SUFFIX)?.[0];
-  if (!suffix) return false;
-  return EXPLICIT_URL_OR_EMAIL.test(leftToken) || /[/:?#]$/u.test(suffix);
-};
-
-const voiceSegmentSeparator = (left: string, right: string): string => {
-  const leftCharacter = left.at(-1) ?? '';
-  const rightCharacter = right.at(0) ?? '';
-  if (!leftCharacter || !rightCharacter || /\s/u.test(leftCharacter + rightCharacter)) return '';
-  if (NO_SPACE_SCRIPT.test(leftCharacter) || NO_SPACE_SCRIPT.test(rightCharacter)) return '';
-  if (CLOSING_PUNCTUATION.test(rightCharacter) || OPENING_PUNCTUATION.test(leftCharacter)) return '';
-
-  const leftToken = left.match(/\S+$/u)?.[0] ?? '';
-  const rightToken = right.match(/^\S+/u)?.[0] ?? '';
-  if (
-    /[-'@/_#=+%&?]$/u.test(leftToken)
-    || /^[-'@/_#=+%&?]/u.test(rightToken)
-    || (/^\p{N}+$/u.test(leftToken) && /^\p{N}+$/u.test(rightToken))
-    || (
-      /[\p{N}][.,:]$/u.test(leftToken)
-      && /^\p{N}/u.test(rightToken)
-    )
-    || continuesDomain(leftToken, rightToken)
-  ) {
-    return '';
-  }
-
-  if (WORD_CHARACTER.test(rightCharacter)) return ' ';
-  return '';
-};
-
-const trimTranscribedOverlap = (left: string, right: string): string => {
-  const candidate = right.trimStart();
-  const leftFolded = left.toLocaleLowerCase();
-  const candidateFolded = candidate.toLocaleLowerCase();
-  for (
-    let length = Math.min(leftFolded.length, candidateFolded.length);
-    length > 0;
-    length -= 1
-  ) {
-    const overlap = candidateFolded.slice(0, length);
-    if (!leftFolded.endsWith(overlap)) continue;
-
-    const leftStart = left.length - length;
-    const leftBefore = left.at(leftStart - 1) ?? '';
-    const overlapFirst = candidate.at(0) ?? '';
-    const overlapLast = candidate.at(length - 1) ?? '';
-    const rightAfter = candidate.at(length) ?? '';
-    const containsNoSpaceScript = NO_SPACE_SCRIPT.test(overlap);
-    if (
-      !containsNoSpaceScript
-      && (
-        (WORD_CHARACTER.test(leftBefore) && WORD_CHARACTER.test(overlapFirst))
-        || (WORD_CHARACTER.test(overlapLast) && WORD_CHARACTER.test(rightAfter))
-      )
-    ) {
-      continue;
-    }
-    return candidate.slice(length);
-  }
-  return right;
-};
-
-export const voiceTranscriptFromSegments = (
+export const finalizeVoiceDictation = async (
   segments: VoiceTranscriptionSegment[],
-): string => {
-  const failed = segments.find((segment) => (
-    !isEmptyVoiceSegment(segment)
-    && (segment.error || !segment.text)
-  ));
+  input: {
+    dictationId: string;
+    before: string;
+    after: string;
+  },
+  dependencies: VoiceFinalizationDependencies = {},
+): Promise<VoiceDictationResult> => {
+  const ordered = [...segments].sort((left, right) => left.sequence - right.sequence);
+  const finalSegment = ordered.find((segment) => segment.final);
+  if (!finalSegment || ordered.at(-1) !== finalSegment) {
+    throw new VoiceTranscriptionError('failed');
+  }
+  const prior = ordered.filter((segment) => !segment.final);
+  const failed = prior.find((segment) => segment.error || !segment.receipt);
   if (failed) {
     if (failed.error instanceof Error) throw failed.error;
     throw new VoiceTranscriptionError('failed', { cause: failed.error });
   }
-  const transcribed = segments.filter((segment) => Boolean(segment.text));
-  if (!transcribed.length) {
-    const emptyError = segments.find(isEmptyVoiceSegment)?.error;
-    if (emptyError instanceof Error) throw emptyError;
-    throw new VoiceTranscriptionError('empty');
+  const receipts = prior.map((segment) => segment.receipt as string);
+  finalSegment.error = undefined;
+  finalSegment.attemptCount = (finalSegment.attemptCount ?? 0) + 1;
+  try {
+    const result = dependencies.finalize
+      ? await dependencies.finalize({
+          blob: finalSegment.blob,
+          sequence: finalSegment.sequence,
+          receipts,
+        })
+      : await (async () => {
+          const response = await requestVoiceServer(
+            finalSegment.blob,
+            {
+              ...dependencies,
+              durationMs: finalSegment.durationMs,
+              attemptCount: finalSegment.attemptCount,
+              dictationId: input.dictationId,
+            },
+            {
+              dictationId: input.dictationId,
+              sequence: finalSegment.sequence,
+              overlapMs: finalSegment.overlapMs ?? 0,
+              final: true,
+              finalizeOnly: finalSegment.blob === null,
+              receipts,
+              before: input.before,
+              after: input.after,
+            },
+          );
+          if (response.kind !== 'text' || !response.cleanup) {
+            throw new VoiceTranscriptionError('failed');
+          }
+          return { text: response.text, cleanup: response.cleanup };
+        })();
+    if (!result.text.trim()) throw new VoiceTranscriptionError('empty');
+    return result;
+  } catch (error) {
+    if (error instanceof VoiceTranscriptionError && error.status === 422) {
+      for (const segment of prior) segment.receipt = undefined;
+    }
+    finalSegment.error = error;
+    throw error;
   }
-  const text = transcribed.reduce((joined, segment) => {
-    const rawPart = segment.text ?? '';
-    const part = joined && (segment.overlapMs ?? 0) > 0
-      ? trimTranscribedOverlap(joined, rawPart)
-      : rawPart;
-    if (!part) return joined;
-    return joined ? `${joined}${voiceSegmentSeparator(joined, part)}${part}` : part;
-  }, '').trim();
-  if (!text) throw new VoiceTranscriptionError('empty');
-  return text;
 };

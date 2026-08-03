@@ -518,22 +518,25 @@ def persist_silent_terminal(context: MessageContext, *, is_error: bool) -> None:
         )
 
 
-def agent_message_exists(context: MessageContext, native_message_id: str | None) -> bool:
-    """Check a stable output identity before external delivery.
+def agent_message_exists(
+    context: MessageContext,
+    native_message_id: str | None,
+) -> Optional[dict[str, Any]]:
+    """Load the accepted Message receipt before external delivery.
 
     The database unique constraint remains the final race guard. This early
-    check prevents ordinary callback or backend retries from posting the same
-    durable output to an IM surface twice.
+    read prevents retries from posting the same durable output twice and returns
+    the canonical text, footer, and provenance for local-only settlement.
     """
 
     platform = str(context.platform or "").strip()
     identity = str(native_message_id or "").strip()
     if not platform or not identity:
-        return False
+        return None
     try:
         engine = get_cached_sqlite_engine()
         with engine.begin() as conn:
-            return messages_service.native_message_exists(
+            return messages_service.get_native_message(
                 conn,
                 platform=platform,
                 scope_id=_agent_message_scope_id(conn, context),
@@ -541,7 +544,7 @@ def agent_message_exists(context: MessageContext, native_message_id: str | None)
             )
     except Exception:
         logger.debug("agent_message_exists: lookup failed open", exc_info=True)
-        return False
+        return None
 
 
 def mirror_harness_inbound(context: MessageContext, text: str) -> None:

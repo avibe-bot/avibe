@@ -163,6 +163,47 @@ def test_native_message_identity_is_scoped_to_conversation(isolated_state):
     )
 
 
+def test_native_message_lookup_returns_canonical_result_payload(isolated_state):
+    engine = create_sqlite_engine(isolated_state / "state" / "vibe.sqlite")
+    with engine.begin() as conn:
+        now = messages_service._utc_now_iso()
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C-results",
+            now=now,
+        )
+        _seed_session(conn, scope_id, "ses-results")
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses-results",
+            platform="slack",
+            author="agent",
+            message_type="result",
+            text="Exact accepted assistant result",
+            content={"result_footer": "3.4s | 812 tok"},
+            metadata={
+                "activity_ids": ["task-a", "task-b"],
+                "run_ids": ["run-a", "run-b"],
+            },
+            native_message_id="activity-batch-receipt",
+        )
+
+        accepted = messages_service.get_native_message(
+            conn,
+            platform="slack",
+            scope_id=scope_id,
+            native_message_id="activity-batch-receipt",
+        )
+
+    assert accepted is not None
+    assert accepted["text"] == "Exact accepted assistant result"
+    assert accepted["content"]["result_footer"] == "3.4s | 812 tok"
+    assert accepted["metadata"]["activity_ids"] == ["task-a", "task-b"]
+
+
 def _list_production_transcript(conn, session_id: str):
     return messages_service.list_session_messages(
         conn,

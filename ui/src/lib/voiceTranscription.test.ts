@@ -6,12 +6,12 @@ import {
   type AvibeFetchRequestInit,
 } from './avibeFetch';
 import {
+  finalizeVoiceDictation,
   transcribeVoiceBlob,
   VoiceTranscriptionQueue,
-  VoiceTranscriptionError,
+  type VoiceTranscriptionSegment,
   transcribeVoiceSegments,
   VOICE_TRANSCRIPTION_TIMEOUT_MS,
-  voiceTranscriptFromSegments,
   voiceRecordingFileName,
 } from './voiceTranscription';
 
@@ -29,7 +29,8 @@ describe('voice transcription', () => {
 
   it('uses the real container extension and normalized MIME type', async () => {
     const telemetry = vi.fn();
-    const cloudFetch = vi.fn().mockImplementation(async (_path: string, init?: RequestInit) => {
+    const cloudFetch = vi.fn().mockImplementation(async (path: string, init?: RequestInit) => {
+      expect(path).toBe('/api/cloud/audio/transcriptions');
       const file = (init?.body as FormData).get('file') as File;
       expect(file.name).toBe('voice.mp4');
       expect(file.type).toBe('audio/mp4; codecs=mp4a.40.2');
@@ -370,18 +371,24 @@ describe('voice transcription', () => {
     );
   });
 
-  it('joins independently transcribed segments in capture order', async () => {
-    const segments = [
-      { blob: new Blob(['one']), text: 'first' },
-      { blob: new Blob(['two']) },
-      { blob: new Blob(['three']) },
+  it('retains accepted receipts and uploads only missing intermediate segments', async () => {
+    const segments: VoiceTranscriptionSegment[] = [
+      { blob: new Blob(['one']), sequence: 0, final: false, receipt: 'accepted' },
+      { blob: new Blob(['two']), sequence: 1, final: false },
+      { blob: new Blob(['three']), sequence: 2, final: false },
+      { blob: new Blob(['final']), sequence: 3, final: true },
     ];
     const transcribe = vi.fn(async (blob: Blob) => blob.text());
 
     await transcribeVoiceSegments(segments, { concurrency: 2, transcribe });
 
     expect(transcribe).toHaveBeenCalledTimes(2);
-    expect(voiceTranscriptFromSegments(segments)).toBe('first two three');
+    expect(segments.map((segment) => segment.receipt)).toEqual([
+      'accepted',
+      'two',
+      'three',
+      undefined,
+    ]);
   });
 
   it('bounds incrementally queued initial transcriptions', async () => {
@@ -396,9 +403,13 @@ describe('voice transcription', () => {
       return blob.text();
     });
     const queue = new VoiceTranscriptionQueue({ concurrency: 2, transcribe });
-    const segments = Array.from(
+    const segments: VoiceTranscriptionSegment[] = Array.from(
       { length: 5 },
-      (_value, index) => ({ blob: new Blob([String(index)]) }),
+      (_value, index) => ({
+        blob: new Blob([String(index)]),
+        sequence: index,
+        final: false,
+      }),
     );
 
     const tasks = segments.map((segment) => queue.enqueue(segment));
@@ -412,7 +423,7 @@ describe('voice transcription', () => {
     await Promise.all(tasks);
 
     expect(maxActive).toBe(2);
-    expect(segments.map((segment) => segment.text)).toEqual(['0', '1', '2', '3', '4']);
+    expect(segments.map((segment) => segment.receipt)).toEqual(['0', '1', '2', '3', '4']);
     expect(segments.map((segment) => segment.attemptCount)).toEqual([1, 1, 1, 1, 1]);
   });
 
@@ -425,14 +436,15 @@ describe('voice transcription', () => {
         }, { once: true });
       }),
     );
-    const segments = Array.from(
+    const segments: VoiceTranscriptionSegment[] = Array.from(
       { length: 5 },
-      () => ({ blob: audioBlob() }),
+      (_value, index) => ({ blob: audioBlob(), sequence: index, final: false }),
     );
 
     const transcription = transcribeVoiceSegments(segments, {
       cloudFetch,
       concurrency: 2,
+      dictationId: 'dictation-cancelled',
       signal: controller.signal,
     });
     await vi.waitFor(() => expect(cloudFetch).toHaveBeenCalledTimes(2));
@@ -469,11 +481,12 @@ describe('voice transcription', () => {
     const queue = new VoiceTranscriptionQueue({
       cloudFetch,
       concurrency: 2,
+      dictationId: 'dictation-discarded',
       signal: controller.signal,
     });
-    const segments = Array.from(
+    const segments: VoiceTranscriptionSegment[] = Array.from(
       { length: 5 },
-      () => ({ blob: audioBlob() }),
+      (_value, index) => ({ blob: audioBlob(), sequence: index, final: false }),
     );
 
     const tasks = segments.map((segment) => queue.enqueue(segment));
@@ -499,110 +512,127 @@ describe('voice transcription', () => {
     ]);
   });
 
-  it.each([
-    [['你好', '世界'], '你好世界'],
-    [['hello', 'world'], 'hello world'],
-    [['hello ', 'world'], 'hello world'],
-    [['123', '456'], '123456'],
-    [['https://example.', 'com/path'], 'https://example.com/path'],
-    [['https://example.', 'technology'], 'https://example.technology'],
-    [['example.', 'cn/path'], 'example.cn/path'],
-    [['example.', 'co.uk/path'], 'example.co.uk/path'],
-    [['sentence.', 'cn'], 'sentence. cn'],
-    [['voice_input-', 'reliability'], 'voice_input-reliability'],
-    [['hello,', 'world'], 'hello, world'],
-    [['use camelCase', 'notation matters'], 'use camelCase notation matters'],
-    [['camel', 'Case'], 'camel Case'],
-    [['we met', 'Alice yesterday'], 'we met Alice yesterday'],
-    [['first paragraph\n\n', 'second paragraph'], 'first paragraph\n\nsecond paragraph'],
-    [['hello.', 'world'], 'hello. world'],
-  ])('joins segment boundaries without corrupting language or tokens', (parts, expected) => {
-    expect(voiceTranscriptFromSegments(
-      parts.map((text) => ({ blob: new Blob(), text })),
-    )).toBe(expected);
+  it('submits ordered receipts and cursor context with the final audio segment', async () => {
+    const cloudFetch = vi.fn(async (path: string, init?: RequestInit) => {
+      expect(path).toBe('/api/cloud/voice/dictations');
+      const form = init?.body as FormData;
+      if (form.get('final') === 'false') {
+        expect(form.get('sequence')).toBe('0');
+        expect(form.getAll('receipt')).toEqual([]);
+        return Response.json({ receipt: 'receipt-0', sequence: 0 });
+      }
+      expect(form.get('sequence')).toBe('1');
+      expect(form.get('finalize_only')).toBeNull();
+      expect(form.getAll('receipt')).toEqual(['receipt-0']);
+      expect(form.get('before')).toBe('prefix ');
+      expect(form.get('after')).toBe(' suffix');
+      expect(form.get('file')).toBeInstanceOf(Blob);
+      return Response.json({ text: 'cleaned result', cleanup: 'success' });
+    });
+    const segments: VoiceTranscriptionSegment[] = [
+      { blob: audioBlob(), sequence: 0, final: false },
+      { blob: audioBlob(), sequence: 1, final: true, overlapMs: 250 },
+    ];
+
+    await transcribeVoiceSegments(segments, {
+      cloudFetch,
+      dictationId: 'dictation-final',
+    });
+    await expect(finalizeVoiceDictation(segments, {
+      dictationId: 'dictation-final',
+      before: 'prefix ',
+      after: ' suffix',
+    }, { cloudFetch })).resolves.toEqual({ text: 'cleaned result', cleanup: 'success' });
+
+    expect(cloudFetch).toHaveBeenCalledTimes(2);
+    expect(segments[0]?.receipt).toBe('receipt-0');
   });
 
-  it('removes transcript duplicated by acoustic segment overlap', () => {
-    expect(voiceTranscriptFromSegments([
-      { blob: new Blob(), text: 'Please ship reliable voice input' },
-      {
-        blob: new Blob(),
-        text: 'reliable voice input today',
-        overlapMs: 500,
-      },
-    ])).toBe('Please ship reliable voice input today');
-    expect(voiceTranscriptFromSegments([
-      { blob: new Blob(), text: '今天讨论语音输入稳定性' },
-      {
-        blob: new Blob(),
-        text: '语音输入稳定性和延迟',
-        overlapMs: 500,
-      },
-    ])).toBe('今天讨论语音输入稳定性和延迟');
-    expect(voiceTranscriptFromSegments([
-      { blob: new Blob(), text: 'use cat' },
-      {
-        blob: new Blob(),
-        text: 'category labels',
-        overlapMs: 500,
-      },
-    ])).toBe('use cat category labels');
-    expect(voiceTranscriptFromSegments([
-      { blob: new Blob(), text: 'first paragraph' },
-      {
-        blob: new Blob(),
-        text: '\n\nsecond paragraph',
-        overlapMs: 500,
-      },
-    ])).toBe('first paragraph\n\nsecond paragraph');
-    expect(voiceTranscriptFromSegments([
-      { blob: new Blob(), text: 'first paragraph' },
-      {
-        blob: new Blob(),
-        text: 'paragraph\n\nsecond paragraph',
-        overlapMs: 500,
-      },
-    ])).toBe('first paragraph\n\nsecond paragraph');
+  it('uses a finalize-only request when capture stops exactly at a segment boundary', async () => {
+    const cloudFetch = vi.fn(async (_path: string, init?: RequestInit) => {
+      const form = init?.body as FormData;
+      expect(form.get('file')).toBeNull();
+      expect(form.get('finalize_only')).toBe('true');
+      expect(form.getAll('receipt')).toEqual(['receipt-0']);
+      return Response.json({ text: 'boundary result', cleanup: 'fallback' });
+    });
+    const segments: VoiceTranscriptionSegment[] = [
+      { blob: audioBlob(), sequence: 0, final: false, receipt: 'receipt-0' },
+      { blob: null, sequence: 1, final: true },
+    ];
+
+    await expect(finalizeVoiceDictation(segments, {
+      dictationId: 'dictation-boundary',
+      before: '',
+      after: '',
+    }, { cloudFetch })).resolves.toEqual({ text: 'boundary result', cleanup: 'fallback' });
   });
 
-  it('skips silent segments unless the whole dictation is silent', () => {
-    const empty = new VoiceTranscriptionError('empty');
-    expect(voiceTranscriptFromSegments([
-      { blob: new Blob(), text: 'first' },
-      { blob: new Blob(), error: empty },
-      { blob: new Blob(), text: 'second' },
-    ])).toBe('first second');
+  it('reuploads retained segments after the server rejects their receipts', async () => {
+    const cloudFetch = vi.fn().mockResolvedValue(
+      Response.json({ error: 'invalid_dictation' }, { status: 422 }),
+    );
+    const segments: VoiceTranscriptionSegment[] = [
+      { blob: audioBlob(), sequence: 0, final: false, receipt: 'stale-receipt' },
+      { blob: null, sequence: 1, final: true },
+    ];
 
-    expect(() => voiceTranscriptFromSegments([
-      { blob: new Blob(), error: empty },
-      { blob: new Blob(), error: new VoiceTranscriptionError('empty') },
-    ])).toThrowError(empty);
-  });
+    await expect(finalizeVoiceDictation(segments, {
+      dictationId: 'dictation-stale',
+      before: '',
+      after: '',
+    }, { cloudFetch })).rejects.toMatchObject({ code: 'failed', status: 422 });
+    expect(segments[0]?.receipt).toBeUndefined();
 
-  it('does not resubmit accepted silent segments during explicit retry', async () => {
-    const silent = {
-      blob: new Blob(['silent']),
-      error: new VoiceTranscriptionError('empty'),
-    };
-    const failed = {
-      blob: new Blob(['failed']),
-      error: new VoiceTranscriptionError('failed'),
-    };
-    const transcribe = vi.fn(async () => 'recovered');
-
-    await transcribeVoiceSegments([silent, failed], { transcribe });
-
+    const transcribe = vi.fn().mockResolvedValue('replacement-receipt');
+    await transcribeVoiceSegments(segments, { transcribe });
     expect(transcribe).toHaveBeenCalledOnce();
-    expect(transcribe).toHaveBeenCalledWith(failed.blob);
-    expect(silent.error).toMatchObject({ code: 'empty' });
-    expect(failed).toMatchObject({ text: 'recovered', error: undefined });
+    expect(segments[0]?.receipt).toBe('replacement-receipt');
   });
 
-  it('retries only failed segments without discarding completed text', async () => {
+  it('forwards the same finalization contract through the local compatibility route', async () => {
+    const cloudFetch = vi.fn().mockRejectedValue(new CloudUnavailableError());
+    const localFetch = vi.fn(async (_path: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.final === false) return Response.json({ receipt: 'local-receipt', sequence: 0 });
+      expect(body).toMatchObject({
+        dictation_id: 'dictation-local',
+        sequence: 1,
+        final: true,
+        finalize_only: true,
+        receipts: ['local-receipt'],
+        before: '前文',
+        after: '后文',
+      });
+      expect(body.data).toBeUndefined();
+      return Response.json({ text: '本地代理结果', cleanup: 'success' });
+    });
+    const segments: VoiceTranscriptionSegment[] = [
+      { blob: audioBlob(), sequence: 0, final: false },
+      { blob: null, sequence: 1, final: true },
+    ];
+
+    await transcribeVoiceSegments(segments, {
+      cloudFetch,
+      localFetch,
+      dictationId: 'dictation-local',
+    });
+    await expect(finalizeVoiceDictation(segments, {
+      dictationId: 'dictation-local',
+      before: '前文',
+      after: '后文',
+    }, { cloudFetch, localFetch })).resolves.toEqual({
+      text: '本地代理结果',
+      cleanup: 'success',
+    });
+  });
+
+  it('retries only failed intermediate segments without discarding receipts', async () => {
     const failed = new Error('provider failed');
-    const segments = [
-      { blob: new Blob(['one']) },
-      { blob: new Blob(['two']) },
+    const segments: VoiceTranscriptionSegment[] = [
+      { blob: new Blob(['one']), sequence: 0, final: false },
+      { blob: new Blob(['two']), sequence: 1, final: false },
+      { blob: new Blob(['final']), sequence: 2, final: true },
     ];
     const firstAttempt = vi
       .fn<(blob: Blob) => Promise<string>>()
@@ -610,13 +640,26 @@ describe('voice transcription', () => {
       .mockRejectedValueOnce(failed);
 
     await transcribeVoiceSegments(segments, { transcribe: firstAttempt });
-    expect(() => voiceTranscriptFromSegments(segments)).toThrow(failed);
+    expect(segments[0]).toMatchObject({ receipt: 'first', error: undefined });
+    expect(segments[1]?.error).toBe(failed);
 
     const retry = vi.fn(async (blob: Blob) => blob.text());
     await transcribeVoiceSegments(segments, { transcribe: retry });
 
     expect(retry).toHaveBeenCalledTimes(1);
     expect(await retry.mock.calls[0]?.[0].text()).toBe('two');
-    expect(voiceTranscriptFromSegments(segments)).toBe('first two');
+    expect(segments.slice(0, 2).map((segment) => segment.receipt)).toEqual(['first', 'two']);
+
+    const finalize = vi.fn().mockResolvedValue({ text: 'final', cleanup: 'success' as const });
+    await finalizeVoiceDictation(segments, {
+      dictationId: 'dictation-retry',
+      before: '',
+      after: '',
+    }, { finalize });
+    expect(finalize).toHaveBeenCalledWith({
+      blob: segments[2]?.blob,
+      sequence: 2,
+      receipts: ['first', 'two'],
+    });
   });
 });
