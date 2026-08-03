@@ -7,6 +7,7 @@ import stat
 
 import pytest
 
+import core.memory.profile_page as profile_page_module
 from core.memory.profile_page import (
     MemoryProfilePageStore,
     PROFILE_PAGE_MAX_CSS_BYTES,
@@ -141,6 +142,10 @@ def test_profile_page_rejects_active_or_remote_content_and_keeps_last_good(tmp_p
         lambda html: html.replace(
             "<head>",
             '<head><meta http-equiv="content-security-policy" content="style-src none">',
+        ),
+        lambda html: html.replace(
+            "<head>",
+            '<head><meta name="referrer" content="no-referrer">',
         ),
         lambda html: html.replace(
             '<main data-avibe-memory-profile-page="1">',
@@ -360,6 +365,30 @@ def test_profile_page_same_scope_publications_keep_current_readable(tmp_path: Pa
     assert len([path for path in versions.iterdir() if len(path.name) == 32]) == 3
 
 
+def test_profile_page_publication_is_thread_safe_without_fcntl(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(profile_page_module, "_fcntl", None)
+    store = MemoryProfilePageStore(tmp_path / "profile-pages")
+
+    def publish(index: int):
+        return _publish(store, _source(title=f"Fallback revision {index}"))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        published = tuple(executor.map(publish, range(12)))
+
+    current = store.current(
+        scope_key=b"s" * 32,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        language="en",
+    )
+    assert current in published
+    versions = next((tmp_path / "profile-pages").rglob(current.artifact_id)).parent
+    assert len([path for path in versions.iterdir() if len(path.name) == 32]) == 3
+
+
 def test_profile_page_current_fails_closed_when_an_asset_is_modified(tmp_path: Path) -> None:
     root = tmp_path / "profile-pages"
     store = MemoryProfilePageStore(root)
@@ -410,6 +439,31 @@ def test_profile_page_pointer_failure_preserves_current_and_cleans_temporary_fil
     ) == first
     assert tuple(root.rglob(".current-*.tmp")) == ()
     assert len(tuple(root.rglob("versions/[0-9a-f]*"))) == 1
+
+
+def test_profile_page_post_commit_fsync_failure_returns_the_committed_page(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "profile-pages"
+    store = MemoryProfilePageStore(root)
+    real_fsync_directory = profile_page_module._fsync_directory
+
+    def fail_after_pointer_replace(path: Path) -> None:
+        if path.name == "en":
+            raise OSError("post-commit-fsync-canary")
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(profile_page_module, "_fsync_directory", fail_after_pointer_replace)
+
+    published = _publish(store, _source())
+
+    assert store.current(
+        scope_key=b"s" * 32,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        language="en",
+    ) == published
 
 
 def test_profile_page_rejects_a_symlinked_artifact_root(tmp_path: Path) -> None:

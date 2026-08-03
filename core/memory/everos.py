@@ -623,7 +623,11 @@ def _map_profile_item(data: dict[str, Any], *, principal_id: str) -> MemoryItem 
             return MemoryItem(
                 kind="profile",
                 text=text,
-                date=updated_at.split("T", 1)[0] if updated_at is not None else None,
+                date=(
+                    updated_at.split("T", 1)[0]
+                    if updated_at is not None
+                    else _record_date(profile)
+                ),
                 profile=structured_profile,
             )
     return None

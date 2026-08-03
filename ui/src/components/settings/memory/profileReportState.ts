@@ -10,7 +10,9 @@ export const profileReportLanguage = (language: string): MemoryProfileReportLang
 export const acceptsProfilePageCompletion = (
   requested: MemoryProfileReportLanguage,
   current: MemoryProfileReportLanguage,
-): boolean => requested === current;
+  operation: number,
+  currentOperation: number,
+): boolean => requested === current && operation === currentOperation;
 
 /** Compare opaque source identities; timestamps are display metadata only. */
 export const profilePageFreshness = (

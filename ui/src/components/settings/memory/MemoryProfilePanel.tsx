@@ -203,6 +203,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
   const reportLanguage = profileReportLanguage(i18n.language);
   const pageLanguageRef = useRef(reportLanguage);
   pageLanguageRef.current = reportLanguage;
+  const pageOperationRef = useRef(0);
   const [pageState, setPageState] = useState<ProfilePageViewState>(() =>
     emptyProfilePageState(reportLanguage, true),
   );
@@ -212,6 +213,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
   }, [reload]);
 
   useEffect(() => {
+    const operation = ++pageOperationRef.current;
     if (!enabled) {
       setPageState(emptyProfilePageState(reportLanguage));
       return;
@@ -226,7 +228,12 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
         );
         if (
           !active ||
-          !acceptsProfilePageCompletion(requestedLanguage, pageLanguageRef.current)
+          !acceptsProfilePageCompletion(
+            requestedLanguage,
+            pageLanguageRef.current,
+            operation,
+            pageOperationRef.current,
+          )
         ) return;
         if (outcome.kind === 'ok') {
           setPageState({
@@ -246,7 +253,12 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
       } catch {
         if (
           !active ||
-          !acceptsProfilePageCompletion(requestedLanguage, pageLanguageRef.current)
+          !acceptsProfilePageCompletion(
+            requestedLanguage,
+            pageLanguageRef.current,
+            operation,
+            pageOperationRef.current,
+          )
         ) return;
         setPageState({
           ...emptyProfilePageState(requestedLanguage),
@@ -272,6 +284,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
   const generateReport = useCallback(async () => {
     if (!structuredProfile) return;
     const requestedLanguage = reportLanguage;
+    const operation = ++pageOperationRef.current;
     setPageState((current) => ({
       ...(current.language === requestedLanguage
         ? current
@@ -284,7 +297,12 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
       const outcome = classifyMemoryResult<MemoryProfileReportOk>(
         await api.generateMemoryProfilePage(requestedLanguage),
       );
-      if (!acceptsProfilePageCompletion(requestedLanguage, pageLanguageRef.current)) return;
+      if (!acceptsProfilePageCompletion(
+        requestedLanguage,
+        pageLanguageRef.current,
+        operation,
+        pageOperationRef.current,
+      )) return;
       if (outcome.kind === 'ok') {
         setPageState((current) => ({
           ...(current.language === requestedLanguage
@@ -308,7 +326,12 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
         error: memoryErrorMessage(t, outcome.code),
       }));
     } catch {
-      if (!acceptsProfilePageCompletion(requestedLanguage, pageLanguageRef.current)) return;
+      if (!acceptsProfilePageCompletion(
+        requestedLanguage,
+        pageLanguageRef.current,
+        operation,
+        pageOperationRef.current,
+      )) return;
       setPageState((current) => ({
         ...(current.language === requestedLanguage
           ? current

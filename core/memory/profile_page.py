@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import hmac
 from html.parser import HTMLParser
@@ -13,9 +12,15 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Iterator, Literal
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - native Windows
+    _fcntl = None
 
 from core.memory.store import is_principal_id, is_project_id
 from core.memory.types import (
@@ -119,6 +124,7 @@ _FORBIDDEN_CSS_PATTERNS = (
     re.compile(r"(?:-moz-binding|behavior)\s*:", re.IGNORECASE),
     re.compile(r"(?:data|file|ftp|https?|javascript)\s*:", re.IGNORECASE),
 )
+_PROFILE_PAGE_PROCESS_LOCK = threading.Lock()
 
 
 class ProfilePageValidationError(ValueError):
@@ -191,10 +197,20 @@ class _ProfileHTMLParser(HTMLParser):
                 self._validate_url_attribute(normalized_tag, name, value)
 
         if normalized_tag == "meta":
-            if normalized_attrs.get("charset", "").lower() == "utf-8":
+            if set(normalized_attrs) == {"charset"} and normalized_attrs["charset"].lower() == "utf-8":
                 self.charset += 1
-            if normalized_attrs.get("name", "").lower() == "viewport" and normalized_attrs.get("content"):
+            elif (
+                set(normalized_attrs) == {"name", "content"}
+                and normalized_attrs["name"].lower() == "viewport"
+                and "width=device-width"
+                in {
+                    part.strip().lower().replace(" ", "")
+                    for part in normalized_attrs["content"].split(",")
+                }
+            ):
                 self.viewport += 1
+            else:
+                raise ProfilePageValidationError("only fixed page metadata is allowed")
         elif normalized_tag == "link":
             if set(normalized_attrs) != {"rel", "href"}:
                 raise ProfilePageValidationError("only the fixed stylesheet link is allowed")
@@ -414,8 +430,9 @@ class MemoryProfilePageStore:
         except Exception as error:
             _remove_tree_best_effort(temporary)
             _remove_tree_best_effort(pointer)
-            if not current_replaced:
-                _remove_tree_best_effort(final)
+            if current_replaced:
+                return descriptor
+            _remove_tree_best_effort(final)
             raise ProfilePageStoreError("profile page publication failed") from error
         return descriptor
 
@@ -727,21 +744,27 @@ def _write_private_file(path: Path, payload: bytes) -> None:
 
 @contextmanager
 def _publication_lock(language_root: Path) -> Iterator[None]:
-    path = language_root / ".publish.lock"
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ProfilePageStoreError("unsafe profile page publication lock")
-        os.fchmod(descriptor, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    finally:
+    # Native Windows rejects Memory runtime installation, but this process lock
+    # keeps direct store callers thread-safe without making module import fail.
+    # POSIX adds a file lock for overlapping service processes during restarts.
+    with _PROFILE_PAGE_PROCESS_LOCK:
+        path = language_root / ".publish.lock"
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise ProfilePageStoreError("unsafe profile page publication lock")
+            os.fchmod(descriptor, 0o600)
+            if _fcntl is not None:
+                _fcntl.flock(descriptor, _fcntl.LOCK_EX)
+            yield
         finally:
-            os.close(descriptor)
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(descriptor, _fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
 
 
 def _read_private_file(path: Path, maximum: int) -> bytes | None:

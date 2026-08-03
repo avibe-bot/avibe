@@ -442,7 +442,17 @@ def test_profile_timestamp_without_recognized_content_uses_the_raw_fallback() ->
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"data": {"profiles": [{"user_id": "owner-1", "profile_data": raw_profile}]}},
+            json={
+                "data": {
+                    "profiles": [
+                        {
+                            "user_id": "owner-1",
+                            "profile_data": raw_profile,
+                            "created_at": "2026-08-01T12:34:56Z",
+                        }
+                    ]
+                }
+            },
         )
 
     with _sidecar_transport(handler):
@@ -450,7 +460,7 @@ def test_profile_timestamp_without_recognized_content_uses_the_raw_fallback() ->
 
     assert len(items) == 1
     assert items[0].profile is None
-    assert items[0].date is None
+    assert items[0].date == "2026-08-01"
     assert json.loads(items[0].text) == raw_profile
 
 

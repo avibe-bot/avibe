@@ -13,9 +13,10 @@ describe('profile page request state', () => {
     expect(profileReportLanguage('en-US')).toBe('en');
   });
 
-  it('discards a completion after the visible language changes', () => {
-    expect(acceptsProfilePageCompletion('en', 'zh')).toBe(false);
-    expect(acceptsProfilePageCompletion('en', 'en')).toBe(true);
+  it('discards a completion after the language changes or a newer operation starts', () => {
+    expect(acceptsProfilePageCompletion('en', 'zh', 2, 2)).toBe(false);
+    expect(acceptsProfilePageCompletion('en', 'en', 1, 2)).toBe(false);
+    expect(acceptsProfilePageCompletion('en', 'en', 2, 2)).toBe(true);
   });
 
   it('uses opaque source snapshots for current, stale, and unknown states', () => {
