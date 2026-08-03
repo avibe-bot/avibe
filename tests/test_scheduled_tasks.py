@@ -2019,6 +2019,78 @@ def test_canceled_task_execution_projects_every_result_and_only_retires_schedule
     assert (task.id in service.scheduler.jobs) is expected_enabled
 
 
+@pytest.mark.parametrize("natural_terminal_wins", [False, True])
+def test_task_definition_projection_follows_the_exact_terminal_cas_winner(
+    tmp_path: Path,
+    monkeypatch,
+    natural_terminal_wins: bool,
+) -> None:
+    """HFR-102: definition projection follows the exact terminal CAS winner."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="settle this exact fire",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+    )
+    started = asyncio.Event()
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        started.set()
+        await asyncio.Event().wait()
+
+    settings_manager = SimpleNamespace(
+        get_store=lambda: SimpleNamespace(
+            get_user=lambda *_args, **_kwargs: None,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(
+            platform_settings_managers={"slack": settings_manager},
+            message_handler=SimpleNamespace(
+                handle_scheduled_message=_handle_scheduled_message,
+            ),
+        ),
+        store=store,
+        request_store=request_store,
+    )
+    service.scheduler = _StubScheduler()
+
+    async def _race_terminal_with_cancellation() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions[request.id]
+        await asyncio.wait_for(started.wait(), timeout=1)
+        if natural_terminal_wins:
+            request_store.complete(request, ok=True)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        await asyncio.sleep(0)
+
+    asyncio.run(_race_terminal_with_cancellation())
+
+    settled = request_store.get_run(request.id)
+    projected = ScheduledTaskStore().get_task(task.id)
+    assert settled is not None
+    assert settled["status"] == (
+        "succeeded" if natural_terminal_wins else "failed"
+    )
+    assert projected is not None
+    assert projected.enabled is True
+    assert projected.last_run_at is not None
+    assert projected.last_error == settled["error"]
+    if natural_terminal_wins:
+        assert "interrupt_reason" not in settled["metadata"]
+
+
 @pytest.mark.parametrize("shutdown_entrypoint", ["stop", "lease_loss"])
 @pytest.mark.parametrize("user_stopped", [False, True])
 def test_service_teardown_terminalizes_transferred_durable_turn_without_draining_held_queue(

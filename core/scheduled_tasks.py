@@ -2672,53 +2672,6 @@ class ScheduledTaskService:
             SETTLED_BY_INTERRUPTED,
         )
 
-    def _record_interrupted_task_result(
-        self,
-        task: ScheduledTask,
-        *,
-        execution_id: str,
-        disable_one_shot: bool,
-        interruption: Optional[str] = None,
-    ) -> None:
-        """Project every interrupted fire and retire only an owned one-shot."""
-
-        interruption = interruption or self._execution_interruption(execution_id)
-        error = self._t(SETTLEMENT_I18N_KEYS[interruption])
-        retire_one_shot = disable_one_shot and task.schedule_type == "at"
-        try:
-            recorded = self.store.mark_task_result(
-                task.id,
-                error=error,
-                disable_one_shot=retire_one_shot,
-                expected_binding=(
-                    task.session_id,
-                    task.session_key,
-                    task.schedule_type,
-                ),
-            )
-        except Exception:
-            logger.exception(
-                "Failed to record interrupted task result for %s",
-                task.id,
-            )
-            return
-        if not recorded:
-            logger.warning(
-                "Interrupted task %s changed before its result could be recorded",
-                task.id,
-            )
-            return
-        if retire_one_shot:
-            try:
-                if self.scheduler.get_job(task.id) is not None:
-                    self.scheduler.remove_job(task.id)
-                self._job_signatures.pop(task.id, None)
-            except Exception:
-                logger.exception(
-                    "Failed to retire scheduler job for interrupted task %s",
-                    task.id,
-                )
-
     @staticmethod
     def _activity_run_ids(activity: Any) -> list[str]:
         run_ids: list[str] = []
@@ -5109,26 +5062,21 @@ class ScheduledTaskService:
                     ):
                         self.request_store.requeue(request.id)
                         return
-                    if request.task_id and request.request_type in {
-                        "task_run",
-                        "scheduled",
-                    }:
-                        definition = self.store.get_task(request.task_id)
-                        if definition is not None:
-                            self._record_interrupted_task_result(
-                                definition,
-                                execution_id=request.id,
-                                disable_one_shot=(
-                                    request.source_kind == "scheduler"
-                                ),
-                                interruption=interruption,
-                            )
                     self.request_store.complete(
                         request,
                         ok=False,
                         error=self._t(SETTLEMENT_I18N_KEYS[interruption]),
                         interrupt_reason=interruption,
                     )
+                    if request.task_id and request.request_type in {
+                        "task_run",
+                        "scheduled",
+                    }:
+                        self._project_terminal_definition_result(
+                            self.request_store.get_run(request.id),
+                            execution_id=request.id,
+                        )
+                        self.reconcile_jobs()
                 except Exception:
                     logger.exception(
                         "Failed to terminalize canceled claimed request %s",
@@ -5156,6 +5104,7 @@ class ScheduledTaskService:
         settled_out_of_band = False
         recover_queue_on_return = False
         reconcile_delivery_on_return = False
+        project_terminal_definition_on_cancel = False
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
@@ -5263,6 +5212,10 @@ class ScheduledTaskService:
             should_complete = True
             settled_out_of_band = False
             recover_queue_on_return = False
+            project_terminal_definition_on_cancel = request.request_type in {
+                "task_run",
+                "scheduled",
+            }
             raise
         except UnresolvableSessionTarget as exc:
             # THE RUN'S DELIVERY TARGET IS GONE, and that is a CLASS of failure rather
@@ -5329,6 +5282,12 @@ class ScheduledTaskService:
                     interrupt_reason=interrupt_reason,
                     failure_code=failure_code,
                 )
+                if project_terminal_definition_on_cancel:
+                    self._project_terminal_definition_result(
+                        self.request_store.get_run(request.id),
+                        execution_id=request.id,
+                    )
+                    self.reconcile_jobs()
             if reconcile_delivery_on_return and session_id:
                 manager = getattr(self.controller, "session_turns", None)
                 reconcile_delivery = getattr(
@@ -5423,14 +5382,6 @@ class ScheduledTaskService:
                 complete_on_return = dispatch_result.complete_on_return
             else:
                 error = dispatch_result
-        except asyncio.CancelledError:
-            self._record_interrupted_task_result(
-                task,
-                execution_id=execution_id,
-                disable_one_shot=disable_one_shot,
-            )
-            self.reconcile_jobs()
-            raise
         except UnresolvableSessionTarget as exc:
             # The pinned session no longer resolves. Left alone this definition
             # re-fires and re-fails on every schedule with nobody told, so classify
@@ -5471,14 +5422,6 @@ class ScheduledTaskService:
                         complete_on_return = dispatch_result.complete_on_return
                     else:
                         error = dispatch_result
-                except asyncio.CancelledError:
-                    self._record_interrupted_task_result(
-                        task,
-                        execution_id=execution_id,
-                        disable_one_shot=disable_one_shot,
-                    )
-                    self.reconcile_jobs()
-                    raise
                 except Exception as retry_exc:
                     error = str(retry_exc)
                     logger.error(
@@ -5753,7 +5696,6 @@ class ScheduledTaskService:
             execution_id = str(raw_execution_id or "").strip()
             if not execution_id:
                 continue
-            run = self.request_store.get_run(execution_id)
             _supported, settled = self._settle_agent_run_without_result(
                 execution_id,
                 settled_by=settled_by,
@@ -5762,10 +5704,9 @@ class ScheduledTaskService:
             if settled is None:
                 continue
             settled_any = True
-            self._project_transferred_definition_result(
-                run,
+            self._project_terminal_definition_result(
+                self.request_store.get_run(execution_id),
                 execution_id=execution_id,
-                settled_by=settled_by,
             )
         if settled_any:
             self._drain_dirty = True
@@ -5863,14 +5804,18 @@ class ScheduledTaskService:
         if settled_any:
             self._drain_dirty = True
 
-    def _project_transferred_definition_result(
+    def _project_terminal_definition_result(
         self,
         run: Optional[dict[str, Any]],
         *,
         execution_id: str,
-        settled_by: str,
     ) -> None:
+        """Project only the terminal outcome persisted on the exact Run row."""
+
         if run is None:
+            return
+        status = str(run.get("status") or "").strip()
+        if status not in TERMINAL_RUN_STATUSES:
             return
         definition_id = str(
             run.get("definition_id") or run.get("task_id") or ""
@@ -5897,12 +5842,63 @@ class ScheduledTaskService:
                 definition_id,
             )
             return
-        self._record_interrupted_task_result(
-            task,
-            execution_id=execution_id,
-            disable_one_shot=str(run.get("source_kind") or "") == "scheduler",
-            interruption=settled_by,
+        error = None if status == "succeeded" else str(run.get("error") or "").strip()
+        if status != "succeeded" and not error:
+            metadata = run.get("metadata")
+            interruption = (
+                str(metadata.get("interrupt_reason") or "").strip()
+                if isinstance(metadata, dict)
+                else ""
+            )
+            key = SETTLEMENT_I18N_KEYS.get(interruption)
+            if key is not None:
+                error = self._t(key)
+        if status != "succeeded" and not error:
+            logger.warning(
+                "Terminal Run %s has no failure detail; skipping definition %s projection",
+                execution_id,
+                definition_id,
+            )
+            return
+        retire_one_shot = (
+            str(run.get("source_kind") or "") == "scheduler"
+            and task.schedule_type == "at"
         )
+        try:
+            recorded = self.store.mark_task_result(
+                task.id,
+                error=error,
+                disable_one_shot=retire_one_shot,
+                expected_binding=(
+                    task.session_id,
+                    task.session_key,
+                    task.schedule_type,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to project terminal Run %s to definition %s",
+                execution_id,
+                definition_id,
+            )
+            return
+        if not recorded:
+            logger.warning(
+                "Definition %s changed before terminal Run %s could be projected",
+                definition_id,
+                execution_id,
+            )
+            return
+        if retire_one_shot:
+            try:
+                if self.scheduler.get_job(task.id) is not None:
+                    self.scheduler.remove_job(task.id)
+                self._job_signatures.pop(task.id, None)
+            except Exception:
+                logger.exception(
+                    "Failed to retire scheduler job for terminal definition %s",
+                    definition_id,
+                )
 
     def _settle_agent_run_without_result(
         self,
