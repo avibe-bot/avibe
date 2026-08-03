@@ -2486,7 +2486,7 @@ class TaskExecutionStore:
         session_id: Optional[str] = None,
         interrupt_reason: Optional[str] = None,
         failure_code: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Settle one claimed request.
 
         ``interrupt_reason`` is the caller's structured CLASS for a failure that has
@@ -2504,6 +2504,9 @@ class TaskExecutionStore:
         arguments are merged verbatim into a run's metadata, and a wide-open
         passthrough at a completion site is how an unrelated key comes to overwrite
         ``interrupt_reason``, ``failure_code`` or the notice blob itself.
+
+        Returns the exact terminal status this call wrote, or ``None`` when another
+        terminal owner already won.
         """
 
         extra_metadata: dict[str, Any] = {"ok": ok}
@@ -2518,7 +2521,7 @@ class TaskExecutionStore:
             # whenever the claimed-request layer finished with an error. The identity
             # columns are still written either way (see ``settle_run_terminal``), so
             # routing through the guard costs nothing a caller depended on.
-            self._sqlite.settle_run_terminal(
+            return self._sqlite.settle_run_terminal(
                 request.id,
                 terminal_status="succeeded" if ok else "failed",
                 error=error,
@@ -2528,9 +2531,11 @@ class TaskExecutionStore:
                 session_id=session_id if session_id is not None else request.session_id,
                 metadata=extra_metadata,
             )
-            return
         processing_path = self._request_path(request.id, state="processing")
         completed_path = self._request_path(request.id, state="completed")
+        if not processing_path.exists():
+            return None
+        terminal_status = "succeeded" if ok else "failed"
         payload = request.to_dict()
         payload.update(
             {
@@ -2565,6 +2570,7 @@ class TaskExecutionStore:
             tmp_path = Path(handle.name)
         tmp_path.replace(completed_path)
         processing_path.unlink(missing_ok=True)
+        return terminal_status
 
     def settle_turn_participants(
         self,
@@ -5062,19 +5068,20 @@ class ScheduledTaskService:
                     ):
                         self.request_store.requeue(request.id)
                         return
-                    self.request_store.complete(
+                    written_status = self.request_store.complete(
                         request,
                         ok=False,
                         error=self._t(SETTLEMENT_I18N_KEYS[interruption]),
                         interrupt_reason=interruption,
                     )
-                    if request.task_id and request.request_type in {
+                    if written_status is not None and request.task_id and request.request_type in {
                         "task_run",
                         "scheduled",
                     }:
                         self._project_terminal_definition_result(
                             self.request_store.get_run(request.id),
                             execution_id=request.id,
+                            expected_status=written_status,
                         )
                         self.reconcile_jobs()
                 except Exception:
@@ -5272,7 +5279,7 @@ class ScheduledTaskService:
             settled_out_of_band = False
         finally:
             if should_complete:
-                self.request_store.complete(
+                written_status = self.request_store.complete(
                     request,
                     ok=not error,
                     error=error,
@@ -5282,10 +5289,11 @@ class ScheduledTaskService:
                     interrupt_reason=interrupt_reason,
                     failure_code=failure_code,
                 )
-                if project_terminal_definition_on_cancel:
+                if project_terminal_definition_on_cancel and written_status is not None:
                     self._project_terminal_definition_result(
                         self.request_store.get_run(request.id),
                         execution_id=request.id,
+                        expected_status=written_status,
                     )
                     self.reconcile_jobs()
             if reconcile_delivery_on_return and session_id:
@@ -5707,6 +5715,7 @@ class ScheduledTaskService:
             self._project_terminal_definition_result(
                 self.request_store.get_run(execution_id),
                 execution_id=execution_id,
+                expected_status=settled,
             )
         if settled_any:
             self._drain_dirty = True
@@ -5809,13 +5818,14 @@ class ScheduledTaskService:
         run: Optional[dict[str, Any]],
         *,
         execution_id: str,
+        expected_status: str,
     ) -> None:
-        """Project only the terminal outcome persisted on the exact Run row."""
+        """Project only the exact terminal transition the caller actually won."""
 
         if run is None:
             return
         status = str(run.get("status") or "").strip()
-        if status not in TERMINAL_RUN_STATUSES:
+        if status != expected_status or status not in TERMINAL_RUN_STATUSES:
             return
         definition_id = str(
             run.get("definition_id") or run.get("task_id") or ""

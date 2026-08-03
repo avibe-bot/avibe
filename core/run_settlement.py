@@ -287,6 +287,10 @@ _HFR_102 = (
     "tests/test_scheduled_tasks.py::"
     "test_canceled_task_execution_projects_every_result_and_only_retires_scheduler_one_shots"
 )
+_HFR_102_CAS = (
+    "tests/test_scheduled_tasks.py::"
+    "test_task_definition_projection_follows_the_exact_terminal_cas_winner"
+)
 _HFR_103 = (
     "tests/test_scheduled_tasks.py::"
     "test_service_teardown_terminalizes_transferred_durable_turn_without_draining_held_queue"
@@ -302,12 +306,6 @@ _HFR_106 = (
 _CANCELED_NOTICE = (
     "tests/test_harness_failure_visibility.py::"
     "test_a_succeeded_or_canceled_transition_owes_no_notice"
-)
-_LEASE_RUN = (
-    "tests/test_scheduled_tasks.py::test_service_lease_loss_cancels_inflight_execution"
-)
-_LEASE_SCHEDULER = (
-    "tests/test_scheduled_tasks.py::test_reconcile_jobs_stops_after_service_lease_loss"
 )
 _RESTART_TURN = (
     "tests/test_session_delivery_fsm.py::"
@@ -371,36 +369,36 @@ _WATCH_STOP = "tests/test_watches.py::test_managed_watch_service_stop_terminates
 #: test or a precise ownership reason.
 TEARDOWN_SETTLEMENT_MATRIX: Final = {
     "direct_executor_cancellation": {
-        "run_row": covered(_HFR_100),
-        "definition_projection": covered(_HFR_102),
+        "run_row": covered(_HFR_102_CAS),
+        "definition_projection": covered(_HFR_102_CAS),
         "durable_turn": not_applicable("ownership already transferred to SessionTurnManager"),
         "delivery_binding": not_applicable("no durable Delivery on the drain-owned lane"),
         "session_projection_and_queue": not_applicable("no durable Session owner on this lane"),
-        "scheduler_runtime_ownership": covered(_HFR_102),
+        "scheduler_runtime_ownership": covered(_HFR_102_CAS),
         "backend_runtime": not_applicable("executor cancellation does not dismantle a backend runtime"),
         "callback_and_failure_notice": covered(_HFR_082),
         "restart_recovery": not_applicable("the process remains live"),
         "runtime_registries": covered(_HFR_100),
     },
     "graceful_service_stop": {
-        "run_row": covered(_HFR_101),
-        "definition_projection": covered(_HFR_103),
+        "run_row": covered(_HFR_102_CAS),
+        "definition_projection": covered(_HFR_102_CAS),
         "durable_turn": covered(_HFR_103),
         "delivery_binding": covered(_HFR_103),
         "session_projection_and_queue": covered(_HFR_103),
-        "scheduler_runtime_ownership": covered(_HFR_101),
+        "scheduler_runtime_ownership": covered(_HFR_102_CAS),
         "backend_runtime": not_applicable("controller backend cleanup is a later entry point"),
         "callback_and_failure_notice": covered(_HFR_082),
         "restart_recovery": covered(_HFR_101),
         "runtime_registries": covered(_HFR_103),
     },
     "service_lease_loss": {
-        "run_row": covered(_LEASE_RUN),
-        "definition_projection": covered(_HFR_103),
+        "run_row": covered(_HFR_102_CAS),
+        "definition_projection": covered(_HFR_102_CAS),
         "durable_turn": covered(_HFR_103),
         "delivery_binding": covered(_HFR_103),
         "session_projection_and_queue": covered(_HFR_103),
-        "scheduler_runtime_ownership": covered(_LEASE_SCHEDULER),
+        "scheduler_runtime_ownership": covered(_HFR_102_CAS),
         "backend_runtime": not_applicable("the scheduler lease does not own backend processes"),
         "callback_and_failure_notice": covered(_HFR_082),
         "restart_recovery": not_applicable("lease loss settles while the process is live"),

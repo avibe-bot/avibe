@@ -2019,11 +2019,13 @@ def test_canceled_task_execution_projects_every_result_and_only_retires_schedule
     assert (task.id in service.scheduler.jobs) is expected_enabled
 
 
-@pytest.mark.parametrize("natural_terminal_wins", [False, True])
+@pytest.mark.parametrize("cancellation_entrypoint", ["direct", "service_stop", "lease_loss"])
+@pytest.mark.parametrize("settlement_winner", ["interruption", "natural_terminal", "user_stop"])
 def test_task_definition_projection_follows_the_exact_terminal_cas_winner(
     tmp_path: Path,
     monkeypatch,
-    natural_terminal_wins: bool,
+    cancellation_entrypoint: str,
+    settlement_winner: str,
 ) -> None:
     """HFR-102: definition projection follows the exact terminal CAS winner."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -2031,8 +2033,8 @@ def test_task_definition_projection_follows_the_exact_terminal_cas_winner(
     task = store.add_task(
         session_key="slack::channel::C123",
         prompt="settle this exact fire",
-        schedule_type="cron",
-        cron="0 * * * *",
+        schedule_type="at",
+        run_at="2026-08-04T00:00:00+00:00",
         timezone_name="UTC",
     )
     request_store = TaskExecutionStore()
@@ -2063,16 +2065,42 @@ def test_task_definition_projection_follows_the_exact_terminal_cas_winner(
         request_store=request_store,
     )
     service.scheduler = _StubScheduler()
+    service.scheduler.jobs[task.id] = SimpleNamespace(id=task.id)
 
     async def _race_terminal_with_cancellation() -> None:
         await service._drain_requests()
         execution = service._inflight_executions[request.id]
         await asyncio.wait_for(started.wait(), timeout=1)
-        if natural_terminal_wins:
-            request_store.complete(request, ok=True)
-        execution.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await execution
+        if settlement_winner == "natural_terminal":
+            assert store.mark_task_result(
+                task.id,
+                error=None,
+                disable_one_shot=True,
+            )
+            assert request_store.complete(request, ok=True) == "succeeded"
+            service.reconcile_jobs()
+        elif settlement_winner == "user_stop":
+            assert request_store.cancel_run(request.id)
+        if cancellation_entrypoint == "direct":
+            if settlement_winner == "user_stop":
+                service._inflight_cancellation_causes[request.id] = SETTLED_BY_STOPPED
+            execution.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await execution
+        elif cancellation_entrypoint == "service_stop":
+            await service.stop()
+        else:
+            service._running = True
+            service._requires_service_lease = True
+            monkeypatch.setattr(
+                "core.scheduled_tasks.runtime.current_process_owns_service_instance",
+                lambda: False,
+            )
+            assert service._owns_service_instance() is False
+            teardown = service._service_teardown_task
+            assert teardown is not None
+            await teardown
+            await service.stop()
         await asyncio.sleep(0)
 
     asyncio.run(_race_terminal_with_cancellation())
@@ -2080,15 +2108,21 @@ def test_task_definition_projection_follows_the_exact_terminal_cas_winner(
     settled = request_store.get_run(request.id)
     projected = ScheduledTaskStore().get_task(task.id)
     assert settled is not None
-    assert settled["status"] == (
-        "succeeded" if natural_terminal_wins else "failed"
-    )
+    expected_status = {
+        "interruption": "failed",
+        "natural_terminal": "succeeded",
+        "user_stop": "canceled",
+    }[settlement_winner]
+    assert settled["status"] == expected_status
     assert projected is not None
-    assert projected.enabled is True
+    assert projected.enabled is False
     assert projected.last_run_at is not None
     assert projected.last_error == settled["error"]
-    if natural_terminal_wins:
+    assert task.id not in service.scheduler.jobs
+    if settlement_winner == "natural_terminal":
         assert "interrupt_reason" not in settled["metadata"]
+    elif settlement_winner == "user_stop":
+        assert settled["metadata"]["interrupt_reason"] == SETTLED_BY_STOPPED
 
 
 @pytest.mark.parametrize("shutdown_entrypoint", ["stop", "lease_loss"])
