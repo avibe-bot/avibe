@@ -162,6 +162,7 @@ class RuntimeTargetOwnershipSnapshot:
     activity_runtime_keys: tuple[str, ...]
     sessions: tuple[SessionRuntimeOwnershipSnapshot, ...]
     sessionless_active_activity_ids: tuple[str, ...]
+    sessionless_fallback_run_ids: tuple[str, ...]
     disposition: SessionRuntimeDisposition
 ```
 
@@ -188,6 +189,15 @@ blocks the shared target. Any target-level active Activity or `active`,
 backend process; an all-`runnable|waiting|reclaimable` target may release idle
 resources after the final locked recheck. A positively orphaned runtime with no
 durable binding may be reclaimed, but a mapping error is `unknown`.
+
+Fallback Runs receive the same route treatment. An IM/CLI Run may have no
+`session_id` while its persisted `legacy_session_key`, backend/agent identity,
+and execution metadata still name the target. Each backend maps that exact route
+to its resource key without string parsing. A queued Session-less Run is
+`runnable`; its pre-execution and PID-started forms are `transitioning` and
+`active` on the mapped target. If a nonterminal Session-less Run cannot be
+mapped, that backend's target snapshot is `unknown` and reclamation fails closed
+for the cycle rather than silently omitting the owner.
 
 The exact classification is:
 
@@ -292,12 +302,25 @@ before awaiting its exact worker. An event for an unregistered lane is
 discarded because startup reconciliation is mandatory when a new handler
 registers.
 
+PR3 also registers the minimal `requests` reconciliation handler needed for
+claimed pre-execution fallback Runs: it can only requeue or preserve the exact
+observed Run under the existing PID/owner fence. It does not admit general
+queued Runs. PR4 replaces that registration, through the same generation-token
+handoff, with the complete bounded `requests` admission handler. PR3 therefore
+introduces no interval in which a newly classified `transitioning` Run can pin a
+runtime until process restart, and PR4 does not create a second consumer.
+
 Durable Harness Run admission has one consumer. A scheduler fire, manual task
 run, callback, or watch completion commits the queued Run and wakes `requests`;
 `ScheduledTaskService._run_task` no longer claims, spawns, or awaits the same
-Run on a second path. Before enqueue, a scheduler fire applies one durable
-nonterminal scheduler-Run fence for that definition, preserving the current
-`max_instances=1`/coalescing behavior after `_run_task` returns promptly.
+Run on a second path. Before enqueue, a scheduler fire computes the existing
+one-successor rule in the enqueue transaction from same-definition
+scheduler-sourced Runs and their Delivery/Turn facts. An accepted active
+execution does not suppress its first follower. Any later Run or Delivery that
+has not yet begun its own accepted Turn is the one queued successor and
+suppresses further fires. When that successor starts or terminalizes, the next
+fire may create one new follower. The existing Run/Delivery/Turn rows are the
+evidence; no scheduler fence row or second owner is added.
 Callers that require a synchronous result observe the persisted Run outcome
 rather than taking execution ownership from the lane.
 
@@ -306,9 +329,13 @@ Turn or found after restart, is persisted and wakes `activity_outputs`. Before
 claiming a batch, both the context-sensitive live flush and restart recovery
 enter the same supervisor partition keyed by exact `(backend, runtime_key)`.
 The live path may use its existing in-memory Turn/context while it owns that
-partition; recovery re-reads only durable eligibility after the live owner is
-gone. Neither path carries payload or receipt authority in the wake, and neither
-may claim a later batch while the prior batch for that runtime is owned.
+partition. Its existing expected-Turn selection may scan past unrelated
+unbound output to choose the causally matching batch; the supervisor does not
+replace that #1139 rule with a global row-order policy. The partition lease spans
+claim, emit, and settle/requeue, so no second live or recovery worker can claim
+or send another batch for that runtime while the selected batch owns the
+boundary. After release, the registry again chooses by its existing causal/FIFO
+contract. Neither path carries payload or receipt authority in the wake.
 
 Each lane owns one coordinator event/task plus a bounded map of item workers by
 partition key. The coordinator alone queries eligibility and never awaits item
@@ -320,21 +347,31 @@ bounded page that leaves eligible work re-arms itself. A transient failure
 records bounded backoff for that item/partition only. One lane cannot await or
 cancel another lane.
 
+Eligibility pagination cannot repeatedly stop on rows whose partition is
+already owned. A lane query either returns one actionable head per partition or
+uses stable keyset advancement while excluding the coordinator's occupied and
+backoff keys. One scan continues past full blocked pages until it fills current
+capacity or reaches the stable end cursor; only then may a later wake restart
+from the beginning. Durable FIFO within each partition is unchanged.
+
 Partition keys are not invented tenant labels; they are the existing FIFO or
 serialization owner key. They are Session id for Delivery activation; request
 execution-lock key (or standalone Run id) for Run admission; callback target
 Session for Run/Vault callbacks; exact `(backend, runtime_key)` output queue for
 recovered Activities; and notice destination/Run for failure notices. One
-Activity batch is indivisible, and every batch for one Activity runtime stays in
-FIFO behind the previous batch even after both have stable batch ids.
-`task_definitions` and `stale_runs` retain one bounded coordinator because their
-owner operations are local guarded store/scheduler mutations, not tenant
-transport calls. `watch_definitions` has one serialized definition-reconcile
-partition plus bounded watch-id partitions for guarded store calls initiated by
-individual watch workers; its long-running waiter is not one of those
-maintenance workers. Reconcile and per-watch calls retain the existing
-ManagedWatchService generation checks, watch ownership checks, and store
-transactions; the supervisor adds scheduling isolation, not a second writer.
+selected Activity batch is indivisible and owns that runtime partition through
+settlement or requeue. Selection order remains the existing #1139 registry
+contract, including expected-Turn causal matching; the supervisor forbids
+overlap but does not replace that policy with a second queue.
+`task_definitions`, `watch_definitions`, and `stale_runs` each retain one bounded
+coordinator because their owner operations mutate shared local store/scheduler
+state. In particular, every `ManagedWatchStore` reload, reconcile, cycle marker,
+and runtime-state write stays behind the one `watch_definitions` single-flight
+store boundary: its mutable full-store mirror is not safe for concurrent
+watch-id writers. Long-running waiter processes/tasks remain outside that
+maintenance worker. The supervisor moves the single writer off the controller
+loop and tracks its real future; it does not invent row-level concurrency or a
+second mirror owner.
 Every lane has a small internal maximum greater than one
 where item workers are supported; the limit is injectable in tests and is not a
 public product setting. One hung tenant therefore consumes one partition/slot
@@ -472,8 +509,19 @@ operation or release that partition's single-flight ownership:
 - the partition is marked overdue and does not launch a replacement;
 - an independent supervisor logs the exact overdue lane and partition;
 - completion re-arms the lane if durable work remains;
-- shutdown stops new wakes, cancels async work, and joins each exact owner before
-  disposing shared stores.
+- shutdown stops new wakes, cancels only work that has not crossed an external-
+  effect boundary, and joins each exact owner before disposing shared stores.
+
+Every handler declares its cancellation boundary. Eligibility reads and work
+before a native/transport write may be canceled and recovered from durable
+state. Once an Activity output, callback, notice, or other non-idempotent send
+may have reached its destination, that worker is shielded from graceful-shutdown
+cancellation and retains its lane partition, receipt owner, dependencies, and
+service-instance lock until it persists the exact outcome or exits with a
+definitive pre-write result. A shutdown grace expiry taints the process as below;
+it is not permission to abandon the send and let startup replay it. Forced
+process death remains outside graceful exactly-once guarantees and is the
+current-master reproducer gate for any separate PR4B attempt contract.
 
 SQLite operations must retain the repository's bounded busy timeout. A rare
 compound failure that outlives the controller's shutdown grace is logged as
@@ -572,7 +620,10 @@ keeping a backend process alive forever.
    transaction. Also classify active Activity rows with a NULL Session as
    target-level owners, using the backend-provided resource-key to Activity-key
    mapping rather than assuming those keys are equal. A returned snapshot is
-   valid only for that transaction and exact runtime resource target.
+   valid only for that transaction and exact runtime resource target. Map
+   Session-less fallback Runs from their persisted legacy Session key plus
+   backend/agent execution identity to the exact resource target; an unresolved
+   nonterminal route fails closed for that backend cycle.
 2. Derive `active`, `transitioning`, `runnable`, `waiting`, `reclaimable`, or
    `unknown` exactly as §3.2 specifies. In particular:
    - an open, ownerless FIFO head is `runnable`, not a permanent runtime pin;
@@ -610,6 +661,9 @@ keeping a backend process alive forever.
    to claimed pre-execution fallback Runs. Neither lane hides a full global
    `recover_durable_delivery_state()` call inside cleanup; that global pass
    remains startup-only after backend restoration.
+   PR3 registers this fallback-only `requests` recovery handler together with
+   `session_deliveries`; it neither scans nor admits ordinary queued Runs. PR4
+   atomically replaces the registration with the full admission handler.
 5. Use two failure modes:
    - a lookup that positively proves one binding is dangling fails open for only
      that binding, so a deleted target cannot pin an unrelated session forever;
@@ -665,6 +719,11 @@ keeping a backend process alive forever.
   starting owner, waiting successor, or claimed pre-execution fallback Run after
   its process disappears and invokes only its exact guarded recovery entry; a
   stale observation neither pins the runtime forever nor recovers another item;
+  the fallback Run recovery is live in PR3 before PR4 broadens the lane;
+- `HFR-150`: Session-less IM/CLI fallback Runs map from persisted route and
+  backend identity to the exact runtime target; queued, pre-execution claimed,
+  and PID-started rows derive `runnable`, `transitioning`, and `active`, while an
+  unmappable nonterminal row fails closed instead of disappearing;
 - `HFR-139`: unrelated sessions are not pinned;
 - `HFR-140`: one positively missing binding fails open, while a per-binding
   lookup exception or provider failure aborts the cycle;
@@ -729,28 +788,31 @@ Activity-output owner.
    after an IM transport reconnects.
    A scheduler fire or manual task run only enqueues and notifies; remove
    `_run_task`'s direct claim/spawn/await path so `requests` is the single durable
-   Run admission consumer. Preserve scheduler `max_instances=1` with an exact
-   durable nonterminal scheduler-Run fence per definition, not an in-memory
-   execution owner. Route both live and restart-discovered completed Activity
+   Run admission consumer. Preserve the existing one queued follower behind an
+   active scheduled Run with a transactional same-definition query across Run,
+   Delivery, and Turn facts: active accepted work allows one successor, while an
+   unstarted successor suppresses later fires. Route both live and
+   restart-discovered completed Activity
    batch claims through the same `activity_outputs` partition lease; the live
-   path keeps its current context-sensitive emission logic inside that lease,
-   and no backend-local flush may race the recovery lane as an independent
-   claimant.
+   path keeps #1139's context-sensitive expected-Turn selection inside that
+   lease, including scanning past unrelated unbound output. The lease remains
+   owned through emit and settle/requeue. No backend-local flush may race the
+   recovery lane as an independent claimant.
 6. Run every lane as bounded work. Request, Run-callback, and Vault-callback
    queries use explicit page limits. A page that reaches its limit or reports
    another eligible item re-arms the same lane. A temporarily skipped item uses
    existing durable eligibility/backoff when present; do not hot-spin on an
    in-memory event.
 7. Move synchronous `maybe_reload`, eligibility, and stale-run storage work off
-   the controller event loop. `watch_definitions` owns managed-watch stale-worker
-   recovery retry, store reload, `reconcile_watches`, and runtime-state
-   projection. Per-watch guarded store calls currently made by `_run_watch` also
-   execute off the event loop as tracked operations partitioned by watch id.
+   the controller event loop. `watch_definitions` is the single writer for
+   managed-watch stale-worker recovery retry, store reload,
+   `reconcile_watches`, cycle markers, and runtime-state projection. Per-watch
+   guarded store calls currently made by `_run_watch` enter that same serialized
+   tracked worker because `ManagedWatchStore` owns one mutable full-store mirror.
    The long-running waiter process/task remains under the existing managed-watch
-   lifecycle and is never subjected to a maintenance-lane timeout. Track each
-   underlying executor future as its lane/partition owner through
-   timeout/cancellation as §3.6 requires. Never start a replacement until that
-   exact future exits.
+   lifecycle and is never subjected to a maintenance-lane timeout. Track the
+   underlying executor future as its lane owner through timeout/cancellation as
+   §3.6 requires. Never start a replacement until that exact future exits.
 8. Keep one independent supervisor task that reports the exact overdue lane,
    partition, and service generation. It observes worker timestamps only and
    cannot query the stores or write terminal state. Repeated service start/stop
@@ -768,12 +830,14 @@ Activity-output owner.
    `watch_definitions` respectively, while a request-directory signature wakes
    `requests` and `run_callbacks`. None may execute work inline.
 10. A process signal only requests loop-owned asynchronous shutdown. That path
-    disables new dispatch and wakes, cancels and awaits async lanes, and awaits each
-    exact synchronous future before tearing down stores, executors, or scheduler
-    state. If the outer shutdown grace expires, keep those dependencies alive
-    and refuse same-process restart; never convert quarantine into permission to
-    dispose or overlap. A completion callback from an old generation may log but
-    cannot re-arm the service.
+    disables new dispatch and wakes, cancels only workers still before their
+    declared external-effect boundary, and awaits every worker that may have
+    written until it persists accepted/refused/pre-write evidence. It also awaits
+    each exact synchronous future before tearing down stores, executors, or
+    scheduler state. If the outer shutdown grace expires, keep those workers and
+    dependencies alive and refuse same-process restart; never convert quarantine
+    into permission to dispose or overlap. A completion callback from an old
+    generation may log but cannot re-arm the service.
     Global controller lease loss stops every lane; routine scheduled-service or
     managed-watch-service stop unregisters only the Harness tokens it owns. The
     signal handler never blocks the running loop or releases the process lock;
@@ -810,7 +874,8 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   startup or slow reconciliation exactly once at the guarded owner boundary;
 - `HFR-158`: a hung request admission, callback delivery, vault callback, or
   recovered-output send for one partition does not delay another partition in
-  the same lane, the other lanes, or stale-run sweeps;
+  the same lane, the other lanes, or stale-run sweeps; more than one full page of
+  followers for the occupied partition cannot hide a later actionable partition;
 - `HFR-159`: a contended task/watch reload probe or stale-run store operation
   does not block the event loop, suppress independent drain progress, or
   serialize unrelated partitions;
@@ -825,11 +890,12 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   bounded pages and reliably re-arm; scheduler, manual, callback, and watch
   producers only enqueue and notify, one `requests` claim starts each Run, and
   synchronous callers observe persisted outcomes without becoming a second
-  execution owner; overlapping scheduler fires retain the current one-live-Run
-  coalescing behavior through the durable definition fence;
-- `HFR-162`: a wake during the final empty query is not lost; timeout, cancellation, and
-  exception completion each re-arm remaining eligible work with backoff, while
-  shutdown cancellation does not re-arm;
+  execution owner; one active accepted scheduled Run permits exactly one queued
+  same-definition successor, and that successor suppresses later fires until it
+  starts or terminalizes;
+- `HFR-162`: a wake during the final empty query is not lost; timeout,
+  pre-effect cancellation, and exception completion each re-arm remaining
+  eligible work with backoff, while shutdown cancellation does not re-arm;
 - `HFR-163`: each lane enforces its configured global worker bound and only one
   item worker per partition while allowing a different partition to progress;
 - `HFR-164`: routine scheduled-task or managed-watch service stop/restart
@@ -840,11 +906,16 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   current Harness registration generation and no stale overdue-drain logs;
 - `HFR-166`: complete multi-Activity batches preserve persisted order, one stable
   receipt per batch, and each complete Run union while delayed, restarted, or
-  locally retried; multiple stable batches for the same exact
-  `(backend, runtime_key)` execute FIFO and never overlap; live completion and
-  restart recovery converge on the same claim instead of competing consumers;
-- `HFR-167`: an accepted Message or persisted Activity-batch local-settlement-only marker
-  suppresses transport replay, including after restart;
+  locally retried; one selected batch for exact `(backend, runtime_key)` owns the
+  partition through emit and settle/requeue so another batch cannot overlap it;
+  after release, the registry preserves #1139's expected-Turn causal selection,
+  including scanning past unrelated unbound output, and loss of live context
+  falls back to persisted Activity/Turn/Run settlement without a competing
+  claimant;
+- `HFR-167`: an accepted Message or persisted Activity-batch
+  local-settlement-only marker suppresses transport replay, including after
+  restart; graceful shutdown after remote acceptance but before local receipt
+  persistence cannot cancel the owning send and must await its exact settlement;
 - `HFR-168`: incomplete or conflicting recovered batch membership fails closed before
   transport and remains under the same Activity owner;
 - `HFR-169`: work with no Run row still reaches an Activity-owned terminal outcome visible
@@ -871,12 +942,15 @@ membership, create a second receipt, or infer resend safety from timeout alone.
 - `HFR-178`: a real signal while the controller loop is running requests
   nonblocking async shutdown; a synchronous lane outliving shutdown grace
   retains the service-instance lock and exact dependencies until its worker or
-  process exits, so a replacement process cannot overlap it; a signal before
-  loop startup follows the same ownership decision;
+  process exits, so a replacement process cannot overlap it; the same is true
+  for an async worker past its external-effect boundary, and a signal before loop
+  startup follows the same ownership decision;
 - `HFR-179`: contended managed-watch store reconciliation and per-watch guarded
-  store writes do not block the controller loop or another watch partition,
-  while a legitimately long-running waiter is not canceled by the maintenance
-  lane timeout and remains owned by the managed-watch lifecycle.
+  store writes stay single-flight, keep the SQLite row and full-store mirror
+  consistent, and cannot wrongly restart a completed one-shot watch; they do not
+  block the controller loop or another lane, while a legitimately long-running
+  waiter is not canceled by the maintenance timeout and remains owned by the
+  managed-watch lifecycle.
 
 Exit criterion: normal work is event-woken, missed hints are recovered, a hung
 lane cannot block another lane or the controller event loop, lifecycle teardown
@@ -1003,8 +1077,10 @@ fact and its separate contract review passes.
 Implementation ownership is intentionally narrow:
 
 - **PR3** owns the derived SQLite snapshot, the controller-owned supervisor
-  foundation, `session_deliveries` registration, reclaimer consumers, and the
-  exact activation/reclamation tests. It does not restructure Harness drains.
+  foundation, `session_deliveries` registration, the fallback-only pre-execution
+  `requests` recovery registration, reclaimer consumers, and the exact
+  activation/reclamation tests. It does not admit general queued Harness Runs
+  or restructure the other drains.
 - **PR4** registers Harness lanes, replaces the scheduled-task and managed-watch
   `_watch_store` loops, extends the existing Unix-socket event vocabulary and
   bridge use, instruments post-commit producers, and adds lane lifecycle and
