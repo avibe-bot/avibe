@@ -70,8 +70,9 @@ the same name.
 
 Minimum baseline cases:
 
-- a queued or accepted Delivery targets a session that reaches both passes of
-  idle eviction;
+- a Delivery in each live ownership role (claimable, fence, and turn-owned)
+  targets a session that reaches both passes of idle eviction, while terminal
+  Delivery history does not pin it;
 - recovered Activity output delivery hangs while a new Harness request becomes
   ready;
 - scheduled and watch Runs transfer to a durable Delivery/Turn and later produce
@@ -91,10 +92,13 @@ it. Do not let broken bindings or fake activity create immortal sessions.
 ### Required behavior
 
 1. Build one provider that resolves the **current durable owners** of a session:
-   queued/accepted Deliveries, active Turns, and any nonterminal Run whose exact
-   ownership is not already represented by those rows. Reuse current
-   Delivery/Turn storage and teardown APIs; do not restore PR2's discarded
-   in-memory resolver design.
+   Delivery rows whose `DELIVERY_STATE_MATRIX` ordering role is `claimable`,
+   `fence`, or `turn_owned`; nonterminal Turns; and any nonterminal Run whose
+   exact ownership is not already represented by those rows. Consume the state
+   policy instead of hard-coding state names: terminal `accepted` / `retired`
+   Delivery history does not pin a session, while unresolved fences and
+   turn-owned states do. Reuse current Delivery/Turn storage and teardown APIs;
+   do not restore PR2's discarded in-memory resolver design.
 2. Consult the provider in both passes of `evict_idle_sessions`. Recompute during
    the second pass so work admitted between the two reads pins the session.
 3. Use two failure modes:
@@ -111,6 +115,8 @@ it. Do not let broken bindings or fake activity create immortal sessions.
 ### Required evidence
 
 - queued work pins the exact target session;
+- unresolved fence and turn-owned Delivery states pin, while terminal Delivery
+  history without a nonterminal Turn does not;
 - a pin admitted between eviction passes wins;
 - unrelated sessions are not pinned;
 - one unresolvable binding fails open;
