@@ -2646,6 +2646,40 @@ scenarios:
     # prevent. FIX: query NOT IN the terminal statuses (raw aliases plus public names),
     # so an unknown status pins instead of vanishing.
     test: tests/test_session_eviction_interlock.py::test_an_unrecognized_run_status_still_pins
+  - id: HFR-150
+    name: a Codex Delivery admitted while the transport stops costs a restart, not the work
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: codex
+    # Found by review on PR #1150's third head. The final ownership read cannot be
+    # atomic with teardown, and deliberately is not: admission is a durable commit
+    # that takes no runtime lock, because input acceptance must never block on a
+    # backend. So a Delivery can land after the in-lock recheck approved the eviction,
+    # while transport.stop() is still awaiting. The plan's governing requirement for
+    # that window is loss-free resumption, not atomicity, so this encodes it: the
+    # eviction holds _transport_locks[cwd] across BOTH the recheck and the stop and
+    # _get_or_create_transport takes the same lock, so the dispatch cannot observe a
+    # half-torn-down transport -- it misses, builds a fresh app-server, and resumes
+    # via the persisted thread mapping, which eviction must therefore never clear.
+    # Asserts the queued row survives untouched, no turn was invented, no stale handle
+    # or activity entry is left behind, and the lock is free for the rebuild.
+    test: tests/test_session_eviction_interlock.py::test_codex_admission_during_teardown_costs_a_restart_not_the_work
+  - id: HFR-151
+    name: a Claude Delivery admitted during its own candidate's disconnect is not lost
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: claude
+    # The Claude half of HFR-150, and the irreducible remainder of HFR-147: there the
+    # admission is visible in time to veto a LATER candidate, here it lands during this
+    # candidate's own disconnect, after its own re-resolution. Survivable because
+    # cleanup_session pops the client out of claude_sessions synchronously, before it
+    # awaits anything, so a dispatch arriving afterwards never sees the disconnecting
+    # client -- it misses and get_or_create_claude_session builds a fresh one that
+    # resumes the same native session id. Asserts the queued row is untouched, no turn
+    # was created, and neither the client nor its activity clock is left behind.
+    test: tests/test_session_eviction_interlock.py::test_claude_admission_during_teardown_costs_a_restart_not_the_work
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

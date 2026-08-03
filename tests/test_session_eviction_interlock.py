@@ -13,7 +13,7 @@ These tests drive the two real eviction entry points --
 -- against REAL durable rows in the isolated state database, so what is asserted
 is the join between the two keyspaces, not a stub's opinion of it.
 
-Scenarios: HFR-130 … HFR-149 (tests/scenarios/harness_failure_recovery/catalog.yaml).
+Scenarios: HFR-130 … HFR-151 (tests/scenarios/harness_failure_recovery/catalog.yaml).
 """
 
 from __future__ import annotations
@@ -326,6 +326,27 @@ def _set_delivery_state(delivery_id: str, state: str) -> None:
         conn.execute(
             sa_text("UPDATE message_deliveries SET state = :state WHERE id = :id"),
             {"state": state, "id": delivery_id},
+        )
+
+
+def _delivery_state(delivery_id: str) -> Optional[str]:
+    """The row's current state, or ``None`` if eviction destroyed the row."""
+
+    with _engine().begin() as conn:
+        row = conn.execute(
+            sa_text("SELECT state FROM message_deliveries WHERE id = :id"),
+            {"id": delivery_id},
+        ).fetchone()
+    return None if row is None else row[0]
+
+
+def _turn_count(session_id: str) -> int:
+    with _engine().begin() as conn:
+        return int(
+            conn.execute(
+                sa_text("SELECT count(*) FROM session_turns WHERE session_id = :sid"),
+                {"sid": session_id},
+            ).scalar_one()
         )
 
 
@@ -1108,3 +1129,97 @@ def test_an_unrecognized_run_status_still_pins(monkeypatch, tmp_path: Path) -> N
     assert _sweep(handler) == 0, "an unknown Run status must fail closed and pin"
     assert composite_key in controller.claude_sessions
     assert captured["disconnects"] == 0
+
+
+# ---------------------------------------------------------------------------
+# HFR-150 … HFR-151: the residual admission window is loss-free
+# ---------------------------------------------------------------------------
+#
+# The final ownership read is NOT atomic with teardown: admission is a durable
+# commit that deliberately takes no runtime lock (input acceptance must never
+# block on a backend), so work can be accepted while an approved teardown is
+# already awaiting. Plan section 4's evidence bullet is what governs that window
+# -- "every enabled backend eviction path either honors the provider or proves
+# queued work resumes without loss or replay" -- not atomicity. These two tests
+# are that proof: when eviction loses the race, the durable input survives
+# untouched and the runtime registry is left in a state the next dispatch can
+# rebuild from, so the cost is a cold start rather than a lost turn.
+
+
+def test_codex_admission_during_teardown_costs_a_restart_not_the_work(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """HFR-150: a Delivery committed while ``transport.stop()`` awaits is not lost.
+
+    Admission here commits inside the stop, i.e. after the in-lock ownership
+    recheck has already approved the eviction -- the exact window a snapshot
+    cannot close. What makes it survivable is that the eviction holds
+    ``_transport_locks[cwd]`` across both the recheck and the stop, and
+    ``_get_or_create_transport`` acquires that same lock: the dispatch cannot
+    observe the half-torn-down transport, and once the lock is free it finds no
+    transport and builds a fresh one. The persisted thread mapping is what makes
+    that rebuild a resume instead of a new conversation, so it must survive.
+    """
+
+    _state_db()
+    workdir = str(tmp_path)
+    _seed_session("sescodex0001", anchor="slack_C777", workdir=workdir, backend="codex")
+
+    agent, calls = _codex_agent(workdir)
+
+    async def _stop_then_admit() -> None:
+        calls.stopped.append(workdir)
+        _seed_delivery("sescodex0001", "queued", delivery_id="dlv-admitted-mid-stop")
+
+    agent._transports[workdir] = SimpleNamespace(stop=_stop_then_admit)
+
+    assert _codex_sweep(agent, monkeypatch) == 1
+
+    # The work itself is untouched: still claimable, no turn invented for it.
+    assert _delivery_state("dlv-admitted-mid-stop") == "queued"
+    assert _turn_count("sescodex0001") == 0
+    # No stale handle survives, so the next dispatch cannot reuse a stopped
+    # app-server -- it has to create one.
+    assert workdir not in agent._transports
+    assert workdir not in agent._transport_last_activity
+    # ... and it can: the lock is released and the resume mapping is intact.
+    assert not agent._transport_locks[workdir].locked()
+    agent.sessions.clear_agent_session_mapping.assert_not_called()
+
+
+def test_claude_admission_during_teardown_costs_a_restart_not_the_work(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """HFR-151: the same proof for the Claude consumer.
+
+    HFR-147 covers the case where the admission is visible in time to veto a
+    LATER candidate. This is the irreducible remainder: the admission lands
+    during this candidate's own disconnect, after its own re-resolution. It is
+    survivable because ``cleanup_session`` pops the client out of
+    ``claude_sessions`` synchronously, before it awaits anything, so a dispatch
+    arriving afterwards never sees the disconnecting client -- it misses, and
+    ``get_or_create_claude_session`` builds a fresh client that resumes the same
+    native session id.
+    """
+
+    _state_db()
+    handler, controller, composite_key, captured = _claude_handler(monkeypatch, tmp_path)
+    _seed_session(BASE_SESSION_ID, anchor=ANCHOR, workdir=str(tmp_path))
+
+    class _AdmitsDuringOwnDisconnect:
+        async def disconnect(self) -> None:
+            captured["disconnects"] += 1
+            _seed_delivery(BASE_SESSION_ID, "queued", delivery_id="dlv-admitted-mid-disconnect")
+
+    handler.claude_sessions[composite_key] = _AdmitsDuringOwnDisconnect()
+
+    assert _sweep(handler) == 1
+    assert captured["disconnects"] == 1
+
+    assert _delivery_state("dlv-admitted-mid-disconnect") == "queued"
+    assert _turn_count(BASE_SESSION_ID) == 0
+    # The stale client is gone rather than left half-disconnected in the map, and
+    # nothing resurrected the activity clock on the way out.
+    assert composite_key not in handler.claude_sessions
+    assert composite_key not in controller.claude_sessions
+    assert composite_key not in handler.session_last_activity

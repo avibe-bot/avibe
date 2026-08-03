@@ -172,6 +172,25 @@ it. Do not let broken bindings or fake activity create immortal sessions.
 Exit criterion: no queued work is lost or misclassified, no productive turn is
 timed out, and the interlock cannot make a stuck session immortal.
 
+### Accepted residual — admission is not serialized with teardown
+
+The final ownership read cannot be atomic with teardown, and deliberately is
+not: admission is a durable commit that takes no backend runtime lock, because
+input acceptance must never block on a backend. So a Delivery can be admitted
+after an approved candidate's last re-resolution, while its teardown is already
+awaiting. This is bounded by the last evidence bullet above rather than closed by
+a lock: teardown removes the runtime from its registry before it can be observed
+half-torn-down (Codex holds `_transport_locks[cwd]` across both the recheck and
+the stop, and `_get_or_create_transport` takes the same lock; Claude's
+`cleanup_session` pops the client synchronously before its first await), so the
+next dispatch misses, rebuilds, and resumes — a cold start, not a lost turn. The
+persisted resume state (native session id, Codex thread mapping) is what makes
+the rebuild a resume, so eviction must never clear it. Covered by HFR-150/151.
+
+Serializing admission through eviction per runtime would put a backend lock on
+the acceptance path and is out of scope here; if a future change makes a cold
+start unacceptable (a costly warm-up, say), that is the point to revisit.
+
 ## 5. PR4 — Bound and supervise shared drains
 
 ### Goal
