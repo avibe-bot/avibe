@@ -29,12 +29,12 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_dead_accepted_owner_converges_run_session_and_persisted_fifo
   - id: HFR-003
-    name: canceled scheduler execution requeues its claimed Run
+    name: queued but unstarted Run remains queued behind its live Session owner
     status: covered
-    kind: cancellation
+    kind: safety
     layer: contract
     backend: shared
-    test: tests/test_scheduled_tasks.py::test_drain_requests_requeues_cancelled_task_run
+    test: tests/test_scheduled_tasks.py::test_drain_serializes_executions_per_session
   - id: HFR-004
     name: restart recovers held run queues without flushing user-owned queue heads
     status: covered
@@ -2316,6 +2316,55 @@ scenarios:
     # property every round of this review has verified as unchanged, so it is a scoped
     # follow-up for the plan owner and not a close-out edit.
     test: tests/test_harness_failure_visibility.py::test_a_successful_rebind_is_delivered_through_the_retried_notice_path
+  - id: HFR-100
+    name: direct in-flight cancellation terminalizes the exact Run and releases ownership
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_direct_inflight_cancellation_terminalizes_the_exact_run
+  - id: HFR-101
+    name: service stop terminalizes an in-flight Run so restart cannot replay it
+    status: covered
+    kind: restart
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_service_stop_terminalizes_inflight_run_without_replay
+  - id: HFR-102
+    name: every canceled task execution projects a result and only scheduler one-shots retire
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_canceled_task_execution_projects_every_result_and_only_retires_scheduler_one_shots
+  - id: HFR-103
+    name: every service teardown settles the transferred scheduled Turn without draining held work
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_service_teardown_terminalizes_transferred_durable_turn_without_draining_held_queue
+  - id: HFR-104
+    name: restart recovery fails executed Runs and preserves separately owned rows
+    status: covered
+    kind: restart
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_restart_recovery_terminalizes_started_rows_and_preserves_other_owners
+  - id: HFR-105
+    name: every teardown entry point and state surface cell has evidence or an explicit owner
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_every_teardown_settlement_surface_is_reached_or_explicitly_owned_elsewhere
+  - id: HFR-106
+    name: user Stop cause wins when graceful shutdown cancels the same non-durable Run
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_service_stop_preserves_non_durable_user_stop_cause
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
