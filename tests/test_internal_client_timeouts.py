@@ -77,6 +77,10 @@ def test_all_memory_read_clients_outlast_provider_reads() -> None:
 
 
 def test_profile_report_deadlines_are_strictly_nested() -> None:
+    assert PROFILE_REPORT_TIMEOUT_SECONDS == 180.0
+    assert _PROFILE_REPORT_SIDECAR_TIMEOUT_SECONDS == 185.0
+    assert PROFILE_REPORT_OPERATION_TIMEOUT_SECONDS == 190.0
+    assert MEMORY_PROFILE_REPORT_TIMEOUT_SECONDS == 195.0
     assert (
         PROFILE_REPORT_TIMEOUT_SECONDS
         < _PROFILE_REPORT_SIDECAR_TIMEOUT_SECONDS

@@ -45,10 +45,10 @@ _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
 # ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s).
 MEMORY_READ_TIMEOUT_SECONDS = 25.0
 MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
-# The report path has a nested 60s child LLM deadline, a 65s private-sidecar
-# deadline, and a 70s module operation deadline. The UI-facing client must stay
+# The report path has a nested 180s child LLM deadline, a 185s private-sidecar
+# deadline, and a 190s module operation deadline. The UI-facing client must stay
 # outside all of them so a retry cannot overlap an active report generation.
-MEMORY_PROFILE_REPORT_TIMEOUT_SECONDS = 75.0
+MEMORY_PROFILE_REPORT_TIMEOUT_SECONDS = 195.0
 # Reconcile can probe processing (20s), drain an active add (30s), stop the
 # prior child (10s), and wait for replacement readiness (30s). Keep transport
 # outside the whole sequence so a slow success cannot race a settings rollback.
