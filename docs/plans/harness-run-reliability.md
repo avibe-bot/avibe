@@ -213,8 +213,15 @@ evidence, and restart recovery. First determine what remains.
    `interrupt_waiting`, and `reconciling_steer` states: each must either reach
    its exact Turn owner or a durable terminal ambiguity outcome, release its
    ordering fence, and never replay work with possible/unknown native effects.
-5. Default any automatic inactivity limit below the cron interval, but do not
-   turn short cron periods into absolute turn-duration caps.
+5. Store the global inactivity default in `config/v2_config.py` and derive the
+   effective limit as
+   `min(configured_or_global_default, 0.8 × cron_interval)`. The interval
+   ceiling applies even when the configured value is longer, so a silent owner
+   cannot survive across repeated fires. It still bounds **inactivity**, not
+   duration: observable progress re-arms it, including for short cron periods.
+6. Cover an unset value, a shorter explicit value, and an explicit value longer
+   than the cron interval; the last must clamp below the next fire without
+   canceling a turn that continues to make observable progress.
 
 The old D7 blocker is retired, not carried forward. Its premise was that a
 message row simultaneously represented queued input and ambiguous execution.
