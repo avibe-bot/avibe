@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
@@ -90,11 +91,15 @@ class RuntimeWorkSupervisor:
         lane_capacity: int = _DEFAULT_LANE_CAPACITY,
         scan_page_size: int = _DEFAULT_SCAN_PAGE_SIZE,
         retry_backoff: float = _DEFAULT_RETRY_BACKOFF_SECONDS,
+        retry_wait: Callable[[float], Awaitable[None]] | None = None,
+        reconcile_wait: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._reconcile_interval = max(0.001, float(reconcile_interval))
         self._lane_capacity = max(1, int(lane_capacity))
         self._scan_page_size = max(1, int(scan_page_size))
         self._retry_backoff = max(0.001, float(retry_backoff))
+        self._retry_wait = retry_wait or asyncio.sleep
+        self._reconcile_wait = reconcile_wait or asyncio.sleep
         self._registrations: dict[RuntimeWorkLane, _Registration] = {}
         self._generations: dict[RuntimeWorkLane, int] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -331,7 +336,7 @@ class RuntimeWorkSupervisor:
         finally:
             try:
                 if should_backoff and registration.live and not self._stopping:
-                    await asyncio.sleep(self._retry_backoff)
+                    await self._retry_wait(self._retry_backoff)
             finally:
                 current = registration.workers.get(partition)
                 if current is asyncio.current_task():
@@ -342,7 +347,7 @@ class RuntimeWorkSupervisor:
     async def _reconcile_loop(self) -> None:
         try:
             while self._active and not self._stopping:
-                await asyncio.sleep(self._reconcile_interval)
+                await self._reconcile_wait(self._reconcile_interval)
                 self._notify_on_loop(tuple(self._registrations))
         except asyncio.CancelledError:
             raise

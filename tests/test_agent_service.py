@@ -318,22 +318,50 @@ def test_hfr_142_gate_wait_does_not_refresh_backend_progress_clock() -> None:
     """HFR-142: a request waiting on the runtime gate creates no progress."""
 
     async def _run():
+        first_started = asyncio.Event()
+        second_waiting = asyncio.Event()
+
+        class _ObservedRuntimeAgent(_RuntimeAgent):
+            async def handle_message(self, request):
+                self.started.append(request.message)
+                if request.message == "first":
+                    first_started.set()
+                    if self.release_first is not None:
+                        await self.release_first.wait()
+
+        class _GateWaitIndicator:
+            async def show_queued_reaction(self, _request):
+                second_waiting.set()
+                return True
+
+            async def promote_reaction_to_running(
+                self,
+                _request,
+                *,
+                agent_name=None,
+            ):
+                return None
+
+            async def finish(self, _request_or_handle):
+                return None
+
         controller = _Controller()
+        controller.processing_indicator = _GateWaitIndicator()
         service = AgentService(controller=controller)
         controller.agent_service = service
         release_first = asyncio.Event()
-        agent = _RuntimeAgent(release_first)
+        agent = _ObservedRuntimeAgent(release_first)
         agent.session_last_activity = {"session:/repo": 17.0}
         service.register(agent)
 
         first_request = _request("first")
         first = asyncio.create_task(service.handle_message("claude", first_request))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(first_started.wait(), timeout=1)
         second_request = _request("second")
         second = asyncio.create_task(
             service.handle_message("claude", second_request)
         )
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(second_waiting.wait(), timeout=1)
 
         assert agent.started == ["first"]
         assert agent.session_last_activity == {"session:/repo": 17.0}

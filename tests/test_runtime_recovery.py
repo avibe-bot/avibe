@@ -436,21 +436,22 @@ async def test_hfr_149_periodic_requests_lane_requeues_only_pre_execution_claim(
             reconcile_interval=0.01,
             lane_capacity=1,
         )
+        processed = asyncio.Event()
+
+        class _ObservedFallbackRequestRecoveryHandler(
+            FallbackRequestRecoveryHandler
+        ):
+            async def process(self, item):
+                result = await super().process(item)
+                processed.set()
+                return result
+
         supervisor.register(
             RuntimeWorkLane.REQUESTS,
-            FallbackRequestRecoveryHandler(store),
+            _ObservedFallbackRequestRecoveryHandler(store),
         )
         await supervisor.activate()
-        for _ in range(50):
-            with store.engine.connect() as conn:
-                status = conn.execute(
-                    select(agent_runs.c.status).where(
-                        agent_runs.c.id == "run-pre-execution"
-                    )
-                ).scalar_one()
-            if status == "queued":
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(processed.wait(), timeout=1)
         await supervisor.stop()
 
         with store.engine.connect() as conn:

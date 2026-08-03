@@ -20,6 +20,7 @@ class _Handler(RuntimeWorkHandler):
     items: list[RuntimeWorkItem]
     started: list[str]
     release: asyncio.Event
+    started_event: asyncio.Event | None = None
 
     def scan(
         self,
@@ -38,12 +39,15 @@ class _Handler(RuntimeWorkHandler):
 
     async def process(self, item: RuntimeWorkItem) -> None:
         self.started.append(item.partition_key)
+        if self.started_event is not None:
+            self.started_event.set()
         await self.release.wait()
 
 
 @dataclass
 class _RetryHandler(RuntimeWorkHandler):
     attempts: int = 0
+    attempted: asyncio.Event | None = None
 
     def scan(
         self,
@@ -60,6 +64,8 @@ class _RetryHandler(RuntimeWorkHandler):
 
     async def process(self, item: RuntimeWorkItem) -> bool:
         self.attempts += 1
+        if self.attempted is not None:
+            self.attempted.set()
         return False
 
 
@@ -67,10 +73,12 @@ class _RetryHandler(RuntimeWorkHandler):
 async def test_hfr_151_supervisor_coalesces_wakes_and_keeps_partition_single_flight() -> None:
     """HFR-151: coalesced wakes preserve bounded per-partition single flight."""
     release = asyncio.Event()
+    started = asyncio.Event()
     handler = _Handler(
         items=[RuntimeWorkItem("session-a", {"version": 1})],
         started=[],
         release=release,
+        started_event=started,
     )
     supervisor = RuntimeWorkSupervisor(reconcile_interval=3600, lane_capacity=2)
     token = supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, handler)
@@ -78,14 +86,10 @@ async def test_hfr_151_supervisor_coalesces_wakes_and_keeps_partition_single_fli
     supervisor.notify(RuntimeWorkLane.SESSION_DELIVERIES)
     supervisor.notify(RuntimeWorkLane.SESSION_DELIVERIES)
     supervisor.notify(RuntimeWorkLane.SESSION_DELIVERIES)
-    for _ in range(20):
-        if handler.started:
-            break
-        await asyncio.sleep(0.01)
+    await asyncio.wait_for(started.wait(), timeout=1)
     assert handler.started == ["session-a"]
 
-    unregister = asyncio.create_task(supervisor.unregister(token))
-    await asyncio.sleep(0)
+    unregister = supervisor.begin_unregister(token)
     release.set()
     await unregister
     await supervisor.stop()
@@ -96,22 +100,30 @@ async def test_hfr_151_supervisor_coalesces_wakes_and_keeps_partition_single_fli
 async def test_hfr_151_guarded_noop_uses_partition_backoff() -> None:
     """HFR-151: a stale guarded no-op cannot become a tight retry loop."""
 
-    handler = _RetryHandler()
+    attempted = asyncio.Event()
+    backoff_entered = asyncio.Event()
+    release_backoff = asyncio.Event()
+
+    async def controlled_backoff(delay: float) -> None:
+        assert delay == 0.1
+        backoff_entered.set()
+        await release_backoff.wait()
+
+    handler = _RetryHandler(attempted=attempted)
     supervisor = RuntimeWorkSupervisor(
         reconcile_interval=3600,
         lane_capacity=1,
         retry_backoff=0.1,
+        retry_wait=controlled_backoff,
     )
     supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, handler)
     await supervisor.activate()
-    for _ in range(20):
-        if handler.attempts:
-            break
-        await asyncio.sleep(0.005)
+    await asyncio.wait_for(attempted.wait(), timeout=1)
+    await asyncio.wait_for(backoff_entered.wait(), timeout=1)
     assert handler.attempts == 1
-    await asyncio.sleep(0.03)
-    assert handler.attempts == 1
+    release_backoff.set()
     await supervisor.stop()
+    assert handler.attempts == 1
 
 
 @pytest.mark.anyio
@@ -169,25 +181,56 @@ async def test_hfr_151_stale_first_page_does_not_starve_later_partition() -> Non
 @pytest.mark.anyio
 async def test_hfr_152_supervisor_starts_paused_and_periodic_reconcile_wakes_lane() -> None:
     """HFR-152: startup is paused and periodic reconciliation re-reads work."""
-    release = asyncio.Event()
-    handler = _Handler(
-        items=[RuntimeWorkItem("session-a", {})],
-        started=[],
-        release=release,
+    first_scan = asyncio.Event()
+    tick_waiting = asyncio.Event()
+    release_tick = asyncio.Event()
+    started = asyncio.Event()
+    release_worker = asyncio.Event()
+
+    class _PeriodicHandler(RuntimeWorkHandler):
+        ready = False
+
+        def scan(
+            self,
+            *,
+            limit: int,
+            occupied: frozenset[str],
+            cursor: str | None,
+        ):
+            del limit, cursor
+            if not self.ready or "session-a" in occupied:
+                first_scan.set()
+                return [], False
+            return [RuntimeWorkItem("session-a", {})], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            assert item.partition_key == "session-a"
+            started.set()
+            await release_worker.wait()
+
+    async def controlled_reconcile_wait(delay: float) -> None:
+        assert delay == 3600
+        tick_waiting.set()
+        await release_tick.wait()
+        release_tick.clear()
+
+    handler = _PeriodicHandler()
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=1,
+        reconcile_wait=controlled_reconcile_wait,
     )
-    supervisor = RuntimeWorkSupervisor(reconcile_interval=0.01, lane_capacity=1)
     supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, handler)
     supervisor.notify(RuntimeWorkLane.SESSION_DELIVERIES)
-    await asyncio.sleep(0.02)
-    assert handler.started == []
+    assert not started.is_set()
 
     await supervisor.activate()
-    for _ in range(20):
-        if handler.started:
-            break
-        await asyncio.sleep(0.01)
-    assert handler.started == ["session-a"]
-    release.set()
+    await asyncio.wait_for(first_scan.wait(), timeout=1)
+    await asyncio.wait_for(tick_waiting.wait(), timeout=1)
+    handler.ready = True
+    release_tick.set()
+    await asyncio.wait_for(started.wait(), timeout=1)
+    release_worker.set()
     await supervisor.stop()
 
 
@@ -195,10 +238,12 @@ async def test_hfr_152_supervisor_starts_paused_and_periodic_reconcile_wakes_lan
 async def test_hfr_153_bus_callback_crosses_threads_without_mutating_lane_off_loop() -> None:
     """HFR-153: cross-thread events schedule all lane mutation on its loop."""
     release = asyncio.Event()
+    started = asyncio.Event()
     handler = _Handler(
         items=[RuntimeWorkItem("session-a", {})],
         started=[],
         release=release,
+        started_event=started,
     )
     supervisor = RuntimeWorkSupervisor(reconcile_interval=3600, lane_capacity=1)
     supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, handler)
@@ -209,10 +254,7 @@ async def test_hfr_153_bus_callback_crosses_threads_without_mutating_lane_off_lo
     )
     publisher.start()
     publisher.join()
-    for _ in range(20):
-        if handler.started:
-            break
-        await asyncio.sleep(0.01)
+    await asyncio.wait_for(started.wait(), timeout=1)
     assert handler.started == ["session-a"]
     release.set()
     await supervisor.stop()
