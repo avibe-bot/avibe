@@ -1882,10 +1882,16 @@ class ConsolidatedMessageDispatcher:
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
                 if output_semantics.requires_delivery_for_run_settlement:
-                    self._settle_activity_output_claims(
+                    settlement_complete = self._settle_activity_output_claims(
                         output_semantics,
                         accepted_message_exists=persisted_output is not None,
+                        visible_output=False,
                     )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Suppressed Activity output local settlement is incomplete",
+                            delivered=False,
+                        )
                 return message_id
             finally:
                 if mutates_turn_lifecycle:

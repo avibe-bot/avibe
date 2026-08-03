@@ -2252,7 +2252,11 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             restored.append(activity)
         self.assertEqual(
             [activity.id for activity in restored],
-            ["task-old", "task-current-a", "task-current-b"],
+            ["task-old", "task-current-b"],
+        )
+        self.assertEqual(
+            restored[-1].metadata["output_batch_activity_ids"],
+            ["task-current-a", "task-current-b"],
         )
         for activity in restored:
             service.activities.ack_completed_output(activity)

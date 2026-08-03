@@ -126,7 +126,12 @@ def activity_completion_output(
     if not members:
         members = (activity,)
     batch_id = _activity_output_batch_id(members[0])
-    activity_ids = tuple(dict.fromkeys(member.id for member in members))
+    stored_activity_ids = _activity_output_batch_members(members[0])
+    activity_ids = (
+        stored_activity_ids
+        if len(members) == 1 and stored_activity_ids
+        else tuple(dict.fromkeys(member.id for member in members))
+    )
     run_ids: list[str] = []
     for member in members:
         values = [member.run_id]
@@ -137,6 +142,9 @@ def activity_completion_output(
             run_id = str(value or "").strip()
             if run_id and run_id not in run_ids:
                 run_ids.append(run_id)
+    stored_run_ids = _activity_output_batch_run_ids(members[0])
+    if len(members) == 1 and stored_run_ids:
+        run_ids = list(stored_run_ids)
 
     return MessageOutput(
         completes_turn=completes_turn,
@@ -165,6 +173,34 @@ def _activity_output_batch_id(activity: SessionActivity) -> str:
     if assigned:
         return assigned
     return f"{activity.backend}:{activity.runtime_key}:activity:{activity.id}"
+
+
+def _activity_output_batch_members(activity: SessionActivity) -> tuple[str, ...]:
+    values = activity.metadata.get("output_batch_activity_ids")
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        dict.fromkeys(str(value).strip() for value in values if str(value).strip())
+    )
+
+
+def _activity_output_batch_run_ids(activity: SessionActivity) -> tuple[str, ...]:
+    values = activity.metadata.get("output_batch_run_ids")
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        dict.fromkeys(str(value).strip() for value in values if str(value).strip())
+    )
+
+
+def _activity_run_id_sequence(activity: SessionActivity) -> tuple[str, ...]:
+    values = [activity.run_id]
+    linked = activity.metadata.get("run_ids")
+    if isinstance(linked, list):
+        values.extend(linked)
+    return tuple(
+        dict.fromkeys(str(value).strip() for value in values if str(value or "").strip())
+    )
 
 
 def _activity_output_idempotency_key(activity: SessionActivity) -> str:
@@ -221,11 +257,7 @@ class SessionActivityRegistry:
 
     @staticmethod
     def _activity_run_ids(activity: SessionActivity) -> set[str]:
-        run_ids = {str(activity.run_id)} if activity.run_id else set()
-        values = activity.metadata.get("run_ids")
-        if isinstance(values, list):
-            run_ids.update(str(value) for value in values if str(value or "").strip())
-        return run_ids
+        return set(_activity_run_id_sequence(activity))
 
     def _persist_activity(self, activity: SessionActivity, *, phase: str) -> None:
         upsert = getattr(self._store, "upsert_activity", None)
@@ -527,6 +559,8 @@ class SessionActivityRegistry:
         max_age_seconds: float = 0,
         recovered_only: bool = False,
     ) -> SessionActivity | None:
+        """Claim one receipt and return its canonical (last) batch member."""
+
         claimed = self._claim_completed_outputs(
             backend,
             runtime_key,
@@ -534,8 +568,36 @@ class SessionActivityRegistry:
             recovered_only=recovered_only,
             limit=1,
         )
+        if claimed:
+            candidate = claimed[0]
+            batch_id = str(
+                candidate.metadata.get("output_batch_id") or ""
+            ).strip()
+            if batch_id:
+                claimed.extend(
+                    self._claim_completed_outputs(
+                        backend,
+                        runtime_key,
+                        max_age_seconds=max_age_seconds,
+                        recovered_only=recovered_only,
+                        output_batch_id=batch_id,
+                    )
+                )
+            elif recovered_only:
+                turn_id = str(candidate.turn_id or "").strip()
+                if turn_id:
+                    claimed.extend(
+                        self._claim_completed_outputs(
+                            backend,
+                            runtime_key,
+                            max_age_seconds=max_age_seconds,
+                            recovered_only=True,
+                            turn_ids={turn_id},
+                            unbound_only=True,
+                        )
+                    )
         bound = self._bind_claimed_output_batch_or_requeue(claimed)
-        return bound[0] if bound else None
+        return bound[-1] if bound else None
 
     def claim_completed_output_batch(
         self,
@@ -641,7 +703,36 @@ class SessionActivityRegistry:
                 f"batch:{uuid.uuid4().hex}"
             )
         )
-        bound: list[SessionActivity] = []
+        persisted_member_sets = {
+            _activity_output_batch_members(activity)
+            for activity in activities
+            if _activity_output_batch_members(activity)
+        }
+        if len(persisted_member_sets) > 1:
+            raise RuntimeError("Activity output batch members have conflicting membership")
+        activity_ids = (
+            next(iter(persisted_member_sets))
+            if persisted_member_sets
+            else tuple(dict.fromkeys(activity.id for activity in activities))
+        )
+        persisted_run_sets = {
+            _activity_output_batch_run_ids(activity)
+            for activity in activities
+            if _activity_output_batch_run_ids(activity)
+        }
+        if len(persisted_run_sets) > 1:
+            raise RuntimeError("Activity output batch members have conflicting Run provenance")
+        if persisted_run_sets:
+            run_ids = next(iter(persisted_run_sets))
+        else:
+            ordered_run_ids: list[str] = []
+            for activity in activities:
+                for run_id in _activity_run_id_sequence(activity):
+                    if run_id not in ordered_run_ids:
+                        ordered_run_ids.append(run_id)
+            run_ids = tuple(ordered_run_ids)
+
+        updates: list[tuple[tuple[str, str, str], SessionActivity]] = []
         with self._lock:
             for activity in activities:
                 activity_key = self._activity_key(activity)
@@ -649,20 +740,57 @@ class SessionActivityRegistry:
                 if claimed is None:
                     continue
                 current = claimed.entry.activity
-                if current.metadata.get("output_batch_id") == batch_id:
-                    bound.append(current)
-                    continue
                 updated = replace(
                     current,
-                    metadata={**current.metadata, "output_batch_id": batch_id},
+                    metadata={
+                        **current.metadata,
+                        "output_batch_id": batch_id,
+                        "output_batch_activity_ids": list(activity_ids),
+                        "output_batch_run_ids": list(run_ids),
+                    },
                 )
-                self._persist_activity(updated, phase="awaiting_output")
+                updates.append((activity_key, updated))
+
+            if len(updates) != len(activities):
+                raise RuntimeError("Activity output batch is not completely claimed")
+
+            changed = [
+                updated
+                for activity_key, updated in updates
+                if updated
+                != self._claimed_completed_outputs[activity_key].entry.activity
+            ]
+            if changed:
+                if len(updates) == 1:
+                    self._persist_activity(changed[0], phase="awaiting_output")
+                else:
+                    persist_batch = getattr(self._store, "upsert_activities", None)
+                    persist_one = getattr(self._store, "upsert_activity", None)
+                    if callable(persist_batch):
+                        try:
+                            persist_batch(
+                                [updated.to_dict() for _key, updated in updates],
+                                phase="awaiting_output",
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to persist Activity output batch %s",
+                                batch_id,
+                                exc_info=True,
+                            )
+                            raise
+                    elif callable(persist_one):
+                        raise RuntimeError(
+                            "Durable Activity store cannot atomically bind an output batch"
+                        )
+
+            for activity_key, updated in updates:
+                claimed = self._claimed_completed_outputs[activity_key]
                 self._claimed_completed_outputs[activity_key] = replace(
                     claimed,
                     entry=replace(claimed.entry, activity=updated),
                 )
-                bound.append(updated)
-        return bound
+        return [updated for _activity_key, updated in updates]
 
     def claimed_completed_output_for_idempotency_key(
         self,
@@ -820,7 +948,7 @@ class SessionActivityRegistry:
         front: bool = True,
         recovered: bool | None = None,
     ) -> bool:
-        """Restore one claim, optionally promoting it for immediate retry."""
+        """Restore one claim or its complete receipt group for retry."""
 
         key = (str(activity.backend), str(activity.runtime_key))
         activity_key = self._activity_key(activity)
@@ -828,6 +956,27 @@ class SessionActivityRegistry:
             claimed = self._claimed_completed_outputs.get(activity_key)
             if claimed is None:
                 return False
+            batch_id = str(
+                claimed.entry.activity.metadata.get("output_batch_id") or ""
+            ).strip()
+            if batch_id:
+                batch = sorted(
+                    (
+                        item
+                        for item in self._claimed_completed_outputs.values()
+                        if str(
+                            item.entry.activity.metadata.get("output_batch_id") or ""
+                        ).strip()
+                        == batch_id
+                    ),
+                    key=lambda item: item.entry.sequence,
+                )
+                if len(batch) > 1:
+                    if any(not item.externally_retryable for item in batch):
+                        return False
+                    return self.requeue_completed_outputs(
+                        [item.entry.activity for item in batch]
+                    ) == len(batch)
             if not claimed.externally_retryable:
                 return False
             self._claimed_completed_outputs.pop(activity_key, None)

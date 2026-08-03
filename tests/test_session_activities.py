@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from sqlalchemy import event
 
 from core.session_activities import (
     SessionActivity,
@@ -143,9 +144,8 @@ def test_activity_batch_requeue_restores_global_fifo_position():
         restored.append(activity)
     assert [activity.id for activity in restored] == [
         "task-old",
-        "task-current-a",
-        "task-other",
         "task-current-b",
+        "task-other",
         "task-new",
     ]
     for activity in restored:
@@ -392,7 +392,13 @@ def test_activity_batch_receipt_is_stable_for_every_member_after_restart():
 
 
 def test_failed_batch_binding_restores_every_claim_to_the_retryable_queue():
-    registry = SessionActivityRegistry()
+    store = SimpleNamespace(
+        upsert_activity=mock.Mock(),
+        upsert_activities=mock.Mock(
+            side_effect=RuntimeError("batch binding unavailable")
+        ),
+    )
+    registry = SessionActivityRegistry(store)
     for activity_id in ("task-a", "task-b"):
         registry.start(
             backend="claude",
@@ -410,18 +416,246 @@ def test_failed_batch_binding_restores_every_claim_to_the_retryable_queue():
             expects_output=True,
         )
 
-    with mock.patch.object(
-        registry,
-        "_persist_activity",
-        side_effect=RuntimeError("batch binding unavailable"),
-    ):
-        with pytest.raises(RuntimeError, match="batch binding unavailable"):
-            registry.claim_completed_output_batch("claude", "runtime-1")
+    with pytest.raises(RuntimeError, match="batch binding unavailable"):
+        registry.claim_completed_output_batch("claude", "runtime-1")
 
     assert registry.has_completed_output("claude", "runtime-1") is True
+    store.upsert_activities.side_effect = None
     retried = registry.claim_completed_output_batch("claude", "runtime-1")
     assert [activity.id for activity in retried] == ["task-a", "task-b"]
     assert len({activity.metadata["output_batch_id"] for activity in retried}) == 1
+
+
+def test_durable_store_without_bulk_binding_never_falls_back_to_member_writes():
+    store = SimpleNamespace(upsert_activity=mock.Mock())
+    registry = SessionActivityRegistry(store)
+    for activity_id in ("task-a", "task-b"):
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            turn_id="turn-1",
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+
+    with pytest.raises(RuntimeError, match="cannot atomically bind"):
+        registry.claim_completed_output_batch("claude", "runtime-1")
+
+    assert registry.has_completed_output("claude", "runtime-1") is True
+    assert store.upsert_activity.call_count == 4
+
+
+def test_partial_batch_binding_recovers_as_one_complete_retryable_batch():
+    class _Store:
+        def __init__(self):
+            self.records = {}
+            self.binding_writes = 0
+            self.fail_second_binding = True
+
+        def upsert_activity(self, activity, *, phase):
+            self.records[activity["id"]] = {
+                "activity": dict(activity),
+                "phase": phase,
+            }
+
+        def upsert_activities(self, activities, *, phase):
+            self.binding_writes += len(activities)
+            if self.fail_second_binding:
+                raise RuntimeError("second batch member unavailable")
+            for activity in activities:
+                self.upsert_activity(activity, phase=phase)
+
+        def list_activities(self):
+            return list(self.records.values())
+
+    store = _Store()
+    registry = SessionActivityRegistry(store)
+    for activity_id, run_id in (("task-a", "run-a"), ("task-b", "run-b")):
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            turn_id="turn-1",
+            run_id=run_id,
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+
+    with pytest.raises(RuntimeError, match="second batch member unavailable"):
+        registry.claim_completed_output_batch("claude", "runtime-1")
+
+    store.fail_second_binding = False
+    recovered = SessionActivityRegistry(store)
+    representative = recovered.claim_completed_output(
+        "claude",
+        "runtime-1",
+        recovered_only=True,
+    )
+    assert representative is not None
+    output = activity_completion_output(
+        representative,
+        detached=True,
+        completes_turn=False,
+    )
+
+    assert output.activity_ids == ("task-a", "task-b")
+    assert output.run_ids == ("run-a", "run-b")
+    assert [
+        activity.id
+        for activity in recovered.claimed_completed_output_batch_for_output(output)
+    ] == ["task-a", "task-b"]
+
+
+def test_sqlite_batch_binding_rolls_back_a_later_member_failure(tmp_path: Path):
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    engine = create_sqlite_engine(db_path)
+    store = SQLiteSessionActivityStore(engine)
+    originals = [
+        SessionActivity(
+            id=activity_id,
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            kind="background_task",
+            status="completed",
+            turn_id="turn-1",
+            run_id=run_id,
+            metadata={"summary": activity_id},
+        ).to_dict()
+        for activity_id, run_id in (("task-a", "run-a"), ("task-b", "run-b"))
+    ]
+    for activity in originals:
+        store.upsert_activity(activity, phase="awaiting_output")
+    bound = [
+        {
+            **activity,
+            "metadata": {
+                **activity["metadata"],
+                "output_batch_id": "batch-1",
+                "output_batch_activity_ids": ["task-a", "task-b"],
+                "output_batch_run_ids": ["run-a", "run-b"],
+            },
+        }
+        for activity in originals
+    ]
+    writes = 0
+
+    def fail_second_write(_conn, _cursor, statement, _parameters, _context, _many):
+        nonlocal writes
+        if statement.lstrip().upper().startswith("INSERT INTO RUNTIME_RECORDS"):
+            writes += 1
+            if writes == 2:
+                raise RuntimeError("second batch member unavailable")
+
+    event.listen(engine, "before_cursor_execute", fail_second_write)
+    try:
+        with pytest.raises(RuntimeError, match="second batch member unavailable"):
+            store.upsert_activities(bound, phase="awaiting_output")
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_second_write)
+
+    records = store.list_activities()
+    assert [record["activity"]["id"] for record in records] == ["task-a", "task-b"]
+    assert all(
+        "output_batch_id" not in record["activity"]["metadata"]
+        for record in records
+    )
+    engine.dispose()
+
+
+def test_single_recovery_claim_expands_a_persisted_output_batch():
+    class _Store:
+        def __init__(self):
+            self.records = {}
+
+        def upsert_activity(self, activity, *, phase):
+            self.records[activity["id"]] = {
+                "activity": dict(activity),
+                "phase": phase,
+            }
+
+        def upsert_activities(self, activities, *, phase):
+            for activity in activities:
+                self.upsert_activity(activity, phase=phase)
+
+        def list_activities(self):
+            return list(self.records.values())
+
+    store = _Store()
+    registry = SessionActivityRegistry(store)
+    for activity_id, run_id in (("task-a", "run-a"), ("task-b", "run-b")):
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            turn_id="turn-1",
+            run_id=run_id,
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+    registry.claim_completed_output_batch("claude", "runtime-1")
+
+    recovered = SessionActivityRegistry(store)
+    representative = recovered.claim_completed_output(
+        "claude",
+        "runtime-1",
+        recovered_only=True,
+    )
+    assert representative is not None
+    output = activity_completion_output(
+        representative,
+        detached=True,
+        completes_turn=False,
+    )
+
+    assert output.activity_ids == ("task-a", "task-b")
+    assert output.run_ids == ("run-a", "run-b")
+    assert [
+        activity.id
+        for activity in recovered.claimed_completed_output_batch_for_output(output)
+    ] == ["task-a", "task-b"]
+
+    assert recovered.requeue_completed_output(representative, recovered=True)
+    retried = recovered.claim_completed_output(
+        "claude",
+        "runtime-1",
+        recovered_only=True,
+    )
+    assert retried is not None
+    retried_output = activity_completion_output(
+        retried,
+        detached=True,
+        completes_turn=False,
+    )
+    assert [
+        activity.id
+        for activity in recovered.claimed_completed_output_batch_for_output(
+            retried_output
+        )
+    ] == ["task-a", "task-b"]
 
 
 def test_requeued_bound_batch_does_not_absorb_later_same_turn_completion():
