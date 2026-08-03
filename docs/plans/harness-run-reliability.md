@@ -352,67 +352,43 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-### Conditional PR7A — Terminal truth closure
+### After PR7R — close the claim or review the contract
 
-Open PR7A only for a defect reproduced by PR7R. Route settlement through the
-existing exact Turn, Activity batch, Message receipt, and Run CAS owners. Keep
-Workbench's single terminal writer; make compatibility projections atomic with
-the Run CAS or reconcile them idempotently using monotonic
-`(completed_at, run_id)` ordering. Positive output delivery remains final when
-later Message, Run, Turn, or Activity local settlement fails; recovery retries
-only the owed local settlement.
+PR7R does not authorize implementation. If its executable evidence disproves an
+old claim, close that claim without adding code. For every reproduced defect,
+amend this plan in a separate documentation-only review before opening an
+implementation PR. Do not reserve PR7A / PR7B as implementation units until that
+contract review passes.
 
-If current data still contains misleading pre-#1134 success rows, mark only rows
-with durable writer/version evidence or `completed_at` strictly before
-`2026-08-02T09:56:28Z` plus the old premature-success signature. Ambiguous rows
-remain unchanged. The marker is display-only: never rewrite historical status or
-invent result text, and route all visible copy through the English and Chinese
-catalogs.
+The amendment must define one complete model, not another list of local patches:
 
-### Conditional PR7B — Cron liveness closure
+1. Name the durable owner and guarded terminal transition at every phase,
+   including a bare Run before Delivery reservation, each nonterminal Delivery
+   role, a starting or active Turn, terminal-result and pending-output evidence,
+   Activity receipt, and post-delivery local settlement. It must define
+   request/coalescing cleanup and the durable user notice for every terminal
+   cause.
+2. State whether exact-Turn progress must survive restart. If it must, define the
+   persisted owner, timestamp/update CAS, recovery read, and restart-after-progress
+   evidence. If no backend-independent durable signal exists for every backend
+   and lane, do not implement a generic inactivity timeout.
+3. Define one policy owner for coalesced Runs. Either prove all participants have
+   the same snapshotted policy or keep incompatible Runs in separate Turns.
+   Specify natural completion, user Stop, and timeout precedence before adding a
+   timeout writer.
+4. If the model includes a user-configurable task inactivity override, specify
+   its V2 config key, concrete default, normalization, persistence, CLI/API/Web
+   inputs, English and Chinese documentation, and unchanged watch semantics. If
+   those supported surfaces are not part of the implementation, remove the
+   override from the model rather than supporting it only through fixtures.
+5. Reuse the exact Run, Delivery, Turn, Message, and Activity owners already on
+   `master`. Any new state, schema, terminal writer, retry, or replay rule needs
+   evidence that those owners cannot express the reproduced behavior.
 
-Open PR7B only when PR7R reproduces scheduler starvation or ownerless inactive
-work. Its implementation contract is:
-
-1. Scheduler fire is enqueue-only; preserve at most one pending fire per
-   definition while productive work continues.
-2. Progress is exact-Turn evidence wired and tested for Claude, Codex, and
-   OpenCode in both direct IM and Workbench lanes. Queuing, claims, unrelated
-   session activity, and another Run's progress do not refresh it.
-3. Inactivity ownership is Turn-level. Runs may share a Turn only when their
-   effective inactivity policy is identical; incompatible scheduler/manual
-   participants remain separate queued Turns. All compatible participants re-arm
-   from the same attributed progress and settle from the same winning cause.
-4. A scheduler-created recurring Run snapshots
-   `min(positive_override_or_global_default, 0.8 × actual_next_fire_gap)`. A
-   manual CLI/API run and a one-shot `at` run use the positive override or global
-   default without a recurrence ceiling. Zero means the default and negatives
-   are rejected. Snapshot the chosen policy at enqueue so a nearby cron fire
-   cannot shorten a manual run.
-5. Before claiming inactivity, re-read exact progress plus terminal-result latch,
-   Turn, pending-output, accepted-Message, and Activity receipt evidence. Any
-   natural terminal/output evidence wins even when delivery or local settlement
-   is still pending. User Stop and natural completion retain their existing
-   precedence.
-6. The winning timeout owner consumes `DELIVERY_STATE_MATRIX` and the exact Turn
-   owner. It retires only work proven unwritten, never replays possible native
-   effects, resumes partial cleanup by one stable claim id, releases ordering and
-   coalescing fences, and emits #1072's durable visible failure notice.
-7. Cover the no-Delivery reservation race, every nonterminal Delivery role,
-   terminal-latch-before-Turn-terminal, natural/Stop/timeout races, restart at
-   each persisted boundary, manual execution adjacent to a cron fire, and
-   incompatible Runs that must not share a Turn. Ordinary unknown-start recovery
-   keeps #1134's bounded replay policy; only a previously persisted
-   `lifetime_timeout` owner suppresses that replay.
-8. If PR7R proves a task inactivity option is required, thread it through task
-   add/update CLI and API payloads, the Web form, English and Chinese command/CLI
-   and AVIBE Docs pages, and agent-facing `skills/use-avibe/SKILL.md` guidance.
-   Do not change existing watch lifetime semantics.
-
-Exit criterion: Run status, definition health, scheduler availability, and user
-notifications describe one winning terminal event without replaying accepted
-work, timing out a productive Turn, or letting one participant cancel siblings
-that have a different policy.
+Terminal-truth and scheduler-liveness defects remain separate implementation
+reviews even when PR7R reproduces both. Each implementation PR starts with red
+tests for the approved contract and must not infer missing policy from this
+evidence plan.
 
 ## 7. Order and review boundaries
 
@@ -429,13 +405,17 @@ PR4 shared-drain liveness + proven transport-attempt delta
 PR7R current-master evidence matrix
     |
     v
-conditional PR7A terminal truth / PR7B cron liveness
+contract amendment for each reproduced defect
+    |
+    v
+separate terminal-truth / scheduler-liveness implementation PRs
 ```
 
 PR7R is a separate test/documentation review unit. It may close either old claim
-without an implementation PR; any reproduced PR7A and PR7B defects remain
-separate implementation units. Keep PR3 and PR4 separate: PR3 protects session
-ownership; PR4 fixes the global liveness failure.
+without an implementation PR. A reproduced defect first receives the complete
+contract amendment above; only then may it become a separate implementation
+unit. Keep PR3 and PR4 separate: PR3 protects session ownership; PR4 fixes the
+global liveness failure.
 
 Scenario ranges reserved by the original plan remain available on current
 `master`:
