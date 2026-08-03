@@ -734,13 +734,145 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                     completes_turn=False,
                 ),
             )
-            self.assertTrue(registry.ack_completed_output(retried))
+            self.assertFalse(registry.ack_completed_output(retried))
 
         self.assertTrue(str(message_id).startswith("agent-output:claude:"))
         self.assertEqual(controller.im_client.sent, [("C123", None, "Durable output")])
         self.assertEqual(run_attempts, ["run-origin", "run-origin"])
         self.assertEqual(activity.status, "completed")
         self.assertFalse(registry.has_completed_output("claude", "runtime-durable"))
+
+    async def test_recovered_durable_message_retries_only_local_settlement_after_restart(self):
+        from core.scheduled_tasks import ScheduledTaskService
+
+        class _ActivityStore:
+            def __init__(self):
+                self.record = None
+
+            def upsert_activity(self, activity, *, phase):
+                self.record = {"activity": dict(activity), "phase": phase}
+
+            def delete_activity(self, **_kwargs):
+                self.record = None
+
+            def list_activities(self):
+                return [self.record] if self.record is not None else []
+
+        activity_store = _ActivityStore()
+        original = SessionActivityRegistry(activity_store)
+        original.start(
+            backend="claude",
+            runtime_key="runtime-restarted",
+            session_id="sess-restarted",
+            activity_id="activity-restarted",
+            kind="local_agent",
+            run_id="run-origin",
+        )
+        original.complete(
+            backend="claude",
+            runtime_key="runtime-restarted",
+            activity_id="activity-restarted",
+            status="completed",
+            metadata={"summary": "Recovered durable output"},
+            expects_output=True,
+        )
+        self.assertEqual(activity_store.record["phase"], "awaiting_output")
+
+        settlement_calls = []
+
+        class _RecordingRegistry(SessionActivityRegistry):
+            def settle_completed_output_delivery(self, activity, **kwargs):
+                settlement_calls.append(
+                    (activity.id, kwargs["accepted_message_exists"])
+                )
+                return super().settle_completed_output_delivery(activity, **kwargs)
+
+        recovered = _RecordingRegistry(activity_store)
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=recovered,
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        service = object.__new__(ScheduledTaskService)
+        service.controller = controller
+        service._activity_registry = lambda: recovered
+        service._settle_pending_recovered_activity_terminals = lambda: None
+        run_attempts = []
+        observed_native_ids = []
+
+        class _RunStore:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **_kwargs):
+                run_attempts.append(run_id)
+                if len(run_attempts) == 1:
+                    raise RuntimeError("run store unavailable")
+
+            def close(self):
+                pass
+
+        async def deliver_recovered(activity):
+            message_id = await dispatcher.emit_agent_message(
+                MessageContext(
+                    user_id="scheduled",
+                    channel_id="C123",
+                    platform="slack",
+                    platform_specific={"task_trigger_kind": "activity_recovery"},
+                ),
+                "result",
+                "Recovered durable output",
+                output=activity_completion_output(
+                    activity,
+                    detached=True,
+                    completes_turn=False,
+                ),
+            )
+            self.assertIsNotNone(message_id)
+            recovered.ack_completed_output(activity)
+
+        service._deliver_recovered_activity_output = deliver_recovered
+
+        def accepted_message_exists(_context, native_message_id):
+            observed_native_ids.append(native_message_id)
+            return True
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_RunStore(),
+            ),
+            patch.object(
+                message_dispatcher_module,
+                "agent_message_exists",
+                side_effect=accepted_message_exists,
+            ),
+            patch.object(message_dispatcher_module, "persist_agent_message") as persist,
+        ):
+            await service._drain_recovered_activity_outputs()
+            self.assertTrue(
+                recovered.has_completed_output("claude", "runtime-restarted")
+            )
+            await service._drain_recovered_activity_outputs()
+
+        self.assertEqual(controller.im_client.sent, [])
+        persist.assert_not_called()
+        self.assertEqual(run_attempts, ["run-origin", "run-origin"])
+        self.assertTrue(observed_native_ids)
+        self.assertEqual(len(set(observed_native_ids)), 1)
+        self.assertTrue(
+            observed_native_ids[0].endswith(
+                ":claude-task:runtime-restarted:activity-restarted:completion"
+            )
+        )
+        self.assertIn(("activity-restarted", True), settlement_calls)
+        self.assertFalse(
+            recovered.has_completed_output("claude", "runtime-restarted")
+        )
+        self.assertEqual(activity_store.list_activities(), [])
 
     async def test_activity_run_settlement_follows_message_persistence(self):
         controller = _StubController()

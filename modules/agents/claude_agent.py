@@ -6,10 +6,7 @@ from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
-from core.message_dispatcher import (
-    ActivityOutputDeliveryError,
-    terminally_discard_delivered_activity_claim,
-)
+from core.message_dispatcher import ActivityOutputDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
     MessageOutput,
@@ -2112,51 +2109,18 @@ class ClaudeAgent(BaseAgent):
         if not callable(ack):
             return
         for activity in activities:
-            key_builder = getattr(registry, "_activity_key", None)
-            lock = getattr(registry, "_lock", None)
-            claimed = getattr(registry, "_claimed_completed_outputs", None)
-            if callable(key_builder) and lock is not None and isinstance(claimed, dict):
-                with lock:
-                    if key_builder(activity) not in claimed:
-                        continue
-            if delivery_error is not None and delivery_error.cause is not None:
-                failed_activity = terminally_discard_delivered_activity_claim(
-                    registry,
-                    activity,
-                    delivery_error.cause,
-                )
-                self._settle_terminally_discarded_activity(failed_activity)
-                continue
             try:
                 ack(activity)
             except Exception as ack_error:
                 logger.error(
-                    "Activity acknowledgement failed after delivery; terminally "
-                    "discarding the claim to preserve turn liveness "
+                    "Activity acknowledgement failed after delivery; the Registry "
+                    "retains settlement ownership "
                     "(runtime=%s activity=%s error=%s)",
                     composite_key,
                     getattr(activity, "id", ""),
                     ack_error,
                     exc_info=True,
                 )
-                failed_activity = terminally_discard_delivered_activity_claim(
-                    registry,
-                    activity,
-                    ack_error,
-                )
-                self._settle_terminally_discarded_activity(failed_activity)
-
-    def _settle_terminally_discarded_activity(
-        self,
-        activity: SessionActivity,
-    ) -> None:
-        service = getattr(self.controller, "agent_service", None)
-        on_terminal = getattr(service, "on_activity_terminal", None)
-        if callable(on_terminal) and not on_terminal(activity):
-            logger.error(
-                "Failed to terminally settle delivered Activity %s after local failure",
-                activity.id,
-            )
 
     def _claim_activity_batch_for_turns(
         self,

@@ -1597,11 +1597,13 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             def close(self):
                 pass
 
-        original_ack = service.activities.ack_completed_output
+        original_settle = service.activities.settle_completed_output_delivery
 
-        def record_ack(activity):
-            events.append(("ack", activity.id))
-            return original_ack(activity)
+        def record_settle(activity, **kwargs):
+            settled = original_settle(activity, **kwargs)
+            if settled:
+                events.append(("ack", activity.id))
+            return settled
 
         with (
             patch("core.message_dispatcher.persist_agent_message", return_value=None),
@@ -1612,8 +1614,8 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 service.activities,
-                "ack_completed_output",
-                side_effect=record_ack,
+                "settle_completed_output_delivery",
+                side_effect=record_settle,
             ),
         ):
             self.assertFalse(
@@ -1664,9 +1666,17 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertFalse(waiter.done())
 
-        original_persist = service.activities._persist_activity
+        terminal_writes = []
+
+        def fail_terminal_write(activity, *, phase):
+            terminal_writes.append((activity, phase))
+            raise RuntimeError("terminal activity store unavailable")
+
         with (
-            patch("core.message_dispatcher.persist_agent_message", return_value=None),
+            patch(
+                "core.message_dispatcher.persist_agent_message",
+                return_value={"id": "accepted-message"},
+            ),
             patch("core.message_dispatcher.agent_message_exists", return_value=False),
             patch.object(
                 service.activities,
@@ -1676,22 +1686,99 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 service.activities,
                 "_persist_activity",
-                wraps=original_persist,
-            ) as persist_terminal,
+                side_effect=fail_terminal_write,
+            ),
         ):
             self.assertFalse(
                 await agent._flush_completed_activity_outputs(composite_key, context)
             )
 
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
-        terminal_activity = persist_terminal.call_args.args[0]
-        self.assertEqual(terminal_activity.status, "failed")
+        self.assertEqual(len(terminal_writes), 1)
+        terminal_activity, phase = terminal_writes[0]
+        self.assertEqual(terminal_activity.status, "completed")
         self.assertEqual(
-            persist_terminal.call_args.kwargs["phase"],
+            phase,
             TERMINAL_SNAPSHOT_PHASE,
         )
         await asyncio.wait_for(waiter, timeout=0.1)
         self.assertEqual(client.sent, ["Background verification finished"])
+
+    async def test_missing_message_and_terminal_write_failure_stays_fail_closed(self):
+        agent, service = _build_agent()
+        client = _ActivityDeliveryClient()
+        _install_activity_dispatcher(agent, client)
+        composite_key = "session-terminal-write-failure:/tmp/work"
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="discord",
+            platform_specific={"agent_session_id": "sess-terminal-write-failure"},
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-terminal-write-failure",
+            activity_id="task-terminal-write-failure",
+            kind="local_agent",
+            run_id="run-origin",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-terminal-write-failure",
+            status="completed",
+            metadata={"summary": "Background verification finished"},
+            expects_output=True,
+        )
+        terminal_settlements = []
+        agent.controller.scheduled_task_service = SimpleNamespace(
+            settle_activity_runs=lambda activity: terminal_settlements.append(
+                (activity.id, activity.status)
+            )
+        )
+
+        class _Store:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, _run_id, **_kwargs):
+                raise RuntimeError("run store unavailable")
+
+            def close(self):
+                pass
+
+        with (
+            patch("core.message_dispatcher.persist_agent_message", return_value=None),
+            patch("core.message_dispatcher.agent_message_exists", return_value=False),
+            patch("core.message_dispatcher.SQLiteBackgroundTaskStore", return_value=_Store()),
+            patch.object(
+                service.activities,
+                "_persist_activity",
+                side_effect=RuntimeError("terminal activity store unavailable"),
+            ),
+            patch.object(
+                service.activities,
+                "_delete_activity",
+                side_effect=RuntimeError("activity delete unavailable"),
+            ),
+        ):
+            self.assertFalse(
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            )
+            self.assertFalse(
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            )
+
+        self.assertEqual(client.sent, ["Background verification finished"])
+        self.assertTrue(service.activities.has_completed_output("claude", composite_key))
+        self.assertIsNone(
+            service.activities.claim_completed_output("claude", composite_key)
+        )
+        self.assertEqual(
+            terminal_settlements,
+            [("task-terminal-write-failure", "failed")],
+        )
 
     async def test_missing_evidence_and_run_failure_terminally_discards_once(self):
         agent, service = _build_agent()

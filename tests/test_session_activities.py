@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from unittest import mock
 
@@ -221,7 +222,7 @@ def test_activity_completion_persistence_failure_keeps_output_unclaimable():
     assert registry.has_completed_output("claude", "runtime-1") is False
 
 
-def test_activity_ack_keeps_claim_until_snapshot_delete_succeeds():
+def test_activity_ack_replaces_undeletable_snapshot_with_terminal_evidence():
     delete_activity = mock.Mock(side_effect=RuntimeError("database is locked"))
     store = SimpleNamespace(
         upsert_activity=mock.Mock(),
@@ -245,13 +246,111 @@ def test_activity_ack_keeps_claim_until_snapshot_delete_succeeds():
     claimed = registry.claim_completed_output("claude", "runtime-1")
     assert claimed is not None
 
-    with pytest.raises(RuntimeError, match="database is locked"):
-        registry.ack_completed_output(claimed)
+    assert registry.ack_completed_output(claimed) is True
+
+    assert registry.has_completed_output("claude", "runtime-1") is False
+    assert store.upsert_activity.call_args.kwargs["phase"] == "terminal"
+
+
+def test_delivered_output_without_durable_evidence_stays_claimed_when_terminal_write_fails():
+    callback = mock.Mock()
+    store = SimpleNamespace(
+        upsert_activity=mock.Mock(),
+        delete_activity=mock.Mock(),
+    )
+    registry = SessionActivityRegistry(store)
+    registry.set_output_settled_callback(callback)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        expects_output=True,
+    )
+    claimed = registry.claim_completed_output("claude", "runtime-1")
+    assert claimed is not None
+
+    with (
+        mock.patch.object(
+            registry,
+            "_delete_activity",
+            side_effect=RuntimeError("activity delete unavailable"),
+        ),
+        mock.patch.object(
+            registry,
+            "_persist_activity",
+            side_effect=RuntimeError("terminal write unavailable"),
+        ),
+    ):
+        assert registry.settle_completed_output_delivery(
+            claimed,
+            accepted_message_exists=False,
+        ) is False
+        assert registry.ack_completed_output(claimed) is False
 
     assert registry.has_completed_output("claude", "runtime-1") is True
-    delete_activity.side_effect = None
-    assert registry.ack_completed_output(claimed) is True
-    assert registry.has_completed_output("claude", "runtime-1") is False
+    assert registry.claim_completed_output("claude", "runtime-1") is None
+    callback.assert_not_called()
+
+
+def test_delivered_output_settlement_invokes_callback_outside_registry_lock():
+    registry = SessionActivityRegistry()
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        expects_output=True,
+    )
+    claimed = registry.claim_completed_output("claude", "runtime-1")
+    assert claimed is not None
+    callback_observations = []
+
+    def callback(_activity):
+        inspected = threading.Event()
+
+        def inspect_registry():
+            registry.has_completed_output("claude", "runtime-1")
+            inspected.set()
+
+        worker = threading.Thread(target=inspect_registry)
+        worker.start()
+        worker.join(timeout=0.2)
+        callback_observations.append(inspected.is_set())
+        worker.join(timeout=0.2)
+
+    registry.set_output_settled_callback(callback)
+
+    assert registry.settle_completed_output_delivery(
+        claimed,
+        accepted_message_exists=False,
+    ) is True
+    assert callback_observations == [True]
+
+
+def test_claimed_output_mutation_is_owned_by_the_registry_api():
+    repo_root = Path(__file__).resolve().parents[1]
+
+    for relative_path in (
+        "core/message_dispatcher.py",
+        "modules/agents/claude_agent.py",
+    ):
+        source = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert "_claimed_completed_outputs" not in source
 
 
 def test_activity_updates_are_independent_and_runtime_disconnect_terminates_all():

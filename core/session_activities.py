@@ -123,9 +123,7 @@ def activity_completion_output(
         completes_turn=completes_turn,
         completes_run=True,
         detached=detached,
-        idempotency_key=(
-            f"{activity.backend}-task:{activity.runtime_key}:{activity.id}:completion"
-        ),
+        idempotency_key=_activity_output_idempotency_key(activity),
         activity_id=activity.id,
         causation_id=activity.parent_activity_id,
         sequence=1,
@@ -139,6 +137,10 @@ def activity_completion_output(
             "turn_id": activity.turn_id,
         },
     )
+
+
+def _activity_output_idempotency_key(activity: SessionActivity) -> str:
+    return f"{activity.backend}-task:{activity.runtime_key}:{activity.id}:completion"
 
 
 class SessionActivityRegistry:
@@ -549,6 +551,22 @@ class SessionActivityRegistry:
                 turn_ids=identities,
             )
 
+    def claimed_completed_output_for_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> SessionActivity | None:
+        """Return the claimed Activity owning one stable output identity."""
+
+        identity = str(idempotency_key or "").strip()
+        if not identity:
+            return None
+        with self._lock:
+            for claimed in self._claimed_completed_outputs.values():
+                activity = claimed.entry.activity
+                if _activity_output_idempotency_key(activity) == identity:
+                    return activity
+        return None
+
     def _claim_completed_outputs(
         self,
         backend: str,
@@ -676,15 +694,127 @@ class SessionActivityRegistry:
                 self._recovered_output_ids.add(activity_key)
         return True
 
-    def ack_completed_output(self, activity: SessionActivity) -> bool:
-        """Forget a durable completion only after its output policy succeeds."""
+    @staticmethod
+    def delivered_output_failure(
+        activity: SessionActivity,
+        error: BaseException,
+    ) -> SessionActivity:
+        return replace(
+            activity,
+            status="failed",
+            metadata={
+                **activity.metadata,
+                "terminal_error": (
+                    "delivered_output_local_settlement_failed: "
+                    f"{str(error).strip() or type(error).__name__}"
+                ),
+            },
+        )
+
+    def settle_completed_output_delivery(
+        self,
+        activity: SessionActivity,
+        *,
+        accepted_message_exists: bool,
+        terminal_activity: SessionActivity | None = None,
+        settle_terminal: Callable[[SessionActivity], bool] | None = None,
+    ) -> bool:
+        """Persist the terminal barrier, release the claim, then wake waiters.
+
+        An accepted Message is the durable anti-redelivery receipt. Without one,
+        a failed acknowledgement must first replace the awaiting-output snapshot
+        with terminal evidence; if that write also fails, the claim stays held.
+        """
 
         activity_key = self._activity_key(activity)
+        if terminal_activity is not None:
+            terminal_persisted = False
+            with self._lock:
+                claimed = self._claimed_completed_outputs.get(activity_key)
+                if claimed is None:
+                    return False
+                try:
+                    self._persist_activity(
+                        terminal_activity,
+                        phase=TERMINAL_SNAPSHOT_PHASE,
+                    )
+                    terminal_persisted = True
+                except Exception:
+                    logger.error(
+                        "Failed to persist delivered Activity terminal evidence "
+                        "(activity=%s)",
+                        activity.id,
+                        exc_info=True,
+                    )
+
+            terminal_settled = settle_terminal is None
+            if settle_terminal is not None:
+                try:
+                    terminal_settled = bool(settle_terminal(terminal_activity))
+                except Exception:
+                    terminal_settled = False
+                    logger.error(
+                        "Failed to settle delivered Activity terminal state "
+                        "(activity=%s)",
+                        activity.id,
+                        exc_info=True,
+                    )
+            if not terminal_settled:
+                return False
+            terminal_evidence_safe = (
+                terminal_persisted
+                or accepted_message_exists
+                or settle_terminal is not None
+            )
+            if not terminal_evidence_safe:
+                return False
+
+            with self._lock:
+                if self._claimed_completed_outputs.get(activity_key) is not claimed:
+                    return False
+                self._claimed_completed_outputs.pop(activity_key, None)
+                self._recovered_output_ids.discard(activity_key)
+                callback = self._output_settled_callback
+            if callback is not None:
+                try:
+                    callback(activity)
+                except Exception:
+                    logger.warning(
+                        "Failed to signal settled Activity output %s",
+                        activity.id,
+                        exc_info=True,
+                    )
+            return True
+
         with self._lock:
             claimed = self._claimed_completed_outputs.get(activity_key)
             if claimed is None:
                 return False
-            self._delete_activity(claimed.entry.activity)
+            claimed_activity = claimed.entry.activity
+            try:
+                self._delete_activity(claimed_activity)
+            except Exception:
+                try:
+                    self._persist_activity(
+                        claimed_activity,
+                        phase=TERMINAL_SNAPSHOT_PHASE,
+                    )
+                except Exception:
+                    if not accepted_message_exists:
+                        logger.error(
+                            "Retaining delivered Activity claim without durable "
+                            "Message or terminal evidence (activity=%s)",
+                            activity.id,
+                            exc_info=True,
+                        )
+                        return False
+                    logger.error(
+                        "Releasing delivered Activity claim using accepted Message "
+                        "evidence after acknowledgement and terminal snapshot "
+                        "failure (activity=%s)",
+                        activity.id,
+                        exc_info=True,
+                    )
             self._claimed_completed_outputs.pop(activity_key, None)
             self._recovered_output_ids.discard(activity_key)
             callback = self._output_settled_callback
@@ -698,6 +828,14 @@ class SessionActivityRegistry:
                     exc_info=True,
                 )
         return True
+
+    def ack_completed_output(self, activity: SessionActivity) -> bool:
+        """Settle a delivered completion when no durable Message is known here."""
+
+        return self.settle_completed_output_delivery(
+            activity,
+            accepted_message_exists=False,
+        )
 
     def has_completed_output(self, backend: str, runtime_key: str) -> bool:
         """Whether a completed Activity is waiting for user-visible output."""

@@ -10,7 +10,6 @@ import asyncio
 import hashlib
 import logging
 import time
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -38,7 +37,7 @@ from core.run_settlement import (
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
 )
-from core.session_activities import TERMINAL_SNAPSHOT_PHASE, SessionActivity
+from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
 from storage.background import SQLiteBackgroundTaskStore
 from vibe.i18n import t as i18n_t
@@ -63,62 +62,6 @@ class ActivityOutputDeliveryError(RuntimeError):
         self.durable = durable
         self.message_id = message_id
         self.cause = cause
-
-
-def terminally_discard_delivered_activity_claim(
-    registry: Any,
-    activity: SessionActivity,
-    error: BaseException,
-) -> SessionActivity:
-    """Preserve and release a claim that cannot be acknowledged after delivery."""
-
-    failed_activity = replace(
-        activity,
-        status="failed",
-        metadata={
-            **activity.metadata,
-            "terminal_error": (
-                "delivered_output_local_settlement_failed: "
-                f"{str(error).strip() or type(error).__name__}"
-            ),
-        },
-    )
-    persist = getattr(registry, "_persist_activity", None)
-    if callable(persist):
-        try:
-            persist(failed_activity, phase=TERMINAL_SNAPSHOT_PHASE)
-        except Exception:
-            logger.error(
-                "Failed to persist terminal Activity evidence after delivered "
-                "output settlement failure (activity=%s)",
-                activity.id,
-                exc_info=True,
-            )
-
-    key_builder = getattr(registry, "_activity_key", None)
-    lock = getattr(registry, "_lock", None)
-    claimed = getattr(registry, "_claimed_completed_outputs", None)
-    recovered = getattr(registry, "_recovered_output_ids", None)
-    if not callable(key_builder) or lock is None or not isinstance(claimed, dict):
-        raise RuntimeError(
-            f"Cannot terminally discard claimed Activity {activity.id}"
-        ) from error
-    activity_key = key_builder(activity)
-    with lock:
-        claimed.pop(activity_key, None)
-        if recovered is not None:
-            recovered.discard(activity_key)
-        callback = getattr(registry, "_output_settled_callback", None)
-    if callable(callback):
-        try:
-            callback(activity)
-        except Exception:
-            logger.warning(
-                "Failed to signal terminally discarded Activity output %s",
-                activity.id,
-                exc_info=True,
-            )
-    return failed_activity
 
 
 def _owned_agent_run_ids(payload: dict[str, Any]) -> list[str]:
@@ -1214,70 +1157,73 @@ class ConsolidatedMessageDispatcher:
     ) -> tuple[Any, SessionActivity] | None:
         service = getattr(self.controller, "agent_service", None)
         registry = getattr(service, "activities", None)
-        claimed = getattr(registry, "_claimed_completed_outputs", None)
-        lock = getattr(registry, "_lock", None)
+        find_claimed = getattr(
+            registry,
+            "claimed_completed_output_for_idempotency_key",
+            None,
+        )
         output_id = str(output_semantics.idempotency_key or "").strip()
-        if not output_id or not isinstance(claimed, dict) or lock is None:
+        if not output_id or not callable(find_claimed):
             return None
-        with lock:
-            candidates = [item.entry.activity for item in claimed.values()]
-        for activity in candidates:
-            candidate_id = (
-                f"{activity.backend}-task:{activity.runtime_key}:"
-                f"{activity.id}:completion"
-            )
-            if candidate_id == output_id:
-                return registry, activity
-        return None
+        activity = find_claimed(output_id)
+        return (registry, activity) if activity is not None else None
 
-    def _consume_delivery_only_activity(
+    def _settle_activity_output_claim(
         self,
         output_semantics: MessageOutput,
         *,
+        accepted_message_exists: bool,
         settlement_error: BaseException | None = None,
-    ) -> None:
+    ) -> bool:
         claimed = self._claimed_activity_for_output(output_semantics)
         if claimed is None:
-            return
+            return False
         registry, activity = claimed
-        settle_runs = settlement_error is not None
+        settle = getattr(registry, "settle_completed_output_delivery", None)
+        if not callable(settle):
+            return False
         if settlement_error is None:
-            try:
-                registry.ack_completed_output(activity)
-                return
-            except Exception as ack_error:
-                settlement_error = ack_error
-                logger.error(
-                    "Activity acknowledgement failed after delivery without durable "
-                    "message evidence; terminally discarding the claim "
-                    "(activity=%s)",
-                    activity.id,
-                    exc_info=True,
+            return bool(
+                settle(
+                    activity,
+                    accepted_message_exists=accepted_message_exists,
                 )
-        failed_activity = terminally_discard_delivered_activity_claim(
-            registry,
-            activity,
-            settlement_error,
-        )
-        if not settle_runs:
-            return
+            )
+
+        build_failure = getattr(registry, "delivered_output_failure", None)
+        if not callable(build_failure):
+            return False
+        failed_activity = build_failure(activity, settlement_error)
         service = getattr(self.controller, "agent_service", None)
         on_terminal = getattr(service, "on_activity_terminal", None)
-        if callable(on_terminal):
+
+        def settle_terminal(terminal_activity: SessionActivity) -> bool:
+            if not callable(on_terminal):
+                return False
             try:
-                settled = on_terminal(failed_activity)
+                return bool(on_terminal(terminal_activity))
             except Exception:
-                settled = False
                 logger.error(
                     "Failed to terminally settle delivered Activity %s after local failure",
                     activity.id,
                     exc_info=True,
                 )
-            if not settled:
-                logger.error(
-                    "Delivered Activity %s remains without durable Run settlement",
-                    activity.id,
-                )
+                return False
+
+        settled = bool(
+            settle(
+                activity,
+                accepted_message_exists=accepted_message_exists,
+                terminal_activity=failed_activity,
+                settle_terminal=settle_terminal,
+            )
+        )
+        if not settled:
+            logger.error(
+                "Delivered Activity %s remains claimed without complete local settlement",
+                activity.id,
+            )
+        return settled
 
     def _record_agent_run_terminal_result(
         self,
@@ -1694,6 +1640,11 @@ class ConsolidatedMessageDispatcher:
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
+                if output_semantics.requires_delivery_for_run_settlement:
+                    self._settle_activity_output_claim(
+                        output_semantics,
+                        accepted_message_exists=False,
+                    )
                 return None
             finally:
                 if mutates_turn_lifecycle:
@@ -1760,6 +1711,11 @@ class ConsolidatedMessageDispatcher:
                     self._signal_turn_complete(
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
+                    )
+                if output_semantics.requires_delivery_for_run_settlement:
+                    self._settle_activity_output_claim(
+                        output_semantics,
+                        accepted_message_exists=True,
                     )
                 # A previously persisted output is a successful idempotent
                 # delivery attempt. Return its stable identity so a recovered
@@ -1854,6 +1810,11 @@ class ConsolidatedMessageDispatcher:
                     self._signal_turn_complete(
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
+                    )
+                if output_semantics.requires_delivery_for_run_settlement:
+                    self._settle_activity_output_claim(
+                        output_semantics,
+                        accepted_message_exists=persisted_output is not None,
                     )
                 return message_id
             finally:
@@ -2265,8 +2226,8 @@ class ConsolidatedMessageDispatcher:
                         else:
                             logger.error(
                                 "Activity output reached the user without durable message "
-                                "evidence and linked Run settlement failed; terminally "
-                                "discarding the claim",
+                                "evidence and linked Run settlement failed; preparing "
+                                "Registry-owned terminal settlement",
                                 exc_info=True,
                             )
                             activity_settlement_error = err
@@ -2291,22 +2252,15 @@ class ConsolidatedMessageDispatcher:
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
 
-                if (
-                    activity_was_delivered
-                    and not durable_output_exists
-                    and output_semantics.requires_delivery_for_run_settlement
-                ):
-                    logger.warning(
-                        "Activity output reached the user without a durable message "
-                        "mirror; consuming its delivery claim after Run and Turn settlement"
-                    )
-                    self._consume_delivery_only_activity(
-                        output_semantics,
-                        settlement_error=activity_settlement_error,
-                    )
-
                 if activity_delivery_error is not None:
                     raise activity_delivery_error
+
+                if output_semantics.requires_delivery_for_run_settlement:
+                    self._settle_activity_output_claim(
+                        output_semantics,
+                        accepted_message_exists=durable_output_exists,
+                        settlement_error=activity_settlement_error,
+                    )
 
                 return primary_message_id
             finally:
