@@ -90,3 +90,40 @@ observations:
       - commit the stamp and the escalation enqueue in one transaction, guarded by compare-and-set preconditions on the binding and the uncancelled run id
       - bias the surviving crash window toward BOTH reports rather than neither
       - re-arm the owed notice when a session teardown cancels an escalation that had already suppressed one
+  - id: OBS-HARNESS-COMMAND-TASK-009
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-029
+    summary: The startup reap cleared a worker's durable identity even when the kill came back unconfirmed.
+    previous_assumption: A teardown either kills the process or the process is already gone, so the record is spent either way.
+    observed_behavior: >-
+      An unconfirmed kill is neither -- a task wedged in uninterruptible I/O outlives
+      SIGKILL, and a group whose leader moved cannot be signalled at all. The run is the
+      only place the identity is written and recover_processing settles it moments later,
+      so the surviving backup or migration became permanently unfindable; not just
+      unkilled, but unkillable by any future pass.
+    required_updates:
+      - distinguish "not confirmed" from "already gone" by re-inspecting the identity before discarding it
+      - keep the record and leave the run running so the next start can retry, since only running rows are scanned
+      - bound the retries, because an unconditional retry holds a run running for the life of the install
+  - id: OBS-HARNESS-COMMAND-TASK-010
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-030
+    summary: >-
+      The run row a stamp authorises was composed from the definition as the executor
+      claimed it, and inserted unchanged however long later.
+    previous_assumption: >-
+      An Agent rename rewrites every reference that matters, so a queued turn always
+      names an Agent that exists.
+    observed_behavior: >-
+      The rewrite covers definitions and ACTIVE runs; a row still being composed is
+      neither, and a command task's composition window is the whole runtime of the
+      command. The escalation was inserted naming an Agent the catalog no longer had, so
+      it could never be claimed -- while the notice its own stamp suppressed was already
+      gone. Neither report, which is the one outcome the invariant exists to rule out.
+    required_updates:
+      - read the Agent from the definition values written in the SAME transaction, not from the caller's older snapshot
+      - resolve that name to the catalog's durable agent id so the next rename cannot reopen the window
+      - hold the write lock, because this transaction now reads the Agent catalog a concurrent rename rewrites
+      - leave a removed Agent's spelling alone rather than inventing an identity, and apply the same fix to the watch lane's completion hook

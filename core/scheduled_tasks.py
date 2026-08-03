@@ -84,6 +84,7 @@ from storage.background import (
     COMMAND_SNAPSHOT_METADATA_KEY,
     COMMAND_TIMED_OUT_METADATA_KEY,
     COMMAND_WORKER_METADATA_KEY,
+    COMMAND_WORKER_REAP_ATTEMPTS_KEY,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
     NOTICE_FAILED,
@@ -1861,7 +1862,17 @@ class TaskExecutionStore:
         interruption_error: Optional[str] = None,
         interrupt_reason: str = SETTLED_BY_RESTARTED,
         cancellation_error: Optional[str] = None,
+        skip_run_ids: frozenset[str] = frozenset(),
     ) -> None:
+        """Settle the fires a dead service left ``running``.
+
+        ``skip_run_ids`` are the fires whose command worker is STILL ALIVE because
+        this start could not kill it. Settling one would clear the last record of
+        that process (``list_running_command_workers`` reads ``running`` rows only)
+        and leave a backup or deployment running with nothing able to find it, so
+        those rows are left for the next start to retry.
+        """
+
         interruption_error = interruption_error or i18n_t(
             SETTLEMENT_I18N_KEYS[interrupt_reason],
             "en",
@@ -1875,10 +1886,13 @@ class TaskExecutionStore:
                 interruption_error=interruption_error,
                 interrupt_reason=interrupt_reason,
                 cancellation_error=cancellation_error,
+                skip_run_ids=skip_run_ids,
             )
             return
         self._ensure_dirs()
         for path in self.processing_dir.glob("*.json"):
+            if path.stem in skip_run_ids:
+                continue
             pending_path = self.pending_dir / path.name
             completed_path = self.completed_dir / path.name
             if pending_path.exists():
@@ -3041,6 +3055,10 @@ class ScheduledTaskService:
     # simply leaves the rest queued and re-checks on the next tick. This caps
     # fan-out without re-introducing head-of-line blocking.
     _MAX_CONCURRENT_EXECUTIONS = 8
+    #: Starts allowed to try killing one surviving command worker. Retrying is what
+    #: gives an unkillable orphan a second chance at all; the cap is what stops its
+    #: run from being held ``running`` for the life of the install.
+    _MAX_COMMAND_WORKER_REAP_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -3093,11 +3111,12 @@ class ScheduledTaskService:
         self._recover_activity_lifecycle()
         # BEFORE ``recover_processing``, which nulls ``pid`` and settles these rows:
         # the run is the only place the orphan's identity is recorded, so once it is
-        # terminal the child can never be found again.
-        self._reap_orphaned_command_workers()
+        # terminal the child can never be found again. Whatever it could not kill it
+        # names here, and those rows stay ``running`` so the NEXT start can try again.
         self.request_store.recover_processing(
             interruption_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_RESTARTED]),
             cancellation_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
+            skip_run_ids=self._reap_orphaned_command_workers(),
         )
 
     def _t(self, key: str, **kwargs: Any) -> str:
@@ -3172,7 +3191,7 @@ class ScheduledTaskService:
                 "failed to record executed command for %s", execution_id, exc_info=True
             )
 
-    def _reap_orphaned_command_workers(self) -> None:
+    def _reap_orphaned_command_workers(self) -> frozenset[str]:
         """Kill command workers this host left running when the service died.
 
         Identity, not pid: between the crash and this pass the OS is free to reuse
@@ -3185,13 +3204,24 @@ class ScheduledTaskService:
 
         The tree, not the leaf: the worker is a supervisor, and the backup or
         migration doing the side effects is its child.
+
+        RETURNS THE RUNS WHOSE WORKER IS STILL ALIVE, and that is the whole reason
+        this returns anything. A kill can come back unconfirmed -- a process wedged
+        in uninterruptible I/O outlives even ``SIGKILL``, and a group whose leader
+        moved cannot be signalled at all -- and clearing the record then would throw
+        away the ONLY durable handle on a backup or deployment that is still writing.
+        ``list_running_command_workers`` reads ``running`` rows, so the caller leaves
+        these unsettled: the record survives, the next start tries again, and
+        ``_MAX_COMMAND_WORKER_REAP_ATTEMPTS`` stops that from becoming a run that is
+        ``running`` forever.
         """
 
         try:
             workers = self.request_store.list_running_command_workers()
         except Exception:
             logger.debug("failed to list command workers for recovery", exc_info=True)
-            return
+            return frozenset()
+        unreaped: set[str] = set()
         for worker in workers:
             run_id = str(worker.get("run_id") or "")
             payload = worker.get("identity")
@@ -3201,18 +3231,21 @@ class ScheduledTaskService:
                 if isinstance(pid, int) and not isinstance(pid, bool)
                 else None
             )
-            if expected is not None and inspect_process_identity(expected.pid) is not None:
+            alive = expected is not None and inspect_process_identity(expected.pid) is not None
+            if alive:
                 logger.warning(
                     "reaping orphaned command worker pid=%s from run %s",
                     expected.pid,
                     run_id,
                 )
                 try:
-                    terminate_process_tree_by_pid(
-                        expected.pid,
-                        logger,
-                        f"scheduled command worker {run_id}",
-                        expected_identity=expected,
+                    reaped = bool(
+                        terminate_process_tree_by_pid(
+                            expected.pid,
+                            logger,
+                            f"scheduled command worker {run_id}",
+                            expected_identity=expected,
+                        )
                     )
                 except Exception:
                     logger.exception(
@@ -3220,8 +3253,63 @@ class ScheduledTaskService:
                         expected.pid,
                         run_id,
                     )
+                    reaped = False
+                if not reaped:
+                    # The kill said "not confirmed", which is not the same as "still
+                    # there": a recycled pid and a changed worker marker both answer
+                    # that way, and in both cases OUR worker is already gone. Only a
+                    # process still answering to the identity we hold is an orphan.
+                    reaped = inspect_process_identity(expected.pid) is None
+                if not reaped and run_id and self._retain_unreaped_command_worker(run_id, payload):
+                    unreaped.add(run_id)
+                    continue
             if run_id:
                 self._record_command_worker(run_id, None)
+        return frozenset(unreaped)
+
+    def _retain_unreaped_command_worker(
+        self,
+        run_id: str,
+        payload: Any,
+    ) -> bool:
+        """Keep an unkillable worker's identity for the next start, up to a limit.
+
+        ``True`` means the record was kept and the run must stay ``running`` for
+        ``list_running_command_workers`` to find it again. ``False`` is the give-up
+        answer: the attempts are spent, so the run settles and reports like any other
+        interrupted fire rather than being held open by a process that never exits.
+        """
+
+        identity = dict(payload) if isinstance(payload, dict) else {}
+        attempts = identity.get(COMMAND_WORKER_REAP_ATTEMPTS_KEY)
+        attempts = attempts + 1 if isinstance(attempts, int) and not isinstance(attempts, bool) else 1
+        if attempts >= self._MAX_COMMAND_WORKER_REAP_ATTEMPTS:
+            logger.error(
+                "giving up on command worker pid=%s from run %s after %s attempts; "
+                "it may still be running",
+                identity.get("pid"),
+                run_id,
+                attempts,
+            )
+            return False
+        identity[COMMAND_WORKER_REAP_ATTEMPTS_KEY] = attempts
+        logger.warning(
+            "command worker pid=%s from run %s survived teardown; retrying on the "
+            "next start (attempt %s)",
+            identity.get("pid"),
+            run_id,
+            attempts,
+        )
+        try:
+            # The already-serialized payload, re-stamped with its attempt count:
+            # ``_record_command_worker`` takes a live identity and this record's
+            # process is precisely the one we could not inspect our way back to.
+            return bool(self.request_store.record_command_worker(run_id, identity))
+        except Exception:
+            logger.debug(
+                "failed to retain unreaped command worker for %s", run_id, exc_info=True
+            )
+            return False
 
     def _execution_interruption(self, execution_id: str) -> str:
         return self._inflight_cancellation_causes.get(

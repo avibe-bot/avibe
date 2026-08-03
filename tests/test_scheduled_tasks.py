@@ -13586,6 +13586,7 @@ def _escalation_command_task(
     schedule_type: str = "cron",
     session_id: Optional[str] = None,
     prompt: str = "",
+    agent_name: Optional[str] = None,
 ) -> ScheduledTask:
     """A command definition configured with ``--on-failure agent`` and a binding.
 
@@ -13597,6 +13598,7 @@ def _escalation_command_task(
         session_key="",
         session_id=session_id,
         session_policy="existing" if session_id else None,
+        agent_name=agent_name,
         prompt=prompt,
         schedule_type=schedule_type,
         cron="0 * * * *" if schedule_type == "cron" else None,
@@ -13755,6 +13757,137 @@ def test_a_refused_mark_task_result_queues_no_run(tmp_path: Path, monkeypatch) -
     assert stored is not None and stored.last_exit_code is None, (
         "a refused stamp recorded the exit code anyway"
     )
+
+
+def test_an_agent_renamed_during_the_command_still_gets_the_escalation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-030 -- the queued turn must name an Agent the catalog still has.
+
+    The escalation payload is composed from the definition as the fire CLAIMED it,
+    which for a command task is however long the command ran. A rename committed in
+    that window rewrites the definition and every ACTIVE run, but this run does not
+    exist yet, so it escaped the rewrite and was inserted naming an Agent nobody can
+    resolve: the turn carrying the failure report could never be claimed, while the
+    notice its own stamp suppressed was already gone -- neither report, which is the
+    one outcome the two-report invariant exists to rule out.
+
+    The narrower race (a rename the mirror has NOT yet seen) needs no fix: the payload
+    then carries the pre-rename binding revision and the compare-and-set refuses both
+    halves, leaving the fire to the notice ladder exactly like the reclaim in SCT-004.
+    What survives that guard is the rename the mirror ABSORBED -- and it absorbs one
+    whenever ``PRAGMA data_version`` reports another connection's commit, which during
+    a command long enough to matter is the normal case, not the exotic one. The reload
+    is forced here because that probe is timing-dependent and the defect is not.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    from core.vibe_agents import VibeAgentStore
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        # A user Agent, because a built-in one cannot be renamed at all.
+        agent_store.create(name="ops", backend="claude")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="exit 7", agent_name="ops"
+    )
+    assert task.agent_name == "ops"
+    # What ``build_hook_send`` puts on the payload: the name, resolved by the executor
+    # before the command started. There is no ``agent_id`` to carry -- ``run_definitions``
+    # stores only the spelling.
+    run_payload = _escalation_run_payload(task)
+    run_payload["agent_name"] = task.agent_name
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        renamed = agent_store.rename("ops", "night-shift")
+    finally:
+        agent_store.close()
+    # The executor's mirror catching up mid-command, which is what makes the stamp's
+    # expectation current and the pre-composed run row the only stale thing left.
+    store.load()
+    assert store.get_task(task.id).agent_name == "night-shift"
+
+    stamped = store.mark_task_result(
+        task.id,
+        error="command exited with status 7",
+        exit_code=7,
+        records_command_outcome=True,
+        queued_run=run_payload,
+    )
+
+    assert stamped is True, "the rename was absorbed by the reload, so the stamp must land"
+    runs = _escalation_runs(store)
+    assert len(runs) == 1, f"expected exactly one queued escalation, got {runs!r}"
+    queued = runs[0]
+    assert queued["agent_name"] == "night-shift", (
+        "the escalation was queued against the pre-rename name, which resolves to no "
+        f"Agent at claim time: {queued['agent_name']!r}"
+    )
+    assert queued["agent_id"] == renamed.id, (
+        "the escalation was not pinned to the Agent's durable identity, so the NEXT "
+        f"rename loses it again: {queued['agent_id']!r}"
+    )
+
+
+def test_an_archived_agent_keeps_the_escalations_own_spelling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-030, negative half -- a REMOVED Agent must not be papered over.
+
+    Resolution failing is not always a rename. If the user archived or deleted the
+    Agent the definition names, there is no identity to pin and inventing one would
+    bind the report to a different Agent than the definition asks for. The row keeps
+    the definition's own spelling and lets the claim report the truth.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    from core.vibe_agents import VibeAgentStore
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        agent_store.create(name="ops", backend="claude")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="exit 7", agent_name="ops"
+    )
+    run_payload = _escalation_run_payload(task)
+    run_payload["agent_name"] = task.agent_name
+    _delete_agent_row(paths.get_sqlite_state_path(), "ops")
+
+    stamped = store.mark_task_result(
+        task.id,
+        error="command exited with status 7",
+        exit_code=7,
+        records_command_outcome=True,
+        queued_run=run_payload,
+    )
+
+    assert stamped is True
+    runs = _escalation_runs(store)
+    assert len(runs) == 1
+    assert runs[0]["agent_name"] == "ops", (
+        f"the definition's own spelling was dropped: {runs[0]['agent_name']!r}"
+    )
+    assert not (runs[0]["agent_id"] or ""), (
+        f"an identity was invented for an Agent that no longer exists: {runs[0]['agent_id']!r}"
+    )
+
+
+def _delete_agent_row(db_path: Path, name: str) -> None:
+    """Remove an Agent from the catalog outright, as a delete leaves it."""
+
+    from storage.models import agents as agents_table
+
+    with create_sqlite_engine(db_path).begin() as conn:
+        conn.execute(agents_table.delete().where(agents_table.c.name == name))
 
 
 def test_a_file_backed_task_store_refuses_a_queued_run(tmp_path: Path) -> None:
@@ -14790,6 +14923,117 @@ def test_a_crashed_service_reaps_the_command_worker_it_left_running(
         asyncio.run(_crash_then_restart())
     except asyncio.TimeoutError:  # pragma: no cover - the defect this test reproduces
         pytest.fail("the restart left the orphaned command worker running")
+
+
+def test_a_worker_that_survives_the_reap_is_kept_for_the_next_start(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-029 -- an unconfirmed kill must not throw away the only handle on the child.
+
+    SCT-023 records the worker's identity so a restart can find it. But the reap
+    cleared that record unconditionally, INCLUDING when the teardown came back
+    unconfirmed and the process was still there -- a task wedged in uninterruptible
+    I/O outlives even ``SIGKILL``. Since the run is the only place the identity is
+    written, and ``recover_processing`` settles the run moments later, no later pass
+    could ever find that backup or migration again: it ran to completion unowned.
+
+    So the record survives and the row stays ``running`` for the next start to retry.
+    The cap is the other half: retrying forever would hold a run ``running`` for the
+    life of the install whenever the process genuinely never exits.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    started = tmp_path / "unkillable-started"
+    task = _add_command_task(
+        store,
+        shell_command=f"touch {started.name}; sleep 3600",
+        cwd=str(tmp_path),
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    attempts: list[int] = []
+
+    def _refuse_to_confirm(pid, *args, **kwargs):
+        """A teardown that reports "not confirmed" while the process keeps running."""
+
+        attempts.append(pid)
+        return False
+
+    def _worker_record() -> Optional[dict[str, Any]]:
+        workers = service.request_store.list_running_command_workers()
+        return workers[0]["identity"] if workers else None
+
+    def _run_row(run_id: str) -> dict[str, Any]:
+        row = service.request_store.get_run(run_id)
+        assert row is not None
+        return row
+
+    async def _restart_until_it_gives_up() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started, so nothing was orphaned"
+        assert _worker_record(), "the fire recorded no worker"
+
+        real_terminate = scheduled_tasks.terminate_process_tree_by_pid
+        monkeypatch.setattr(
+            scheduled_tasks, "terminate_process_tree_by_pid", _refuse_to_confirm
+        )
+        cap = ScheduledTaskService._MAX_COMMAND_WORKER_REAP_ATTEMPTS
+        # Every start before the cap: the kill is attempted, comes back unconfirmed,
+        # and the record is kept with its attempt count so the NEXT one can try.
+        for attempt in range(1, cap):
+            _scheduled_service_with_ledger(tmp_path, store, [])
+            assert len(attempts) == attempt, (
+                f"start {attempt} did not attempt the kill: {attempts!r}"
+            )
+            identity = _worker_record()
+            assert identity is not None, (
+                f"start {attempt} discarded a live worker's identity, so no later start "
+                "can ever find it"
+            )
+            assert identity.get("reap_attempts") == attempt, (
+                f"the attempt count did not advance: {identity!r}"
+            )
+            assert _run_row(request.id)["status"] == "running", (
+                "the run was settled while its worker was still alive; "
+                "``list_running_command_workers`` will not see it again"
+            )
+
+        # The cap. The process is still there and still unkillable, but the run stops
+        # being held open on its behalf.
+        _scheduled_service_with_ledger(tmp_path, store, [])
+        assert _worker_record() is None, "the reap never gave up; this run stays running forever"
+        assert _run_row(request.id)["status"] != "running", (
+            "the spent run was left ``running`` with nothing tracking it"
+        )
+
+        # Cleanup: the abandoned coroutine still owns the child, and its cancellation
+        # is the orderly teardown every non-crash stop uses. Restored by name, never
+        # ``monkeypatch.undo()`` -- that would also put back the real ``paths``, and a
+        # teardown writing to the user's live ``~/.avibe`` is exactly what
+        # ``_command_task_env`` exists to prevent.
+        monkeypatch.setattr(
+            scheduled_tasks, "terminate_process_tree_by_pid", real_terminate
+        )
+        execution = service._inflight_executions[request.id]
+        execution.cancel()
+        await asyncio.wait_for(
+            asyncio.gather(execution, return_exceptions=True), timeout=15
+        )
+
+    try:
+        asyncio.run(_restart_until_it_gives_up())
+    except asyncio.TimeoutError:  # pragma: no cover - cleanup only
+        pytest.fail("the cancelled command was left running")
 
 
 def test_an_interrupted_command_fire_clears_the_previous_exit_code(

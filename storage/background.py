@@ -151,6 +151,53 @@ def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict
     return {"id": str(row["id"]), "name": str(row["name"])}
 
 
+def _pin_run_to_definition_agent(
+    conn: Any,
+    run_values: dict[str, Any],
+    *,
+    agent_name: Any,
+) -> None:
+    """Point a not-yet-inserted run row at the Agent its DEFINITION names now.
+
+    Both stamp-plus-enqueue writers compose their run row LONG before the transaction
+    opens: the escalation turn a command failure authorises, and the completion hook a
+    terminal watch authorises, are built from the definition as the executor claimed
+    it -- minutes or hours of command runtime earlier. A rename in that window rewrites
+    ``run_definitions.agent_name`` and every ACTIVE run's reference (see
+    ``core.vibe_agents._rewrite_references``), but this row does not exist yet, so it
+    escapes the rewrite and is inserted naming an Agent the catalog no longer has.
+    ``refresh_run_agent_reference`` then resolves nothing at claim time and the turn
+    carrying the report cannot run -- while the notice its stamp suppressed is already
+    gone. That is the one unrecoverable outcome the two-report invariant exists to
+    prevent: neither report, not both.
+
+    The narrower race -- a rename landing AFTER the payload was reloaded -- needs
+    nothing here, because it bumps the definition's agent binding revision and
+    ``definition_state_unchanged`` refuses the whole stamp, rolling both writes back.
+    What survives that guard is a rename the reload already absorbed, leaving the
+    definition current and only this pre-composed run row stale. So the name is read
+    from the definition values being written in THIS transaction, and resolved to the
+    catalog's durable ``agent_id`` so the NEXT rename cannot reopen the window. A row
+    that already carries an ``agent_id`` is left alone: it is pinned by identity, which
+    a rename does not move.
+    """
+
+    if str(run_values.get("agent_id") or "").strip():
+        return
+    name = str(agent_name or "").strip()
+    if not name:
+        return
+    agent = _resolve_agent_identity_by_name(conn, name)
+    if agent is None:
+        # Archived or deleted, not renamed. Keep the definition's own spelling and
+        # leave the claim to report it: inventing an id here would bind the turn to
+        # an Agent the user removed.
+        run_values["agent_name"] = name
+        return
+    run_values["agent_id"] = agent["id"]
+    run_values["agent_name"] = agent["name"]
+
+
 def resolve_run_at(run_at: str, timezone_name: Optional[str]) -> datetime:
     """The instant a one-shot ``run_at`` names, in the task's own timezone.
 
@@ -934,6 +981,12 @@ COMMAND_SNAPSHOT_METADATA_KEY = "command"
 #: Entry: the ``core.process_isolation.serialize_process_identity`` payload. Distinct
 #: from the ``pid`` column, which holds the SERVICE pid and gates startup recovery.
 COMMAND_WORKER_METADATA_KEY = "command_worker"
+
+#: How many starts have tried and failed to kill that supervisor, inside the same
+#: payload. Entry: a positive ``int``, absent until a teardown comes back unconfirmed.
+#: It is what keeps "retry the orphan next start" from holding a run ``running``
+#: forever when the process genuinely never exits.
+COMMAND_WORKER_REAP_ATTEMPTS_KEY = "reap_attempts"
 
 #: Whether the SCHEDULER stopped the DEFINITION's last command fire, on the definition's
 #: own ``metadata``. Entry: ``True``/``False``, written by every command stamp and
@@ -2738,10 +2791,14 @@ class SQLiteBackgroundTaskStore:
         values = self._watch_values(payload)
         run_values = self._run_values(run_payload)
         with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
             if not upsert_definition_in_connection(
                 conn, values, expect=expect, definition_type="watch"
             ):
                 return False
+            _pin_run_to_definition_agent(
+                conn, run_values, agent_name=values.get("agent_name")
+            )
             enqueue_run_in_connection(conn, run_values)
         return True
 
@@ -2791,6 +2848,7 @@ class SQLiteBackgroundTaskStore:
         values = self._scheduled_task_values(payload)
         run_values = self._run_values(run_payload)
         with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
             if expected_uncanceled_run_id and agent_run_cancellation_won_in_connection(
                 conn, expected_uncanceled_run_id
             ):
@@ -2805,6 +2863,9 @@ class SQLiteBackgroundTaskStore:
                 definition_type="scheduled task",
             ):
                 return False
+            _pin_run_to_definition_agent(
+                conn, run_values, agent_name=values.get("agent_name")
+            )
             enqueue_run_in_connection(conn, run_values)
         return True
 
@@ -4489,7 +4550,16 @@ class SQLiteBackgroundTaskStore:
         interruption_error: str,
         interrupt_reason: str,
         cancellation_error: str,
+        skip_run_ids: frozenset[str] = frozenset(),
     ) -> None:
+        """Settle every run a dead service left ``running``, minus ``skip_run_ids``.
+
+        A skipped run is one whose command worker outlived this start's attempt to
+        kill it: its ``command_worker`` record is readable only while the row is
+        ``running``, so settling it here would strip the orphan's only durable name.
+        The caller bounds the retries -- see ``_reap_orphaned_command_workers``.
+        """
+
         with run_update_event_transaction(self.engine) as conn:
             now = _utc_now_iso()
             rows = list(
@@ -4509,6 +4579,8 @@ class SQLiteBackgroundTaskStore:
                 ):
                     continue
                 run_id = str(row["id"])
+                if run_id in skip_run_ids:
+                    continue
                 if row["pid"] is None:
                     requeued_ids.append(run_id)
                     continue

@@ -2952,6 +2952,73 @@ _WATCH_FIXTURE_PAYLOAD = {
 }
 
 
+def test_a_hook_queued_after_a_rename_names_an_agent_that_still_exists(tmp_path: Path) -> None:
+    """The watch half of SCT-030 -- the completion hook must be claimable.
+
+    ``_hook_request`` composes the hook from ``watch.agent_name`` when the cycle ends,
+    and the row becomes durable inside the stamp's transaction. A rename committed
+    between those two moments rewrites the definition and every ACTIVE run, but not a
+    row still being composed, so the hook was inserted naming an Agent the catalog no
+    longer had -- and the user is never told the watch finished, which for a ``once``
+    watch is the only report it ever produces.
+
+    The mirror reload is forced because ``PRAGMA data_version`` is timing-dependent; a
+    rename the mirror has NOT absorbed is refused by the compare-and-set instead, which
+    needs no fix.
+    """
+
+    from core.vibe_agents import VibeAgentStore
+
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "the shared transaction this covers lives in SQLite"
+    request_store = TaskExecutionStore()
+    assert request_store._sqlite is not None
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        # A user Agent: a built-in one cannot be renamed at all.
+        agent_store.create(name="ops", backend="claude")
+    finally:
+        agent_store.close()
+
+    watch = store.add_watch(**{**_WATCH_FIXTURE_PAYLOAD, "agent_name": "ops"})
+    hook = request_store.build_hook_send(
+        session_key=watch.session_key,
+        prompt="the watch finished",
+        agent_name=watch.agent_name,
+        run_type="watch",
+        definition_id=watch.id,
+        source_kind="watch",
+    )
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        renamed = agent_store.rename("ops", "night-shift")
+    finally:
+        agent_store.close()
+    store.load()
+    assert store.get_watch(watch.id).agent_name == "night-shift"
+
+    assert store.mark_cycle_result(
+        watch.id,
+        exit_code=0,
+        error=None,
+        event_detected=True,
+        disable=True,
+        queued_run=hook.to_dict(),
+    ) is True
+
+    rows = [row for row in request_store._sqlite.list_runs() if row["id"] == hook.id]
+    assert len(rows) == 1, f"the hook did not become durable: {rows!r}"
+    assert rows[0]["agent_name"] == "night-shift", (
+        "the hook was queued against the pre-rename name, which resolves to no Agent "
+        f"at claim time: {rows[0]['agent_name']!r}"
+    )
+    assert rows[0]["agent_id"] == renamed.id, (
+        f"the hook was not pinned to the Agent's durable identity: {rows[0]['agent_id']!r}"
+    )
+
+
 @pytest.mark.parametrize("writer", list(_MIRROR_WRITERS))
 def test_a_definition_write_that_raises_leaves_no_live_mirror_ahead_of_the_database(
     tmp_path: Path, writer: str

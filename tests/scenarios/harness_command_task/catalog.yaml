@@ -228,3 +228,26 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_tasks.py::test_the_run_snapshot_names_the_command_the_fire_actually_ran
+  - id: SCT-029
+    name: a command worker that survives the reap is kept for the next start to retry
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_worker_that_survives_the_reap_is_kept_for_the_next_start
+    # Both halves in one test: the run stays ``running`` while a live worker is still
+    # named, because ``list_running_command_workers`` reads only those rows -- and it
+    # stops being held open once ``_MAX_COMMAND_WORKER_REAP_ATTEMPTS`` is spent, so a
+    # process that genuinely never exits cannot pin a run ``running`` for the life of
+    # the install.
+  - id: SCT-030
+    name: an Agent renamed while the command ran still receives the escalation
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_an_agent_renamed_during_the_command_still_gets_the_escalation
+    # The negative half -- an Agent that was REMOVED rather than renamed keeps the
+    # definition's own spelling, because inventing an identity would bind the report to
+    # a different Agent than the definition asks for:
+    # tests/test_scheduled_tasks.py::test_an_archived_agent_keeps_the_escalations_own_spelling
