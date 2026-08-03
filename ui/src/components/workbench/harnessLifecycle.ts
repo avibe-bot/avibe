@@ -330,6 +330,19 @@ export type HarnessDefinitionFacts = {
   health?: HarnessDefinitionHealth | string | null;
   consecutive_failures?: number | null;
   recent_failures?: number | null;
+  // Command-task fields (also present on a watch, which has always run a
+  // command). ``/api/harness/tasks`` serves the raw store row, so these arrive
+  // exactly as ``_scheduled_task_from_row`` writes them: ``shell_command`` as a
+  // string, ``command`` decoded from ``command_json``, and both None-preserving —
+  // which is why every helper below tests for presence rather than truthiness of
+  // a joined string.
+  shell_command?: string | null;
+  command?: unknown[] | null;
+  timeout_seconds?: number | null;
+  last_exit_code?: number | null;
+  // Decoded server-side (key is ``metadata``, not ``metadata_json``). Holds the
+  // command-task-only ``on_failure`` policy; see ``taskOnFailure``.
+  metadata?: Record<string, unknown> | null;
 };
 
 // ``failing`` = the newest verdict failed; ``degraded`` = the newest succeeded but
@@ -365,6 +378,54 @@ export function definitionRowTitle(
     if (collapsed) return collapsed;
   }
   return kindLabel;
+}
+
+// ---------------------------------------------------------------------------
+// Command tasks
+// ---------------------------------------------------------------------------
+
+// Whether this scheduled definition runs a subprocess instead of prompting an
+// Agent. MIRROR of ``ScheduledTask.has_command`` in ``core/scheduled_tasks.py``:
+// a non-empty ``shell_command`` or a non-empty argv list, nothing else. An empty
+// argv list is not a command — the column is populated with ``[]`` by rows that
+// have none.
+export function taskIsCommand(row: HarnessDefinitionFacts): boolean {
+  if (typeof row.shell_command === 'string' && row.shell_command.trim()) return true;
+  return Array.isArray(row.command) && row.command.length > 0;
+}
+
+// The command in one line, for a row title or a chip. Mirrors the CLI's
+// ``_watch_command_preview``: ``shell_command`` verbatim when present, else the
+// argv joined by spaces, trimmed, and cut with an ellipsis rather than a hard
+// slice so the reader can see that something was dropped. The full text always
+// stays available (detail pane, ``title`` attribute) — this is the scannable form.
+export function taskCommandPreview(row: HarnessDefinitionFacts, maxChars = 120): string {
+  const raw =
+    typeof row.shell_command === 'string' && row.shell_command.trim()
+      ? row.shell_command
+      : Array.isArray(row.command)
+        ? row.command.map((part) => String(part)).join(' ')
+        : '';
+  const preview = raw.trim();
+  if (preview.length <= maxChars) return preview;
+  return `${preview.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+export const TASK_ON_FAILURE_VALUES = ['none', 'agent'] as const;
+export type TaskOnFailure = (typeof TASK_ON_FAILURE_VALUES)[number];
+
+// What a failed command run does. MIRROR of ``ScheduledTask.on_failure``: the
+// policy lives in ``metadata`` rather than a column, so absence, a non-object
+// metadata blob, and a value this client has no word for all resolve to
+// ``none`` — the quiet default. Never invent ``agent`` from a value we cannot
+// read: that would promise an Agent turn nobody configured.
+export function taskOnFailure(row: HarnessDefinitionFacts): TaskOnFailure {
+  const metadata = row.metadata;
+  if (!metadata || typeof metadata !== 'object') return 'none';
+  const raw = (metadata as Record<string, unknown>).on_failure;
+  if (typeof raw !== 'string') return 'none';
+  const value = raw.trim().toLowerCase();
+  return value === 'agent' ? 'agent' : 'none';
 }
 
 // The last moment this row is known to have done anything.

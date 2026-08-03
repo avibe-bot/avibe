@@ -697,7 +697,7 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
-vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <表达式> | --at <时间戳>) (--message <文本> | --message-file <文件>) [options]
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <表达式> | --at <时间戳>) (--message <文本> | --message-file <文件> | --shell <命令> | -- <argv>...) [options]
 ```
 
 重要参数：
@@ -714,7 +714,14 @@ vibe task add (--session-id <session_id> | --create-session | --create-session-p
 - `--at`
 - `--message`
 - `--message-file`
+- `--shell`
+- `--on-failure {none,agent}`
+- `--timeout <秒>`
 - `--timezone`
+
+命令任务（`--shell` 或写在 `--` 之后的 argv）执行时不会触发任何 Agent turn，
+除非设置了 `--on-failure agent`，否则不接受 session、scope 或 agent 相关参数。
+`--timeout` 限制每次命令执行的时长（默认 21600 秒，`0` 表示不限制）。
 
 ### `vibe task update`
 
@@ -737,7 +744,12 @@ vibe task update <task_id> [options]
 - `--at`
 - `--message`
 - `--message-file`
+- `--shell`
+- `--timeout <秒>`
 - `--timezone`
+
+在 message 形态与 command 形态之间切换，或修改 `--on-failure`，都会被
+`task_mode_immutable` 拒绝——请删除任务后重新创建。
 
 ### `vibe task list`
 

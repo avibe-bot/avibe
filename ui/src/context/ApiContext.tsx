@@ -1273,6 +1273,20 @@ export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
   last_run_at: string | null;
   last_run_id: string | null;
   last_error: string | null;
+  // Command tasks: a scheduled definition that runs a subprocess instead of
+  // prompting an Agent. Non-null ``shell_command`` OR a non-empty ``command``
+  // argv is what makes a row one (see ``taskIsCommand``); its ``prompt`` is
+  // empty and — when ``metadata.on_failure`` is ``"none"`` — it has no session
+  // at all, so nothing here may be assumed present.
+  //
+  // ``/api/harness/tasks`` serves the raw store row, so these are exactly the
+  // keys ``_scheduled_task_from_row`` writes: ``metadata`` already decoded, not
+  // ``metadata_json``.
+  shell_command?: string | null;
+  command?: unknown[] | null;
+  timeout_seconds?: number | null;
+  last_exit_code?: number | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 export type HarnessWatchRuntime = {

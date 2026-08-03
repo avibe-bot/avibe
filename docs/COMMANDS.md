@@ -719,7 +719,7 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
-vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <expr> | --at <timestamp>) (--message <text> | --message-file <file>) [options]
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <expr> | --at <timestamp>) (--message <text> | --message-file <file> | --shell <cmd> | -- <argv>...) [options]
 ```
 
 Important options:
@@ -735,7 +735,14 @@ Important options:
 - `--at`
 - `--message`
 - `--message-file`
+- `--shell`
+- `--on-failure {none,agent}`
+- `--timeout <seconds>`
 - `--timezone`
+
+A command task (`--shell` or a trailing `-- <argv>`) runs with no Agent turn and
+takes no session, scope, or agent flags unless `--on-failure agent` is set.
+`--timeout` bounds each command run (default 21600 seconds, `0` = no timeout).
 
 ### `vibe task update`
 
@@ -758,7 +765,12 @@ Important options:
 - `--at`
 - `--message`
 - `--message-file`
+- `--shell`
+- `--timeout <seconds>`
 - `--timezone`
+
+Switching a task between message and command form, or changing `--on-failure`,
+is rejected with `task_mode_immutable` — remove the task and recreate it.
 
 ### `vibe task list`
 

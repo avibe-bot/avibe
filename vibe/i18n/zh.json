@@ -61,7 +61,9 @@
     "notice": {
       "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",
       "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
+      "commandLine": "命令:{command}",
       "error": "错误:{error}",
+      "commandExit": "退出码:{exitCode}",
       "unknownError": "未记录错误信息",
       "definition": "任务 ID:{id}",
       "paused": "该任务当前已暂停,恢复前不会再次触发:vibe task resume {id}",

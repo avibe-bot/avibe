@@ -1,0 +1,71 @@
+version: 1
+capability:
+  id: harness_command_task
+  name: Scheduled command tasks and their failure visibility
+  canonical_tests:
+    - tests/test_harness_failure_visibility.py
+    - tests/test_scheduled_command_task_integration.py
+    - tests/test_scheduled_tasks.py
+    - tests/test_command_runner.py
+    - tests/test_cli_task_command.py
+  shared_harness: []
+status_legend:
+  covered: deterministic scenario or contract coverage exists
+  manual: validated in the local Incus black-box environment
+  planned: scenario id reserved, coverage not written yet
+scenarios:
+  - id: SCT-001
+    name: a failed command fire produces exactly one command-aware failure notice
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_failed_command_fire_delivers_exactly_one_command_aware_notice
+  - id: SCT-002
+    name: a successful command fire notifies nowhere
+    status: covered
+    kind: success
+    layer: scenario
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_successful_command_fire_notifies_nowhere
+  - id: SCT-003
+    name: an escalated command failure produces one Agent turn and zero notices
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_failed_on_failure_agent_command_fire_queues_exactly_one_escalation
+    # The drain half of the same scenario -- a failed run carrying the escalation
+    # marker is never delivered a notice:
+    # tests/test_harness_failure_visibility.py::test_an_escalated_command_failure_is_never_delivered_a_notice
+  - id: SCT-004
+    name: a reclaim committed mid-command refuses the stamp and escalates nowhere
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_reclaim_during_the_command_refuses_the_stamp_and_escalates_nowhere
+  - id: SCT-005
+    name: session teardown hands a killed escalation's failure back to the notice ladder
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_archiving_the_session_gives_a_killed_escalation_its_notice_back
+    # The other teardown path -- ``/new`` hard-deleting an empty Session, which
+    # orphans the escalation instead of cancelling it:
+    # tests/test_scheduled_tasks.py::test_hard_deleting_the_session_gives_a_killed_escalation_its_notice_back
+  - id: SCT-006
+    name: a timed-out command reports the output it produced before it hung
+    status: covered
+    kind: timeout
+    layer: unit
+    backend: shared
+    test: tests/test_command_runner.py::test_timeout_keeps_the_output_the_capped_readers_already_retained
+  - id: SCT-007
+    name: escalation guidance can be reworded without recreating the task
+    status: covered
+    kind: config
+    layer: contract
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_rewords_escalation_guidance_on_an_agent_command_task

@@ -39,6 +39,17 @@ capabilities:
       - tests/test_agent_run_target.py
       - tests/test_watches.py
       - tests/test_cli_watch_command.py
+  - id: harness_command_task
+    name: Scheduled command tasks and their failure visibility
+    status: active
+    catalog: tests/scenarios/harness_command_task/catalog.yaml
+    scenario_tests:
+      - tests/test_harness_failure_visibility.py
+      - tests/test_scheduled_command_task_integration.py
+    unit_or_contract_tests:
+      - tests/test_command_runner.py
+      - tests/test_cli_task_command.py
+      - tests/test_scheduled_tasks.py
   - id: auth_setup
     name: IM-driven backend auth recovery
     status: active

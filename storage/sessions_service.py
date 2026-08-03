@@ -2233,6 +2233,24 @@ def _delete_agent_session_rows(
                 session_id,
             )
             continue
+        now = _utc_now_iso()
+        # BEFORE the history branch, because both halves end this Session's ability to
+        # run anything: the archival half cancels its queued runs outright, and the
+        # delete half removes the row they are bound to. A queued command-task
+        # escalation suppressed its parent's failure notice on the promise that the turn
+        # would carry the report, so either way that report is now impossible and the
+        # failure has to fall back to the notice ladder -- which does not need the
+        # Session, since a notice is delivered to the scope. Same reason as the archive
+        # path in ``workbench_sessions_service``, and in this same transaction.
+        #
+        # The delete half is the quieter of the two: it cancels nothing, so the
+        # escalation is left queued against a row that no longer exists and no
+        # cancel-shaped guard could ever see it.
+        from storage.background import (
+            rearm_notices_for_escalations_canceled_with_session,
+        )
+
+        rearm_notices_for_escalations_canceled_with_session(conn, session_id, now=now)
         has_retained_history = bool(
             conn.execute(
                 select(messages.c.id)
@@ -2261,7 +2279,6 @@ def _delete_agent_session_rows(
                     else f"superseded:{session_id}"
                 )
             )
-            now = _utc_now_iso()
             conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.session_id == session_id)

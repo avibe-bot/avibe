@@ -1162,6 +1162,16 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     #    cancel-requested (the executor honors it for in-flight ones) and
     #    terminalize the ones that haven't started.
     if reclaimed["runs"]:
+        # BEFORE the cancel, and in this same transaction: a queued command-task
+        # escalation is the only user-visible report of a failure whose own notice it
+        # suppressed, so cancelling it silently would leave that failure reported by
+        # nothing. This hands it back to the notice ladder, which does not need the
+        # session being torn down.
+        from storage.background import (
+            rearm_notices_for_escalations_canceled_with_session,
+        )
+
+        rearm_notices_for_escalations_canceled_with_session(conn, session_id, now=now)
         conn.execute(
             update(agent_runs)
             .where(agent_runs.c.session_id == session_id)

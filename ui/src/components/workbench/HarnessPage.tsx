@@ -73,6 +73,9 @@ import {
   humanizeTime,
   isWallClockTimestamp,
   lifecycleLabel,
+  taskCommandPreview,
+  taskIsCommand,
+  taskOnFailure,
   waiterExpectedAlive,
 } from './harnessLifecycle';
 import type {
@@ -1028,6 +1031,30 @@ export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row
   );
 };
 
+// What a task *does*, when that is not the default. A command task runs a
+// subprocess instead of prompting an Agent, and nothing else on the row says so:
+// the schedule chip, the state dot and the second line read identically for both
+// kinds, so an operator scanning the list had no way to tell a shell task from a
+// message task without opening it.
+//
+// A message task gets no chip — the same philosophy as ``HealthBadge``'s
+// ``healthy``: the overwhelming majority are message tasks, a chip on every one
+// of them is noise, and the silence is what makes this chip worth reading.
+// Watches are excluded outright: every watch runs a command, so the chip would
+// say nothing there (their ``kind`` chip already reads once/continuous).
+export const TaskKindBadge: React.FC<{ row: HarnessTask | HarnessWatch; kind: HarnessDefinitionKind }> = ({
+  row,
+  kind,
+}) => {
+  const { t } = useTranslation();
+  if (kind !== 'task' || !taskIsCommand(row)) return null;
+  return (
+    <Badge variant="secondary" className="shrink-0 font-mono text-[9px] uppercase" title={taskCommandPreview(row)}>
+      {t('harness.taskKind.command')}
+    </Badge>
+  );
+};
+
 interface DefinitionRowProps {
   row: HarnessTask | HarnessWatch;
   kind: HarnessDefinitionKind;
@@ -1050,7 +1077,16 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
   onDelete,
 }) => {
   const { t } = useTranslation();
-  const title = definitionRowTitle(row, t(`harness.kind.${kind}`));
+  // A command task has no name and no message to fall back to — its ``prompt``
+  // is empty by construction — so the existing chain landed on the kind label
+  // and every unnamed command task in the list rendered as the word "Task".
+  // The command is what identifies it, exactly as ``_watch_display_name`` uses
+  // it for a watch; it goes in the last slot of the same chain rather than
+  // ahead of the user's own name.
+  const title = definitionRowTitle(
+    row,
+    kind === 'task' && taskIsCommand(row) ? taskCommandPreview(row) : t(`harness.kind.${kind}`),
+  );
   const chip = definitionChipLabel(row, kind, t);
   const line = definitionRowLine(row, kind, t, now);
   return (
@@ -1072,6 +1108,7 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
             <span className="truncate text-[14px] font-semibold text-foreground" title={title}>
               {title}
             </span>
+            <TaskKindBadge row={row} kind={kind} />
             {chip && (
               <Badge variant="secondary" className="shrink-0 font-mono text-[9px] uppercase">
                 {chip}
@@ -1159,9 +1196,11 @@ interface TaskDetailProps {
   pending: boolean;
 }
 
-const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, pending }) => {
+export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, pending }) => {
   const { t } = useTranslation();
-  const title = definitionRowTitle(task, t('harness.kind.task'));
+  const isCommand = taskIsCommand(task);
+  const commandPreview = isCommand ? taskCommandPreview(task) : '';
+  const title = definitionRowTitle(task, isCommand ? commandPreview : t('harness.kind.task'));
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 items-center gap-2">
@@ -1177,6 +1216,16 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
           disabled={pending}
         />
       </div>
+      {/* Same anatomy and position as ``WatchDetail``'s command field — the two
+          run a subprocess the same way, so they read the same way. The preview
+          truncates for the header; this is the copyable full text. */}
+      {isCommand && (
+        <DetailField label={t('harness.detail.command')}>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+            {task.shell_command || (Array.isArray(task.command) ? task.command.map(String).join(' ') : '') || '—'}
+          </pre>
+        </DetailField>
+      )}
       {/* The row humanizes the schedule; this is where the literal lives, so
           an operator can still read and copy the exact expression. */}
       <DetailField label={t('harness.detail.schedule')}>
@@ -1208,14 +1257,55 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
           <span className="text-[12px] text-foreground">{deliveryLabel(task.post_to, t)}</span>
         </DetailField>
       </div>
-      <DetailField label={t('harness.detail.message')}>
-        <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
-          {task.message || task.prompt || '—'}
-        </pre>
-      </DetailField>
+      {/* A command task's ``prompt`` is empty by construction, so this field
+          would render a bare em-dash under the heading "Message" — a promise of
+          a message the task does not have. A command task that *also* carries
+          one (``--on-failure agent``) still shows it. */}
+      {(!isCommand || task.message || task.prompt) && (
+        <DetailField label={t('harness.detail.message')}>
+          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+            {task.message || task.prompt || '—'}
+          </pre>
+        </DetailField>
+      )}
+      {/* What a failed run does, and how long it is allowed to take. Both are
+          command-task-only policy, and both are unanswerable from anything else
+          on this pane — "no Agent" is a deliberate configuration, not an
+          omission, so it is stated rather than left blank. */}
+      {isCommand && (
+        <div className="grid grid-cols-2 gap-4">
+          <DetailField label={t('harness.detail.onFailure')}>
+            <span className="text-[12px] text-foreground">{t(`harness.onFailure.${taskOnFailure(task)}`)}</span>
+          </DetailField>
+          {task.timeout_seconds != null && (
+            <DetailField label={t('harness.detail.timeout')}>
+              {/* 0 means "no limit" server-side. Printing "0s" would read as an
+                  instant kill — the opposite of what it configures. */}
+              <span className="font-mono text-[11px] text-muted">
+                {task.timeout_seconds > 0
+                  ? t('harness.detail.timeoutSeconds', { seconds: task.timeout_seconds })
+                  : t('harness.detail.timeoutNone')}
+              </span>
+            </DetailField>
+          )}
+        </div>
+      )}
       {task.last_run_at && (
         <DetailField label={t('harness.detail.lastRun')}>
           <span className="font-mono text-[11px] text-muted">{formatLocalDateTime(task.last_run_at)}</span>
+        </DetailField>
+      )}
+      {/* The verdict of the last command run, on the definition rather than only
+          on the run row: a nightly command task's exit code is the one fact an
+          operator wants without paging through the runs tab. Not gated on
+          ``last_run_at`` — a stored exit code proves a run happened. */}
+      {task.last_exit_code != null && (
+        <DetailField label={t('harness.detail.lastExitCode')}>
+          <span
+            className={clsx('font-mono text-[11px]', task.last_exit_code === 0 ? 'text-muted' : 'text-pink')}
+          >
+            {task.last_exit_code}
+          </span>
         </DetailField>
       )}
       {/* Its own field, and no longer nested inside ``last_run_at``: a task can

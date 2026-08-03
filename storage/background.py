@@ -1294,12 +1294,29 @@ def _owed_failure_notice_for_transition(
     An existing notice is never overwritten. Re-stamping would reset ``attempts``
     and resurrect a dead letter, so a row that already carries a notice keeps the
     one it has whatever later writer touches it.
+
+    ``escalation_run_id`` SUPPRESSES the notice, the same shape of decision
+    ``_callback_parent_owns_failure_notice`` makes: a command definition configured
+    with ``--on-failure agent`` already had one Agent turn queued -- carrying the
+    failure report -- in the SAME transaction that stamped its definition, so a notice
+    as well is the identical failure told twice, once as a report and once as an alert.
+
+    ACCEPTED CRASH WINDOW, stated rather than hidden. The escalation is durable before
+    this settle runs, and the marker only reaches the run row here, so a teardown
+    between the atomic stamp+enqueue and this settle loses the marker: the escalation
+    still fires AND a notice is stamped. That is the deliberate direction -- both,
+    never neither. A cross-row lookup ("does some queued run name me as its parent?")
+    would close the duplicate at the cost of the never-silent bias, and the duplicate
+    is the cheaper failure.
     """
 
     if normalize_run_status(status) != "failed":
         return None
     existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
     if isinstance(existing, dict) and str(existing.get("state") or "").strip():
+        return None
+    if str(metadata.get("escalation_run_id") or "").strip():
+        # The escalation turn IS the user-visible report for this failure.
         return None
     reason = str(metadata.get("interrupt_reason") or "").strip() or None
     return {
@@ -1355,6 +1372,93 @@ def _owed_failure_notice_for_transition(
         "ack_evidence": None,
         "stamped_at": now,
     }
+
+
+def rearm_notices_for_escalations_canceled_with_session(
+    conn: Any, session_id: str, *, now: str
+) -> list[str]:
+    """Give a failed command fire its notice back when teardown kills its escalation.
+
+    An ``--on-failure agent`` fire suppresses its own failure notice because the
+    escalation turn IS the report (``_owed_failure_notice_for_transition``). Session
+    teardown then cancels every not-yet-terminal run bound to the session -- the
+    escalation among them -- and a ``canceled`` run owes nothing. Without this, the
+    failure ends up with NO turn and NO notice: the exactly-one-of invariant broken in
+    the silent direction, which is the one direction the design refuses. The accepted
+    crash window biases towards BOTH reports; this must not bias towards neither.
+
+    The notice ladder is the right fallback precisely because it does not need the
+    session: a notice is delivered to the scope, not into a conversation.
+
+    MUST be called inside the SAME transaction as the cancel it compensates for. Two
+    commits are not one decision: a teardown that committed the cancel and then failed
+    here would leave exactly the silence this closes.
+
+    ``escalation_run_id`` is deliberately LEFT on the parent. It is the audit trail of
+    what was attempted, and the row is then honest about both facts -- it escalated,
+    the escalation died, a notice is owed. Returns the parents it re-armed.
+    """
+
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        return []
+    doomed = (
+        conn.execute(
+            select(agent_runs.c.parent_run_id)
+            .where(agent_runs.c.session_id == normalized)
+            .where(agent_runs.c.run_type == "task_escalation")
+            .where(agent_runs.c.status.in_(("pending", "queued")))
+        )
+        .scalars()
+        .all()
+    )
+    rearmed: list[str] = []
+    for raw_parent_id in doomed:
+        parent_id = str(raw_parent_id or "").strip()
+        if not parent_id:
+            continue
+        parent = (
+            conn.execute(
+                select(agent_runs.c.status, agent_runs.c.metadata_json)
+                .where(agent_runs.c.id == parent_id)
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        if parent is None:
+            continue
+        metadata = _json_loads(parent["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            continue
+        # The marker is withheld from the BUILDER, not from the row: it exists only to
+        # suppress this notice in favour of a turn that is being canceled in this very
+        # transaction, so for the purpose of deciding what is owed it no longer applies.
+        # Everything else is passed through untouched so the interruption/failure lane
+        # still picks the identity the live path would have used.
+        notice = _owed_failure_notice_for_transition(
+            parent_id,
+            status=parent["status"],
+            metadata={
+                key: value
+                for key, value in metadata.items()
+                if key != "escalation_run_id"
+            },
+            now=now,
+        )
+        if notice is None:
+            # Not a failure, or it already owes one. Either way nothing is missing.
+            continue
+        metadata[OWED_FAILURE_NOTICE_KEY] = notice
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == parent_id)
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        rearmed.append(parent_id)
+    if rearmed:
+        _defer_run_ids_updated_from_connection(conn, rearmed)
+    return rearmed
 
 
 def _callback_parent_owns_failure_notice(
@@ -2518,6 +2622,54 @@ class SQLiteBackgroundTaskStore:
         with run_update_event_transaction(self.engine) as conn:
             if not upsert_definition_in_connection(
                 conn, values, expect=expect, definition_type="watch"
+            ):
+                return False
+            enqueue_run_in_connection(conn, run_values)
+        return True
+
+    def upsert_scheduled_task_with_queued_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None,
+        run_payload: dict[str, Any],
+    ) -> bool:
+        """A guarded task stamp and the outbox row it authorises, ONE transaction.
+
+        The twin of ``upsert_watch_with_queued_run``, and HFR-269 is the same bug on
+        the scheduled side: two commits are not one decision.
+
+            self.store.mark_task_result(...)                # transaction 1, COMMITS
+            self.request_store.enqueue_hook_send(...)        # transaction 2, COMMITS
+
+        A ``/new`` reclaim or an archive from another connection can commit in the gap.
+        The stamp is accepted -- it won its compare-and-set fairly, before the teardown
+        -- and the escalation turn is queued afterwards anyway, against a definition the
+        database has since paused or soft-deleted. The inverse is the other half: an
+        exception between the two commits leaves a failed one-shot ``at`` task durably
+        DISABLED with the failure report that explains it LOST, so the user is never
+        told why the task they scheduled never came back.
+
+        Here they are one: the outbox row is written on the same connection, after the
+        guard, and a refusal or an exception rolls BOTH back. ``False`` means nothing
+        was written; the definition is untouched and no queued run exists.
+
+        Deliberately NOT ``enqueue_definition_run``: that writer re-reads the
+        definition server-side and RAISES on a disabled one, and the stamp in this very
+        transaction is what disables a failed one-shot.
+        """
+
+        values = self._scheduled_task_values(payload)
+        run_values = self._run_values(run_payload)
+        with run_update_event_transaction(self.engine) as conn:
+            if not upsert_definition_in_connection(
+                # Only the refusal LOG's label; the row's ``definition_type`` column
+                # comes from ``_scheduled_task_values``. Spelled the way the rest of
+                # the scheduled family spells it.
+                conn,
+                values,
+                expect=expect,
+                definition_type="scheduled task",
             ):
                 return False
             enqueue_run_in_connection(conn, run_values)
@@ -3772,6 +3924,9 @@ class SQLiteBackgroundTaskStore:
         task_id: Optional[str] = None,
         session_key: Optional[str] = None,
         session_id: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None,
     ) -> Optional[str]:
         """Terminalize a non-terminal run in one guarded write.
 
@@ -3794,6 +3949,12 @@ class SQLiteBackgroundTaskStore:
         are written whether or not the status transition lands — otherwise routing
         the completion through this guarded writer would lose them on exactly the
         rows another actor settled first.
+
+        ``exit_code`` / ``stdout`` / ``stderr`` are the opposite kind of value: a
+        command run's OUTCOME. They ride the guarded transition alongside ``error``,
+        so a run another actor already settled -- a ``vibe runs cancel`` that won the
+        race, say -- does not have its terminal story overwritten by the losing fire's
+        output.
 
         Returns the terminal status actually written, or ``None`` when nothing was
         written (already terminal, deferred, or missing).
@@ -3846,6 +4007,12 @@ class SQLiteBackgroundTaskStore:
                     values["error"] = str(error)
                 if result_text is not None:
                     values["result_text"] = str(result_text)
+                if exit_code is not None:
+                    values["exit_code"] = int(exit_code)
+                if stdout is not None:
+                    values["stdout"] = str(stdout)
+                if stderr is not None:
+                    values["stderr"] = str(stderr)
                 _merge_owed_failure_notice(
                     values,
                     conn=conn,
@@ -5664,12 +5831,14 @@ class SQLiteBackgroundTaskStore:
             "cron": payload.get("cron"),
             "run_at": payload.get("run_at"),
             "timezone": payload.get("timezone") or "UTC",
-            "command_json": None,
-            "shell_command": None,
+            # Command tasks reuse the watch columns, but None-preserving: a message
+            # task must keep every one of them NULL (no watch-style defaults here).
+            "command_json": _json_dumps(payload["command"]) if payload.get("command") else None,
+            "shell_command": payload.get("shell_command"),
             "prefix": None,
             "cwd": payload.get("cwd"),
             "mode": None,
-            "timeout_seconds": None,
+            "timeout_seconds": float(payload["timeout_seconds"]) if payload.get("timeout_seconds") is not None else None,
             "lifetime_timeout_seconds": None,
             "retry_exit_codes_json": None,
             "retry_delay_seconds": None,
@@ -5686,7 +5855,10 @@ class SQLiteBackgroundTaskStore:
             "last_run_at": payload.get("last_run_at"),
             "last_run_id": payload.get("last_run_id"),
             "last_error": payload.get("last_error"),
-            "last_exit_code": None,
+            # Runtime state, but written through the same FULL-ROW upsert every
+            # definition edit uses: hardcoding None here would silently clear a
+            # recorded exit code on the next unrelated write.
+            "last_exit_code": payload.get("last_exit_code"),
             "metadata_json": _json_dumps(payload.get("metadata") or {}),
         }
 
@@ -5798,6 +5970,10 @@ class SQLiteBackgroundTaskStore:
             "cron": row["cron"],
             "run_at": row["run_at"],
             "timezone": row["timezone"] or "UTC",
+            "shell_command": row["shell_command"],
+            "command": _json_loads(row["command_json"], None),
+            "timeout_seconds": float(row["timeout_seconds"]) if row["timeout_seconds"] is not None else None,
+            "last_exit_code": row["last_exit_code"],
             "enabled": bool(row["enabled"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
 import sqlite3
 import sys
 from contextlib import redirect_stderr
@@ -730,7 +731,11 @@ def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     assert payload["help_command"] == "vibe task list"
 
 
-def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys) -> None:
+def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys, monkeypatch) -> None:
+    # ``patch.dict(..., clear=False)`` below pins only the five ids this test names, so
+    # the ORIGIN half of the contract (platform/channel/session_key/...) leaked in from
+    # the Avibe Agent shell that runs the suite and appeared in the asserted metadata.
+    _bare_terminal_caller(monkeypatch)
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)
     args = _parse_task_add(
@@ -4030,3 +4035,620 @@ def test_agent_run_refuses_the_reserved_session_with_no_side_effects(
         "an ordinary Session must still be able to take a direct Agent Run: "
         f"{[r.session_id for r in request_store.list_pending()]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Scheduled command tasks (``vibe task add/update --shell`` and friends)
+# ---------------------------------------------------------------------------
+
+#: Every variable ``caller_context_from_env`` reads (core/caller_context.py). The whole
+#: set is pinned per test rather than just ``AVIBE_SESSION_ID``, because these tests
+#: assert on what lands in ``metadata.created_by``: a stray ``AVIBE_CALLER_PLATFORM``
+#: inherited from the Agent shell that runs the suite would otherwise change the payload
+#: without changing the test.
+_CALLER_CONTEXT_ENV_VARS = (
+    "AVIBE_SESSION_ID",
+    "AVIBE_RUN_ID",
+    "AVIBE_CALLER_SOURCE",
+    "AVIBE_CALLER_BACKEND",
+    "AVIBE_NATIVE_SESSION_ID",
+    "AVIBE_CALLER_PLATFORM",
+    "AVIBE_CALLER_USER_ID",
+    "AVIBE_CALLER_CHANNEL_ID",
+    "AVIBE_CALLER_SESSION_KEY",
+    "AVIBE_CALLER_MESSAGE_ID",
+    "AVIBE_CALLER_WORKSPACE_ID",
+)
+
+
+def _bare_terminal_caller(monkeypatch) -> None:
+    """A human typing the command in a plain shell: no Avibe caller context at all."""
+
+    for name in _CALLER_CONTEXT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _agent_shell_caller(monkeypatch, *, session_id: str = "sesCaller") -> None:
+    """The command running inside an Avibe-hosted Agent turn."""
+
+    _bare_terminal_caller(monkeypatch)
+    monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+    monkeypatch.setenv("AVIBE_RUN_ID", "run_caller")
+    monkeypatch.setenv("AVIBE_CALLER_SOURCE", "agent_turn")
+    monkeypatch.setenv("AVIBE_CALLER_BACKEND", "codex")
+
+
+def _parse_task_update(task_id: str, argv: list[str]):
+    parser = cli.build_parser()
+    return parser.parse_args(["task", "update", task_id, *argv])
+
+
+def _command_task_store(tmp_path: Path):
+    return cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+
+
+def _caller_session_state(tmp_path: Path, *, session_id: str = "sesCaller"):
+    """A migrated CLI state DB holding one active Session owned by an enabled Agent."""
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="codex", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-06-28T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "avibe", "project", "proj-command-task", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="codex",
+                agent_variant="default",
+                session_anchor=f"anchor_{session_id}",
+                native_session_id="native-caller",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    return db_path, agent_store
+
+
+# --- parse forms -----------------------------------------------------------
+
+
+def test_task_add_parses_shell_command_form() -> None:
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh --verbose"])
+
+    command, shell_command, has_command = cli._resolve_task_command(
+        args, help_command="vibe task add --help"
+    )
+
+    assert (command, shell_command, has_command) == ([], "./scripts/sync.sh --verbose", True)
+
+
+def test_task_add_keeps_flag_values_in_trailing_command_argv() -> None:
+    """``--`` must hand the whole tail to the command, option-looking tokens included."""
+
+    args = _parse_task_add(
+        ["--cron", "0 3 * * *", "--", "./scripts/sync.sh", "--target", "prod", "-v"]
+    )
+
+    command, shell_command, has_command = cli._resolve_task_command(
+        args, help_command="vibe task add --help"
+    )
+
+    assert command == ["./scripts/sync.sh", "--target", "prod", "-v"]
+    assert shell_command is None
+    assert has_command is True
+
+
+def test_task_add_rejects_both_command_inputs() -> None:
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./a.sh", "--", "./b.sh"])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "conflicting_task_command_inputs"
+
+
+def test_task_add_rejects_empty_shell_command() -> None:
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "   "])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "empty_task_command"
+
+
+def test_task_add_rejects_bare_command_separator() -> None:
+    args = _parse_task_add(["--cron", "0 3 * * *", "--"])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "empty_task_command"
+
+
+# --- action matrix ---------------------------------------------------------
+
+
+def test_task_add_rejects_on_failure_without_command(monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(
+        ["--session-id", "sesTarget", "--cron", "0 * * * *", "--message", "hi", "--on-failure", "agent"]
+    )
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "on_failure_requires_command"
+
+
+def test_task_add_rejects_timeout_without_command(monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(
+        ["--session-id", "sesTarget", "--cron", "0 * * * *", "--message", "hi", "--timeout", "30"]
+    )
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "timeout_requires_command"
+
+
+def test_task_add_rejects_negative_timeout(monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(["--cron", "0 * * * *", "--shell", "./a.sh", "--timeout", "-1"])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "invalid_timeout"
+
+
+def test_task_add_rejects_message_on_non_escalating_command_task(monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(["--cron", "0 * * * *", "--shell", "./a.sh", "--message", "look at this"])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "message_without_consumer"
+    assert payload["details"]["flags"] == ["--message"]
+
+
+def test_task_add_requires_a_message_or_a_command(monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(["--session-id", "sesTarget", "--cron", "0 * * * *"])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "missing_task_action"
+
+
+@pytest.mark.parametrize(
+    "flag_argv,flag_name",
+    [
+        (["--session-id", "sesTarget"], "--session-id"),
+        (["--session-key", "slack::channel::C123"], "--session-key"),
+        (["--create-session"], "--create-session"),
+        (["--create-session-per-run"], "--create-session-per-run"),
+        (["--scope-id", "avibe::project::proj-x"], "--scope-id"),
+        (["--agent", "codex"], "--agent"),
+        (["--post-to", "channel"], "--post-to"),
+        (["--deliver-key", "slack::channel::C123"], "--deliver-key"),
+    ],
+)
+def test_task_add_rejects_session_flags_for_pure_command_task(
+    monkeypatch, flag_argv: list[str], flag_name: str
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh", *flag_argv])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "session_flags_with_command_task"
+    assert payload["details"]["flags"] == [flag_name]
+    assert "--on-failure agent" in payload["hint"]
+
+
+# --- caller-context defaulting --------------------------------------------
+
+
+def test_task_add_pure_command_task_ignores_caller_session_default(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Created from chat, a pure command task must NOT inherit the calling Session.
+
+    Otherwise ``--shell`` would be uncreatable from an Agent turn: the caller default
+    would bind a Session, and a bound Session is exactly what a pure command task
+    refuses to carry.
+    """
+
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    definition = payload["definition"]
+    assert definition["session_id"] is None
+    assert definition["session_policy"] is None
+    assert definition["session_key"] == ""
+    assert definition["agent_name"] is None
+    assert "session_default_notice" not in payload
+    # The caller is still RECORDED, just not bound: creation origin survives.
+    assert definition["metadata"]["created_by"]["caller"]["session_id"] == "sesCaller"
+
+
+def test_task_add_escalating_command_task_binds_caller_session(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        [
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--on-failure",
+            "agent",
+            "--message",
+            "The nightly sync failed. Diagnose it.",
+        ]
+    )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    definition = payload["definition"]
+    assert definition["session_id"] == "sesCaller"
+    assert definition["session_policy"] == "existing"
+    assert definition["shell_command"] == "./scripts/sync.sh"
+    assert definition["prompt"] == "The nightly sync failed. Diagnose it."
+    assert definition["metadata"]["on_failure"] == "agent"
+    assert definition["kind"] == "command"
+    assert payload["session_default_notice"]["code"] == "session_defaulted_to_caller"
+
+
+# --- persisted shape ------------------------------------------------------
+
+
+def test_task_add_pure_shell_command_persists_command_fields(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        [
+            "--name",
+            "nightly-sync",
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--timeout",
+            "0",
+            "--cwd",
+            str(tmp_path),
+        ]
+    )
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    definition = payload["definition"]
+    assert definition["shell_command"] == "./scripts/sync.sh"
+    assert definition["command"] is None
+    assert definition["timeout_seconds"] == 0
+    assert definition["prompt"] == ""
+    assert definition["cwd"] == str(tmp_path)
+    assert definition["metadata"]["on_failure"] == "none"
+    assert "session_workdir" not in definition["metadata"]
+
+    stored = store.get_task(definition["id"])
+    assert stored.has_command is True
+    assert stored.on_failure == "none"
+    assert stored.shell_command == "./scripts/sync.sh"
+    assert stored.timeout_seconds == 0
+
+
+def test_task_add_command_argv_persists_the_argv_list(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        ["--cron", "0 3 * * *", "--cwd", str(tmp_path), "--", "python3", "sync.py", "--target", "prod"]
+    )
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["command"] == ["python3", "sync.py", "--target", "prod"]
+    assert definition["shell_command"] is None
+    assert definition["timeout_seconds"] is None
+    assert definition["command_preview"] == "python3 sync.py --target prod"
+    assert definition["display_name"] == "python3 sync.py --target prod"
+
+
+def test_task_add_message_task_stores_no_command_fields(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Regression guard: the message lane must be untouched by the command flags."""
+
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        ["--session-key", "slack::channel::C123", "--cron", "0 * * * *", "--message", "morning briefing"]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["prompt"] == "morning briefing"
+    assert definition["shell_command"] is None
+    assert definition["command"] is None
+    assert definition["timeout_seconds"] is None
+    assert definition["kind"] == "message"
+    assert definition["on_failure"] == "none"
+    assert "on_failure" not in definition["metadata"]
+
+
+# --- update ---------------------------------------------------------------
+
+
+def _stored_command_task(store, **overrides):
+    payload = {
+        "name": "nightly-sync",
+        "session_key": "",
+        "prompt": "",
+        "schedule_type": "cron",
+        "cron": "0 3 * * *",
+        "timezone_name": "UTC",
+        "shell_command": "./scripts/old.sh",
+        "timeout_seconds": 60,
+        "metadata": {"on_failure": "none"},
+    }
+    payload.update(overrides)
+    return store.add_task(**payload)
+
+
+def test_task_update_replaces_pure_command_task_shell(tmp_path: Path, capsys, monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, cwd=str(tmp_path))
+    args = _parse_task_update(task.id, ["--shell", "./scripts/new.sh"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["shell_command"] == "./scripts/new.sh"
+    # ``update_command_fields`` is all-or-nothing, so an unnamed column must survive.
+    assert definition["timeout_seconds"] == 60
+    assert definition["cwd"] == str(tmp_path)
+    assert definition["session_policy"] is None
+    assert definition["session_id"] is None
+
+
+def test_task_update_timeout_only_preserves_stored_command(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(
+        store,
+        shell_command=None,
+        command=["python3", "sync.py"],
+        cwd=str(tmp_path),
+    )
+    args = _parse_task_update(task.id, ["--timeout", "900"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["command"] == ["python3", "sync.py"]
+    assert definition["shell_command"] is None
+    assert definition["timeout_seconds"] == 900
+
+
+def test_task_update_rejects_message_flags_on_command_task(tmp_path: Path, monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, cwd=str(tmp_path))
+    args = _parse_task_update(task.id, ["--message", "please look"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(cli.cmd_task_update, args)
+
+    assert result == 1
+    assert payload["code"] == "task_mode_immutable"
+    assert payload["details"]["kind"] == "command"
+
+
+def test_task_update_rewords_escalation_guidance_on_an_agent_command_task(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-007 -- an ``--on-failure agent`` task owns its message, so it stays editable.
+
+    ``cmd_task_add`` REQUIRES ``--on-failure agent`` for a message to be legal beside
+    a command (``message_without_consumer``), so rejecting the message here forbade
+    exactly the shape the add path blesses -- leaving the escalation guidance
+    rewordable only by deleting and recreating the task. The command columns must
+    survive the edit untouched: this is a message change, not a mode switch.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(
+        store,
+        cwd=str(tmp_path),
+        prompt="The nightly sync failed. Diagnose it.",
+        session_key="slack::channel::C123",
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--message", "Check the upstream API first."])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["prompt"] == "Check the upstream API first."
+    assert definition["shell_command"] == "./scripts/old.sh"
+    assert definition["timeout_seconds"] == 60
+    assert definition["on_failure"] == "agent"
+
+
+def test_task_update_rejects_command_flags_on_message_task(tmp_path: Path, monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="morning briefing",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    args = _parse_task_update(task.id, ["--shell", "./scripts/new.sh"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(cli.cmd_task_update, args)
+
+    assert result == 1
+    assert payload["code"] == "task_mode_immutable"
+    assert payload["details"]["kind"] == "message"
+    assert payload["details"]["flags"] == ["--shell"]
+
+
+def test_task_update_rejects_failure_handling_change(tmp_path: Path, monkeypatch) -> None:
+    """Escalation decides whether the definition owns a Session, so it is not editable."""
+
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, cwd=str(tmp_path))
+    args = _parse_task_update(task.id, ["--on-failure", "agent"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(cli.cmd_task_update, args)
+
+    assert result == 1
+    assert payload["code"] == "task_mode_immutable"
+    assert payload["details"]["on_failure"] == "none"
+    assert payload["details"]["requested_on_failure"] == "agent"
+
+
+def test_task_update_rejects_session_flags_on_pure_command_task(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, cwd=str(tmp_path))
+    args = _parse_task_update(task.id, ["--session-id", "sesTarget"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(cli.cmd_task_update, args)
+
+    assert result == 1
+    assert payload["code"] == "session_flags_with_command_task"
+
+
+# --- rendering ------------------------------------------------------------
+
+
+def test_task_payload_renders_command_kind_and_preview(tmp_path: Path) -> None:
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, name=None, shell_command="./scripts/sync.sh --verbose")
+    task.last_exit_code = 2
+
+    payload = cli._task_payload(task)
+    brief = cli._task_payload(task, brief=True)
+
+    assert payload["kind"] == "command"
+    assert payload["on_failure"] == "none"
+    assert payload["command_preview"] == "./scripts/sync.sh --verbose"
+    assert payload["display_name"] == "./scripts/sync.sh --verbose"
+    assert brief["kind"] == "command"
+    assert brief["last_exit_code"] == 2
+
+
+def test_task_payload_renders_message_kind_for_message_tasks(tmp_path: Path) -> None:
+    store = _command_task_store(tmp_path)
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="morning briefing",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+
+    payload = cli._task_payload(task)
+
+    assert payload["kind"] == "message"
+    assert payload["command_preview"] == ""
+    assert payload["display_name"] == "morning briefing"
+    assert cli._task_payload(task, brief=True)["last_exit_code"] is None
+
+
+# --- documented examples --------------------------------------------------
+
+
+def test_documented_task_command_examples_stay_parseable() -> None:
+    """Injected help text is a live caller: every example must survive the parser."""
+
+    parser = cli.build_parser()
+    text = cli._task_add_examples_text() + "\n" + cli._task_update_examples_text()
+    examples = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith(("vibe task add ", "vibe task update "))
+    ]
+    command_examples = [line for line in examples if "--shell" in line or "--timeout" in line]
+    assert len(examples) >= 4
+    assert len(command_examples) >= 3
+
+    for example in examples:
+        parser.parse_args(shlex.split(example)[1:])

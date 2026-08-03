@@ -20,6 +20,10 @@ import {
   isWallClockTimestamp,
   LIFECYCLE_DETAILS,
   lifecycleLabel,
+  TASK_ON_FAILURE_VALUES,
+  taskCommandPreview,
+  taskIsCommand,
+  taskOnFailure,
 } from './harnessLifecycle';
 
 // Translation-free stand-in: proves a mapper picked the right key without
@@ -359,6 +363,94 @@ describe('definitionRowTitle', () => {
 
   it('names the kind when there is nothing else to say', () => {
     expect(definitionRowTitle({ name: null, message: '   \n\t' }, 'Watch')).toBe('Watch');
+  });
+});
+
+describe('taskIsCommand', () => {
+  it('recognises both shapes a command can arrive in', () => {
+    expect(taskIsCommand({ shell_command: 'pg_dump mydb | gzip > /backups/db.gz' })).toBe(true);
+    expect(taskIsCommand({ command: ['python3', 'scripts/health.py'] })).toBe(true);
+  });
+
+  it('is false for a message task, which carries neither', () => {
+    expect(taskIsCommand({})).toBe(false);
+    expect(taskIsCommand({ shell_command: null, command: null, prompt: 'Summarize #ops' })).toBe(false);
+  });
+
+  it('does not read an empty argv list as a command', () => {
+    // The watches table populates ``command_json`` with ``[]`` for rows that
+    // have none, and the tasks table does the same — an empty list is the
+    // absence of a command, not a command that runs nothing.
+    expect(taskIsCommand({ command: [] })).toBe(false);
+    expect(taskIsCommand({ command: [], shell_command: '' })).toBe(false);
+  });
+
+  it('does not read a whitespace-only shell command as a command', () => {
+    expect(taskIsCommand({ shell_command: '   \n' })).toBe(false);
+  });
+});
+
+describe('taskCommandPreview', () => {
+  it('prefers the shell command verbatim', () => {
+    expect(taskCommandPreview({ shell_command: 'make test', command: ['ignored'] })).toBe('make test');
+  });
+
+  it('joins an argv list with spaces', () => {
+    expect(taskCommandPreview({ command: ['python3', '-m', 'pytest', '-q'] })).toBe('python3 -m pytest -q');
+  });
+
+  it('trims, and returns empty for a row with no command at all', () => {
+    expect(taskCommandPreview({ shell_command: '  make test \n' })).toBe('make test');
+    expect(taskCommandPreview({})).toBe('');
+  });
+
+  it('ellipsizes rather than hard-slicing, so the reader sees text was dropped', () => {
+    // Mirrors the CLI's ``_watch_command_preview``: cut to maxChars-1 then '…',
+    // so the result is never longer than the budget.
+    const long = 'x'.repeat(400);
+    const preview = taskCommandPreview({ shell_command: long });
+    expect(preview).toHaveLength(120);
+    expect(preview.endsWith('…')).toBe(true);
+    expect(preview.startsWith('x'.repeat(119))).toBe(true);
+  });
+
+  it('keeps a command that exactly fills the budget intact', () => {
+    const exact = 'y'.repeat(120);
+    expect(taskCommandPreview({ shell_command: exact })).toBe(exact);
+    expect(taskCommandPreview({ shell_command: 'ok' }, 2)).toBe('ok');
+  });
+
+  it('honours a caller-supplied budget', () => {
+    expect(taskCommandPreview({ shell_command: 'make test' }, 6)).toBe('make…');
+  });
+});
+
+describe('taskOnFailure', () => {
+  it('reads the policy out of decoded metadata', () => {
+    // Key is ``metadata`` on the API row, already decoded — not ``metadata_json``.
+    expect(taskOnFailure({ metadata: { on_failure: 'agent' } })).toBe('agent');
+    expect(taskOnFailure({ metadata: { on_failure: 'none' } })).toBe('none');
+    expect(taskOnFailure({ metadata: { on_failure: ' AGENT ' } })).toBe('agent');
+  });
+
+  it('treats absence as the quiet default', () => {
+    expect(taskOnFailure({})).toBe('none');
+    expect(taskOnFailure({ metadata: null })).toBe('none');
+    expect(taskOnFailure({ metadata: {} })).toBe('none');
+  });
+
+  it('never invents an Agent escalation from metadata it cannot read', () => {
+    // Falling the other way would promise an Agent turn nobody configured.
+    expect(taskOnFailure({ metadata: { on_failure: 42 } as unknown as Record<string, unknown> })).toBe('none');
+    expect(taskOnFailure({ metadata: { on_failure: '' } })).toBe('none');
+    expect(taskOnFailure({ metadata: { on_failure: 'escalate' } })).toBe('none');
+    expect(taskOnFailure({ metadata: 'not-an-object' as unknown as Record<string, unknown> })).toBe('none');
+  });
+
+  it('has real copy behind every policy it can name, in both languages', () => {
+    expectCopy('harness.onFailure', TASK_ON_FAILURE_VALUES);
+    expectCopy('harness.taskKind', ['command']);
+    expectCopy('harness.detail', ['command', 'onFailure', 'timeout', 'timeoutSeconds', 'timeoutNone', 'lastExitCode']);
   });
 });
 

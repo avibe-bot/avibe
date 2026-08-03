@@ -7,7 +7,6 @@ import json
 import logging
 import math
 import os
-import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -17,18 +16,14 @@ from uuid import uuid4
 
 from config import paths
 from core import watch_worker
+from core.command_runner import SupervisedCommandStartupError, run_supervised_command
 from core.process_isolation import (
     DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
     PersistedProcessIdentity,
-    capture_spawned_process_identity,
     inspect_process_identity,
-    isolated_subprocess_kwargs,
-    new_process_identity_marker,
     process_group_exists,
     process_group_identity_status,
     process_identity_matches,
-    process_identity_subprocess_env,
-    terminate_and_communicate,
     terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
 )
@@ -1483,77 +1478,63 @@ class ManagedWatchService:
             return
 
     async def _run_cycle(self, watch: ManagedWatch, *, timeout_seconds: float) -> _CycleResult:
+        """Run one waiter cycle through the shared supervised-command runner.
+
+        The runner owns the process mechanics; this method owns watch policy:
+        the active-pid/identity registries, runtime-state writes, and the
+        localization of worker errors.
+        """
+
         spawn_cwd = _watch_spawn_cwd(watch)
-        worker_marker = new_process_identity_marker()
-        spawn_env = process_identity_subprocess_env(worker_marker)
-        process = await asyncio.create_subprocess_exec(
-            os.path.abspath(sys.executable),
-            os.fspath(Path(watch_worker.__file__).resolve()),
-            cwd=spawn_cwd,
-            env=spawn_env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **isolated_subprocess_kwargs(),
-        )
-        self._active_pids[watch.id] = process.pid
-        identity = capture_spawned_process_identity(process.pid, worker_marker)
-        if identity is not None:
-            self._active_process_identities[watch.id] = identity
-        else:
-            logger.warning(
-                "Unable to capture process identity for watch worker pid=%s watch_id=%s; "
-                "a future recovery will leave it untouched",
-                process.pid,
-                watch.id,
-            )
-        self._runtime_state_dirty = True
-        self._write_runtime_state()
-        try:
-            if process.stdin is None:
-                await terminate_and_communicate(process, logger, f"watch {watch.id}")
-                raise RuntimeError("watch worker supervisor stdin is unavailable")
-            try:
-                process.stdin.write(
-                    watch_worker.encode_watch_worker_spec(
-                        command=watch.command,
-                        shell_command=watch.shell_command,
-                    )
-                )
-                await process.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError):
-                stdout, stderr = await process.communicate()
-                detail = stderr.decode("utf-8", errors="replace").strip()
-                detail = self._localize_watch_worker_error(detail)
-                raise RuntimeError(
-                    detail or self._t("harness.watch.supervisorExitedDuringStartup")
-                ) from None
-            finally:
-                process.stdin.close()
-            if timeout_seconds > 0:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+
+        def _register_spawn(pid: int, identity: Optional[PersistedProcessIdentity]) -> None:
+            self._active_pids[watch.id] = pid
+            if identity is not None:
+                self._active_process_identities[watch.id] = identity
             else:
-                stdout, stderr = await process.communicate()
-            timed_out = False
-        except asyncio.CancelledError:
-            await terminate_and_communicate(process, logger, f"watch {watch.id}")
-            raise
-        except asyncio.TimeoutError:
-            stdout, stderr = await terminate_and_communicate(process, logger, f"watch {watch.id}")
-            return _CycleResult(exit_code=124, stdout="", stderr=stderr.decode("utf-8", errors="replace"), timed_out=True)
+                logger.warning(
+                    "Unable to capture process identity for watch worker pid=%s watch_id=%s; "
+                    "a future recovery will leave it untouched",
+                    pid,
+                    watch.id,
+                )
+            self._runtime_state_dirty = True
+            self._write_runtime_state()
+
+        try:
+            result = await run_supervised_command(
+                command=watch.command,
+                shell_command=watch.shell_command,
+                cwd=spawn_cwd,
+                timeout_seconds=timeout_seconds,
+                label=f"watch {watch.id}",
+                on_spawn=_register_spawn,
+                max_output_bytes=None,
+            )
+        except SupervisedCommandStartupError as exc:
+            detail = self._localize_watch_worker_error(exc.detail)
+            raise RuntimeError(
+                detail or self._t("harness.watch.supervisorExitedDuringStartup")
+            ) from None
         finally:
             self._active_pids.pop(watch.id, None)
             self._active_process_identities.pop(watch.id, None)
             self._runtime_state_dirty = True
             self._write_runtime_state()
 
+        if result.timed_out:
+            return _CycleResult(
+                exit_code=result.exit_code,
+                stdout="",
+                stderr=result.stderr,
+                timed_out=True,
+            )
+
         return _CycleResult(
-            exit_code=process.returncode or 0,
-            stdout=stdout.decode("utf-8", errors="replace").strip(),
-            stderr=self._localize_watch_worker_error(
-                stderr.decode("utf-8", errors="replace").strip()
-            ),
-            timed_out=timed_out,
+            exit_code=result.exit_code,
+            stdout=result.stdout.strip(),
+            stderr=self._localize_watch_worker_error(result.stderr.strip()),
+            timed_out=False,
         )
 
     def _hook_request(

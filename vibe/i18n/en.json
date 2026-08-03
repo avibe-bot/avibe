@@ -61,7 +61,9 @@
     "notice": {
       "failed": "[Avibe Harness] Scheduled work \"{name}\" failed.",
       "interrupted": "[Avibe Harness] Scheduled work \"{name}\" was interrupted ({reason}). Nothing is wrong with the definition itself.",
+      "commandLine": "Command: {command}",
       "error": "Error: {error}",
+      "commandExit": "Exit code: {exitCode}",
       "unknownError": "no error text was recorded",
       "definition": "Definition: {id}",
       "paused": "It is currently PAUSED and will not fire again until you resume it: vibe task resume {id}",

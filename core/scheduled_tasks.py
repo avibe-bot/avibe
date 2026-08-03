@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
@@ -61,6 +62,10 @@ from storage.agent_session_rows import (
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
+from core.command_runner import (
+    SupervisedCommandStartupError,
+    run_supervised_command,
+)
 from core.delivery_evidence import (
     ACK_EVIDENCE_DELIVERY_ONLY,
     ACK_EVIDENCE_RECEIPT,
@@ -132,6 +137,26 @@ def _adopt_delivery_evidence(target: DeliveryEvidence, source: DeliveryEvidence)
     target.send_returned = source.send_returned
     target.error = source.error
     target.error_stage = source.error_stage
+
+
+#: How much of a failing command's stderr may ride the one-line error text. The full
+#: stream is on the run row; this is only the hint the CLI list and the notice show.
+_COMMAND_ERROR_DETAIL_MAX_CHARS = 200
+
+
+def _last_nonempty_line(text: Optional[str]) -> str:
+    """The LAST non-empty stderr line, trimmed -- the usual place the cause is.
+
+    A failing command's stderr commonly ends with the sentence that explains the
+    failure (a traceback's exception line, a shell's "command not found"), while the
+    first lines are warnings and progress noise.
+    """
+
+    for line in reversed((text or "").splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped[:_COMMAND_ERROR_DETAIL_MAX_CHARS]
+    return ""
 
 
 def _json_loads(value: str | None, default: Any) -> Any:
@@ -453,6 +478,17 @@ class TaskExecutionResult:
     failure_code: Optional[str] = None
     complete_on_return: bool = True
     reconcile_delivery_on_return: bool = False
+    #: Command-task outcome facts, all ``None`` for a message task. They ride the
+    #: result rather than being written by the executor so the run row's terminal
+    #: write stays a single guarded statement in ``complete()``.
+    exit_code: Optional[int] = None
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
+    #: The Agent turn a failed ``--on-failure agent`` command fire queued, already
+    #: durable when this is set. It rides the run row's metadata so the settle that
+    #: transitions the run also records that its failure has a REPORT, which is what
+    #: suppresses the owed failure notice for the same failure.
+    escalation_run_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -521,6 +557,17 @@ BINDING_FOLLOWS_SESSION_METADATA_KEY = "binding_follows_session"
 #:
 #: Each entry: ``{"session_id": str, "reason": str, "at": iso8601}``.
 ORPHANED_RESERVATIONS_METADATA_KEY = "orphaned_reservations"
+
+#: Wall-clock ceiling applied to a command task that stored no ``timeout_seconds``.
+#: Six hours: long enough that an ordinary batch job is never cut short, short
+#: enough that a wedged child cannot hold a run row ``running`` forever. A stored
+#: ``0`` is NOT this default -- it flows through the runner as "no timeout".
+COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS = 21600.0
+
+#: Retained bytes per output stream for one command run. The runner keeps draining
+#: the child past the cap, so a chatty command is truncated in the run row rather
+#: than deadlocked on a full pipe.
+COMMAND_TASK_OUTPUT_CAP_BYTES = 64 * 1024
 
 #: What a fire reports when its terminal stamp was REFUSED by the guarded
 #: full-row write (HFR-261/HFR-264). Plain text, like every other value that
@@ -831,6 +878,38 @@ def _created_by_caller(task: Any, run_metadata: Any) -> Optional[dict[str, Any]]
     return caller if isinstance(caller, dict) else None
 
 
+def _coerce_command_argv(value: Any) -> Optional[list[str]]:
+    """An argv list of strings, or ``None`` for absent/empty/malformed input.
+
+    ``[]`` collapses to ``None`` on purpose: an empty argv is not a command, and the
+    storage layer must keep the column NULL so ``has_command`` stays False.
+    """
+
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(item, str) for item in value):
+        return None
+    return [str(item) for item in value]
+
+
+def _coerce_optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class ScheduledTask:
     id: str
@@ -853,6 +932,29 @@ class ScheduledTask:
     last_run_at: Optional[str] = None
     last_error: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Command tasks run a subprocess instead of messaging an Agent. All four stay
+    # ``None`` for a message task, which is what keeps its stored columns NULL.
+    shell_command: Optional[str] = None
+    command: Optional[list[str]] = None
+    timeout_seconds: Optional[float] = None
+    last_exit_code: Optional[int] = None
+
+    @property
+    def has_command(self) -> bool:
+        """Whether this definition runs a command rather than prompting an Agent."""
+
+        return bool(self.shell_command or self.command)
+
+    @property
+    def on_failure(self) -> str:
+        """What a failed command run should do; ``"none"`` when unset.
+
+        Kept in ``metadata`` rather than a column: it is a command-task-only policy,
+        and the CLI owns validating which values are accepted.
+        """
+
+        value = str((self.metadata or {}).get("on_failure") or "none").strip().lower()
+        return value or "none"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -880,6 +982,10 @@ class ScheduledTask:
             last_run_at=payload.get("last_run_at"),
             last_error=payload.get("last_error"),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            shell_command=(str(payload["shell_command"]) if payload.get("shell_command") else None),
+            command=_coerce_command_argv(payload.get("command")),
+            timeout_seconds=_coerce_optional_float(payload.get("timeout_seconds")),
+            last_exit_code=_coerce_optional_int(payload.get("last_exit_code")),
         )
 
 
@@ -1156,15 +1262,32 @@ class ScheduledTaskStore:
             metadata=task.metadata,
         )
 
+    @property
+    def sqlite_backend(self) -> Optional[SQLiteBackgroundTaskStore]:
+        """The SQLite backend behind this store, or ``None`` for the file backend.
+
+        The guard ``_write_task`` applies lives in SQLite; the file backend has no
+        compare-and-set at all. Exposed so a caller can ask whether a guarded stamp and
+        an outbox row can be committed together (HFR-269).
+        """
+
+        return self._sqlite
+
     def _write_task(
         self,
         task: ScheduledTask,
         expect: DefinitionWriteExpectation,
         *,
+        queued_run: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """Persist a whole task row; ``False`` means the guard refused the write.
+
+        ``queued_run`` is an ``agent_runs`` outbox payload this write AUTHORISES; it is
+        committed in the SAME transaction as the row (HFR-269), so a refusal or a
+        failure leaves neither behind. Only the SQLite backend can do that, and passing
+        one to the file backend is a caller bug -- see ``sqlite_backend``.
 
         On refusal the in-memory mirror is reloaded, so the store never keeps serving
         the mutated task that the database rejected -- and on a RAISED write too
@@ -1177,14 +1300,30 @@ class ScheduledTaskStore:
 
         try:
             if self._sqlite is None:
+                # The watch store's answer, replicated verbatim: REFUSE rather than
+                # save-then-enqueue. A file-backed store cannot make the two writes one
+                # decision at all, and a best-effort second write is exactly the
+                # two-commits bug HFR-269 removed.
+                if queued_run is not None:
+                    raise ValueError(
+                        "a file-backed scheduled task store cannot commit a queued run "
+                        "with the task row"
+                    )
                 self._save()
                 return True
-            landed = self._sqlite.upsert_scheduled_task(
-                task.to_dict(),
-                expect=expect,
-                expected_enabled_agent_id=expected_enabled_agent_id,
-                expected_reference_agent_id=expected_reference_agent_id,
-            )
+            if queued_run is None:
+                landed = self._sqlite.upsert_scheduled_task(
+                    task.to_dict(),
+                    expect=expect,
+                    expected_enabled_agent_id=expected_enabled_agent_id,
+                    expected_reference_agent_id=expected_reference_agent_id,
+                )
+            else:
+                # No agent-guard kwargs: the only caller that passes a queued run is
+                # ``mark_task_result``, which never passes them either.
+                landed = self._sqlite.upsert_scheduled_task_with_queued_run(
+                    task.to_dict(), expect=expect, run_payload=queued_run
+                )
         except Exception:
             self._reload_after_lost_write(task.id)
             raise
@@ -1270,6 +1409,9 @@ class ScheduledTaskStore:
         cron: Optional[str] = None,
         run_at: Optional[str] = None,
         timezone_name: str,
+        shell_command: Optional[str] = None,
+        command: Optional[list[str]] = None,
+        timeout_seconds: Optional[float] = None,
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
@@ -1290,6 +1432,9 @@ class ScheduledTaskStore:
             run_at=run_at,
             timezone=timezone_name,
             metadata=dict(metadata or {}),
+            shell_command=shell_command,
+            command=command,
+            timeout_seconds=timeout_seconds,
         )
         return self.upsert_task(
             task,
@@ -1349,6 +1494,10 @@ class ScheduledTaskStore:
         session_policy: Optional[str] = None,
         cwd: Optional[str] = None,
         update_cwd: bool = False,
+        shell_command: Optional[str] = None,
+        command: Optional[list[str]] = None,
+        timeout_seconds: Optional[float] = None,
+        update_command_fields: bool = False,
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
@@ -1374,6 +1523,12 @@ class ScheduledTaskStore:
         task.cron = cron
         task.run_at = run_at
         task.timezone = timezone_name
+        if update_command_fields:
+            # Gated like ``cwd``: an edit that says nothing about the command must not
+            # clear it, and ``last_exit_code`` is runtime state no edit ever rewrites.
+            task.shell_command = shell_command
+            task.command = command
+            task.timeout_seconds = timeout_seconds
         if metadata is not None:
             task.metadata = dict(metadata)
         task.updated_at = _utc_now_iso()
@@ -1485,7 +1640,18 @@ class ScheduledTaskStore:
         error: Optional[str],
         disable_one_shot: bool = True,
         expected_binding: Optional[tuple[Optional[str], str, str]] = None,
+        exit_code: Optional[int] = None,
+        queued_run: Optional[dict[str, Any]] = None,
     ) -> bool:
+        """Stamp a fire's outcome; ``False`` means the store refused the write.
+
+        ``queued_run`` is the outbox row this stamp AUTHORISES -- today the
+        ``--on-failure agent`` escalation turn. Passing it makes the stamp and the turn
+        ONE transaction (HFR-269): both land or neither does, so no teardown can commit
+        between them and a failed one-shot ``at`` task cannot be disabled while losing
+        the report that explains why.
+        """
+
         self.maybe_reload()
         task = self._tasks.get(task_id)
         if task is None:
@@ -1499,6 +1665,11 @@ class ScheduledTaskStore:
         expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
         task.last_error = error
+        if exit_code is not None:
+            # Only a command fire has an exit code to report. ``None`` means "this
+            # fire had none", not "clear it": a message task must never blank the
+            # last exit code a command fire of the same definition recorded.
+            task.last_exit_code = int(exit_code)
         if disable_one_shot and task.schedule_type == "at":
             task.enabled = False
         task.updated_at = _utc_now_iso()
@@ -1506,7 +1677,7 @@ class ScheduledTaskStore:
         # guarded: this payload carries the mirror's ``session_id`` and ``enabled``, so
         # a run result landing after a ``/new`` reclaim would re-enable the definition
         # and re-point it at the session the reclaim just tore down.
-        return self._write_task(task, expect)
+        return self._write_task(task, expect, queued_run=queued_run)
 
 
 class TaskExecutionStore:
@@ -1943,7 +2114,20 @@ class TaskExecutionStore:
             return [
                 TaskExecutionRequest.from_dict(item)
                 for item in self._sqlite.list_runs(status="pending")
-                if item.get("request_type") in {"task_run", "hook_send", "agent_run", "scheduled", "watch", "webhook"}
+                # ``task_escalation`` belongs here for the same reason ``hook_send``
+                # does: it is a queued Agent turn the drain loop must claim. Left out,
+                # the escalation row would be durable and never executed -- a failure
+                # report the atomic stamp promised and nothing ever delivered.
+                if item.get("request_type")
+                in {
+                    "task_run",
+                    "hook_send",
+                    "agent_run",
+                    "scheduled",
+                    "watch",
+                    "webhook",
+                    "task_escalation",
+                }
             ]
         self._ensure_dirs()
         requests: list[TaskExecutionRequest] = []
@@ -2486,6 +2670,10 @@ class TaskExecutionStore:
         session_id: Optional[str] = None,
         interrupt_reason: Optional[str] = None,
         failure_code: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None,
+        escalation_run_id: Optional[str] = None,
     ) -> Optional[str]:
         """Settle one claimed request.
 
@@ -2505,6 +2693,16 @@ class TaskExecutionStore:
         passthrough at a completion site is how an unrelated key comes to overwrite
         ``interrupt_reason``, ``failure_code`` or the notice blob itself.
 
+        ``exit_code`` / ``stdout`` / ``stderr`` are a command fire's outcome facts and
+        stay ``None`` for every other request type.
+
+        ``escalation_run_id`` names the already-durable Agent turn that carries this
+        failure's report (``--on-failure agent``). It rides the metadata channel for
+        exactly the reason ``interrupt_reason`` does: ``_merge_owed_failure_notice``
+        applies ``extra_metadata`` BEFORE ``_owed_failure_notice_for_transition`` reads
+        it, so the marker is in place when the notice decision is made and the same
+        failure is not reported twice -- once as a turn, once as an alert.
+
         Returns the exact terminal status this call wrote, or ``None`` when another
         terminal owner already won.
         """
@@ -2514,6 +2712,8 @@ class TaskExecutionStore:
             extra_metadata["interrupt_reason"] = interrupt_reason
         if failure_code:
             extra_metadata["failure_code"] = failure_code
+        if escalation_run_id:
+            extra_metadata["escalation_run_id"] = escalation_run_id
         if self._sqlite is not None:
             # Guarded, NOT ``update_run_status``: that writer's UPDATE has no status
             # predicate, so an ordinary completion rewrote a status another actor had
@@ -2530,6 +2730,9 @@ class TaskExecutionStore:
                 session_key=session_key if session_key is not None else request.session_key,
                 session_id=session_id if session_id is not None else request.session_id,
                 metadata=extra_metadata,
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
             )
         processing_path = self._request_path(request.id, state="processing")
         completed_path = self._request_path(request.id, state="completed")
@@ -2548,16 +2751,27 @@ class TaskExecutionStore:
                 "callback_session_id": request.callback_session_id,
             }
         )
-        if interrupt_reason or failure_code:
+        # Command outcome facts only when this fire produced them, so a message task's
+        # completed JSON keeps exactly the keys it has always had.
+        if exit_code is not None:
+            payload["exit_code"] = exit_code
+        if stdout is not None:
+            payload["stdout"] = stdout
+        if stderr is not None:
+            payload["stderr"] = stderr
+        if interrupt_reason or failure_code or escalation_run_id:
             # The file backend has no owed-notice machinery at all, so this records the
             # class where its only reader — an operator looking at the completed JSON —
             # can see it, rather than dropping the one fact the caller went to the
-            # trouble of classifying.
+            # trouble of classifying. ``escalation_run_id`` rides the same channel: it
+            # suppresses nothing here (there is nothing to suppress), but the pointer
+            # from a failure to the turn that reports it is the same kind of fact.
             existing = payload.get("metadata")
             payload["metadata"] = {
                 **(existing if isinstance(existing, dict) else {}),
                 **({"interrupt_reason": interrupt_reason} if interrupt_reason else {}),
                 **({"failure_code": failure_code} if failure_code else {}),
+                **({"escalation_run_id": escalation_run_id} if escalation_run_id else {}),
             }
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -4522,7 +4736,32 @@ class ScheduledTaskService:
             )
         else:
             headline = self._t("harness.notice.failed", name=name)
-        lines = [headline, self._t("harness.notice.error", error=error)]
+        # COMMAND COPY, ORDINARY-FAILED LANE ONLY. A command definition's notice named
+        # the definition and the error but never the command, so "Error: command exited
+        # with status 7: boom" left the reader to go and look up WHAT exited. The lane
+        # gate is deliberate: an interrupted command run is a fact about the SERVICE
+        # (restart, eviction) and not about the command, so that lane keeps the generic
+        # copy the headline already explains.
+        is_command_failure = (
+            not failure_notices.is_interruption(notice)
+            and task is not None
+            and task.has_command
+        )
+        lines = [headline]
+        if is_command_failure:
+            command_preview = self._notice_command_preview(task)
+            if command_preview:
+                lines.append(self._t("harness.notice.commandLine", command=command_preview))
+        lines.append(self._t("harness.notice.error", error=error))
+        if is_command_failure and run.get("exit_code") is not None:
+            # ONLY when the row actually carries one. A fire that never spawned — a
+            # missing working directory, a supervisor that died during startup — has no
+            # exit code at all, and "Exit code: None" (or a fabricated 0/1) would be
+            # copy about nothing on the very notice that has to be trusted. No stderr
+            # tail line either: the executor already appends the last non-empty stderr
+            # line to the run's ``error``, so the line above carries it and a third
+            # line would print the same text twice.
+            lines.append(self._t("harness.notice.commandExit", exitCode=run.get("exit_code")))
         if not failure_notices.is_interruption(notice):
             # D5 asks for "the error and its CLASS", and on this lane the class was
             # dropped: the interrupted headline was the only place any reason was
@@ -4626,6 +4865,25 @@ class ScheduledTaskService:
                         lines.append(self._t("harness.notice.nextRun", when=next_run))
                 lines.append(self._t("harness.notice.rerun", id=definition_id))
         return "\n".join(lines)
+
+    @staticmethod
+    def _notice_command_preview(task: Any, *, max_chars: int = 120) -> str:
+        """The one-line command a notice names, or ``""`` for a non-command definition.
+
+        Mirrors the CLI's ``_task_command_preview`` idiom deliberately — same
+        shell-string-or-``shlex.join`` choice, same 120-char cap with a trailing
+        ellipsis — so the command a user reads in a failure notice is the same string
+        ``vibe task list`` showed them. A notice is delivered into a chat message, and
+        an uncapped command (a long ``bash -lc`` pipeline) would bury the error line
+        that follows it.
+        """
+
+        shell_command = getattr(task, "shell_command", None)
+        argv = getattr(task, "command", None)
+        preview = (shell_command or (shlex.join(argv) if argv else "")).strip()
+        if len(preview) <= max_chars:
+            return preview
+        return preview[: max_chars - 1].rstrip() + "…"
 
     def _task_lifecycle_state(self, definition_id: Optional[str], task: Any) -> str:
         """The lifecycle state the badge shows for this task — asked of the badge.
@@ -4982,6 +5240,14 @@ class ScheduledTaskService:
         return None
 
     def _transport_ready_for_request(self, request: TaskExecutionRequest) -> bool:
+        if request.request_type in {"task_run", "scheduled"} and request.task_id:
+            task = self.store.get_task(request.task_id)
+            if task is not None and task.has_command:
+                # A command run needs no IM transport: it produces an exit code and
+                # output, not a reply. Gating it on a platform's readiness would hold a
+                # backup or health check queued while an unrelated IM adapter is down.
+                # The failure-notice path owns delivery, and it can be owed later.
+                return True
         try:
             platform = self._request_target_platform(request)
         except Exception:
@@ -5115,6 +5381,15 @@ class ScheduledTaskService:
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
+        #: Command-fire outcome facts. They stay ``None`` for every other request type,
+        #: which is what keeps those rows' columns untouched.
+        exit_code: Optional[int] = None
+        stdout: Optional[str] = None
+        stderr: Optional[str] = None
+        #: The already-durable escalation turn a failed ``--on-failure agent`` command
+        #: fire queued, or ``None``. Recorded on THIS run's metadata by ``complete()``,
+        #: which is what stops the same failure being reported twice.
+        escalation_run_id: Optional[str] = None
         try:
             if request.request_type in {"task_run", "scheduled"}:
                 self.store.maybe_reload()
@@ -5141,7 +5416,16 @@ class ScheduledTaskService:
                 failure_code = result.failure_code
                 should_complete = result.complete_on_return
                 reconcile_delivery_on_return = result.reconcile_delivery_on_return
-            elif request.request_type in {"hook_send", "watch", "webhook"}:
+                exit_code = result.exit_code
+                stdout = result.stdout
+                stderr = result.stderr
+                escalation_run_id = result.escalation_run_id
+            elif request.request_type in {
+                "hook_send",
+                "watch",
+                "webhook",
+                "task_escalation",
+            }:
                 if not request.prompt:
                     raise ValueError("hook request requires prompt")
                 if request.session_policy == "create_per_run":
@@ -5163,7 +5447,17 @@ class ScheduledTaskService:
                     prompt=request.prompt,
                     execution_id=request.id,
                     task_id=task_id,
-                    trigger_kind=request.request_type if request.request_type != "hook_send" else "hook",
+                    # ``delivery_intent_for_trigger`` has a CLOSED vocabulary, and an
+                    # escalation IS a hook send -- an out-of-band turn a definition
+                    # queued -- so it takes the hook intent rather than a new one no
+                    # mapping knows. Provenance is not lost: the run row still carries
+                    # ``run_type="task_escalation"`` and the failed fire's
+                    # ``parent_run_id``.
+                    trigger_kind=(
+                        "hook"
+                        if request.request_type in {"hook_send", "task_escalation"}
+                        else request.request_type
+                    ),
                     agent_name=request.agent_name,
                     _capture_dispatch_result=True,
                     **({"agent_id": request.agent_id} if request.agent_id else {}),
@@ -5288,6 +5582,10 @@ class ScheduledTaskService:
                     session_id=session_id,
                     interrupt_reason=interrupt_reason,
                     failure_code=failure_code,
+                    exit_code=exit_code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    escalation_run_id=escalation_run_id,
                 )
                 if project_terminal_definition_on_cancel and written_status is not None:
                     self._project_terminal_definition_result(
@@ -5341,6 +5639,232 @@ class ScheduledTaskService:
                             session_id,
                         )
 
+    async def _execute_command_task(
+        self, task: ScheduledTask, *, execution_id: str, disable_one_shot: bool
+    ) -> TaskExecutionResult:
+        """Run one command definition's fire and record its outcome.
+
+        The command runner owns the process mechanics -- spawn, spec handshake,
+        timeout, cancellation and tree teardown -- so this method owns only scheduled
+        task policy: where to run, how long to allow, and how the outcome is written
+        to the definition and the run row.
+
+        No pid registry and no ``on_spawn`` callback, deliberately. The runner is the
+        only thing that ever kills this child: a timeout kills it from inside, and a
+        service stop cancels the awaiting coroutine, which the runner turns into a tree
+        teardown. ``vibe runs cancel`` is not a kill path at all -- it sets
+        ``cancel_requested``, and ``settle_run_terminal`` reads that flag in the same
+        transaction that settles the row, so the run lands ``canceled``. The run row's
+        ``pid`` column keeps its existing meaning (the SERVICE pid, written by
+        ``mark_execution_started`` for the recovery gate) and must not be repurposed.
+        """
+
+        error: Optional[str] = None
+        exit_code: Optional[int] = None
+        stdout_value: Optional[str] = None
+        stderr_value: Optional[str] = None
+
+        spawn_cwd = task.cwd
+        if not spawn_cwd:
+            stable_cwd = paths.get_vibe_remote_dir()
+            stable_cwd.mkdir(parents=True, exist_ok=True)
+            spawn_cwd = str(stable_cwd)
+
+        if not os.path.isdir(spawn_cwd):
+            # Do NOT spawn: ``create_subprocess_exec`` would raise a bare
+            # ``NotADirectoryError``/``FileNotFoundError`` whose text does not name the
+            # directory the user configured.
+            error = f"working directory does not exist: {spawn_cwd}"
+        else:
+            effective_timeout = (
+                task.timeout_seconds
+                if task.timeout_seconds is not None
+                else COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS
+            )
+            try:
+                result = await run_supervised_command(
+                    command=task.command,
+                    shell_command=task.shell_command,
+                    cwd=spawn_cwd,
+                    timeout_seconds=effective_timeout,
+                    label=f"scheduled task {task.id}",
+                    max_output_bytes=COMMAND_TASK_OUTPUT_CAP_BYTES,
+                )
+            except SupervisedCommandStartupError as exc:
+                # Its own clause, BEFORE the broad one: the class subclasses
+                # ``RuntimeError``, so a single ``except Exception`` would swallow it and
+                # report the worker's startup failure as an ordinary command error.
+                error = exc.detail or "command supervisor exited during startup"
+            except Exception as exc:
+                error = str(exc)
+                logger.error(
+                    "Scheduled task %s command failed: %s", task.id, exc, exc_info=True
+                )
+            else:
+                exit_code = result.exit_code
+                if result.timed_out:
+                    # Both streams are kept: whatever the command printed before it
+                    # hung is the only evidence of WHY it hung, and a timeout has no
+                    # exit status that explains itself. The runner preserves the
+                    # capped readers' buffers across the kill for exactly this.
+                    stdout_value = result.stdout
+                    stderr_value = result.stderr
+                    error = f"command timed out after {int(effective_timeout)} second(s)"
+                else:
+                    stdout_value = result.stdout
+                    stderr_value = result.stderr
+                    if exit_code:
+                        error = f"command exited with status {exit_code}"
+                        detail = _last_nonempty_line(result.stderr)
+                        if detail:
+                            error = f"{error}: {detail}"
+
+        # THE ESCALATION IS COMPOSED BEFORE THE STAMP AND QUEUED BY IT. A definition
+        # carrying ``on_failure == "agent"`` owes the user ONE Agent turn per failed
+        # fire, carrying the report -- and that turn is what the stamp AUTHORISES, so
+        # the two must be one transaction (HFR-269, ``core/watches.py``: "TWO COMMITS
+        # ARE NOT ONE DECISION"). Split in two, a teardown landing between them queues
+        # an escalation under a definition that no longer authorises it, and an
+        # exception between them disables a failed one-shot while LOSING the report.
+        #
+        # Never ``enqueue_definition_run``: that writer re-reads the definition and
+        # RAISES on a disabled one, and a failed ``at`` task is disabled by the very
+        # stamp that authorises this turn.
+        escalation_request = None
+        if error and task.on_failure == "agent":
+            escalation_request = self.request_store.build_hook_send(
+                session_key=task.session_key or "",
+                session_id=task.session_id,
+                prompt=self._escalation_prompt(
+                    task,
+                    run_id=execution_id,
+                    error=error,
+                    exit_code=exit_code,
+                    stdout=stdout_value,
+                    stderr=stderr_value,
+                ),
+                post_to=task.post_to,
+                deliver_key=task.deliver_key,
+                agent_name=task.agent_name,
+                session_policy=task.session_policy,
+                run_type="task_escalation",
+                definition_id=task.id,
+                source_kind="scheduler",
+                parent_run_id=execution_id,
+                metadata=dict(task.metadata or {}),
+            )
+        stamped = self.store.mark_task_result(
+            task.id,
+            error=error,
+            disable_one_shot=disable_one_shot,
+            exit_code=exit_code,
+            # THE BINDING THIS FIRE STARTED AGAINST, and only when a turn is being
+            # authorised. ``mark_task_result`` reloads the mirror and derives its
+            # compare-and-set expectation from the RELOADED row, so a ``/new`` reclaim
+            # committed while the command ran becomes the expectation -- it matches, and
+            # the stamp lands. Harmless while the stamp wrote only bookkeeping; not
+            # harmless now that it queues an Agent turn, because the escalation above was
+            # composed from the PRE-EXECUTION task and would be durably queued against
+            # the session the reclaim just tore down, with the notice suppressed in its
+            # favour. Refusing instead rolls both halves back and leaves the failure to
+            # the owed-notice ladder.
+            expected_binding=(
+                (task.session_id, task.session_key, task.schedule_type)
+                if escalation_request is not None
+                else None
+            ),
+            queued_run=(
+                self.request_store.queued_run_payload(escalation_request)
+                if escalation_request is not None
+                else None
+            ),
+        )
+        # ONLY when the stamp landed. A refusal rolled the escalation row back with it,
+        # so claiming an escalation id here would suppress the failure notice in favour
+        # of a turn that does not exist -- and the failure would be silent.
+        escalation_run_id = (
+            escalation_request.id if escalation_request is not None and stamped else None
+        )
+        if not stamped:
+            # Same refusal as the message path (HFR-261/HFR-264): the definition was
+            # reclaimed, repointed or removed while this fire was running, so nothing
+            # was stored. A would-be success must not be reported as one.
+            logger.warning(
+                "Scheduled task %s produced a result the store refused to stamp; "
+                "reporting the run as failed",
+                task.id,
+            )
+            if not error:
+                error = _TASK_RESULT_NOT_RECORDED_ERROR
+        # An ``at`` command task just disabled itself; the APScheduler job must drop.
+        self.reconcile_jobs()
+        return TaskExecutionResult(
+            error=error,
+            session_key=task.session_key or "",
+            session_id=task.session_id,
+            failure_code=None,
+            complete_on_return=True,
+            exit_code=exit_code,
+            stdout=stdout_value,
+            stderr=stderr_value,
+            escalation_run_id=escalation_run_id,
+        )
+
+    def _escalation_prompt(
+        self,
+        task: ScheduledTask,
+        *,
+        run_id: str,
+        error: str,
+        exit_code: Optional[int],
+        stdout: Optional[str],
+        stderr: Optional[str],
+    ) -> str:
+        """The Agent-facing failure report a ``--shell ... --on-failure agent`` fire sends.
+
+        NOT i18n'd, deliberately, and the watch completion-hook prompts are the
+        precedent: this text is read by an AGENT, not shown to a user. It is the input
+        to a turn, so the reply it produces is what the user actually reads -- and that
+        reply is written in whatever language the conversation is in. Localizing the
+        input would only make the instructions the model follows vary by locale.
+
+        The user's own stored message comes FIRST when there is one: it is the standing
+        instruction ("open a ticket if the backup fails"), and the machine-generated
+        report is the evidence it operates on.
+        """
+
+        lines: list[str] = []
+        stored_message = (task.prompt or "").strip()
+        if stored_message:
+            lines.append(stored_message)
+            lines.append("")
+        label = (task.name or "").strip()
+        lines.append(
+            f"A scheduled command task failed: {label} ({task.id})"
+            if label
+            else f"A scheduled command task failed: {task.id}"
+        )
+        command_preview = self._notice_command_preview(task)
+        if command_preview:
+            lines.append(f"Command: {command_preview}")
+        # ``error`` already names the outcome in the only form that covers every branch:
+        # the exit status, the timeout, a missing working directory, or the supervisor's
+        # own startup detail. The exit code line is added only when the fire actually
+        # produced one -- a run that never spawned has none, and "Exit code: None" would
+        # be a fabricated fact on the one message that has to be trusted.
+        lines.append(f"Outcome: {error}")
+        if exit_code is not None:
+            lines.append(f"Exit code: {exit_code}")
+        stdout_tail = _last_nonempty_line(stdout)
+        if stdout_tail:
+            lines.append(f"Last stdout line: {stdout_tail}")
+        stderr_tail = _last_nonempty_line(stderr)
+        if stderr_tail:
+            lines.append(f"Last stderr line: {stderr_tail}")
+        lines.append(f"Run id: {run_id}")
+        lines.append(f"Inspect with: vibe runs show {run_id}")
+        return "\n".join(lines)
+
     async def _execute_task(
         self,
         task: ScheduledTask,
@@ -5362,6 +5886,15 @@ class ScheduledTaskService:
         # books whatever this run does, and outside the ``try`` because it reports
         # itself and must never be mistaken for the run's own failure.
         self._retry_orphaned_reservations(task)
+        if task.has_command:
+            # A command definition runs a subprocess instead of prompting an Agent, so
+            # none of the session/binding machinery below applies to it. An
+            # ``on_failure == "agent"`` definition queues its escalation turn from in
+            # there, in the same transaction as its result stamp -- it does not dispatch
+            # one from here.
+            return await self._execute_command_task(
+                task, execution_id=execution_id, disable_one_shot=disable_one_shot
+            )
         try:
             if task.session_policy == "create_per_run":
                 session_id = self._reserve_runtime_session(

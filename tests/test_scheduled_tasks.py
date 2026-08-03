@@ -45,6 +45,7 @@ from core.scheduled_tasks import (
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     BINDING_RECOVERY_METADATA_KEY,
     ParsedSessionKey,
+    ScheduledTask,
     ScheduledTaskService,
     ScheduledTaskStore,
     SessionBindingChange,
@@ -625,6 +626,219 @@ def test_update_task_preserves_id_and_overwrites_selected_fields(tmp_path: Path)
     assert updated.cron is None
     assert updated.run_at == "2026-03-31T09:00:00+08:00"
     assert updated.timezone == "UTC"
+
+
+def _sqlite_backed_task_store(tmp_path: Path) -> tuple[ScheduledTaskStore, SQLiteBackgroundTaskStore]:
+    """A scheduled-task store on its own SQLite file under ``tmp_path``."""
+
+    sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    return store, sqlite
+
+
+def _reloaded_task_store(tmp_path: Path, sqlite: SQLiteBackgroundTaskStore) -> ScheduledTaskStore:
+    reloaded = ScheduledTaskStore(tmp_path / "scheduled_tasks-reloaded.json")
+    reloaded._sqlite = sqlite
+    reloaded.load()
+    return reloaded
+
+
+def _definition_row(sqlite: SQLiteBackgroundTaskStore, definition_id: str) -> dict[str, Any]:
+    with sqlite.engine.connect() as conn:
+        row = (
+            conn.execute(select(run_definitions).where(run_definitions.c.id == definition_id))
+            .mappings()
+            .first()
+        )
+    assert row is not None
+    return dict(row)
+
+
+def test_store_round_trip_persists_shell_command_task(tmp_path: Path) -> None:
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        name="Nightly sync",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+        shell_command="./sync.sh; exit 0",
+        timeout_seconds=300.0,
+        metadata={"on_failure": "agent"},
+    )
+
+    saved = _reloaded_task_store(tmp_path, sqlite).get_task(task.id)
+
+    assert saved is not None
+    assert saved.shell_command == "./sync.sh; exit 0"
+    assert saved.command is None
+    assert saved.timeout_seconds == 300.0
+    assert saved.last_exit_code is None
+    assert saved.has_command is True
+    assert saved.on_failure == "agent"
+    # A command task needs no session, and the inference must not invent one.
+    assert saved.session_policy is None
+
+
+def test_store_round_trip_persists_argv_command_task(tmp_path: Path) -> None:
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        name="Echo",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="*/5 * * * *",
+        timezone_name="UTC",
+        command=["/bin/echo", "hi"],
+    )
+
+    saved = _reloaded_task_store(tmp_path, sqlite).get_task(task.id)
+
+    assert saved is not None
+    assert saved.command == ["/bin/echo", "hi"]
+    assert saved.shell_command is None
+    assert saved.timeout_seconds is None
+    assert saved.has_command is True
+    assert saved.on_failure == "none"
+
+
+def test_message_task_keeps_command_columns_null(tmp_path: Path) -> None:
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+
+    row = _definition_row(sqlite, task.id)
+    saved = _reloaded_task_store(tmp_path, sqlite).get_task(task.id)
+
+    assert row["command_json"] is None
+    assert row["shell_command"] is None
+    assert row["timeout_seconds"] is None
+    assert row["last_exit_code"] is None
+    assert saved is not None
+    assert saved.shell_command is None
+    assert saved.command is None
+    assert saved.timeout_seconds is None
+    assert saved.last_exit_code is None
+    assert saved.has_command is False
+
+
+def test_from_dict_defaults_command_fields_for_legacy_payloads() -> None:
+    task = ScheduledTask.from_dict(
+        {
+            "id": "task-legacy",
+            "session_key": "slack::channel::C123",
+            "prompt": "send digest",
+            "schedule_type": "cron",
+            "cron": "0 * * * *",
+        }
+    )
+
+    assert task.shell_command is None
+    assert task.command is None
+    assert task.timeout_seconds is None
+    assert task.last_exit_code is None
+    assert task.has_command is False
+    assert task.on_failure == "none"
+    assert task.to_dict()["shell_command"] is None
+
+
+def test_update_task_only_rewrites_command_fields_when_gated(tmp_path: Path) -> None:
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+        shell_command="./sync.sh",
+        timeout_seconds=120.0,
+    )
+
+    preserved = store.update_task(
+        task.id,
+        name="Renamed",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        post_to=None,
+        deliver_key=None,
+        cron="0 4 * * *",
+        run_at=None,
+        timezone_name="UTC",
+    )
+
+    assert preserved.shell_command == "./sync.sh"
+    assert preserved.timeout_seconds == 120.0
+    assert _reloaded_task_store(tmp_path, sqlite).get_task(task.id).shell_command == "./sync.sh"
+
+    replaced = store.update_task(
+        task.id,
+        name="Renamed",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        post_to=None,
+        deliver_key=None,
+        cron="0 4 * * *",
+        run_at=None,
+        timezone_name="UTC",
+        command=["/bin/echo", "hi"],
+        timeout_seconds=45.0,
+        update_command_fields=True,
+    )
+
+    reloaded = _reloaded_task_store(tmp_path, sqlite).get_task(task.id)
+    assert replaced.shell_command is None
+    assert replaced.command == ["/bin/echo", "hi"]
+    assert reloaded.command == ["/bin/echo", "hi"]
+    assert reloaded.shell_command is None
+    assert reloaded.timeout_seconds == 45.0
+
+
+def test_last_exit_code_survives_an_unrelated_definition_write(tmp_path: Path) -> None:
+    """A definition edit must not wipe the exit code a command run recorded.
+
+    Every scheduled-task write is a FULL-ROW upsert, so a hardcoded ``None`` in the
+    column mapping would clear the exit code on the next rename or ``mark_task_result``.
+    """
+
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+        shell_command="./sync.sh",
+    )
+    sqlite.upsert_scheduled_task({**task.to_dict(), "last_exit_code": 3})
+    store.load()
+
+    assert store.get_task(task.id).last_exit_code == 3
+
+    store.update_task(
+        task.id,
+        name="Renamed",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        post_to=None,
+        deliver_key=None,
+        cron="0 4 * * *",
+        run_at=None,
+        timezone_name="UTC",
+    )
+    assert store.mark_task_result(task.id, error=None) is True
+
+    assert _definition_row(sqlite, task.id)["last_exit_code"] == 3
+    assert _reloaded_task_store(tmp_path, sqlite).get_task(task.id).last_exit_code == 3
 
 
 def test_store_reload_detects_deleted_task_file(tmp_path: Path) -> None:
@@ -12805,4 +13019,1167 @@ def test_a_dropped_task_mirror_recovers_with_no_unrelated_commit_to_wake_it() ->
     assert durable_after is not None and durable_after.to_dict() == durable_before.to_dict(), (
         "the durable row changed, so the failed write committed something and the "
         "recovery above was reading a different definition than the one that was dropped"
+    )
+
+
+# --- Command tasks: a definition that runs a subprocess instead of an Agent turn ---
+
+
+def _command_task_env(tmp_path: Path, monkeypatch) -> Path:
+    """``_binding_env`` plus a test-owned fallback spawn cwd.
+
+    A command definition with no ``cwd`` spawns in ``paths.get_vibe_remote_dir()``,
+    which is the REAL ``~/.avibe`` in an unpatched process. Redirected here so no
+    command test can spawn a child inside the user's live product state.
+    """
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / "avibe_home")
+    return db_path
+
+
+def _fire_command_task(
+    service: ScheduledTaskService, task: ScheduledTask
+) -> dict[str, Any]:
+    """Fire one definition through the REAL claimed-request path; return its run row."""
+
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    return run
+
+
+def _add_command_task(
+    store: ScheduledTaskStore,
+    *,
+    shell_command: str,
+    cwd: Optional[str],
+    schedule_type: str = "cron",
+    timeout_seconds: Optional[float] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> ScheduledTask:
+    return store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type=schedule_type,
+        cron="0 * * * *" if schedule_type == "cron" else None,
+        run_at="2026-07-28T09:00:00+00:00" if schedule_type == "at" else None,
+        timezone_name="UTC",
+        cwd=cwd,
+        shell_command=shell_command,
+        timeout_seconds=timeout_seconds,
+        metadata=dict(metadata or {"origin": "cli"}),
+    )
+
+
+def test_command_task_fire_records_a_successful_run_and_exit_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A zero-exit command run is a SUCCEEDED run with its output on the row.
+
+    The whole point of a command task: the outcome the user reads is the exit code
+    and the captured output, not an Agent reply. Driven through the real
+    claimed-request path so the assertions are on ``agent_runs`` -- what
+    ``vibe task runs`` and the Harness detail pane actually show.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="echo hi; exit 0", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded", f"a zero-exit command run failed: {run['error']!r}"
+    assert run["error"] in (None, "")
+    assert run["exit_code"] == 0, f"the run row lost the exit code: {run['exit_code']!r}"
+    assert "hi" in (run["stdout"] or ""), f"stdout was not persisted: {run['stdout']!r}"
+    assert run["run_type"] == "scheduled", (
+        f"a command fire changed the run type to {run['run_type']!r}; the CLI and Harness "
+        "filter scheduled fires on it"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code == 0, (
+        f"the definition did not record the exit code: {stored.last_exit_code!r}"
+    )
+    assert stored.last_error is None
+    assert stored.last_run_at is not None
+
+
+def test_command_task_failure_records_the_exit_code_and_stderr(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A nonzero exit fails the run and keeps the cause where a reader can find it."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="echo boom >&2; exit 7", cwd=str(tmp_path)
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", "a command that exited 7 was recorded as a success"
+    assert "status 7" in (run["error"] or ""), (
+        f"the run error does not name the exit status: {run['error']!r}"
+    )
+    assert "boom" in (run["error"] or ""), (
+        "the last stderr line -- the only hint the list view shows -- was dropped from "
+        f"the error text: {run['error']!r}"
+    )
+    assert "boom" in (run["stderr"] or ""), f"stderr was not persisted: {run['stderr']!r}"
+    assert run["exit_code"] == 7
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code == 7
+    assert "status 7" in (stored.last_error or "")
+
+
+def test_command_task_timeout_fails_the_run_with_the_timeout_exit_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A command that outlives its timeout is killed and reported as a timeout.
+
+    ``124`` is the runner's timeout code, and it must reach both the run row and the
+    definition: a wedged command that merely stopped being awaited would leave the
+    run ``running`` forever with nothing naming the cause.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="sleep 30", cwd=str(tmp_path), timeout_seconds=1.0
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed"
+    assert run["exit_code"] == 124, (
+        f"the timeout exit code did not reach the run row: {run['exit_code']!r}"
+    )
+    assert "timed out" in (run["error"] or ""), (
+        f"the error text does not say the command timed out: {run['error']!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code == 124
+
+
+def test_command_task_with_a_missing_cwd_fails_without_spawning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A configured working directory that is gone must be named, not guessed at.
+
+    Spawning anyway raises a bare ``NotADirectoryError`` from deep inside asyncio
+    whose text never mentions the directory the user configured -- and there is no
+    exit code to report, because nothing ran.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    missing = tmp_path / "gone"
+    task = _add_command_task(store, shell_command="echo hi", cwd=str(missing))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    spawned: list[dict[str, Any]] = []
+
+    async def _never(**kwargs):
+        spawned.append(kwargs)
+        raise AssertionError("a command was spawned into a directory that does not exist")
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _never)
+
+    run = _fire_command_task(service, task)
+
+    assert spawned == []
+    assert run["status"] == "failed"
+    assert str(missing) in (run["error"] or ""), (
+        f"the error does not name the missing directory: {run['error']!r}"
+    )
+    assert run["exit_code"] is None, (
+        f"a run that never spawned reported an exit code: {run['exit_code']!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code is None
+    assert str(missing) in (stored.last_error or "")
+
+
+def test_command_task_reports_a_supervisor_startup_failure_verbatim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``SupervisedCommandStartupError`` must be caught BEFORE the broad handler.
+
+    It subclasses ``RuntimeError``, so a single ``except Exception`` would swallow it
+    and report the worker's own startup detail as an ordinary command error --
+    losing ``exc.detail``, the only text that says what the worker rejected.
+    """
+
+    from core.command_runner import SupervisedCommandStartupError
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="echo hi", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _startup_failure(**_kwargs):
+        raise SupervisedCommandStartupError("bad spec")
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _startup_failure)
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed"
+    assert run["error"] == "bad spec", (
+        f"the supervisor's own startup detail was rewritten: {run['error']!r}"
+    )
+    assert run["exit_code"] is None
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_error == "bad spec"
+
+
+def test_command_run_is_not_gated_on_im_transport_readiness(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A command run needs no IM transport, so a down adapter must not hold it queued.
+
+    The regression guard is the second half: the SAME setup on a MESSAGE definition
+    must still be gated, because that fire really does owe a reply to a platform.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    metadata = {"origin": "cli", "session_scope_id": "slack::channel::C123"}
+    command_task = _add_command_task(
+        store, shell_command="echo hi", cwd=str(tmp_path), metadata=metadata
+    )
+    message_task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        metadata=dict(metadata),
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    service.controller.is_im_transport_ready = lambda _platform: False
+
+    command_request = TaskExecutionRequest(
+        id="run-command",
+        request_type="scheduled",
+        task_id=command_task.id,
+        metadata=dict(metadata),
+    )
+    message_request = TaskExecutionRequest(
+        id="run-message",
+        request_type="scheduled",
+        task_id=message_task.id,
+        metadata=dict(metadata),
+    )
+
+    assert service._transport_ready_for_request(command_request) is True, (
+        "a command run was held queued behind an IM adapter it never needs"
+    )
+    assert service._transport_ready_for_request(message_request) is False, (
+        "the short-circuit leaked to message tasks; a reply-owing fire must stay gated "
+        "until its platform can deliver"
+    )
+
+
+def test_one_shot_command_task_is_disabled_after_it_fires(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An ``at`` command definition must not be able to fire twice."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="echo hi", cwd=str(tmp_path), schedule_type="at"
+    )
+    assert task.enabled is True
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded"
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.enabled is False, "a one-shot command definition stayed enabled"
+
+
+def test_command_task_never_dispatches_an_agent_turn(tmp_path: Path, monkeypatch) -> None:
+    """A command definition must run its subprocess INSTEAD of prompting an Agent.
+
+    Not a stylistic check: dispatching as well would post an unasked-for reply into
+    the bound conversation and bill an Agent turn for every scheduled backup.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="echo hi", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    dispatched: list[dict[str, Any]] = []
+
+    async def _spy(**kwargs):
+        dispatched.append(kwargs)
+        return TaskDispatchResult(error=None)
+
+    service._execute_request = _spy  # type: ignore[method-assign]
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded"
+    assert dispatched == [], (
+        f"a command task also dispatched an Agent turn: {dispatched!r}"
+    )
+
+
+def test_mark_task_result_stamps_an_exit_code_only_when_one_is_given(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``exit_code=None`` means "this fire had none", never "clear the stored one".
+
+    A message fire of a definition that also stores a command must not blank the last
+    exit code a command fire recorded.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="echo hi", cwd=str(tmp_path))
+
+    assert store.mark_task_result(task.id, error="boom", exit_code=7) is True
+    assert ScheduledTaskStore().get_task(task.id).last_exit_code == 7
+
+    assert store.mark_task_result(task.id, error=None) is True
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code == 7, (
+        f"a result with no exit code cleared the stored one: {stored.last_exit_code!r}"
+    )
+    assert stored.last_error is None
+
+    assert store.mark_task_result(task.id, error=None, exit_code=0) is True
+    assert ScheduledTaskStore().get_task(task.id).last_exit_code == 0
+
+
+def test_canceling_a_command_fire_propagates_and_stamps_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Cancellation must escape the command path un-swallowed.
+
+    ``_execute_claimed_request``'s own ``except asyncio.CancelledError`` is what
+    settles the run row as an interruption, so absorbing the cancellation here would
+    record a service stop as an ordinary failed command AND leave a stale
+    ``last_error`` on the definition for a fire whose outcome is unknown.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="sleep 30", cwd=str(tmp_path), timeout_seconds=0.0
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    stamped: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        store,
+        "mark_task_result",
+        lambda *args, **kwargs: stamped.append(kwargs) or True,
+    )
+
+    real_runner = scheduled_tasks.run_supervised_command
+    entered = asyncio.Event()
+
+    async def _tracking_runner(**kwargs):
+        entered.set()
+        return await real_runner(**kwargs)
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _tracking_runner)
+
+    async def _exercise() -> None:
+        fire = asyncio.ensure_future(
+            service._execute_command_task(
+                task, execution_id="exec-cancel", disable_one_shot=False
+            )
+        )
+        # Cancel only once the child is genuinely being awaited: a cancel that landed
+        # before the spawn would prove nothing about the running path.
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        await asyncio.sleep(0.2)
+        fire.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fire
+
+    asyncio.run(_exercise())
+
+    assert entered.is_set(), "the command never started, so nothing was cancelled"
+    assert stamped == [], (
+        f"a cancelled command fire stamped a terminal result anyway: {stamped!r}"
+    )
+
+
+# --- ``--on-failure agent``: the escalation turn a failed command fire owes -------
+#
+# A command definition never prompts an Agent, so a failure it should ACT on has to
+# queue that turn itself. The turn is what the result stamp AUTHORISES, so the two are
+# ONE transaction (HFR-269, ``core/watches.py``: "TWO COMMITS ARE NOT ONE DECISION").
+# Split in two, a teardown between the commits queues an escalation under a definition
+# that no longer authorises it, and an exception between them disables a failed one-shot
+# while LOSING the report that explains it.
+
+
+def _escalation_command_task(
+    store: ScheduledTaskStore,
+    tmp_path: Path,
+    *,
+    shell_command: str,
+    schedule_type: str = "cron",
+    session_id: Optional[str] = None,
+    prompt: str = "",
+) -> ScheduledTask:
+    """A command definition configured with ``--on-failure agent`` and a binding.
+
+    The CLI guarantees such a definition has a session policy and a binding, because
+    the escalation is a real Agent turn that has to land in a real conversation.
+    """
+
+    return store.add_task(
+        session_key="",
+        session_id=session_id,
+        session_policy="existing" if session_id else None,
+        prompt=prompt,
+        schedule_type=schedule_type,
+        cron="0 * * * *" if schedule_type == "cron" else None,
+        run_at="2026-07-28T09:00:00+00:00" if schedule_type == "at" else None,
+        timezone_name="UTC",
+        cwd=str(tmp_path),
+        deliver_key="slack::channel::C123",
+        shell_command=shell_command,
+        metadata={"origin": "cli", "on_failure": "agent"},
+    )
+
+
+def _queued_runs(store: ScheduledTaskStore) -> list[dict[str, Any]]:
+    assert store._sqlite is not None
+    return [run for run in store._sqlite.list_runs() if run["status"] == "queued"]
+
+
+def _escalation_runs(store: ScheduledTaskStore) -> list[dict[str, Any]]:
+    return [run for run in _queued_runs(store) if run["run_type"] == "task_escalation"]
+
+
+def _escalation_run_payload(task: ScheduledTask, *, run_id: str = "esc-1") -> dict[str, Any]:
+    """The ``agent_runs`` outbox payload an escalation stamp would carry."""
+
+    return {
+        "id": run_id,
+        "request_type": "task_escalation",
+        "task_id": task.id,
+        "session_key": "",
+        "session_id": task.session_id,
+        "prompt": "the report",
+        "message": "the report",
+        "source_kind": "scheduler",
+        "parent_run_id": "parent-run",
+        "status": "queued",
+        "created_at": "2026-07-28T09:00:00+00:00",
+        "updated_at": "2026-07-28T09:00:00+00:00",
+    }
+
+
+def test_the_atomic_task_stamp_and_its_queued_run_both_land(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-269 control — with nothing racing it, ONE transaction carries both halves.
+
+    A combined write that simply refused everything would satisfy the refusal test
+    below vacuously ("no run row, definition untouched" is exactly what a method that
+    never commits produces), so the positive half needs its own test: the definition's
+    transition is readable AND the outbox row is durable, from one call.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    assert store.sqlite_backend is not None, (
+        "this test needs the SQLite backend; a shared transaction is the whole fix"
+    )
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 7")
+    expect = store._read_state(task)
+    task.last_error = "command exited with status 7"
+    task.last_exit_code = 7
+
+    landed = store.sqlite_backend.upsert_scheduled_task_with_queued_run(
+        task.to_dict(), expect=expect, run_payload=_escalation_run_payload(task)
+    )
+
+    assert landed is True
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code == 7, (
+        f"the definition's transition did not commit: {stored and stored.last_exit_code!r}"
+    )
+    runs = _escalation_runs(store)
+    assert len(runs) == 1, f"expected exactly one queued escalation, got {runs!r}"
+    assert runs[0]["id"] == "esc-1" and runs[0]["task_id"] == task.id
+
+
+def test_a_refused_atomic_task_stamp_writes_neither_half(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A refused compare-and-set must leave NO run row and an untouched definition.
+
+    The inverse of the control above, and the reason the two are one transaction: an
+    escalation queued against a definition whose stamp was refused is a durable turn
+    nothing authorises.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    assert store.sqlite_backend is not None
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 7")
+    before = _stored_definition_row(task.id)
+    # A STALE expectation: the payload claims it was read from a paused definition,
+    # which is what a teardown committed after the read would have left behind.
+    stale = scheduled_tasks.DefinitionWriteExpectation.from_read(
+        session_id=task.session_id,
+        enabled=False,
+        deleted_at=None,
+        metadata=task.metadata,
+    )
+    task.last_error = "command exited with status 7"
+
+    landed = store.sqlite_backend.upsert_scheduled_task_with_queued_run(
+        task.to_dict(), expect=stale, run_payload=_escalation_run_payload(task)
+    )
+
+    assert landed is False, "a stale expectation must be refused"
+    assert _escalation_runs(store) == [], (
+        "the refused stamp still queued its escalation; the two are not one transaction"
+    )
+    assert _stored_definition_row(task.id)["last_error"] == before["last_error"], (
+        "a refused compare-and-set partially landed"
+    )
+
+
+def test_mark_task_result_stamps_and_enqueues_in_one_call(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``queued_run`` rides the stamp: one call, one transaction, both effects."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 7")
+
+    stamped = store.mark_task_result(
+        task.id,
+        error="command exited with status 7",
+        exit_code=7,
+        queued_run=_escalation_run_payload(task),
+    )
+
+    assert stamped is True
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code == 7
+    assert [run["id"] for run in _escalation_runs(store)] == ["esc-1"]
+
+
+def test_a_refused_mark_task_result_queues_no_run(tmp_path: Path, monkeypatch) -> None:
+    """The refusal path: an unmatched binding expectation writes neither half."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 7")
+
+    stamped = store.mark_task_result(
+        task.id,
+        error="command exited with status 7",
+        exit_code=7,
+        # The binding this fire started against, as the caller remembers it — and it
+        # is not what the definition says, so the stamp must refuse.
+        expected_binding=("some-other-session", "", "cron"),
+        queued_run=_escalation_run_payload(task),
+    )
+
+    assert stamped is False
+    assert _escalation_runs(store) == []
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code is None, (
+        "a refused stamp recorded the exit code anyway"
+    )
+
+
+def test_a_file_backed_task_store_refuses_a_queued_run(tmp_path: Path) -> None:
+    """The watch store's answer, replicated: REFUSE rather than save-then-enqueue.
+
+    A file-backed store cannot make the two writes one decision at all, so a
+    best-effort second write would be exactly the two-commits bug HFR-269 removed.
+    Passing one here is a caller bug and says so.
+    """
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    assert store.sqlite_backend is None
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        shell_command="exit 7",
+        metadata={"on_failure": "agent"},
+    )
+
+    with pytest.raises(ValueError):
+        store.mark_task_result(
+            task.id, error="boom", queued_run=_escalation_run_payload(task)
+        )
+
+
+def test_a_failed_on_failure_agent_command_fire_queues_exactly_one_escalation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-003 — a failed ``--on-failure agent`` fire reports through ONE Agent turn.
+
+    The whole point of the mode: instead of a notification the user has to act on, the
+    failure becomes a turn the Agent can act on. So all four halves are asserted from a
+    REAL fire through the claimed-request path:
+
+    * the parent run is ``failed`` and carries the ``escalation_run_id`` marker,
+    * exactly one queued ``task_escalation`` row exists, pointing back at the fire and
+      at the definition,
+    * its prompt carries the command and the outcome the Agent has to act on, and
+    * the parent owes NO failure notice -- the escalation IS the report, and both would
+      be the same failure told twice.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_escalation")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    escalations = _escalation_runs(store)
+    assert len(escalations) == 1, (
+        f"expected exactly one queued escalation for one failed fire: {escalations!r}"
+    )
+    escalation = escalations[0]
+    assert run["metadata"].get("escalation_run_id") == escalation["id"], (
+        "the failed run does not point at the turn that reports it: "
+        f"{run['metadata'].get('escalation_run_id')!r} != {escalation['id']!r}"
+    )
+    assert escalation["parent_run_id"] == run["id"], (
+        f"the escalation lost its parent fire: {escalation['parent_run_id']!r}"
+    )
+    assert escalation["task_id"] == task.id, (
+        f"the escalation lost its definition: {escalation['task_id']!r}"
+    )
+    assert escalation["session_id"] == session_id
+    assert "echo boom >&2; exit 7" in (escalation["prompt"] or ""), (
+        f"the escalation must name the command that failed: {escalation['prompt']!r}"
+    )
+    assert "status 7" in (escalation["prompt"] or ""), (
+        f"and the outcome it failed with: {escalation['prompt']!r}"
+    )
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "an escalated failure also owes a notice; the same failure would be reported "
+        "twice, once as a turn and once as an alert"
+    )
+
+
+def test_archiving_the_session_gives_a_killed_escalation_its_notice_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-005 -- teardown must not turn an escalated failure into a silent one.
+
+    A failed ``--on-failure agent`` fire suppresses its own failure notice because
+    the escalation turn IS the report. Session teardown then cancels every queued run
+    bound to that session -- the escalation among them -- and a ``canceled`` run owes
+    nothing. So the failure ended up with NO turn and NO notice, which is the one
+    direction this design refuses: the accepted crash window biases towards BOTH,
+    never towards neither.
+
+    The failure must fall back to the notice ladder, which does not need the
+    torn-down session: a notice is delivered to the scope, not into a conversation.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_archive_esc")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    escalations = _escalation_runs(store)
+    assert len(escalations) == 1, f"the premise: one escalation is queued ({escalations!r})"
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "the premise: the escalation suppressed the notice"
+    )
+
+    from storage.workbench_sessions_service import archive_session
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            archive_session(conn, session_id)
+    finally:
+        engine.dispose()
+
+    assert _escalation_runs(store) == [], (
+        "the premise: archiving the session cancels the queued escalation"
+    )
+    notice = store._sqlite.owed_failure_notice(run["id"])
+    assert notice is not None, (
+        "the escalation was canceled and no notice replaced it, so this failure is "
+        "reported by nothing at all"
+    )
+    assert notice["state"] == "pending"
+
+
+def test_hard_deleting_the_session_gives_a_killed_escalation_its_notice_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-005, other half -- ``/new`` owes the same fallback, and owes it EARLIER.
+
+    ``_delete_agent_session_rows`` splits on retained history: a Session with Messages
+    or Deliveries is archived and re-anchored (and cancels its queued runs on the way),
+    while an EMPTY one is deleted outright. The empty branch is the one that bites,
+    because it is both reachable and quieter: a Session created for a command task has
+    no Messages until a turn actually delivers, so the first thing that ever happens in
+    it can be a queued escalation -- and deleting the row leaves that escalation queued
+    against a Session that no longer exists. It is not cancelled, so no cancel-shaped
+    guard can see it; it simply never runs, and the notice it suppressed never came.
+
+    So the re-arm belongs BEFORE the branch, not inside the archival half: the failure
+    must fall back to the notice ladder whichever way the row goes.
+    """
+
+    from storage.models import agent_sessions
+    from storage.session_reclaim import RECLAIM_PAUSE
+    from storage.sessions_service import _delete_agent_session_rows
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_delete_esc")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    assert len(_escalation_runs(store)) == 1, "the premise: one escalation is queued"
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "the premise: the escalation suppressed the notice"
+    )
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            deleted = _delete_agent_session_rows(
+                conn,
+                select(agent_sessions.c.id).where(agent_sessions.c.id == session_id),
+                reclaim_mode=RECLAIM_PAUSE,
+                reclaim_reason="new_session",
+            )
+    finally:
+        engine.dispose()
+
+    assert deleted == 1, "the premise: the empty Session row was torn down"
+    notice = store._sqlite.owed_failure_notice(run["id"])
+    assert notice is not None, (
+        "the Session the escalation was queued against is gone, so the turn can never "
+        "run and no notice replaced it: this failure is reported by nothing at all"
+    )
+    assert notice["state"] == "pending"
+
+
+def _repoint_definition_session(definition_id: str, session_id: str) -> None:
+    """Commit a binding change from another connection, the way ``/new`` does."""
+
+    from storage.models import run_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == definition_id)
+                .values(session_id=session_id)
+            )
+    finally:
+        engine.dispose()
+
+
+def test_a_reclaim_during_the_command_refuses_the_stamp_and_escalates_nowhere(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-004 -- a binding that moved mid-fire must not receive the escalation.
+
+    ``mark_task_result`` reloads the mirror and derives its compare-and-set
+    expectation FROM THE RELOADED ROW, so a ``/new`` reclaim that commits while the
+    command is running becomes the expectation the stamp compares against -- it
+    matches, and the stamp lands. That was survivable while the stamp only wrote
+    bookkeeping. It is not survivable now that the same stamp QUEUES AN AGENT TURN:
+    the escalation is composed from the pre-execution task object, so it would be
+    durably queued against the session the reclaim just tore down, and the notice
+    would be suppressed in favour of a turn that can never be delivered there.
+
+    The fire must instead be refused whole: no escalation row, and the failure
+    reported on the run so the owed-notice ladder still owns it.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_reclaim_before")
+    reclaimed_session_id = _bare_session_row(
+        workdir=tmp_path, anchor="avibe_task_reclaim_after"
+    )
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    real_runner = scheduled_tasks.run_supervised_command
+
+    async def _reclaim_then_fail(**kwargs):
+        # The reclaim commits WHILE the command runs, which is the only ordering that
+        # reaches the window: before the fire there is nothing to stamp, and after the
+        # stamp the transaction has already closed.
+        result = await real_runner(**kwargs)
+        _repoint_definition_session(task.id, reclaimed_session_id)
+        return result
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _reclaim_then_fail)
+
+    run = _fire_command_task(service, task)
+
+    assert _escalation_runs(store) == [], (
+        "an escalation was queued against a binding the definition no longer has"
+    )
+    assert run["status"] == "failed", (
+        f"a fire whose stamp was refused must not report success: {run['status']!r}"
+    )
+    assert run["metadata"].get("escalation_run_id") in (None, ""), (
+        "the run claims an escalation that was never queued, which suppresses the "
+        f"notice too: {run['metadata'].get('escalation_run_id')!r}"
+    )
+
+
+def test_the_escalation_prompt_prepends_the_stored_message_and_names_the_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The user's standing instruction first, then the machine-generated evidence.
+
+    ``vibe task add --shell ... --on-failure agent --message "open a ticket"`` stores
+    that message as the definition's prompt: it is the instruction, and the report is
+    what it operates on. The report also has to name the run, or the Agent cannot look
+    up the full output the one-line tails were cut from.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        prompt="Open a ticket if the nightly sync breaks.",
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    prompt = service._escalation_prompt(
+        task,
+        run_id="run-abc123",
+        error="command exited with status 7: boom",
+        exit_code=7,
+        stdout="starting\nsyncing\n",
+        stderr="warning: slow\nboom\n",
+    )
+
+    assert prompt.startswith("Open a ticket if the nightly sync breaks."), (
+        f"the stored instruction must come first: {prompt!r}"
+    )
+    assert "echo boom >&2; exit 7" in prompt, f"the command must be named: {prompt!r}"
+    assert "command exited with status 7: boom" in prompt
+    assert "Exit code: 7" in prompt
+    assert "boom" in prompt.split("Last stderr line:")[1].splitlines()[0], (
+        f"the stderr tail is where the cause usually is: {prompt!r}"
+    )
+    assert "syncing" in prompt.split("Last stdout line:")[1].splitlines()[0], (
+        f"the stdout tail was dropped: {prompt!r}"
+    )
+    assert "run-abc123" in prompt and "vibe runs show run-abc123" in prompt, (
+        f"the report must say how to read the full output: {prompt!r}"
+    )
+
+
+def test_a_failed_one_shot_command_task_is_disabled_and_escalates_together(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The trap this design avoids: the stamp that authorises the turn also disables.
+
+    ``enqueue_definition_run`` re-reads the definition server-side and RAISES on a
+    disabled one -- and a failed ``at`` task is disabled by the very stamp that
+    authorises its escalation. Routing the turn through that writer would mean a
+    one-shot command task NEVER escalates, which is the case that needs it most: there
+    is no next fire to notice the failure.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_oneshot")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        schedule_type="at",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed"
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.enabled is False, (
+        "a failed one-shot command definition stayed enabled"
+    )
+    assert len(_escalation_runs(store)) == 1, (
+        "the one-shot was disabled without queueing the report that explains why"
+    )
+
+
+def test_a_refused_result_stamp_queues_no_escalation_and_leaves_a_notice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Stamp refused -> zero escalation rows AND a notice: never silent.
+
+    THE PRODUCTION STORY (HFR-261/HFR-264 applied to this lane). A command task fires
+    and fails. While the fire is running the user archives the bound Session, and
+    ``reclaim_bound_definitions(mode='delete')`` soft-deletes the definition. The
+    guarded stamp then correctly REFUSES -- and the escalation rolls back with it,
+    because both were the same transaction. The failure must still be visible, so the
+    owed-notice path takes it over.
+    """
+
+    from storage.session_reclaim import RECLAIM_DELETE
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    _binding_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / "avibe_home")
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None
+    sessions = SQLiteSessionsService(paths.get_sqlite_state_path())
+    try:
+        session_id = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:escalation_refusal",
+            native_session_id="native-esc",
+        )
+    finally:
+        sessions.close()
+    assert session_id is not None
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="exit 7", session_id=session_id
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine,
+        session_id,
+        read=_DEFINITION_EXISTS_SELECT,
+        mode=RECLAIM_DELETE,
+        reason="the session was archived",
+    )
+
+    run = _fire_command_task(service, task)
+
+    assert race["fired"] == 1, (
+        "the competing archive never landed inside the write window, so this test "
+        "proved nothing; the rendered SQL of the guarded upsert's existence probe drifted"
+    )
+    assert run["status"] == "failed"
+    assert _escalation_runs(store) == [], (
+        "an escalation survived a refused stamp: a durable turn nothing authorises"
+    )
+    assert run["metadata"].get("escalation_run_id") is None, (
+        "the run claims an escalation the transaction rolled back"
+    )
+    notice = store._sqlite.owed_failure_notice(run["id"])
+    assert notice is not None and notice.get("state"), (
+        "no escalation AND no notice: the failure is silent, which is the one outcome "
+        "this design must never produce"
+    )
+
+
+def test_claiming_an_escalation_dispatches_it_as_a_hook_send(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The executor has to accept the new request type and route it somewhere real.
+
+    ``delivery_intent_for_trigger`` has a CLOSED vocabulary and would RAISE on an
+    unmapped trigger, so an escalation takes the hook intent -- it IS an out-of-band
+    turn a definition queued. Provenance is not lost: the row still carries
+    ``run_type="task_escalation"`` and its parent fire.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_escalation_exec")
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="exit 7", session_id=session_id
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    dispatched: list[dict[str, Any]] = []
+
+    async def _spy(**kwargs):
+        dispatched.append(kwargs)
+        return TaskDispatchResult(error=None)
+
+    service._execute_request = _spy  # type: ignore[method-assign]
+
+    escalation = service.request_store.build_hook_send(
+        session_key="",
+        session_id=session_id,
+        prompt="A scheduled command task failed: nightly sync",
+        deliver_key=task.deliver_key,
+        session_policy=task.session_policy,
+        run_type="task_escalation",
+        definition_id=task.id,
+        source_kind="scheduler",
+        parent_run_id="parent-run",
+    )
+    service.request_store.enqueue(escalation)
+    assert [run["id"] for run in _escalation_runs(store)] == [escalation.id], (
+        "the escalation is not visible as a queued run at all"
+    )
+    assert [
+        pending.id
+        for pending in service.request_store.list_pending()
+        if pending.request_type == "task_escalation"
+    ] == [escalation.id], (
+        "the drain loop's pending list filters the escalation out, so a durable "
+        "escalation would never be executed"
+    )
+    claimed = service.request_store.claim(escalation.id)
+    assert claimed is not None
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert len(dispatched) == 1, f"the escalation was not dispatched: {dispatched!r}"
+    assert dispatched[0]["trigger_kind"] == "hook", (
+        f"an escalation must take the hook delivery intent: {dispatched[0]['trigger_kind']!r}"
+    )
+    assert dispatched[0]["prompt"] == escalation.prompt, (
+        "the dispatched turn is not carrying the composed report"
+    )
+    settled = service.request_store.get_run(escalation.id)
+    assert settled is not None and settled["status"] == "succeeded"
+    assert settled["run_type"] == "task_escalation", (
+        f"the escalation's provenance was rewritten to {settled['run_type']!r}"
+    )
+
+
+def test_a_successful_on_failure_agent_command_fire_escalates_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``--on-failure agent`` is a FAILURE policy; success stays silent.
+
+    Otherwise a minute-ly health check would bill an Agent turn every minute and post
+    a reply nobody asked for.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_escalation_ok")
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="echo fine", session_id=session_id
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded", f"the premise: the fire succeeded ({run['error']!r})"
+    assert _escalation_runs(store) == [], "a successful fire escalated anyway"
+    assert run["metadata"].get("escalation_run_id") is None
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "a succeeded run must owe no notice either"
+    )
+
+
+def test_complete_with_an_escalation_marker_stamps_no_owed_notice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The suppression is decided from the metadata the SAME statement writes.
+
+    ``_merge_owed_failure_notice`` applies ``extra_metadata`` before
+    ``_owed_failure_notice_for_transition`` reads it, which is what makes the marker
+    visible to the notice decision. The regression half is the second run: without the
+    kwarg the identical failure still owes its notice, so this cannot silence anything
+    it was not asked to.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    requests = TaskExecutionStore()
+    assert requests.sqlite_backend is not None
+
+    escalated = requests.enqueue_hook_send(session_key="slack::channel::C123", prompt="hi")
+    claimed = requests.claim(escalated.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="boom", escalation_run_id="esc-9")
+
+    row = requests.get_run(escalated.id)
+    assert row is not None and row["status"] == "failed"
+    assert row["metadata"].get("escalation_run_id") == "esc-9", (
+        f"the marker never reached the run row: {row['metadata']!r}"
+    )
+    assert requests.sqlite_backend.owed_failure_notice(escalated.id) is None, (
+        "an escalated failure stamped a notice as well"
+    )
+
+    plain = requests.enqueue_hook_send(session_key="slack::channel::C123", prompt="hi")
+    plain_claimed = requests.claim(plain.id)
+    assert plain_claimed is not None
+    requests.complete(plain_claimed, ok=False, error="boom")
+
+    notice = requests.sqlite_backend.owed_failure_notice(plain.id)
+    assert notice is not None and notice.get("state"), (
+        "the suppression leaked to ordinary failures; every failed run would go silent"
     )

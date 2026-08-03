@@ -10,6 +10,7 @@ import type {
   ApiContextType,
   HarnessRun,
   HarnessSessionSummary,
+  HarnessTask,
   HarnessWatch,
   VibeAgentBrief,
 } from '../../context/ApiContext';
@@ -18,6 +19,8 @@ import {
   HealthBadge,
   RunDetail,
   RunTriggerChip,
+  TaskDetail,
+  TaskKindBadge,
   WatchDetail,
 } from './HarnessPage';
 import { agentDisplayName, loadHarnessAgentCatalog } from './harnessAgents';
@@ -104,6 +107,45 @@ const watch = (overrides: Partial<HarnessWatch>): HarnessWatch => ({
   ...NO_SESSION,
   ...overrides,
 });
+
+// A scheduled task as ``/api/harness/tasks`` serves it: the raw store row, so
+// ``metadata`` arrives already decoded and the command columns are
+// None-preserving. Defaults describe a *message* task, which is what almost
+// every stored row is; a command case overrides shell_command/command.
+const task = (overrides: Partial<HarnessTask>): HarnessTask =>
+  ({
+    id: 'task-1',
+    name: null,
+    agent_name: null,
+    session_policy: null,
+    session_id: null,
+    session_key: '',
+    prompt: '',
+    message: '',
+    message_payload: null,
+    schedule_type: 'cron',
+    cron: '17 3 * * *',
+    run_at: null,
+    timezone: 'UTC',
+    post_to: null,
+    deliver_key: null,
+    enabled: true,
+    created_at: null,
+    updated_at: null,
+    last_run_at: null,
+    last_run_id: null,
+    last_error: null,
+    lifecycle_state: 'waiting',
+    lifecycle_detail: null,
+    next_run_at: null,
+    waiting_since: null,
+    running_since: null,
+    health: null,
+    consecutive_failures: 0,
+    recent_failures: 0,
+    ...NO_SESSION,
+    ...overrides,
+  }) as HarnessTask;
 
 // Translation-free stand-in: proves the mappers pick the right key without
 // depending on the copy.
@@ -389,6 +431,163 @@ describe('HealthBadge', () => {
 
     expect(html).toContain(`>${i18n.t('harness.health.failing')} 4<`);
     expect(html).toContain('text-pink');
+  });
+});
+
+describe('TaskKindBadge', () => {
+  it('marks a command task, so the list distinguishes it from a message task', () => {
+    const label = i18n.t('harness.taskKind.command');
+    expect(label).not.toBe('harness.taskKind.command');
+
+    const html = render(<TaskKindBadge row={task({ shell_command: 'make test' })} kind="task" />);
+
+    expect(html).toContain(`>${label}<`);
+    // Same chip anatomy as the schedule chip beside it.
+    expect(html).toContain('font-mono text-[9px] uppercase');
+    // The full command is one hover away even though the chip is two words.
+    expect(html).toContain('title="make test"');
+  });
+
+  it('marks an argv command task too', () => {
+    const html = render(<TaskKindBadge row={task({ command: ['python3', 'scripts/health.py'] })} kind="task" />);
+
+    expect(html).toContain(`>${i18n.t('harness.taskKind.command')}<`);
+    expect(html).toContain('title="python3 scripts/health.py"');
+  });
+
+  it('renders nothing for a message task', () => {
+    // Silence is the signal: a chip on every one of the overwhelming majority
+    // is noise, and it is what makes the command chip worth reading.
+    expect(render(<TaskKindBadge row={task({ prompt: 'Summarize #ops', message: 'Summarize #ops' })} kind="task" />)).toBe('');
+    expect(render(<TaskKindBadge row={task({ command: [] })} kind="task" />)).toBe('');
+  });
+
+  it('renders nothing for a watch, which always runs a command', () => {
+    expect(render(<TaskKindBadge row={watch({ shell_command: 'wait_pr.py 1140' })} kind="watch" />)).toBe('');
+  });
+});
+
+describe('TaskDetail command task', () => {
+  const commandTask = task({
+    shell_command: 'pg_dump mydb | gzip > /backups/db.gz',
+    session_id: null,
+    last_exit_code: 7,
+    timeout_seconds: 900,
+    metadata: { on_failure: 'agent' },
+  });
+  const detail = (value: HarnessTask) =>
+    render(<TaskDetail task={value} onToggleEnabled={() => undefined} pending={false} />);
+
+  it('shows the command, the failure policy, the timeout and the last exit code', () => {
+    const html = detail(commandTask);
+
+    expect(html).toContain(`>${i18n.t('harness.detail.command')}<`);
+    expect(html).toContain('pg_dump mydb | gzip &gt; /backups/db.gz');
+    expect(html).toContain(`>${i18n.t('harness.detail.onFailure')}<`);
+    expect(html).toContain(`>${i18n.t('harness.onFailure.agent')}<`);
+    expect(html).toContain(`>${i18n.t('harness.detail.timeout')}<`);
+    expect(html).toContain('900s');
+    expect(html).toContain(`>${i18n.t('harness.detail.lastExitCode')}<`);
+    expect(html).toContain('>7<');
+  });
+
+  it('names the command in the header, instead of the word "Scheduled task"', () => {
+    // A command task has no name and no message to fall back to, so the
+    // existing title chain landed on the kind label and every unnamed command
+    // task in the list read as "Scheduled task".
+    const html = detail(commandTask);
+
+    expect(html).toContain('title="pg_dump mydb | gzip &gt; /backups/db.gz"');
+    expect(html).not.toContain(`>${i18n.t('harness.kind.task')}<`);
+  });
+
+  it('renders a command task with no session without a broken chat link', () => {
+    // ``--on-failure none`` stores no session at all. DetailSession already
+    // owns the four session states, so this must say so rather than link to
+    // /chat/null.
+    const html = detail(commandTask);
+
+    expect(html).toContain(i18n.t('harness.detail.sessionNone'));
+    expect(html).not.toContain('/chat/');
+  });
+
+  it('drops the Message field a command task has nothing to put in', () => {
+    const html = detail(commandTask);
+
+    expect(html).not.toContain(`>${i18n.t('harness.detail.message')}<`);
+  });
+
+  it('keeps the Message field for a command task that escalates with one', () => {
+    const html = detail(task({ shell_command: 'make test', message: 'Tests failed, investigate' }));
+
+    expect(html).toContain(`>${i18n.t('harness.detail.message')}<`);
+    expect(html).toContain('Tests failed, investigate');
+  });
+
+  it('says "no timeout" rather than "0s", which would read as an instant kill', () => {
+    const html = detail(task({ shell_command: 'make test', timeout_seconds: 0 }));
+
+    expect(html).toContain(i18n.t('harness.detail.timeoutNone'));
+    expect(html).not.toContain('0s');
+  });
+
+  it('states the quiet default when no failure policy is stored', () => {
+    const html = detail(task({ shell_command: 'make test' }));
+
+    expect(html).toContain(`>${i18n.t('harness.onFailure.none')}<`);
+    // No timeout column at all when the server did not send one.
+    expect(html).not.toContain(`>${i18n.t('harness.detail.timeout')}<`);
+  });
+
+  it('colours a zero exit code as neutral and a non-zero one as a failure', () => {
+    expect(detail(task({ shell_command: 'make test', last_exit_code: 0 }))).toContain(
+      '<span class="font-mono text-[11px] text-muted">0</span>',
+    );
+    expect(detail(task({ shell_command: 'make test', last_exit_code: 1 }))).toContain(
+      '<span class="font-mono text-[11px] text-pink">1</span>',
+    );
+  });
+
+  it('leaves a message task rendering exactly as it does today', () => {
+    const html = detail(task({ name: 'Nightly digest', prompt: 'Summarize #ops', message: 'Summarize #ops' }));
+
+    expect(html).toContain(`>${i18n.t('harness.detail.message')}<`);
+    expect(html).toContain('Summarize #ops');
+    // None of the command-only fields appear.
+    for (const label of ['harness.detail.command', 'harness.detail.onFailure', 'harness.detail.timeout', 'harness.detail.lastExitCode']) {
+      expect(html).not.toContain(`>${i18n.t(label)}<`);
+    }
+    expect(html).not.toContain(i18n.t('harness.taskKind.command'));
+  });
+});
+
+describe('RunDetail command run', () => {
+  it('renders a command run with no session, and keeps its exit code visible', () => {
+    // A command run keeps ``run_type: "scheduled"`` and carries exit_code /
+    // stdout / stderr with ``session_id: null`` — nothing on this pane may
+    // assume every run has a session.
+    const html = render(
+      <RunDetail
+        run={run({
+          run_type: 'scheduled',
+          status: 'failed',
+          session_id: null,
+          exit_code: 7,
+          stdout: 'dumping mydb',
+          stderr: 'pg_dump: connection refused',
+          definition_name: 'Nightly backup',
+          definition_kind: 'task',
+          definition_id: 'def-9',
+        })}
+      />,
+    );
+
+    expect(html).toContain(i18n.t('harness.detail.sessionNone'));
+    expect(html).not.toContain('href="/chat/');
+    expect(html).toContain('exit_code 7');
+    expect(html).toContain('pg_dump: connection refused');
+    // Command runs reuse the existing scheduled run-type label; no new key.
+    expect(html).toContain(i18n.t('harness.runType.scheduled'));
   });
 });
 
