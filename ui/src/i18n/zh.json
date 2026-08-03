@@ -3546,6 +3546,11 @@
       "warningUnavailable": "该提供方暂不支持画像。这是预期行为，不是错误——可以试试搜索，或稍后再来看看。",
       "disabledHint": "启用记忆后即可查看画像。",
       "refresh": "刷新",
+      "summary": "概览",
+      "explicitInfo": "明确信息",
+      "implicitTraits": "推断特征",
+      "basis": "推断依据",
+      "evidence": "相关证据",
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "search": {

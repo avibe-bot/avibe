@@ -18,6 +18,7 @@ from core.memory.everos import (
     ProviderAttachment,
     ProviderCapture,
 )
+from core.memory.types import MemoryProfile, MemoryProfileExplicitInfo, MemoryProfileTrait
 
 
 PROJECT = "p-22222222222222222222222222222222"
@@ -359,6 +360,125 @@ def test_profile_canonicalizes_structured_profile() -> None:
 
     assert items[0].kind == "profile"
     assert items[0].text == '{"language":"Python","timezone":"UTC"}'
+    assert items[0].profile is None
+
+
+def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {
+                            "user_id": "owner-1",
+                            "profile_data": {
+                                "summary": "Prefers concise technical discussions.",
+                                "explicit_info": [
+                                    {
+                                        "category": "communication",
+                                        "description": "Prefers written updates.",
+                                        "evidence": "Asked for a written summary.",
+                                    },
+                                    {"description": 42},
+                                ],
+                                "implicit_traits": [
+                                    {
+                                        "trait": "methodical",
+                                        "description": "May prefer a clear sequence of steps.",
+                                        "basis": "Repeatedly requested checklists.",
+                                        "evidence": "Three recent planning discussions.",
+                                    }
+                                ],
+                                "profile_timestamp_ms": 0,
+                            },
+                        }
+                    ]
+                }
+            },
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT))
+
+    assert items[0].date == "1970-01-01"
+    assert items[0].profile == MemoryProfile(
+        summary="Prefers concise technical discussions.",
+        explicit_info=(
+            MemoryProfileExplicitInfo(
+                category="communication",
+                description="Prefers written updates.",
+                evidence="Asked for a written summary.",
+            ),
+        ),
+        implicit_traits=(
+            MemoryProfileTrait(
+                trait="methodical",
+                description="May prefer a clear sequence of steps.",
+                basis="Repeatedly requested checklists.",
+                evidence="Three recent planning discussions.",
+            ),
+        ),
+        updated_at="1970-01-01T00:00:00Z",
+    )
+    assert json.loads(items[0].text)["implicit_traits"][0]["basis"] == "Repeatedly requested checklists."
+    assert json.loads(items[0].text)["implicit_traits"][0]["evidence"] == "Three recent planning discussions."
+
+
+def test_profile_timestamp_without_recognized_content_uses_the_raw_fallback() -> None:
+    raw_profile = {
+        "profile_timestamp_ms": 1_754_012_345_678,
+        "future_provider_field": {"only": "opaque data"},
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {
+                            "user_id": "owner-1",
+                            "profile_data": raw_profile,
+                            "created_at": "2026-08-01T12:34:56Z",
+                        }
+                    ]
+                }
+            },
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT))
+
+    assert len(items) == 1
+    assert items[0].profile is None
+    assert items[0].date == "2026-08-01"
+    assert json.loads(items[0].text) == raw_profile
+
+
+def test_profile_rejects_wrong_shaped_known_collections() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {
+                            "user_id": "owner-1",
+                            "profile_data": {"explicit_info": "not-a-list"},
+                        }
+                    ]
+                }
+            },
+        )
+
+    async def run() -> None:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT)
+        assert raised.value.error == "memory_provider_response_invalid"
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
 
 
 def test_invalid_search_envelope_is_closed_failure() -> None:

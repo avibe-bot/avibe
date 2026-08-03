@@ -5,10 +5,63 @@ import { Loader2, RefreshCw } from 'lucide-react';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { useApi } from '../../../context/ApiContext';
-import type { MemoryItemsResult } from '../../../context/ApiContext';
+import type { MemoryItem, MemoryItemsResult, MemoryProfile } from '../../../context/ApiContext';
 import { useMemoryResource } from './useMemoryResource';
 
 type MemoryItemsOk = Extract<MemoryItemsResult, { status: 'ok' }>;
+type Translate = (key: string) => string;
+
+/** Return the first recognized provider profile, leaving legacy raw items untouched. */
+export const structuredProfileFromItems = (items: readonly MemoryItem[] | null): MemoryProfile | null =>
+  items?.find((item) => item.kind === 'profile' && item.profile)?.profile ?? null;
+
+const ProfileDetail: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <p className="mt-1 whitespace-pre-wrap text-[12px] leading-relaxed text-muted">
+    <span className="font-medium text-foreground">{label}: </span>
+    {value}
+  </p>
+);
+
+/** Render provider values as inert text nodes, never as Markdown or HTML. */
+export const StructuredMemoryProfile: React.FC<{ profile: MemoryProfile; t: Translate }> = ({ profile, t }) => (
+  <div className="flex flex-col gap-4">
+    {profile.summary ? (
+      <section>
+        <h3 className="text-[12px] font-semibold text-foreground">{t('memory.profile.summary')}</h3>
+        <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{profile.summary}</p>
+      </section>
+    ) : null}
+    {profile.explicit_info.length > 0 ? (
+      <section>
+        <h3 className="text-[12px] font-semibold text-foreground">{t('memory.profile.explicitInfo')}</h3>
+        <div className="mt-2 flex flex-col gap-3">
+          {profile.explicit_info.map((info, index) => (
+            <div key={`${info.description}:${index}`} className="border-l-2 border-border pl-3">
+              {info.category ? <Badge variant="secondary">{info.category}</Badge> : null}
+              <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{info.description}</p>
+              {info.evidence ? <ProfileDetail label={t('memory.profile.evidence')} value={info.evidence} /> : null}
+            </div>
+          ))}
+        </div>
+      </section>
+    ) : null}
+    {profile.implicit_traits.length > 0 ? (
+      <section>
+        <h3 className="text-[12px] font-semibold text-foreground">{t('memory.profile.implicitTraits')}</h3>
+        <div className="mt-2 flex flex-col gap-3">
+          {profile.implicit_traits.map((trait, index) => (
+            <div key={`${trait.description}:${index}`} className="border-l-2 border-border pl-3">
+              {trait.trait ? <Badge variant="secondary">{trait.trait}</Badge> : null}
+              <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{trait.description}</p>
+              {trait.basis ? <ProfileDetail label={t('memory.profile.basis')} value={trait.basis} /> : null}
+              {trait.evidence ? <ProfileDetail label={t('memory.profile.evidence')} value={trait.evidence} /> : null}
+            </div>
+          ))}
+        </div>
+      </section>
+    ) : null}
+  </div>
+);
 
 export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
   const { t } = useTranslation();
@@ -62,14 +115,17 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
         </div>
       ) : (
         <div className="flex flex-col gap-2">
-          {items.map((item, idx) => (
-            // Inert text nodes only; never use Markdown/HTML rendering for provider content.
-            <div key={idx} className="rounded-xl border border-border bg-surface px-4 py-3">
-              <div className="mb-1 flex items-center gap-2">
+          {items.map((item, index) => (
+            <div key={`${item.kind}:${item.date ?? ''}:${index}`} className="rounded-xl border border-border bg-surface px-4 py-3">
+              <div className="mb-3 flex items-center gap-2">
                 <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
                 {item.date ? <span className="font-mono text-[10.5px] text-muted">{item.date}</span> : null}
               </div>
-              <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{item.text}</p>
+              {item.profile ? (
+                <StructuredMemoryProfile profile={item.profile} t={t} />
+              ) : (
+                <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{item.text}</p>
+              )}
             </div>
           ))}
           <p className="px-1 text-[11px] text-muted">{t('memory.profile.sourceNote')}</p>

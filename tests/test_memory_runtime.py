@@ -47,7 +47,13 @@ from core.memory.process import (
 )
 from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
 from core.memory.store import MemoryStore
-from core.memory.types import MemoryItem, MemoryItems, OperationFailed
+from core.memory.types import (
+    MemoryItem,
+    MemoryItems,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    OperationFailed,
+)
 from config.v2_config import (
     AgentsConfig,
     MemoryConfig,
@@ -2362,6 +2368,47 @@ def test_profile_payload_reports_only_its_own_principal_emptiness(
 
     assert populated["profile_warning"] is None
     assert empty["profile_warning"] == "empty"
+
+
+def test_profile_payload_serializes_structured_profile_without_widening_legacy_items(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = create_memory_runtime(MemoryConfig(enabled=True), artifact_manager=_installed_artifact())
+    structured = MemoryItem(
+        kind="profile",
+        text="{}",
+        profile=MemoryProfile(
+            summary="Concise updates.",
+            explicit_info=(MemoryProfileExplicitInfo(description="Uses Python."),),
+        ),
+    )
+
+    class _ProfileModule:
+        async def profile(self, *, principal_id: str, project_id: str) -> MemoryItems:
+            del principal_id, project_id
+            return MemoryItems(items=(structured, MemoryItem(kind="fact", text="Legacy")))
+
+    runtime._module = _ProfileModule()
+    payload = asyncio.run(runtime.profile_payload("u-" + "a" * 32, PROJECT))
+
+    assert payload["items"] == [
+        {
+            "kind": "profile",
+            "text": "{}",
+            "date": None,
+            "profile": {
+                "summary": "Concise updates.",
+                "explicit_info": [
+                    {"description": "Uses Python.", "category": None, "evidence": None}
+                ],
+                "implicit_traits": [],
+                "updated_at": None,
+            },
+        },
+        {"kind": "fact", "text": "Legacy", "date": None},
+    ]
 
 
 def test_status_payload_carries_no_principal_scoped_profile_warning(

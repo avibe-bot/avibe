@@ -49,6 +49,9 @@ from core.memory.types import (
     MemoryItem,
     MemoryFailureLogEntry,
     MemoryItems,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileTrait,
     OperationFailed,
 )
 from core.memory.worker import BREAKER_RETRY_SECONDS, MemoryWorker, SYSTEM_PAUSE_SECONDS
@@ -745,6 +748,39 @@ async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_pa
     result = await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
     assert result == OperationFailed(error="memory_processing_failed")
     assert "provider-search-body-canary" not in repr(result)
+
+
+async def test_profile_bounds_accept_structured_data_only_on_profile_items(tmp_path: Path) -> None:
+    profile = MemoryProfile(
+        summary="Uses concise updates.",
+        explicit_info=(MemoryProfileExplicitInfo(description="Uses Python."),),
+        implicit_traits=(
+            MemoryProfileTrait(
+                description="May prefer checklists.",
+                basis="Repeated planning requests.",
+                evidence="Recent project discussions.",
+            ),
+        ),
+        updated_at="2026-08-02T10:30:00Z",
+    )
+    provider = FakeMemoryProvider(
+        profile_items=(MemoryItem(kind="profile", text="{}", profile=profile),),
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    scope = {
+        "principal_id": "u-11111111111111111111111111111111",
+        "project_id": PROJECT,
+    }
+
+    assert await module.profile(**scope) == MemoryItems(items=provider.profile_items)
+
+    provider.profile_items = (MemoryItem(kind="fact", text="{}", profile=profile),)
+    assert await module.profile(**scope) == OperationFailed(error="memory_provider_response_invalid")
+
+    provider.profile_items = (
+        MemoryItem(kind="profile", text="{}", profile=MemoryProfile(summary="bad\x00value")),
+    )
+    assert await module.profile(**scope) == OperationFailed(error="memory_provider_response_invalid")
 
 
 async def test_clear_is_idempotent_and_interrupted_clear_recovers_on_next_module(tmp_path: Path) -> None:

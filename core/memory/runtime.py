@@ -36,7 +36,14 @@ from core.memory.process import (
     sidecar_record_path,
 )
 from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
-from core.memory.types import ClearCompleted, MemoryItems, MemoryResult, MemoryStatus, OperationFailed
+from core.memory.types import (
+    ClearCompleted,
+    MemoryItems,
+    MemoryResult,
+    MemoryStatus,
+    OperationFailed,
+    memory_item_payload,
+)
 from core.memory.worker import ProcessingEvent
 
 
@@ -935,7 +942,7 @@ def _result_payload(result: MemoryResult) -> dict[str, Any]:
     if isinstance(result, MemoryItems):
         return {
             "status": result.status,
-            "items": [asdict(item) for item in result.items],
+            "items": [memory_item_payload(item) for item in result.items],
             "warnings": list(result.warnings),
         }
     return {"status": "failed", "error": "memory_processing_failed"}

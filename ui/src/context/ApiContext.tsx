@@ -1690,10 +1690,31 @@ export type MemoryFailureLogResult =
 
 export type MemoryItemKind = 'profile' | 'episode' | 'fact';
 
+export type MemoryProfileExplicitInfo = {
+  description: string;
+  category: string | null;
+  evidence: string | null;
+};
+
+export type MemoryProfileTrait = {
+  description: string;
+  trait: string | null;
+  basis: string | null;
+  evidence: string | null;
+};
+
+export type MemoryProfile = {
+  summary: string | null;
+  explicit_info: MemoryProfileExplicitInfo[];
+  implicit_traits: MemoryProfileTrait[];
+  updated_at: string | null;
+};
+
 export type MemoryItem = {
   kind: MemoryItemKind;
   text: string;
   date: string | null;
+  profile?: MemoryProfile;
 };
 
 export type MemoryItemsResult =

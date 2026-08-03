@@ -11,7 +11,7 @@ import shutil
 import stat
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -40,6 +40,9 @@ from core.memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileTrait,
     MemoryResult,
     MemoryStatus,
     OperationFailed,
@@ -518,6 +521,13 @@ class MemoryModule:
                 except ValueError:
                     return OperationFailed(error="memory_provider_response_invalid")
                 total_bytes += len(date_bytes)
+            if item.profile is not None:
+                if item.kind != "profile":
+                    return OperationFailed(error="memory_provider_response_invalid")
+                profile_bytes = _profile_bytes(item.profile)
+                if profile_bytes is None:
+                    return OperationFailed(error="memory_provider_response_invalid")
+                total_bytes += profile_bytes
             if total_bytes > MAX_PROVIDER_RESULT_BYTES:
                 return OperationFailed(error="memory_provider_response_invalid")
         return MemoryItems(items=items)
@@ -902,6 +912,83 @@ class MemoryModule:
     def _valid_identifier(value: str) -> bool:
         encoded = _utf8_bytes(value)
         return bool(value.strip()) and encoded is not None and len(encoded) <= MAX_CAPTURE_IDENTIFIER_BYTES
+
+
+def _profile_text_bytes(value: object) -> bytes | None:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        return None
+    encoded = _utf8_bytes(value)
+    if encoded is None or len(encoded) > MAX_PROVIDER_ITEM_BYTES:
+        return None
+    if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
+        return None
+    return encoded
+
+
+def _profile_bytes(profile: object) -> int | None:
+    """Revalidate every structured profile field before it leaves the module."""
+
+    if not isinstance(profile, MemoryProfile):
+        return None
+    if profile.summary is None and not profile.explicit_info and not profile.implicit_traits:
+        return None
+
+    total = 0
+
+    def optional_text(value: object) -> int | None:
+        if value is None:
+            return 0
+        encoded = _profile_text_bytes(value)
+        return len(encoded) if encoded is not None else None
+
+    summary_bytes = optional_text(profile.summary)
+    if summary_bytes is None:
+        return None
+    total += summary_bytes
+
+    if not isinstance(profile.explicit_info, tuple) or len(profile.explicit_info) > MAX_PROVIDER_RESULT_ITEMS * 10:
+        return None
+    for info in profile.explicit_info:
+        if not isinstance(info, MemoryProfileExplicitInfo):
+            return None
+        description_bytes = _profile_text_bytes(info.description)
+        if description_bytes is None:
+            return None
+        total += len(description_bytes)
+        for value in (info.category, info.evidence):
+            value_bytes = optional_text(value)
+            if value_bytes is None:
+                return None
+            total += value_bytes
+
+    if not isinstance(profile.implicit_traits, tuple) or len(profile.implicit_traits) > MAX_PROVIDER_RESULT_ITEMS * 10:
+        return None
+    for trait in profile.implicit_traits:
+        if not isinstance(trait, MemoryProfileTrait):
+            return None
+        description_bytes = _profile_text_bytes(trait.description)
+        if description_bytes is None:
+            return None
+        total += len(description_bytes)
+        for value in (trait.trait, trait.basis, trait.evidence):
+            value_bytes = optional_text(value)
+            if value_bytes is None:
+                return None
+            total += value_bytes
+
+    if profile.updated_at is not None:
+        timestamp_bytes = _profile_text_bytes(profile.updated_at)
+        if timestamp_bytes is None or len(timestamp_bytes) > 64:
+            return None
+        try:
+            instant = datetime.fromisoformat(profile.updated_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if instant.tzinfo is None or instant.utcoffset() != timezone.utc.utcoffset(instant):
+            return None
+        total += len(timestamp_bytes)
+
+    return total
 
 
 def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:

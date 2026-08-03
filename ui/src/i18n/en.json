@@ -3546,6 +3546,11 @@
       "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
+      "summary": "Summary",
+      "explicitInfo": "Explicit information",
+      "implicitTraits": "Inferred traits",
+      "basis": "Basis",
+      "evidence": "Evidence",
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {

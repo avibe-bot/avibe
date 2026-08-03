@@ -16,7 +16,15 @@ from typing import Any, Deque, Literal, Protocol, runtime_checkable
 
 import httpx
 
-from core.memory.types import CaptureAttachment, MemoryErrorCode, MemoryItem, is_memory_error_code
+from core.memory.types import (
+    CaptureAttachment,
+    MemoryErrorCode,
+    MemoryItem,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileTrait,
+    is_memory_error_code,
+)
 from core.memory.observations import (
     AddAck,
     FlushRejected,
@@ -38,6 +46,7 @@ _ADD_TIMEOUT_SECONDS = 30.0
 _FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
 _PROFILE_QUERY = "profile"
+_MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
 
 ProviderAttachment = CaptureAttachment
 
@@ -549,10 +558,98 @@ def _map_profile_item(data: dict[str, Any], *, principal_id: str) -> MemoryItem 
     for profile in profiles:
         if not isinstance(profile, dict) or profile.get("user_id") != principal_id:
             continue
-        text = _canonical_profile_text(profile.get("profile_data"))
+        profile_data = profile.get("profile_data")
+        structured_profile = _structured_profile(profile_data)
+        text = _canonical_profile_text(profile_data)
         if text is not None:
-            return MemoryItem(kind="profile", text=text, date=_record_date(profile))
+            updated_at = structured_profile.updated_at if structured_profile is not None else None
+            return MemoryItem(
+                kind="profile",
+                text=text,
+                date=updated_at.split("T", 1)[0] if updated_at is not None else _record_date(profile),
+                profile=structured_profile,
+            )
     return None
+
+
+def _structured_profile(value: Any) -> MemoryProfile | None:
+    """Map only the known EverOS profile fields into stable caller-facing types."""
+
+    if not isinstance(value, dict):
+        return None
+
+    summary = _safe_text(value.get("summary")) if "summary" in value else None
+    explicit_info = _structured_explicit_info(value)
+    implicit_traits = _structured_implicit_traits(value)
+    updated_at = _normalized_profile_timestamp(value.get("profile_timestamp_ms"))
+
+    # A provider timestamp is metadata, not readable profile content. Unknown
+    # shapes retain their canonical raw-text fallback for compatibility.
+    if summary is None and not explicit_info and not implicit_traits:
+        return None
+    return MemoryProfile(
+        summary=summary,
+        explicit_info=explicit_info,
+        implicit_traits=implicit_traits,
+        updated_at=updated_at,
+    )
+
+
+def _structured_explicit_info(value: dict[str, Any]) -> tuple[MemoryProfileExplicitInfo, ...]:
+    if "explicit_info" not in value:
+        return ()
+    entries = value["explicit_info"]
+    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    mapped: list[MemoryProfileExplicitInfo] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        description = _safe_text(entry.get("description"))
+        if description is None:
+            continue
+        mapped.append(
+            MemoryProfileExplicitInfo(
+                description=description,
+                category=_safe_text(entry.get("category")),
+                evidence=_safe_text(entry.get("evidence")),
+            )
+        )
+    return tuple(mapped)
+
+
+def _structured_implicit_traits(value: dict[str, Any]) -> tuple[MemoryProfileTrait, ...]:
+    if "implicit_traits" not in value:
+        return ()
+    entries = value["implicit_traits"]
+    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    mapped: list[MemoryProfileTrait] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        description = _safe_text(entry.get("description"))
+        if description is None:
+            continue
+        mapped.append(
+            MemoryProfileTrait(
+                description=description,
+                trait=_safe_text(entry.get("trait")),
+                basis=_safe_text(entry.get("basis")),
+                evidence=_safe_text(entry.get("evidence")),
+            )
+        )
+    return tuple(mapped)
+
+
+def _normalized_profile_timestamp(value: Any) -> str | None:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= _MAX_PROFILE_TIMESTAMP_MS:
+        return None
+    try:
+        instant = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return instant.isoformat().replace("+00:00", "Z")
 
 
 def _episode_text(episode: dict[str, Any]) -> str | None:
