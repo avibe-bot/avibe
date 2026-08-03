@@ -496,3 +496,17 @@ scenarios:
     # install's Agent turns already run, so it is both a real directory and the answer the
     # escalation Session would get; it is validated rather than trusted, so an unset or
     # deleted setting falls through to the old fallback instead of failing the fire.
+  - id: SCT-049
+    name: both run stores settle a fire with the command it ran
+    status: covered
+    kind: crash_recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_both_run_stores_settle_a_fire_with_the_command_it_ran
+    # SCT-028's re-stamp is read off the TERMINAL row -- by the failure notice, the
+    # escalation prompt and the Workbench run detail -- and the file backend composed that
+    # row from the ``TaskExecutionRequest`` the caller still held, the enqueue-time copy.
+    # So the last write of the fire overwrote the only one that knew what ran. SQLite
+    # updates the row the metadata already lives on, which is why the gap was invisible
+    # from there; the recovery writer already composed from the file, so the same backend's
+    # two terminal writers disagreed about what a settled row remembers.

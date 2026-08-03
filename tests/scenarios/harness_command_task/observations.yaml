@@ -484,3 +484,20 @@ observations:
       - record the command's directory at creation without pinning the Session escalation creates
       - resolve the runtime default workdir at fire time for definitions creation cannot reach
       - keep the product state directory as a last resort nothing normally reaches
+  - id: OBS-HARNESS-COMMAND-TASK-028
+    scenario: SCT-049
+    summary: >-
+      An in-flight correction is only as durable as the write that publishes it, and one
+      backend published from a copy taken before the correction existed.
+    previous_assumption: >-
+      Re-stamping the executed command on the running row makes every later reader of that
+      run see it, on either store.
+    observed_behavior: >-
+      The file backend's completion rebuilt the terminal payload from the caller's
+      enqueue-time request, so the re-stamp -- and every other in-flight write -- was
+      dropped at the moment the run became readable as a result. SQLite settles the row the
+      metadata already sits on and carried it forward for free, hiding the asymmetry.
+    required_updates:
+      - compose the file backend's terminal payload from the durable in-flight state
+      - keep the caller's outcome facts authoritative over what the row already held
+      - assert on both stores in one test, since a reader cannot tell which one answered

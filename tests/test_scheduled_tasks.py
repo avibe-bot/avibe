@@ -15881,6 +15881,68 @@ def test_both_run_stores_name_the_definition_a_command_worker_belongs_to(
         )
 
 
+def test_both_run_stores_settle_a_fire_with_the_command_it_ran(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-049 -- the executed snapshot has to survive the completion that publishes it.
+
+    SCT-028 re-stamps the run with the command the executor really spawned, and every
+    reader of that record -- the failure notice, the escalation prompt, the Workbench run
+    detail -- reads it off the TERMINAL row. The file backend composed that row from the
+    ``TaskExecutionRequest`` the caller still held, which is the enqueue-time copy, so the
+    re-stamp was overwritten at the last step and the settled run named the command as it
+    stood before the edit. SQLite updates the row the metadata already lives on and keeps
+    it for free; the gap was invisible from there.
+
+    Asserted on both backends together, like SCT-042: what a settled run remembers is a
+    store contract, and its readers cannot tell which store answered them.
+    """
+
+    db_path = _command_task_env(tmp_path, monkeypatch)
+    assert db_path is not None
+    task_store = ScheduledTaskStore()
+    task = _add_command_task(
+        task_store, shell_command="echo original", cwd=str(tmp_path)
+    )
+
+    for label, store in (
+        ("sqlite", TaskExecutionStore()),
+        ("file", TaskExecutionStore(tmp_path / "task_requests")),
+    ):
+        queued = store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+        predicted = store.get_run(queued.id)
+        assert predicted is not None
+        assert predicted["metadata"].get(COMMAND_SNAPSHOT_METADATA_KEY) == {
+            "shell": "echo original",
+            "argv": [],
+        }, f"{label}: the premise -- the enqueue predicted a command"
+
+        claimed = store.claim(queued.id)
+        assert claimed is not None, f"{label}: could not claim the fire"
+        # The executor's re-stamp: the definition was edited between enqueue and claim.
+        assert store.record_command_snapshot(
+            claimed.id, {"shell": "echo edited", "argv": []}
+        ), f"{label}: the executed snapshot did not land on the in-flight row"
+
+        assert (
+            store.complete(claimed, ok=True, exit_code=0, stdout="edited\n")
+            == "succeeded"
+        ), f"{label}: the fire did not settle"
+
+        settled = store.get_run(queued.id)
+        assert settled is not None, f"{label}: the settled run is unreadable"
+        assert settled["metadata"].get(COMMAND_SNAPSHOT_METADATA_KEY) == {
+            "shell": "echo edited",
+            "argv": [],
+        }, (
+            f"{label}: the settled run's immutable record of what it executed names a "
+            "command it did not execute "
+            f"({settled['metadata'].get(COMMAND_SNAPSHOT_METADATA_KEY)!r}), so the "
+            "notice and the escalation prompt report the wrong command with a "
+            "snapshot's authority"
+        )
+
+
 def test_a_failed_retention_write_keeps_the_stored_worker_record(
     tmp_path: Path, monkeypatch
 ) -> None:

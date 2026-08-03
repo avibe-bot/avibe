@@ -3084,6 +3084,7 @@ class TaskExecutionStore:
             return None
         terminal_status = "succeeded" if ok else "failed"
         payload = request.to_dict()
+        self._carry_inflight_writes(processing_path, payload)
         payload.update(
             {
                 "ok": ok,
@@ -3129,6 +3130,54 @@ class TaskExecutionStore:
         tmp_path.replace(completed_path)
         processing_path.unlink(missing_ok=True)
         return terminal_status
+
+    @staticmethod
+    def _carry_inflight_writes(processing_path: Path, payload: dict[str, Any]) -> None:
+        """Layer what was written to this run WHILE it ran onto its terminal payload.
+
+        ``complete`` composes that payload from the caller's ``TaskExecutionRequest``,
+        which is the copy taken at ENQUEUE: every in-flight write went to the processing
+        file and to nothing the caller holds. ``record_command_snapshot`` is one --
+        SCT-028's re-stamp of the command the executor really spawned, after its
+        post-claim reload of the definition -- so starting from the request alone
+        discarded it, and the completed run reported the definition as it stood BEFORE
+        an edit committed in that window. SQLite has no such gap: the metadata lives on
+        the row ``settle_run_terminal`` updates in place and is carried forward for free,
+        which is exactly why this backend has to do it deliberately. Same reason the
+        recovery writer (``_settle_processing_file``) composes from the file, and the two
+        terminal writers must not disagree about what a settled row remembers.
+
+        The file wins on ``metadata`` key by key rather than wholesale, so a key only
+        the request carries is not dropped by a store whose in-flight merges never saw
+        it, and the caller's own outcome facts still land afterwards. ``pid`` and
+        ``started_at`` come along for the same reason the metadata does: they exist only
+        because ``mark_execution_started`` wrote them here.
+        """
+
+        try:
+            stored = json.loads(processing_path.read_text(encoding="utf-8"))
+        except Exception:
+            # The payload composed from the request is still a truthful terminal record
+            # of the fire; it just forgets what ran. Failing the completion instead would
+            # leave the row ``running`` over bookkeeping.
+            logger.debug(
+                "failed to read in-flight state for %s while completing it",
+                processing_path.name,
+                exc_info=True,
+            )
+            return
+        if not isinstance(stored, dict):
+            return
+        stored_metadata = stored.get("metadata")
+        if isinstance(stored_metadata, dict):
+            existing = payload.get("metadata")
+            payload["metadata"] = {
+                **(existing if isinstance(existing, dict) else {}),
+                **stored_metadata,
+            }
+        for key in ("pid", "started_at"):
+            if stored.get(key) is not None:
+                payload[key] = stored[key]
 
     def settle_turn_participants(
         self,
