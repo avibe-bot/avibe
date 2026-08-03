@@ -1262,16 +1262,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />
         )}
-        {/* 36px (size-9) icon buttons: pink-soft Stop while a turn runs, else a
-            flat mint Send — design-system variants, not a glowy brand CTA. */}
-        {!voiceCaptureActive && (busyControls ? (
+        {/* A running agent turn keeps its Stop escape hatch even during voice
+            capture. Queue/Send withdraw while capture owns the draft. */}
+        {busyControls ? (
           <>
             {/* Sending while a turn runs is allowed — the backend enqueues it
                 (202) instead of refusing (Enter does this too). Surface a visible
                 affordance for it, but only when there's something to send: a cyan
                 "queue" button left of Stop. Paper-plane + a small clock badge
                 reads as "send, but later / into the queue". */}
-            {canSubmit && (
+            {!voiceCaptureActive && canSubmit && (
               <Button
                 type="button"
                 variant="accent"
@@ -1301,7 +1301,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <Square className="size-4" />
             </Button>
           </>
-        ) : (
+        ) : !voiceCaptureActive ? (
           <Button
             type="button"
             variant="default"
@@ -1313,7 +1313,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           >
             <Send className="size-4" />
           </Button>
-        ))}
+        ) : null}
         {/* Destructive voice actions stay at the opposite edge from the primary
             voice slot. Finish is never adjacent to Trash; once a failed or
             recovered recording is retained, Send remains available before the
