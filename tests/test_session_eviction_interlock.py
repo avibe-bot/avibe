@@ -13,7 +13,7 @@ These tests drive the two real eviction entry points --
 -- against REAL durable rows in the isolated state database, so what is asserted
 is the join between the two keyspaces, not a stub's opinion of it.
 
-Scenarios: HFR-130 … HFR-147 (tests/scenarios/harness_failure_recovery/catalog.yaml).
+Scenarios: HFR-130 … HFR-149 (tests/scenarios/harness_failure_recovery/catalog.yaml).
 """
 
 from __future__ import annotations
@@ -1030,3 +1030,81 @@ def test_every_backend_eviction_consumer_is_inventoried() -> None:
         "OpenCode grew an idle-eviction path: it must consume core/session_ownership.py "
         f"or prove restart-safety here -- found {opencode_evictors}"
     )
+
+
+# ---------------------------------------------------------------------------
+# HFR-148 … HFR-149: a pin must be scoped, and must not depend on an allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_a_pin_does_not_cross_backends_at_a_shared_workdir(monkeypatch, tmp_path: Path) -> None:
+    """HFR-148: durable work pins the runtime it will actually run in, only.
+
+    Both keyspaces collapse across backends at the default working directory: a
+    Codex transport is keyed by cwd alone, and a Claude runtime key is
+    ``anchor:workdir``. So an unscoped pin lets a Claude-backed session hold a
+    Codex app-server open for work that will never be dispatched into it, and
+    vice versa -- an idle runtime kept alive forever by a neighbour's queue.
+    Ownership is only evidence for the backend the durable work names.
+    """
+
+    _state_db()
+    workdir = str(tmp_path)
+
+    # A Claude-backed owner at this cwd is not evidence for the Codex transport.
+    _seed_session("sesclaude001", anchor="slack_C888", workdir=workdir, backend="claude")
+    _seed_delivery("sesclaude001", "queued")
+
+    agent, calls = _codex_agent(workdir)
+    assert _codex_sweep(agent, monkeypatch) == 1, "a foreign-backend owner must not pin Codex"
+    assert calls.stopped == [workdir]
+
+    # ... and the same owner on the matching backend still pins it.
+    _state_db()
+    _seed_session("sescodex0001", anchor="slack_C777", workdir=workdir, backend="codex")
+    _seed_delivery("sescodex0001", "queued")
+
+    agent, calls = _codex_agent(workdir)
+    assert _codex_sweep(agent, monkeypatch) == 0
+    assert calls.stopped == []
+
+
+def test_a_codex_owner_does_not_pin_the_claude_runtime_at_the_same_key(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """HFR-148: the mirror direction, on the Claude consumer.
+
+    A session that has switched backends keeps its anchor and its workdir, so its
+    Claude runtime key is unchanged. Queued Codex work must not keep the stale
+    SDK client from a previous backend alive.
+    """
+
+    _state_db()
+    handler, controller, composite_key, captured = _claude_handler(monkeypatch, tmp_path)
+    _seed_session(BASE_SESSION_ID, anchor=ANCHOR, workdir=str(tmp_path), backend="codex")
+    _seed_delivery(BASE_SESSION_ID, "queued")
+
+    assert _sweep(handler) == 1, "Codex-backed work must not pin the Claude runtime"
+    assert composite_key not in controller.claude_sessions
+    assert captured["disconnects"] == 1
+
+
+def test_an_unrecognized_run_status_still_pins(monkeypatch, tmp_path: Path) -> None:
+    """HFR-149: nonterminal is 'not terminal', never 'on the list we know about'.
+
+    ``agent_runs.status`` carries no CHECK constraint and ``normalize_run_status``
+    passes an unrecognized string through untouched, so a status introduced later
+    -- or imported from another writer -- reaches this query. Selecting the known
+    in-progress statuses would silently drop such a Run's interlock, which is the
+    one failure mode this whole provider exists to prevent. It is queried as NOT
+    IN the terminal set, exactly like Deliveries and Turns.
+    """
+
+    _state_db()
+    handler, controller, composite_key, captured = _claude_handler(monkeypatch, tmp_path)
+    _seed_session(BASE_SESSION_ID, anchor=ANCHOR, workdir=str(tmp_path))
+    _seed_run(BASE_SESSION_ID, run_type="agent_run", status="retrying")
+
+    assert _sweep(handler) == 0, "an unknown Run status must fail closed and pin"
+    assert composite_key in controller.claude_sessions
+    assert captured["disconnects"] == 0

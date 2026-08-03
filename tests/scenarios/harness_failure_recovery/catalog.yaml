@@ -2613,6 +2613,39 @@ scenarios:
     # disconnect commits the follower -- and asserts the teardown and the commit
     # both really happened, so it cannot pass by failing to race.
     test: tests/test_session_eviction_interlock.py::test_ownership_admitted_during_an_earlier_teardown_vetoes_the_later_eviction
+  - id: HFR-148
+    name: a durable pin does not cross backends at a shared working directory
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Found by review on PR #1150's second head. Both eviction keyspaces collapse
+    # across backends at the default working directory: a Codex transport is keyed by
+    # cwd alone, and a Claude runtime key is anchor:workdir. An unscoped pin therefore
+    # lets one backend's queue hold another backend's runtime open forever -- the exact
+    # inverse of the leak this PR prevents, and unbounded because the neighbour's work
+    # will never be dispatched there to settle it. FIX: the snapshot retains each
+    # session's backends (agent_sessions.agent_backend UNION its nonterminal Turns'
+    # backend, so a session caught mid-switch pins both) and only a POSITIVE mismatch
+    # drops the pin -- a caller naming no backend, or a session whose backend cannot be
+    # established, still pins. Both directions are covered, plus the positive case that
+    # the matching backend does pin.
+    test: tests/test_session_eviction_interlock.py::test_a_pin_does_not_cross_backends_at_a_shared_workdir
+  - id: HFR-149
+    name: an unrecognized Run status still pins its session
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # Found by review on PR #1150's second head, and the same fail-closed rule the
+    # Delivery and Turn queries already followed. agent_runs.status has no CHECK
+    # constraint and normalize_run_status passes an unrecognized string through
+    # untouched, so a status introduced later -- or written by another producer --
+    # reaches this query. Selecting the known in-progress statuses would silently drop
+    # that Run's interlock, which is the one failure mode the provider exists to
+    # prevent. FIX: query NOT IN the terminal statuses (raw aliases plus public names),
+    # so an unknown status pins instead of vanishing.
+    test: tests/test_session_eviction_interlock.py::test_an_unrecognized_run_status_still_pins
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

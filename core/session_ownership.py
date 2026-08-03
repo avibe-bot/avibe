@@ -34,7 +34,7 @@ import logging
 import os
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
@@ -70,6 +70,17 @@ PINNING_TURN_STATES = ("waiting", "starting", "active")
 # lose its interlock.
 SUPERVISOR_RUN_TYPES = frozenset({"watch_runtime"})
 EXECUTION_BEARING_RUN_TYPES = frozenset({"agent_run", "scheduled", "watch"})
+# ``agent_runs.status`` has no CHECK constraint and ``normalize_run_status`` keeps
+# an unrecognized string as-is, so an imported or newly introduced in-progress
+# status (``retrying``, say) must not fall outside an allowlist of the statuses we
+# happen to know are live. Queried as "not terminal", like Deliveries and Turns,
+# so an unknown status pins its session instead of silently losing its interlock.
+TERMINAL_RUN_STATUS_VALUES = tuple(
+    sorted(
+        {raw for raw, public in RUN_STATUS_ALIASES.items() if public in TERMINAL_RUN_STATUSES}
+        | set(TERMINAL_RUN_STATUSES)
+    )
+)
 NONTERMINAL_RUN_STATUSES = tuple(
     sorted({raw for raw, public in RUN_STATUS_ALIASES.items() if public not in TERMINAL_RUN_STATUSES})
 )
@@ -141,17 +152,19 @@ class SessionOwnershipSnapshot:
     def failed(self) -> bool:
         return not self.resolved
 
-    def pins_runtime_key(self, runtime_key: str) -> bool:
+    def pins_runtime_key(self, runtime_key: str, backend: Optional[str] = None) -> bool:
         """True when a durable owner holds the session behind this runtime key."""
 
-        return bool(runtime_key) and bool(self.session_ids_for_runtime_key(runtime_key))
+        return bool(runtime_key) and bool(self.session_ids_for_runtime_key(runtime_key, backend))
 
-    def pins_workdir(self, workdir: str) -> bool:
+    def pins_workdir(self, workdir: str, backend: Optional[str] = None) -> bool:
         """True for a runtime keyed only by working directory (Codex transports)."""
 
-        return bool(self.pinned_workdirs) and normalize_workdir(workdir) in self.pinned_workdirs
+        return bool(self.session_ids_for_workdir(workdir, backend))
 
-    def session_ids_for_runtime_key(self, runtime_key: str) -> frozenset[str]:
+    def session_ids_for_runtime_key(
+        self, runtime_key: str, backend: Optional[str] = None
+    ) -> frozenset[str]:
         """Which pinned sessions this backend runtime key projects."""
 
         if not runtime_key or not self.pinned_session_ids:
@@ -168,34 +181,74 @@ class SessionOwnershipSnapshot:
             # ``:{agent_name}`` suffix, so a live parent turn pins it too.
             if base == anchor or base.startswith(f"{anchor}:"):
                 matched.add(session_id)
-        return frozenset(matched)
+        return frozenset(
+            session_id for session_id in matched if self.backend_owns(session_id, backend)
+        )
 
-    def reasons_for_runtime_key(self, runtime_key: str) -> tuple[str, ...]:
+    def reasons_for_runtime_key(
+        self, runtime_key: str, backend: Optional[str] = None
+    ) -> tuple[str, ...]:
         """Loggable provenance: which durable rows pin this runtime key."""
 
-        owners = self.session_ids_for_runtime_key(runtime_key)
+        owners = self.session_ids_for_runtime_key(runtime_key, backend)
         return tuple(binding.describe() for binding in self.bindings if binding.session_id in owners)
 
-    def session_ids_for_workdir(self, workdir: str) -> frozenset[str]:
+    def session_ids_for_workdir(
+        self, workdir: str, backend: Optional[str] = None
+    ) -> frozenset[str]:
         """Which pinned sessions a workdir-keyed runtime projects."""
 
         normalized = normalize_workdir(workdir)
         if not normalized:
             return frozenset()
-        return frozenset(
+        matched = {
             session_id
             for _anchor, session_workdir, session_id in self.pinned_targets
             if session_workdir == normalized
+        }
+        for runtime_key, owners in self._runtime_key_owners.items():
+            if normalize_workdir(split_runtime_key(runtime_key)[1]) != normalized:
+                continue
+            matched |= set(owners)
+        return frozenset(
+            session_id for session_id in matched if self.backend_owns(session_id, backend)
         )
 
-    def reasons_for_workdir(self, workdir: str) -> tuple[str, ...]:
+    def reasons_for_workdir(self, workdir: str, backend: Optional[str] = None) -> tuple[str, ...]:
         """Loggable provenance for a workdir-keyed runtime."""
 
-        owners = self.session_ids_for_workdir(workdir)
+        owners = self.session_ids_for_workdir(workdir, backend)
         return tuple(binding.describe() for binding in self.bindings if binding.session_id in owners)
+
+    def backend_owns(self, session_id: str, backend: Optional[str]) -> bool:
+        """Whether this session's durable work runs on the backend that is asking.
+
+        A runtime key alone does not identify a backend: Claude and Codex sessions
+        share the default workdir, and a Codex transport is keyed by that workdir
+        alone — so without this filter a queued Claude Delivery would pin an
+        unrelated Codex app-server (and a session switched to Codex would pin the
+        obsolete Claude runtime) until the stuck-active cap expired.
+
+        Only a POSITIVE mismatch drops the pin. A caller that names no backend, or
+        a session whose backends cannot be established, keeps it: an
+        unattributable runtime must still fail closed. The session's backends are
+        the union of ``agent_sessions.agent_backend`` and the backend of each of
+        its nonterminal Turns, so a session caught mid-switch pins both runtimes.
+        """
+
+        requested = str(backend or "").strip().lower()
+        if not requested:
+            return True
+        backends = self._session_backends.get(session_id)
+        if not backends:
+            return True
+        return requested in backends
 
     # Derived by the provider; carried so lookups stay O(1) per runtime key.
     _runtime_key_owners: Mapping[str, frozenset[str]] = MappingProxyType({})
+    # ``session_id -> {backend}``: which backend runtimes this session's durable
+    # work actually projects onto.
+    _session_backends: Mapping[str, frozenset[str]] = MappingProxyType({})
 
 
 UNRESOLVED_SNAPSHOT = SessionOwnershipSnapshot(resolved=False)
@@ -266,15 +319,20 @@ class DurableSessionOwnershipProvider:
             )
 
         runtime_keys_by_session: dict[str, set[str]] = {}
+        backends_by_session: dict[str, set[str]] = {}
         for row in conn.execute(
             select(
                 session_turns.c.id,
                 session_turns.c.session_id,
                 session_turns.c.state,
                 session_turns.c.runtime_key,
+                session_turns.c.backend,
             ).where(session_turns.c.state.notin_(TERMINAL_TURN_STATES))
         ).mappings():
             session_id = str(row["session_id"] or "")
+            turn_backend = str(row["backend"] or "").strip().lower()
+            if turn_backend:
+                backends_by_session.setdefault(session_id, set()).add(turn_backend)
             bindings.append(
                 OwnerBinding(
                     kind="turn",
@@ -296,7 +354,7 @@ class DurableSessionOwnershipProvider:
                 agent_runs.c.delivery_id,
             )
             .where(agent_runs.c.session_id.is_not(None))
-            .where(agent_runs.c.status.in_(NONTERMINAL_RUN_STATUSES))
+            .where(agent_runs.c.status.notin_(TERMINAL_RUN_STATUS_VALUES))
         ).mappings():
             run_type = str(row["run_type"] or "").strip()
             if not self._run_bears_execution(run_type):
@@ -343,6 +401,15 @@ class DurableSessionOwnershipProvider:
         }
         pinned_workdirs.discard("")
 
+        session_backends: dict[str, frozenset[str]] = {}
+        for session_id in pinned_session_ids:
+            backends = set(backends_by_session.get(session_id, ()))
+            session_backend = str(session_rows[session_id].get("agent_backend") or "").strip().lower()
+            if session_backend:
+                backends.add(session_backend)
+            if backends:
+                session_backends[session_id] = frozenset(backends)
+
         return SessionOwnershipSnapshot(
             resolved=True,
             bindings=tuple(bindings),
@@ -354,6 +421,7 @@ class DurableSessionOwnershipProvider:
             _runtime_key_owners=MappingProxyType(
                 {key: frozenset(owners) for key, owners in runtime_key_owners.items()}
             ),
+            _session_backends=MappingProxyType(session_backends),
         )
 
     def _run_bears_execution(self, run_type: str) -> bool:
@@ -385,6 +453,7 @@ class DurableSessionOwnershipProvider:
                     agent_sessions.c.id,
                     agent_sessions.c.session_anchor,
                     agent_sessions.c.workdir,
+                    agent_sessions.c.agent_backend,
                 ).where(agent_sessions.c.id.in_(batch))
             ).mappings():
                 rows[str(row["id"])] = dict(row)

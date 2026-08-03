@@ -1605,14 +1605,20 @@ class SessionHandler(BaseHandler):
 
     @staticmethod
     def _ownership_pin(ownership: SessionOwnershipSnapshot, composite_key: str) -> bool:
-        """Whether a durable owner holds this runtime right now (unbounded)."""
+        """Whether a durable owner holds this runtime right now (unbounded).
 
-        if not ownership.pins_runtime_key(composite_key):
+        Scoped to ``claude``: this runtime key is only a projection of durable work
+        that runs on this backend, and Claude and Codex sessions share the default
+        workdir, so an unscoped pin would keep a stale Claude client alive for a
+        session that has moved to Codex.
+        """
+
+        if not ownership.pins_runtime_key(composite_key, backend="claude"):
             return False
         logger.debug(
             "Idle Claude session %s is pinned by durable owners: %s",
             composite_key,
-            ", ".join(ownership.reasons_for_runtime_key(composite_key)) or "unknown",
+            ", ".join(ownership.reasons_for_runtime_key(composite_key, backend="claude")) or "unknown",
         )
         return True
 
@@ -1755,7 +1761,8 @@ class SessionHandler(BaseHandler):
                         composite_key,
                         recheck_idle,
                         stuck_threshold,
-                        ", ".join(ownership.reasons_for_runtime_key(composite_key)) or "unknown",
+                        ", ".join(ownership.reasons_for_runtime_key(composite_key, backend="claude"))
+                        or "unknown",
                     )
                 else:
                     logger.info(

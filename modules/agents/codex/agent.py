@@ -852,14 +852,19 @@ class CodexAgent(BaseAgent):
         return idle_for >= idle_timeout
 
     def _durably_owned_cwd(self, ownership: SessionOwnershipSnapshot, cwd: str) -> bool:
-        """Whether durable rows still own a session rooted at this cwd."""
+        """Whether durable Codex work still owns a session rooted at this cwd.
 
-        if not ownership.pins_workdir(cwd):
+        Scoped to this backend: a transport is keyed by working directory alone and
+        Claude/OpenCode sessions share the default one, so an unscoped pin would
+        hold an app-server open for work that will never be dispatched into it.
+        """
+
+        if not ownership.pins_workdir(cwd, backend="codex"):
             return False
         logger.debug(
             "Codex transport for cwd=%s is pinned by durable owners: %s",
             cwd,
-            ", ".join(ownership.reasons_for_workdir(cwd)) or "unknown",
+            ", ".join(ownership.reasons_for_workdir(cwd, backend="codex")) or "unknown",
         )
         return True
 
