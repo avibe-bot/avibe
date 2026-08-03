@@ -146,11 +146,20 @@ def activity_completion_output(
     if len(members) == 1 and stored_run_ids:
         run_ids = list(stored_run_ids)
 
+    legacy_native_ids = activity.metadata.get("_legacy_native_message_ids")
+    if not isinstance(legacy_native_ids, (list, tuple)):
+        legacy_native_ids = ()
+
     return MessageOutput(
         completes_turn=completes_turn,
         completes_run=True,
         detached=detached,
         idempotency_key=_activity_output_idempotency_key(activity),
+        native_message_id_aliases=tuple(
+            str(value).strip()
+            for value in legacy_native_ids
+            if str(value).strip()
+        ),
         activity_id=activity.id,
         activity_ids=activity_ids,
         activity_batch_id=batch_id,
@@ -162,6 +171,16 @@ def activity_completion_output(
         metadata={
             "activity_kind": activity.kind,
             "activity_status": activity.status,
+            "activity_batch_complete": activity.metadata.get(
+                "_output_batch_claim_complete",
+                True,
+            )
+            is not False,
+            "activity_local_settlement_only": activity.metadata.get(
+                "_output_local_settlement_only",
+                False,
+            )
+            is True,
             "backend": activity.backend,
             "turn_id": activity.turn_id,
         },
@@ -205,6 +224,12 @@ def _activity_run_id_sequence(activity: SessionActivity) -> tuple[str, ...]:
 
 def _activity_output_idempotency_key(activity: SessionActivity) -> str:
     return f"{activity.backend}-activity-output:{_activity_output_batch_id(activity)}:completion"
+
+
+def _legacy_activity_output_native_message_id(activity: SessionActivity) -> str:
+    key = f"{activity.backend}-task:{activity.runtime_key}:{activity.id}:completion"
+    lineage = str(activity.run_id or f"activity:{activity.id}").strip()
+    return f"agent-output:{activity.backend or 'unknown'}:{lineage}:{key}"
 
 
 class SessionActivityRegistry:
@@ -568,11 +593,13 @@ class SessionActivityRegistry:
             recovered_only=recovered_only,
             limit=1,
         )
+        recovered_unbound = False
         if claimed:
             candidate = claimed[0]
             batch_id = str(
                 candidate.metadata.get("output_batch_id") or ""
             ).strip()
+            recovered_unbound = bool(recovered_only and not batch_id)
             if batch_id:
                 claimed.extend(
                     self._claim_completed_outputs(
@@ -583,21 +610,19 @@ class SessionActivityRegistry:
                         output_batch_id=batch_id,
                     )
                 )
-            elif recovered_only:
-                turn_id = str(candidate.turn_id or "").strip()
-                if turn_id:
-                    claimed.extend(
-                        self._claim_completed_outputs(
-                            backend,
-                            runtime_key,
-                            max_age_seconds=max_age_seconds,
-                            recovered_only=True,
-                            turn_ids={turn_id},
-                            unbound_only=True,
-                        )
-                    )
         bound = self._bind_claimed_output_batch_or_requeue(claimed)
-        return bound[-1] if bound else None
+        if not bound:
+            return None
+        representative = bound[-1]
+        transient_metadata = dict(representative.metadata)
+        batch_run_ids = _activity_output_batch_run_ids(representative)
+        if batch_run_ids:
+            transient_metadata["run_ids"] = list(batch_run_ids)
+        if recovered_unbound:
+            transient_metadata["_legacy_native_message_ids"] = [
+                _legacy_activity_output_native_message_id(representative)
+            ]
+        return replace(representative, metadata=transient_metadata)
 
     def claim_completed_output_batch(
         self,
@@ -695,6 +720,11 @@ class SessionActivityRegistry:
         }
         if len(assigned_ids) > 1:
             raise RuntimeError("Activity output batch members have conflicting receipts")
+        if assigned_ids and any(
+            not str(activity.metadata.get("output_batch_id") or "").strip()
+            for activity in activities
+        ):
+            raise RuntimeError("Activity output batch members have conflicting receipts")
         batch_id = (
             next(iter(assigned_ids))
             if assigned_ids
@@ -703,18 +733,51 @@ class SessionActivityRegistry:
                 f"batch:{uuid.uuid4().hex}"
             )
         )
+        raw_member_lists: list[tuple[str, ...]] = []
+        for activity in activities:
+            values = activity.metadata.get("output_batch_activity_ids")
+            if values is None:
+                continue
+            if not isinstance(values, list):
+                raise RuntimeError(
+                    "Activity output batch members have conflicting membership"
+                )
+            normalized = tuple(
+                str(value).strip() for value in values if str(value).strip()
+            )
+            if len(normalized) != len(set(normalized)):
+                raise RuntimeError(
+                    "Activity output batch members have conflicting membership"
+                )
+            raw_member_lists.append(normalized)
         persisted_member_sets = {
-            _activity_output_batch_members(activity)
-            for activity in activities
-            if _activity_output_batch_members(activity)
+            members for members in raw_member_lists if members
         }
         if len(persisted_member_sets) > 1:
             raise RuntimeError("Activity output batch members have conflicting membership")
+        if assigned_ids and len(raw_member_lists) != len(activities):
+            raise RuntimeError("Activity output batch persisted membership is incomplete")
         activity_ids = (
             next(iter(persisted_member_sets))
             if persisted_member_sets
             else tuple(dict.fromkeys(activity.id for activity in activities))
         )
+        claim_complete = True
+        if persisted_member_sets:
+            claimed_ids = tuple(activity.id for activity in activities)
+            if len(claimed_ids) != len(set(claimed_ids)) or not set(
+                claimed_ids
+            ).issubset(activity_ids):
+                raise RuntimeError(
+                    "Activity output batch members have conflicting membership"
+                )
+            claim_complete = len(claimed_ids) == len(activity_ids)
+            activity_by_id = {activity.id: activity for activity in activities}
+            activities = [
+                activity_by_id[activity_id]
+                for activity_id in activity_ids
+                if activity_id in activity_by_id
+            ]
         persisted_run_sets = {
             _activity_output_batch_run_ids(activity)
             for activity in activities
@@ -733,6 +796,10 @@ class SessionActivityRegistry:
             run_ids = tuple(ordered_run_ids)
 
         updates: list[tuple[tuple[str, str, str], SessionActivity]] = []
+        local_only_by_key: dict[tuple[str, str, str], bool] = {}
+        persisted_current_by_key: dict[
+            tuple[str, str, str], SessionActivity
+        ] = {}
         with self._lock:
             for activity in activities:
                 activity_key = self._activity_key(activity)
@@ -740,10 +807,20 @@ class SessionActivityRegistry:
                 if claimed is None:
                     continue
                 current = claimed.entry.activity
+                persistent_metadata = dict(current.metadata)
+                persistent_metadata.pop("_output_batch_claim_complete", None)
+                local_only_by_key[activity_key] = bool(
+                    persistent_metadata.pop("_output_local_settlement_only", False)
+                )
+                persistent_metadata.pop("_legacy_native_message_ids", None)
+                persisted_current_by_key[activity_key] = replace(
+                    current,
+                    metadata=persistent_metadata,
+                )
                 updated = replace(
                     current,
                     metadata={
-                        **current.metadata,
+                        **persistent_metadata,
                         "output_batch_id": batch_id,
                         "output_batch_activity_ids": list(activity_ids),
                         "output_batch_run_ids": list(run_ids),
@@ -758,7 +835,7 @@ class SessionActivityRegistry:
                 updated
                 for activity_key, updated in updates
                 if updated
-                != self._claimed_completed_outputs[activity_key].entry.activity
+                != persisted_current_by_key[activity_key]
             ]
             if changed:
                 if len(updates) == 1:
@@ -784,13 +861,27 @@ class SessionActivityRegistry:
                             "Durable Activity store cannot atomically bind an output batch"
                         )
 
+            published_updates = []
             for activity_key, updated in updates:
+                published = replace(
+                    updated,
+                    metadata={
+                        **updated.metadata,
+                        "_output_batch_claim_complete": claim_complete,
+                        **(
+                            {"_output_local_settlement_only": True}
+                            if local_only_by_key[activity_key]
+                            else {}
+                        ),
+                    },
+                )
                 claimed = self._claimed_completed_outputs[activity_key]
                 self._claimed_completed_outputs[activity_key] = replace(
                     claimed,
-                    entry=replace(claimed.entry, activity=updated),
+                    entry=replace(claimed.entry, activity=published),
                 )
-        return [updated for _activity_key, updated in updates]
+                published_updates.append(published)
+        return published_updates
 
     def claimed_completed_output_for_idempotency_key(
         self,
@@ -824,12 +915,22 @@ class SessionActivityRegistry:
                 key=lambda item: item.entry.sequence,
             )
             if receipt_id:
-                return [
+                matched = [
                     item.entry.activity
                     for item in claimed
                     if _activity_output_idempotency_key(item.entry.activity)
                     == receipt_id
                 ]
+                if matched:
+                    ordered_ids = tuple(output.activity_ids)
+                    if ordered_ids and len(matched) == len(ordered_ids):
+                        matched_by_id = {activity.id: activity for activity in matched}
+                        if set(matched_by_id) == set(ordered_ids):
+                            return [
+                                matched_by_id[activity_id]
+                                for activity_id in ordered_ids
+                            ]
+                    return matched
             return [
                 item.entry.activity
                 for item in claimed
@@ -903,6 +1004,9 @@ class SessionActivityRegistry:
                 self._claimed_completed_outputs[activity_key] = _ClaimedCompletedOutput(
                     entry=entry,
                     recovered=is_recovered,
+                    externally_retryable=not bool(
+                        activity.metadata.get("_output_local_settlement_only")
+                    ),
                 )
                 self._recovered_output_ids.discard(activity_key)
                 claimed.append(activity)
@@ -941,6 +1045,50 @@ class SessionActivityRegistry:
                 self._completed_outputs[key] = deque(entries)
         return sum(len(items) for items in restored_by_runtime.values())
 
+    def requeue_completed_outputs_for_local_settlement(
+        self,
+        activities: list[SessionActivity],
+        *,
+        recovered: bool | None = None,
+    ) -> int:
+        """Requeue durable terminal claims without making them externally sendable."""
+
+        if not activities:
+            return 0
+        restored_by_runtime: dict[
+            tuple[str, str], list[_ClaimedCompletedOutput]
+        ] = defaultdict(list)
+        with self._lock:
+            claimed_items: list[
+                tuple[tuple[str, str, str], _ClaimedCompletedOutput]
+            ] = []
+            for activity in activities:
+                activity_key = self._activity_key(activity)
+                claimed = self._claimed_completed_outputs.get(activity_key)
+                if (
+                    claimed is None
+                    or claimed.externally_retryable
+                    or not claimed.entry.activity.metadata.get(
+                        "_output_local_settlement_only"
+                    )
+                ):
+                    return 0
+                claimed_items.append((activity_key, claimed))
+
+            for activity_key, claimed in claimed_items:
+                self._claimed_completed_outputs.pop(activity_key, None)
+                activity = claimed.entry.activity
+                key = (str(activity.backend), str(activity.runtime_key))
+                restored_by_runtime[key].append(claimed)
+                if claimed.recovered if recovered is None else recovered:
+                    self._recovered_output_ids.add(activity_key)
+            for key, restored in restored_by_runtime.items():
+                entries = list(self._completed_outputs.get(key) or ())
+                entries.extend(item.entry for item in restored)
+                entries.sort(key=lambda item: item.sequence)
+                self._completed_outputs[key] = deque(entries)
+        return len(claimed_items)
+
     def requeue_completed_output(
         self,
         activity: SessionActivity,
@@ -971,13 +1119,32 @@ class SessionActivityRegistry:
                     ),
                     key=lambda item: item.entry.sequence,
                 )
-                if len(batch) > 1:
-                    if any(not item.externally_retryable for item in batch):
+                if batch and any(not item.externally_retryable for item in batch):
+                    local_only = all(
+                        item.entry.activity.metadata.get(
+                            "_output_local_settlement_only"
+                        )
+                        is True
+                        for item in batch
+                    )
+                    if not local_only:
                         return False
+                    return self.requeue_completed_outputs_for_local_settlement(
+                        [item.entry.activity for item in batch],
+                        recovered=recovered,
+                    ) == len(batch)
+                if len(batch) > 1:
                     return self.requeue_completed_outputs(
                         [item.entry.activity for item in batch]
                     ) == len(batch)
             if not claimed.externally_retryable:
+                if claimed.entry.activity.metadata.get(
+                    "_output_local_settlement_only"
+                ) is True:
+                    return self.requeue_completed_outputs_for_local_settlement(
+                        [claimed.entry.activity],
+                        recovered=recovered,
+                    ) == 1
                 return False
             self._claimed_completed_outputs.pop(activity_key, None)
             if recovered is None:
@@ -1114,6 +1281,28 @@ class SessionActivityRegistry:
                 evidence_safe[activity_key] = bool(
                     persisted or accepted_message_exists or not visible_output
                 )
+                if (
+                    terminal_activity is not None
+                    and persisted
+                    and not accepted_message_exists
+                ):
+                    claimed = self._claimed_completed_outputs[activity_key]
+                    local_only_activity = replace(
+                        claimed.entry.activity,
+                        metadata={
+                            **claimed.entry.activity.metadata,
+                            "_output_local_settlement_only": True,
+                        },
+                    )
+                    claimed = replace(
+                        claimed,
+                        entry=replace(
+                            claimed.entry,
+                            activity=local_only_activity,
+                        ),
+                    )
+                    self._claimed_completed_outputs[activity_key] = claimed
+                    claimed_by_key[activity_key] = claimed
 
         terminal_settled = True
         if terminal_by_id:

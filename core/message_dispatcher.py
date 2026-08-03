@@ -1266,6 +1266,21 @@ class ConsolidatedMessageDispatcher:
             return cls._fold_footer(text, footer)
         return text
 
+    @staticmethod
+    def _accepted_message_is_error(
+        accepted_message: Any,
+        *,
+        fallback: bool,
+    ) -> bool:
+        if not isinstance(accepted_message, Mapping):
+            return fallback
+        message_type = str(accepted_message.get("type") or "").strip().lower()
+        if message_type == "error":
+            return True
+        if message_type == "result":
+            return False
+        return fallback
+
     def _record_agent_run_terminal_result(
         self,
         context: MessageContext,
@@ -1599,6 +1614,14 @@ class ConsolidatedMessageDispatcher:
         canonical_type = settings_manager._canonicalize_message_type(message_type or "")
         settings_key = self._get_settings_key(context)
         output_semantics = output_for_message(canonical_type, output)
+        activity_batch_incomplete = bool(
+            output_semantics.requires_delivery_for_run_settlement
+            and output_semantics.metadata.get("activity_batch_complete") is False
+        )
+        activity_local_settlement_only = bool(
+            output_semantics.requires_delivery_for_run_settlement
+            and output_semantics.metadata.get("activity_local_settlement_only") is True
+        )
         current_runtime_turn = self._is_current_runtime_turn(context)
         mutates_turn_lifecycle = (
             canonical_type == "result"
@@ -1654,6 +1677,25 @@ class ConsolidatedMessageDispatcher:
         # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
         if level == "silent" or not text or not text.strip():
             try:
+                if activity_local_settlement_only:
+                    settlement_complete = self._settle_activity_output_claims(
+                        output_semantics,
+                        accepted_message_exists=False,
+                        settlement_error=RuntimeError(
+                            "Retrying delivered Activity terminal settlement"
+                        ),
+                    )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Delivered Activity local settlement retry is incomplete",
+                            delivered=True,
+                        )
+                    return output_semantics.idempotency_key
+                if activity_batch_incomplete:
+                    raise ActivityOutputDeliveryError(
+                        "Activity output batch recovery is incomplete",
+                        delivered=False,
+                    )
                 if (
                     mutates_turn_lifecycle
                     and context.platform != "avibe"
@@ -1720,11 +1762,22 @@ class ConsolidatedMessageDispatcher:
         if canonical_type == "result":
             persist_text = enhanced.text if enhanced.text.strip() else text
 
-        accepted_message = (
-            agent_message_exists(target_context, native_output_id)
-            if native_output_id
-            else None
+        accepted_message = None
+        native_output_candidates = tuple(
+            dict.fromkeys(
+                candidate
+                for candidate in (
+                    native_output_id,
+                    *output_semantics.native_message_id_aliases,
+                )
+                if candidate
+            )
         )
+        for candidate in native_output_candidates:
+            accepted_message = agent_message_exists(target_context, candidate)
+            if accepted_message:
+                native_output_id = candidate
+                break
         if accepted_message:
             logger.info("Skipping duplicate agent output %s", native_output_id)
             accepted_output_semantics = self._output_with_accepted_provenance(
@@ -1753,6 +1806,10 @@ class ConsolidatedMessageDispatcher:
                 }
             try:
                 if canonical_type == "result" and accepted_output_semantics.settles_run:
+                    accepted_is_error = self._accepted_message_is_error(
+                        accepted_message,
+                        fallback=is_error,
+                    )
                     duplicate_result_text = self._accepted_message_result_text(
                         accepted_message,
                         persist_text,
@@ -1762,8 +1819,8 @@ class ConsolidatedMessageDispatcher:
                         context,
                         duplicate_result_text,
                         None,
-                        is_error=is_error,
-                        terminal_error=terminal_error,
+                        is_error=accepted_is_error,
+                        terminal_error=(terminal_error if accepted_is_error else None),
                         output_semantics=accepted_output_semantics,
                     )
                 if mutates_turn_lifecycle:
@@ -1796,6 +1853,27 @@ class ConsolidatedMessageDispatcher:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
                     self._release_runtime_turn(context)
+
+        if activity_batch_incomplete:
+            raise ActivityOutputDeliveryError(
+                "Activity output batch recovery is incomplete",
+                delivered=False,
+            )
+
+        if activity_local_settlement_only:
+            settlement_complete = self._settle_activity_output_claims(
+                output_semantics,
+                accepted_message_exists=False,
+                settlement_error=RuntimeError(
+                    "Retrying delivered Activity terminal settlement"
+                ),
+            )
+            if settlement_complete is False:
+                raise ActivityOutputDeliveryError(
+                    "Delivered Activity local settlement retry is incomplete",
+                    delivered=True,
+                )
+            return native_output_id
 
         # Persistence is decided per delivery path below, not here, so that:
         #   * background sessions retain local history without platform delivery,

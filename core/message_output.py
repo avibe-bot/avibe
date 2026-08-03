@@ -37,6 +37,7 @@ class MessageOutput:
     completes_run: bool | None = None
     detached: bool = False
     idempotency_key: str | None = None
+    native_message_id_aliases: tuple[str, ...] = ()
     activity_id: str | None = None
     activity_ids: tuple[str, ...] = ()
     activity_batch_id: str | None = None

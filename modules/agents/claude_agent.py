@@ -1369,6 +1369,18 @@ class ClaudeAgent(BaseAgent):
                                     composite_key,
                                     err,
                                 )
+                                registry = self._activity_registry()
+                                if (
+                                    registry is not None
+                                    and self._requeue_activities_for_local_settlement(
+                                        registry,
+                                        detached_activities,
+                                    )
+                                ):
+                                    self._schedule_completed_activity_flush(
+                                        composite_key,
+                                        context,
+                                    )
                             except Exception:
                                 registry = self._activity_registry()
                                 if registry is not None:
@@ -1529,7 +1541,15 @@ class ClaudeAgent(BaseAgent):
                                 composite_key,
                                 err,
                             )
-                            self._clear_request_activities(pending_request)
+                            if self._requeue_request_activity_for_local_settlement(
+                                pending_request
+                            ):
+                                self._schedule_completed_activity_flush(
+                                    composite_key,
+                                    context,
+                                )
+                            else:
+                                self._clear_request_activities(pending_request)
                         except Exception:
                             emit_failed = True
                             if output_activity is not None:
@@ -2085,6 +2105,21 @@ class ClaudeAgent(BaseAgent):
 
         registry.requeue_completed_outputs(activities)
 
+    @staticmethod
+    def _requeue_activities_for_local_settlement(
+        registry,
+        activities: list[SessionActivity],
+    ) -> bool:
+        requeue = getattr(
+            registry,
+            "requeue_completed_outputs_for_local_settlement",
+            None,
+        )
+        return bool(
+            callable(requeue)
+            and requeue(activities) == len(activities)
+        )
+
     def _claim_activity_batch_for_turns(
         self,
         registry,
@@ -2130,6 +2165,26 @@ class ClaudeAgent(BaseAgent):
             self._requeue_activities(registry, activities)
         self._clear_request_activities(request)
         request.output = terminal_turn_output()
+
+    def _requeue_request_activity_for_local_settlement(
+        self,
+        request: AgentRequest | None,
+    ) -> bool:
+        activities = self._request_activities(request)
+        registry = self._activity_registry()
+        if (
+            request is None
+            or not activities
+            or registry is None
+            or not self._requeue_activities_for_local_settlement(
+                registry,
+                activities,
+            )
+        ):
+            return False
+        self._clear_request_activities(request)
+        request.output = terminal_turn_output()
+        return True
 
     def _activity_output_pending(self, composite_key: str) -> bool:
         registry = self._activity_registry()
@@ -2645,6 +2700,18 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 err,
             )
+            registry = self._activity_registry()
+            if (
+                registry is not None
+                and self._requeue_activities_for_local_settlement(
+                    registry,
+                    activities,
+                )
+            ):
+                self._schedule_completed_activity_flush(
+                    composite_key,
+                    context,
+                )
         except Exception:
             registry = self._activity_registry()
             if registry is not None:
@@ -2735,6 +2802,10 @@ class ClaudeAgent(BaseAgent):
                         composite_key,
                         err,
                     )
+                    if self._requeue_request_activity_for_local_settlement(
+                        matched_request
+                    ):
+                        return True
                     self._clear_request_activities(matched_request)
                 except Exception:
                     self._requeue_request_activity(matched_request)
@@ -2779,6 +2850,11 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     err,
                 )
+                if self._requeue_activities_for_local_settlement(
+                    registry,
+                    activities,
+                ):
+                    return True
             except Exception:
                 self._requeue_activities(registry, activities)
                 raise

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import asyncio
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,9 @@ from core.message_dispatcher import (
 from core.message_output import MessageOutput
 from core.session_activities import SessionActivityRegistry, activity_completion_output
 from modules.im import MessageContext
+from storage.db import create_sqlite_engine
+from storage.importer import ensure_sqlite_state
+from storage.session_activities import SQLiteSessionActivityStore
 
 
 class _StubIMClient:
@@ -742,7 +746,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activity.status, "completed")
         self.assertFalse(registry.has_completed_output("claude", "runtime-durable"))
 
-    async def test_duplicate_activity_uses_accepted_message_result_and_footer(self):
+    async def test_duplicate_error_activity_uses_accepted_payload_and_status(self):
         controller = _StubController()
         registry = SessionActivityRegistry()
         controller.agent_service = SimpleNamespace(
@@ -777,6 +781,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         )
         accepted = {
             "id": "message-row",
+            "type": "error",
             "native_message_id": output.native_message_id(
                 MessageContext(
                     user_id="scheduled",
@@ -833,6 +838,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             recorded[0][1]["text"],
             "Exact accepted assistant result\n\n3.4s | 812 tok",
         )
+        self.assertEqual(recorded[0][1]["terminal_status"], "failed")
         self.assertFalse(registry.has_completed_output("claude", "runtime-canonical"))
 
     async def test_failed_registry_batch_settlement_is_a_delivered_incomplete_outcome(self):
@@ -1192,6 +1198,471 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             recovered.has_completed_output("claude", "runtime-recovery-batch")
         )
         self.assertEqual(activity_store.list_activities(), [])
+
+    async def test_sqlite_recovery_preserves_canonical_batch_order(self):
+        from core.scheduled_tasks import ScheduledTaskService
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "state" / "vibe.sqlite"
+            ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+            engine = create_sqlite_engine(db_path)
+            activity_store = SQLiteSessionActivityStore(engine)
+            original = SessionActivityRegistry(activity_store)
+
+            for activity_id, run_id in (
+                ("activity-a", "run-a"),
+                ("activity-b", "run-b"),
+            ):
+                original.start(
+                    backend="claude",
+                    runtime_key="runtime-sqlite-recovery-order",
+                    session_id="sess-sqlite-recovery-order",
+                    activity_id=activity_id,
+                    kind="local_agent",
+                    turn_id="turn-sqlite-recovery-order",
+                    run_id=run_id,
+                )
+
+            for activity_id, summary in (
+                ("activity-b", "Earlier completed summary"),
+                ("activity-a", "Canonical live batch summary"),
+            ):
+                original.complete(
+                    backend="claude",
+                    runtime_key="runtime-sqlite-recovery-order",
+                    activity_id=activity_id,
+                    status="completed",
+                    metadata={"summary": summary},
+                    expects_output=True,
+                )
+
+            bound = original.claim_completed_output_batch(
+                "claude",
+                "runtime-sqlite-recovery-order",
+            )
+            self.assertEqual(
+                [activity.id for activity in bound],
+                ["activity-b", "activity-a"],
+            )
+            live_output = activity_completion_output(
+                bound[-1],
+                activities=bound,
+                detached=True,
+                completes_turn=False,
+            )
+
+            recovered = SessionActivityRegistry(activity_store)
+            controller = _StubController()
+            controller.agent_service = SimpleNamespace(
+                activities=recovered,
+                emit_matches_runtime_turn=lambda _context: False,
+                release_runtime_turn=lambda _context: None,
+            )
+            dispatcher = ConsolidatedMessageDispatcher(controller)
+            controller.emit_agent_message = dispatcher.emit_agent_message
+            service = object.__new__(ScheduledTaskService)
+            service.controller = controller
+            service._activity_registry = lambda: recovered
+            service._settle_pending_recovered_activity_terminals = lambda: None
+            context = MessageContext(
+                user_id="scheduled",
+                channel_id="C123",
+                platform="slack",
+            )
+            service._build_context = AsyncMock(return_value=context)
+            accepted_by_native_id = {}
+            accepted = []
+            run_settlements = []
+
+            def persist_message(_context, _message_type, text, **kwargs):
+                message = {
+                    "id": "accepted-sqlite-recovery-order",
+                    "native_message_id": kwargs["native_message_id"],
+                    "text": text,
+                    "content": {"result_footer": kwargs["result_footer"]},
+                    "metadata": kwargs["metadata"],
+                }
+                accepted_by_native_id[kwargs["native_message_id"]] = message
+                accepted.append(message)
+                return message
+
+            class _RunStore:
+                def get_run(self, _run_id):
+                    return {"status": "running"}
+
+                def record_run_output(self, run_id, **kwargs):
+                    run_settlements.append((run_id, kwargs["text"]))
+
+                def close(self):
+                    pass
+
+            with (
+                patch.object(
+                    message_dispatcher_module,
+                    "SQLiteBackgroundTaskStore",
+                    return_value=_RunStore(),
+                ),
+                patch.object(
+                    message_dispatcher_module,
+                    "agent_message_exists",
+                    side_effect=lambda _context, identity: accepted_by_native_id.get(
+                        identity
+                    ),
+                ),
+                patch.object(
+                    message_dispatcher_module,
+                    "persist_agent_message",
+                    side_effect=persist_message,
+                ),
+                patch(
+                    "core.scheduled_tasks.resolve_session_id_target",
+                    return_value=SimpleNamespace(
+                        session_key=SimpleNamespace(platform="slack"),
+                        agent_name="claude",
+                    ),
+                ),
+            ):
+                await service._drain_recovered_activity_outputs()
+                await service._drain_recovered_activity_outputs()
+
+            self.assertEqual(
+                controller.im_client.sent,
+                [("C123", None, "Canonical live batch summary")],
+            )
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual(
+                accepted[0]["native_message_id"],
+                live_output.native_message_id(context),
+            )
+            self.assertEqual(
+                accepted[0]["metadata"]["activity_ids"],
+                ["activity-b", "activity-a"],
+            )
+            self.assertEqual(
+                accepted[0]["metadata"]["run_ids"],
+                ["run-b", "run-a"],
+            )
+            self.assertEqual(
+                run_settlements,
+                [
+                    ("run-b", "Canonical live batch summary"),
+                    ("run-a", "Canonical live batch summary"),
+                ],
+            )
+            self.assertFalse(
+                recovered.has_completed_output(
+                    "claude",
+                    "runtime-sqlite-recovery-order",
+                )
+            )
+            self.assertEqual(activity_store.list_activities(), [])
+            engine.dispose()
+
+    async def test_silent_recovered_batch_settles_every_linked_run(self):
+        from core.scheduled_tasks import ScheduledTaskService
+
+        class _ActivityStore:
+            def __init__(self):
+                self.records = {}
+
+            def upsert_activity(self, activity, *, phase):
+                self.records[activity["id"]] = {
+                    "activity": dict(activity),
+                    "phase": phase,
+                }
+
+            def upsert_activities(self, activities, *, phase):
+                for activity in activities:
+                    self.upsert_activity(activity, phase=phase)
+
+            def delete_activity(self, *, activity_id, **_kwargs):
+                self.records.pop(activity_id, None)
+
+            def list_activities(self):
+                return list(self.records.values())
+
+        activity_store = _ActivityStore()
+        original = SessionActivityRegistry(activity_store)
+        for activity_id, run_id in (
+            ("activity-a", "run-a"),
+            ("activity-b", "run-b"),
+        ):
+            original.start(
+                backend="claude",
+                runtime_key="runtime-silent-batch",
+                session_id="sess-silent-batch",
+                activity_id=activity_id,
+                kind="local_agent",
+                turn_id="turn-silent-batch",
+                run_id=run_id,
+            )
+            original.complete(
+                backend="claude",
+                runtime_key="runtime-silent-batch",
+                activity_id=activity_id,
+                status="completed",
+                metadata={"summary": ""},
+                expects_output=True,
+            )
+        original.claim_completed_output_batch("claude", "runtime-silent-batch")
+
+        recovered = SessionActivityRegistry(activity_store)
+        deferred = []
+        settled = []
+
+        class _RequestStore:
+            def defer_run_terminal(self, run_id, *, terminal_status):
+                deferred.append((run_id, terminal_status))
+
+            def settle_deferred_run(self, run_id):
+                settled.append(run_id)
+                return True
+
+        service = object.__new__(ScheduledTaskService)
+        service.controller = SimpleNamespace(
+            agent_service=SimpleNamespace(activities=recovered)
+        )
+        service.request_store = _RequestStore()
+        service._drain_dirty = False
+        service._activity_registry = lambda: recovered
+        service._settle_pending_recovered_activity_terminals = lambda: None
+
+        await service._drain_recovered_activity_outputs()
+        await service._drain_recovered_activity_outputs()
+
+        self.assertCountEqual(
+            deferred,
+            [("run-a", "succeeded"), ("run-b", "succeeded")],
+        )
+        self.assertEqual(len(deferred), 2)
+        self.assertCountEqual(settled, ["run-a", "run-b"])
+        self.assertEqual(len(settled), 2)
+        self.assertFalse(
+            recovered.has_completed_output("claude", "runtime-silent-batch")
+        )
+        self.assertEqual(activity_store.list_activities(), [])
+
+    async def test_legacy_recovered_receipt_uses_accepted_message_without_resend(self):
+        from core.scheduled_tasks import ScheduledTaskService
+
+        class _ActivityStore:
+            def __init__(self):
+                self.records = {}
+
+            def upsert_activity(self, activity, *, phase):
+                self.records[activity["id"]] = {
+                    "activity": dict(activity),
+                    "phase": phase,
+                }
+
+            def delete_activity(self, *, activity_id, **_kwargs):
+                self.records.pop(activity_id, None)
+
+            def list_activities(self):
+                return list(self.records.values())
+
+        activity_store = _ActivityStore()
+        original = SessionActivityRegistry(activity_store)
+        original.start(
+            backend="claude",
+            runtime_key="runtime-legacy",
+            session_id="sess-legacy",
+            activity_id="activity-legacy",
+            kind="local_agent",
+            run_id="run-legacy",
+        )
+        original.complete(
+            backend="claude",
+            runtime_key="runtime-legacy",
+            activity_id="activity-legacy",
+            status="completed",
+            metadata={"summary": "Legacy accepted output"},
+            expects_output=True,
+        )
+
+        recovered = SessionActivityRegistry(activity_store)
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=recovered,
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        controller.emit_agent_message = dispatcher.emit_agent_message
+        service = object.__new__(ScheduledTaskService)
+        service.controller = controller
+        service._activity_registry = lambda: recovered
+        service._settle_pending_recovered_activity_terminals = lambda: None
+        service._build_context = AsyncMock(
+            return_value=MessageContext(
+                user_id="scheduled",
+                channel_id="C123",
+                platform="slack",
+            )
+        )
+        legacy_native_id = (
+            "agent-output:claude:run-legacy:"
+            "claude-task:runtime-legacy:activity-legacy:completion"
+        )
+        looked_up = []
+        run_settlements = []
+        accepted = {
+            "id": "accepted-legacy",
+            "type": "result",
+            "native_message_id": legacy_native_id,
+            "text": "Legacy accepted output",
+            "metadata": {
+                "activity_ids": ["activity-legacy"],
+                "run_ids": ["run-legacy"],
+            },
+        }
+
+        class _RunStore:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **_kwargs):
+                run_settlements.append(run_id)
+
+            def close(self):
+                pass
+
+        def find_accepted(_context, native_message_id):
+            looked_up.append(native_message_id)
+            return accepted if native_message_id == legacy_native_id else None
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_RunStore(),
+            ),
+            patch.object(
+                message_dispatcher_module,
+                "agent_message_exists",
+                side_effect=find_accepted,
+            ),
+            patch.object(message_dispatcher_module, "persist_agent_message") as persist,
+            patch(
+                "core.scheduled_tasks.resolve_session_id_target",
+                return_value=SimpleNamespace(
+                    session_key=SimpleNamespace(platform="slack"),
+                    agent_name="claude",
+                ),
+            ),
+        ):
+            await service._drain_recovered_activity_outputs()
+            await service._drain_recovered_activity_outputs()
+
+        self.assertEqual(controller.im_client.sent, [])
+        persist.assert_not_called()
+        self.assertEqual(looked_up[-1], legacy_native_id)
+        self.assertEqual(run_settlements, ["run-legacy"])
+        self.assertFalse(
+            recovered.has_completed_output("claude", "runtime-legacy")
+        )
+        self.assertEqual(activity_store.list_activities(), [])
+
+    async def test_incomplete_recovered_receipt_is_requeued_without_a_send(self):
+        from core.scheduled_tasks import ScheduledTaskService
+
+        class _ActivityStore:
+            def __init__(self):
+                self.records = {}
+
+            def upsert_activity(self, activity, *, phase):
+                self.records[activity["id"]] = {
+                    "activity": dict(activity),
+                    "phase": phase,
+                }
+
+            def upsert_activities(self, activities, *, phase):
+                for activity in activities:
+                    self.upsert_activity(activity, phase=phase)
+
+            def delete_activity(self, *, activity_id, **_kwargs):
+                self.records.pop(activity_id, None)
+
+            def list_activities(self):
+                return list(self.records.values())
+
+        activity_store = _ActivityStore()
+        original = SessionActivityRegistry(activity_store)
+        for activity_id, run_id in (
+            ("activity-a", "run-a"),
+            ("activity-b", "run-b"),
+        ):
+            original.start(
+                backend="claude",
+                runtime_key="runtime-incomplete-receipt",
+                session_id="sess-incomplete-receipt",
+                activity_id=activity_id,
+                kind="local_agent",
+                turn_id="turn-incomplete-receipt",
+                run_id=run_id,
+            )
+            original.complete(
+                backend="claude",
+                runtime_key="runtime-incomplete-receipt",
+                activity_id=activity_id,
+                status="completed",
+                metadata={"summary": f"summary for {activity_id}"},
+                expects_output=True,
+            )
+        original.claim_completed_output_batch(
+            "claude",
+            "runtime-incomplete-receipt",
+        )
+        activity_store.records.pop("activity-b")
+
+        recovered = SessionActivityRegistry(activity_store)
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=recovered,
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        controller.emit_agent_message = dispatcher.emit_agent_message
+        service = object.__new__(ScheduledTaskService)
+        service.controller = controller
+        service._activity_registry = lambda: recovered
+        service._build_context = AsyncMock(
+            return_value=MessageContext(
+                user_id="scheduled",
+                channel_id="C123",
+                platform="slack",
+            )
+        )
+        service._settle_pending_recovered_activity_terminals = lambda: None
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "agent_message_exists",
+                return_value=None,
+            ),
+            patch.object(message_dispatcher_module, "persist_agent_message") as persist,
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+            ) as run_store,
+            patch(
+                "core.scheduled_tasks.resolve_session_id_target",
+                return_value=SimpleNamespace(
+                    session_key=SimpleNamespace(platform="slack"),
+                    agent_name="claude",
+                ),
+            ),
+        ):
+            await service._drain_recovered_activity_outputs()
+
+        self.assertEqual(controller.im_client.sent, [])
+        persist.assert_not_called()
+        run_store.assert_not_called()
+        self.assertTrue(
+            recovered.has_completed_output("claude", "runtime-incomplete-receipt")
+        )
 
     async def test_batch_receipt_recovers_earlier_stale_member_without_redelivery(self):
         from core.scheduled_tasks import ScheduledTaskService

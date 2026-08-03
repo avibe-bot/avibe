@@ -347,6 +347,80 @@ def test_terminal_callback_is_not_durable_delivery_evidence():
     callback.assert_not_called()
 
 
+def test_terminal_evidence_requeues_only_for_local_settlement_retry():
+    callback = mock.Mock()
+    store = SimpleNamespace(
+        upsert_activity=mock.Mock(),
+        delete_activity=mock.Mock(),
+    )
+    registry = SessionActivityRegistry(store)
+    registry.set_output_settled_callback(callback)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+        run_id="run-1",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        expects_output=True,
+    )
+    claimed = registry.claim_completed_output("claude", "runtime-1")
+    assert claimed is not None
+    output = activity_completion_output(
+        claimed,
+        detached=True,
+        completes_turn=False,
+    )
+    settle_terminal = mock.Mock(side_effect=[False, True])
+
+    assert registry.settle_completed_output_batch(
+        output,
+        accepted_message_exists=False,
+        settlement_error=RuntimeError("run store unavailable"),
+        settle_terminal=settle_terminal,
+    ) is False
+    assert registry.requeue_completed_outputs([claimed]) == 0
+    assert registry.requeue_completed_output(claimed, recovered=True) is True
+
+    representative = registry.claim_completed_output(
+        "claude",
+        "runtime-1",
+        recovered_only=True,
+    )
+    assert representative is not None
+    retried = registry.claimed_completed_output_batch_for_output(
+        activity_completion_output(
+            representative,
+            detached=True,
+            completes_turn=False,
+        )
+    )
+    assert [activity.id for activity in retried] == ["task-1"]
+    retry_output = activity_completion_output(
+        retried[-1],
+        activities=retried,
+        detached=True,
+        completes_turn=False,
+    )
+    assert retry_output.metadata["activity_local_settlement_only"] is True
+    assert registry.settle_completed_output_batch(
+        retry_output,
+        accepted_message_exists=False,
+        settlement_error=RuntimeError("retry local settlement"),
+        settle_terminal=settle_terminal,
+    ) is True
+
+    assert settle_terminal.call_count == 2
+    callback.assert_called_once()
+    assert registry.has_completed_output("claude", "runtime-1") is False
+
+
 def test_activity_batch_receipt_is_stable_for_every_member_after_restart():
     registry = SessionActivityRegistry()
     for activity_id, run_id in (("task-a", "run-a"), ("task-b", "run-b")):
@@ -500,15 +574,12 @@ def test_partial_batch_binding_recovers_as_one_complete_retryable_batch():
         registry.claim_completed_output_batch("claude", "runtime-1")
 
     store.fail_second_binding = False
-    recovered = SessionActivityRegistry(store)
-    representative = recovered.claim_completed_output(
-        "claude",
-        "runtime-1",
-        recovered_only=True,
-    )
-    assert representative is not None
+    retried = registry.claim_completed_output_batch("claude", "runtime-1")
+    assert [activity.id for activity in retried] == ["task-a", "task-b"]
+    representative = retried[-1]
     output = activity_completion_output(
         representative,
+        activities=retried,
         detached=True,
         completes_turn=False,
     )
@@ -517,7 +588,7 @@ def test_partial_batch_binding_recovers_as_one_complete_retryable_batch():
     assert output.run_ids == ("run-a", "run-b")
     assert [
         activity.id
-        for activity in recovered.claimed_completed_output_batch_for_output(output)
+        for activity in registry.claimed_completed_output_batch_for_output(output)
     ] == ["task-a", "task-b"]
 
 
@@ -656,6 +727,59 @@ def test_single_recovery_claim_expands_a_persisted_output_batch():
             retried_output
         )
     ] == ["task-a", "task-b"]
+
+
+def test_recovery_marks_an_incomplete_persisted_output_batch_for_fail_closed_emit():
+    store = SimpleNamespace(
+        upsert_activity=mock.Mock(),
+        upsert_activities=mock.Mock(),
+        list_activities=mock.Mock(
+            return_value=[
+                {
+                    "phase": "awaiting_output",
+                    "activity": SessionActivity(
+                        id="task-a",
+                        backend="claude",
+                        runtime_key="runtime-1",
+                        session_id="ses-1",
+                        kind="background_task",
+                        status="completed",
+                        turn_id="turn-1",
+                        run_id="run-a",
+                        metadata={
+                            "summary": "must not send",
+                            "output_batch_id": "batch-1",
+                            "output_batch_activity_ids": ["task-a", "task-b"],
+                            "output_batch_run_ids": ["run-a", "run-b"],
+                        },
+                    ).to_dict(),
+                }
+            ]
+        ),
+    )
+    registry = SessionActivityRegistry(store)
+
+    representative = registry.claim_completed_output(
+        "claude",
+        "runtime-1",
+        recovered_only=True,
+    )
+    assert representative is not None
+    output = activity_completion_output(
+        representative,
+        detached=True,
+        completes_turn=False,
+    )
+    assert output.activity_ids == ("task-a", "task-b")
+    assert output.metadata["activity_batch_complete"] is False
+
+    assert registry.requeue_completed_output(representative, recovered=True)
+    assert registry.has_completed_output("claude", "runtime-1") is True
+    assert registry.claim_completed_output_batch(
+        "claude",
+        "runtime-1",
+        turn_ids={"different-turn"},
+    ) == []
 
 
 def test_requeued_bound_batch_does_not_absorb_later_same_turn_completion():
