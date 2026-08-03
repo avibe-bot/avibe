@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from core.message_output import MessageOutput
+from core.runtime_activation import RuntimeActivationIdentity, RuntimeActivationRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -235,9 +236,15 @@ def _legacy_activity_output_native_message_id(activity: SessionActivity) -> str:
 class SessionActivityRegistry:
     """One shared lifecycle owner for backend-native Activities."""
 
-    def __init__(self, store: Any = None) -> None:
+    def __init__(
+        self,
+        store: Any = None,
+        *,
+        activation_registry: RuntimeActivationRegistry | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._store = store
+        self._activation_registry = activation_registry
         self._output_settled_callback: Callable[[SessionActivity], None] | None = None
         self._active: dict[tuple[str, str, str], SessionActivity] = {}
         self._connections: dict[tuple[str, str], tuple[str | None, str]] = {}
@@ -434,49 +441,30 @@ class SessionActivityRegistry:
         turn_id: str | None = None,
         run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> SessionActivity:
-        key = self._key(backend, runtime_key, activity_id)
-        now = _now_iso()
-        with self._lock:
-            existing = self._active.get(key)
-            if existing is None:
-                activity = SessionActivity(
-                    id=str(activity_id),
-                    backend=str(backend),
-                    runtime_key=str(runtime_key),
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> SessionActivity | None:
+        def upsert() -> SessionActivity:
+            with self._lock:
+                return self._start_locked(
+                    backend=backend,
+                    runtime_key=runtime_key,
                     session_id=session_id,
-                    kind=str(kind),
+                    activity_id=activity_id,
+                    kind=kind,
                     description=description,
                     foreground=foreground,
                     detached_from_run=detached_from_run,
                     parent_activity_id=parent_activity_id,
                     turn_id=turn_id,
                     run_id=run_id,
-                    metadata=dict(metadata or {}),
-                    started_at=now,
-                    updated_at=now,
+                    metadata=metadata,
                 )
-            else:
-                merged = dict(existing.metadata)
-                merged.update(metadata or {})
-                activity = replace(
-                    existing,
-                    session_id=session_id or existing.session_id,
-                    kind=str(kind or existing.kind),
-                    status="running",
-                    description=description or existing.description,
-                    foreground=foreground,
-                    detached_from_run=detached_from_run,
-                    parent_activity_id=parent_activity_id or existing.parent_activity_id,
-                    turn_id=turn_id or existing.turn_id,
-                    run_id=run_id or existing.run_id,
-                    metadata=merged,
-                    updated_at=now,
-                    completed_at=None,
-                )
-            self._persist_activity(activity, phase="active")
-            self._active[key] = activity
-            return activity
+
+        return self._commit_active_upsert(
+            backend=backend,
+            activation_identity=activation_identity,
+            upsert=upsert,
+        )
 
     def progress(
         self,
@@ -487,24 +475,129 @@ class SessionActivityRegistry:
         activity_id: str,
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> SessionActivity | None:
+        def upsert() -> SessionActivity:
+            key = self._key(backend, runtime_key, activity_id)
+            with self._lock:
+                existing = self._active.get(key)
+                return self._start_locked(
+                    backend=backend,
+                    runtime_key=runtime_key,
+                    session_id=session_id or (existing.session_id if existing else None),
+                    activity_id=activity_id,
+                    kind=existing.kind if existing else "background_task",
+                    description=description or (existing.description if existing else None),
+                    foreground=existing.foreground if existing else False,
+                    detached_from_run=existing.detached_from_run if existing else False,
+                    parent_activity_id=existing.parent_activity_id if existing else None,
+                    turn_id=existing.turn_id if existing else None,
+                    run_id=existing.run_id if existing else None,
+                    metadata=metadata,
+                )
+
+        return self._commit_active_upsert(
+            backend=backend,
+            activation_identity=activation_identity,
+            upsert=upsert,
+        )
+
+    def _commit_active_upsert(
+        self,
+        *,
+        backend: str,
+        activation_identity: RuntimeActivationIdentity | None,
+        upsert: Callable[[], SessionActivity],
+    ) -> SessionActivity | None:
+        activation_registry = self._activation_registry
+        if activation_registry is None:
+            return upsert()
+        if activation_identity is None:
+            logger.error(
+                "Refusing active Activity upsert without runtime activation identity "
+                "for backend=%s",
+                backend,
+            )
+            return None
+        if activation_identity.backend != str(backend):
+            logger.error(
+                "Refusing active Activity upsert with mismatched runtime backend "
+                "activity=%s activation=%s",
+                backend,
+                activation_identity.backend,
+            )
+            return None
+        committed = activation_registry.commit_if_current(
+            activation_identity,
+            upsert,
+        )
+        if not committed.admitted:
+            logger.debug(
+                "Ignoring stale active Activity upsert for backend=%s resource=%s generation=%s",
+                activation_identity.backend,
+                activation_identity.resource_key,
+                activation_identity.generation,
+            )
+            return None
+        return committed.value
+
+    def _start_locked(
+        self,
+        *,
+        backend: str,
+        runtime_key: str,
+        session_id: str | None,
+        activity_id: str,
+        kind: str,
+        description: str | None,
+        foreground: bool,
+        detached_from_run: bool,
+        parent_activity_id: str | None,
+        turn_id: str | None,
+        run_id: str | None,
+        metadata: dict[str, Any] | None,
     ) -> SessionActivity:
         key = self._key(backend, runtime_key, activity_id)
-        with self._lock:
-            existing = self._active.get(key)
-        return self.start(
-            backend=backend,
-            runtime_key=runtime_key,
-            session_id=session_id or (existing.session_id if existing else None),
-            activity_id=activity_id,
-            kind=existing.kind if existing else "background_task",
-            description=description or (existing.description if existing else None),
-            foreground=existing.foreground if existing else False,
-            detached_from_run=existing.detached_from_run if existing else False,
-            parent_activity_id=existing.parent_activity_id if existing else None,
-            turn_id=existing.turn_id if existing else None,
-            run_id=existing.run_id if existing else None,
-            metadata=metadata,
-        )
+        now = _now_iso()
+        existing = self._active.get(key)
+        if existing is None:
+            activity = SessionActivity(
+                id=str(activity_id),
+                backend=str(backend),
+                runtime_key=str(runtime_key),
+                session_id=session_id,
+                kind=str(kind),
+                description=description,
+                foreground=foreground,
+                detached_from_run=detached_from_run,
+                parent_activity_id=parent_activity_id,
+                turn_id=turn_id,
+                run_id=run_id,
+                metadata=dict(metadata or {}),
+                started_at=now,
+                updated_at=now,
+            )
+        else:
+            merged = dict(existing.metadata)
+            merged.update(metadata or {})
+            activity = replace(
+                existing,
+                session_id=session_id or existing.session_id,
+                kind=str(kind or existing.kind),
+                status="running",
+                description=description or existing.description,
+                foreground=foreground,
+                detached_from_run=detached_from_run,
+                parent_activity_id=parent_activity_id or existing.parent_activity_id,
+                turn_id=turn_id or existing.turn_id,
+                run_id=run_id or existing.run_id,
+                metadata=merged,
+                updated_at=now,
+                completed_at=None,
+            )
+        self._persist_activity(activity, phase="active")
+        self._active[key] = activity
+        return activity
 
     def complete(
         self,
