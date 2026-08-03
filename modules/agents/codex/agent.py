@@ -278,6 +278,7 @@ class CodexAgent(BaseAgent):
                         await self._remove_ack_reaction(interrupted_request)
 
                 await self._refresh_thread_developer_instructions_if_needed(transport, request, thread_id)
+                self._bind_runtime_agent_session_id(request)
                 thread_id = await self._start_turn(transport, request, thread_id)
 
             except Exception as e:
@@ -298,6 +299,7 @@ class CodexAgent(BaseAgent):
                             transport = await self._get_or_create_transport(request.working_path, launch)
                         self._touch_transport_activity(request.working_path)
                         thread_id = await self._start_or_resume_thread(transport, request)
+                        self._bind_runtime_agent_session_id(request)
                         await self._start_turn(transport, request, thread_id)
                         return  # retry succeeded
                     except Exception as retry_err:
@@ -636,6 +638,14 @@ class CodexAgent(BaseAgent):
         self._session_locks.clear()
         logger.info("Stopped Codex runtime across %d transport(s)", len(transports))
 
+    def _bind_runtime_agent_session_id(self, request: AgentRequest) -> None:
+        setter = getattr(self._session_mgr, "set_agent_session_id", None)
+        if not callable(setter):
+            return
+        payload = getattr(request.context, "platform_specific", None) or {}
+        session_id = payload.get("agent_session_id") if isinstance(payload, dict) else None
+        setter(request.base_session_id, session_id)
+
     def _runtime_ownership_target_for_cwd(
         self,
         cwd: str,
@@ -644,6 +654,11 @@ class CodexAgent(BaseAgent):
         all_base_sessions = getattr(self._session_mgr, "all_base_sessions", None)
         get_cwd = getattr(self._session_mgr, "get_cwd", None)
         get_session_key = getattr(self._session_mgr, "get_session_key", None)
+        get_agent_session_id = getattr(
+            self._session_mgr,
+            "get_agent_session_id",
+            None,
+        )
         if not all(
             callable(method)
             for method in (
@@ -651,6 +666,7 @@ class CodexAgent(BaseAgent):
                 all_base_sessions,
                 get_cwd,
                 get_session_key,
+                get_agent_session_id,
             )
         ):
             return None
@@ -658,11 +674,15 @@ class CodexAgent(BaseAgent):
         bindings: list[RuntimeSessionBinding] = []
         for base_session_id in sessions_for_cwd(cwd):
             session_key = str(get_session_key(base_session_id) or "").strip()
+            agent_session_id = str(
+                get_agent_session_id(base_session_id) or ""
+            ).strip()
             bound_cwd = str(get_cwd(base_session_id) or "").strip()
-            if not session_key or bound_cwd != cwd:
+            if not session_key or not agent_session_id or bound_cwd != cwd:
                 return None
             bindings.append(
                 RuntimeSessionBinding(
+                    session_id=agent_session_id,
                     session_anchor=base_session_id,
                     workdir=cwd,
                     activity_runtime_keys=(f"{base_session_id}:{cwd}",),

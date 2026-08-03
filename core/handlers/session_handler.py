@@ -167,12 +167,14 @@ class SessionHandler(BaseHandler):
         *,
         working_path: str,
         fallback_session_key: str,
+        agent_session_id: Optional[str],
     ) -> None:
         """Attach the resolved Claude runtime keys to the connected client."""
         setattr(client, "_vibe_runtime_base_session_id", base_session_id)
         setattr(client, "_vibe_runtime_session_key", composite_key)
         setattr(client, "_vibe_runtime_workdir", working_path)
         setattr(client, "_vibe_runtime_fallback_session_key", fallback_session_key)
+        setattr(client, "_vibe_agent_session_id", str(agent_session_id or "").strip())
         self._attach_claude_runtime_activation(client, composite_key)
         if native_session_id:
             setattr(client, "_vibe_native_session_id", native_session_id)
@@ -334,6 +336,13 @@ class SessionHandler(BaseHandler):
             stored_claude_session_id,
             working_path=working_path,
             fallback_session_key=session_key,
+            agent_session_id=self.ensure_agent_session_id(
+                context,
+                session_key=session_key,
+                agent_name="claude",
+                session_anchor=base_session_id,
+                working_path=working_path,
+            ),
         )
         return client
 
@@ -406,6 +415,13 @@ class SessionHandler(BaseHandler):
             native_session_id,
             working_path=working_path,
             fallback_session_key=session_key,
+            agent_session_id=self.ensure_agent_session_id(
+                context,
+                session_key=session_key,
+                agent_name="claude",
+                session_anchor=base_session_id,
+                working_path=working_path,
+            ),
         )
         return client
 
@@ -1345,6 +1361,13 @@ class SessionHandler(BaseHandler):
             None if fork_session else stored_claude_session_id,
             working_path=working_path,
             fallback_session_key=session_key,
+            agent_session_id=self.ensure_agent_session_id(
+                context,
+                session_key=session_key,
+                agent_name="claude",
+                session_anchor=base_session_id,
+                working_path=working_path,
+            ),
         )
         self.claude_sessions[composite_key] = client
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")
@@ -1758,11 +1781,15 @@ class SessionHandler(BaseHandler):
         fallback_session_key = str(
             getattr(client, "_vibe_runtime_fallback_session_key", "") or ""
         ).strip()
+        agent_session_id = str(
+            getattr(client, "_vibe_agent_session_id", "") or ""
+        ).strip()
         runtime_key = str(
             getattr(client, "_vibe_runtime_session_key", "") or ""
         ).strip()
         if (
             not base_session_id
+            or not agent_session_id
             or not workdir
             or not fallback_session_key
             or runtime_key != composite_key
@@ -1806,6 +1833,7 @@ class SessionHandler(BaseHandler):
             resource_key=composite_key,
             bindings=(
                 RuntimeSessionBinding(
+                    session_id=agent_session_id,
                     session_anchor=base_session_id,
                     workdir=workdir,
                     activity_runtime_keys=(runtime_key,),
@@ -2133,6 +2161,7 @@ class SessionHandler(BaseHandler):
             client = self.claude_sessions.get(composite_key)
             if client is not None:
                 setattr(client, "_vibe_native_session_id", claude_session_id)
+                setattr(client, "_vibe_agent_session_id", str(agent_session_id or ""))
         return agent_session_id
 
     def ensure_agent_session_id(

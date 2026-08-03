@@ -62,6 +62,7 @@ _TERMINAL_RAW_RUN_STATUSES = (
 class RuntimeSessionBinding:
     """Exact adapter-provided durable identities for one runtime Session."""
 
+    session_id: str
     session_anchor: str
     workdir: str | None
     activity_runtime_keys: tuple[str, ...]
@@ -247,38 +248,50 @@ class RuntimeOwnershipProvider:
             # Lifecycle visibility and execution ownership are independent.
             # An archived Session may still have a Turn, Delivery, Activity, or
             # fallback Run whose native effects have not settled yet.
-            session_query = select(agent_sessions).where(
-                agent_sessions.c.agent_backend == backend,
+            binding_ids = tuple(
+                str(binding.session_id or "").strip() for binding in target.bindings
             )
-            if not target.include_all_backend_sessions:
-                predicates = [
-                    and_(
-                        agent_sessions.c.session_anchor == binding.session_anchor,
-                        (
-                            agent_sessions.c.workdir.is_(None)
-                            if binding.workdir is None
-                            else agent_sessions.c.workdir == binding.workdir
-                        ),
-                    )
-                    for binding in target.bindings
+            if any(not session_id for session_id in binding_ids):
+                raise ValueError("runtime binding requires an exact session_id")
+            if len(set(binding_ids)) != len(binding_ids):
+                raise ValueError("runtime bindings require unique session_ids")
+
+            bound_session_rows = (
+                [
+                    dict(row)
+                    for row in connection.execute(
+                        select(agent_sessions)
+                        .where(agent_sessions.c.id.in_(binding_ids))
+                        .order_by(agent_sessions.c.id)
+                    ).mappings()
                 ]
-                if not predicates:
-                    session_rows: list[dict[str, object]] = []
-                else:
-                    session_rows = [
-                        dict(row)
-                        for row in connection.execute(
-                            session_query.where(or_(*predicates)).order_by(
-                                agent_sessions.c.id
-                            )
-                        ).mappings()
-                    ]
-            else:
+                if binding_ids
+                else []
+            )
+            bound_session_by_id = {
+                str(row["id"]): row for row in bound_session_rows
+            }
+            for binding in target.bindings:
+                row = bound_session_by_id.get(binding.session_id)
+                if row is None:
+                    continue
+                if row.get("workdir") != binding.workdir:
+                    raise ValueError("runtime binding workdir does not match target")
+
+            if target.include_all_backend_sessions:
                 session_rows = [
                     dict(row)
                     for row in connection.execute(
-                        session_query.order_by(agent_sessions.c.id)
+                        select(agent_sessions)
+                        .where(agent_sessions.c.agent_backend == backend)
+                        .order_by(agent_sessions.c.id)
                     ).mappings()
+                ]
+            else:
+                session_rows = [
+                    row
+                    for row in bound_session_rows
+                    if str(row.get("agent_backend") or "") == backend
                 ]
 
             if self._after_first_read is not None:
@@ -588,17 +601,20 @@ class RuntimeOwnershipProvider:
         route_to_session: dict[str, str] = {}
         ambiguous_route_keys: set[str] = set()
         for binding in target.bindings:
-            matches = [
-                str(row["id"])
-                for row in session_rows
-                if str(row.get("session_anchor") or "") == binding.session_anchor
-                and row.get("workdir") == binding.workdir
-            ]
+            matched_session = (
+                binding.session_id if binding.session_id in session_by_id else None
+            )
             for route_key in binding.fallback_route_keys:
-                if len(matches) == 1:
-                    route_to_session[route_key] = matches[0]
-                elif len(matches) > 1:
+                existing = route_to_session.get(route_key)
+                if (
+                    matched_session is not None
+                    and existing is not None
+                    and existing != matched_session
+                ):
+                    route_to_session.pop(route_key, None)
                     ambiguous_route_keys.add(route_key)
+                elif matched_session is not None and route_key not in ambiguous_route_keys:
+                    route_to_session[route_key] = matched_session
         target_route_keys = {
             route_key
             for binding in target.bindings

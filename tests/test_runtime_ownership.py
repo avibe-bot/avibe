@@ -24,6 +24,7 @@ from modules.agents.codex.session import CodexSessionManager
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.service import AgentService
 from storage import message_deliveries as delivery_store
+from storage import workbench_sessions_service as workbench_sessions
 from storage.background import SQLiteBackgroundTaskStore
 from storage.db import create_sqlite_engine
 from storage.models import (
@@ -53,7 +54,6 @@ def _session(
     workdir: str,
     backend: str = "codex",
     hold: str = "open",
-    status: str = "active",
 ) -> None:
     conn.execute(
         agent_sessions.insert().values(
@@ -69,7 +69,7 @@ def _session(
             workdir=workdir,
             native_session_id="",
             title=None,
-            status=status,
+            status="active",
             visibility="foreground",
             pinned=0,
             agent_status="idle",
@@ -97,7 +97,7 @@ async def test_hfr_131_open_head_wakes_survives_reclaim_and_claims_exact_head(
 
     agent, _manager, stopped, wakes = _codex_reclaimer(
         engine,
-        [("base-a", "/work", "route:a")],
+        [("ses-a", "base-a", "/work", "route:a")],
     )
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("modules.agents.codex.agent.time.monotonic", lambda: 1000.0)
@@ -142,7 +142,7 @@ async def test_hfr_132_held_head_survives_reclaim_then_explicit_release_starts(
 
     agent, _manager, stopped, wakes = _codex_reclaimer(
         engine,
-        [("base-held", "/work", "route:held")],
+        [("ses-held", "base-held", "/work", "route:held")],
     )
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("modules.agents.codex.agent.time.monotonic", lambda: 1000.0)
@@ -177,7 +177,7 @@ async def test_hfr_137_new_pin_between_reclaimer_passes_wins_locked_check(
 
     agent, _manager, stopped, _wakes = _codex_reclaimer(
         engine,
-        [("base-a", "/work", "route:a")],
+        [("ses-a", "base-a", "/work", "route:a")],
     )
     lock = agent._transport_locks["/work"]
     await lock.acquire()
@@ -225,7 +225,7 @@ def test_hfr_141_repeated_wakes_do_not_refresh_progress_clocks(tmp_path: Path) -
         _delivery(conn, "delivery-a", "ses-a")
     agent, _manager, _stopped, wakes = _codex_reclaimer(
         engine,
-        [("base-a", "/work", "route:a")],
+        [("ses-a", "base-a", "/work", "route:a")],
     )
     agent._session_last_activity = {"base-a": 17.0}
     snapshot = agent._runtime_ownership_snapshot_for_cwd("/work")
@@ -264,11 +264,11 @@ async def test_hfr_146_shared_codex_target_and_claude_mapping_use_exact_bindings
         )
         _delivery(conn, "delivery-held", "ses-held")
 
-    agent, _manager, stopped, _wakes = _codex_reclaimer(
+    agent, manager, stopped, _wakes = _codex_reclaimer(
         engine,
         [
-            ("base-active", "/work", "route:active"),
-            ("base-held", "/work", "route:held"),
+            ("ses-active", "base-active", "/work", "route:active"),
+            ("ses-held", "base-held", "/work", "route:held"),
         ],
     )
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -278,6 +278,7 @@ async def test_hfr_146_shared_codex_target_and_claude_mapping_use_exact_bindings
     assert "base-held" not in agent._session_last_activity
 
     claude_client = SimpleNamespace(
+        _vibe_agent_session_id="ses-active",
         _vibe_runtime_base_session_id="base-active",
         _vibe_runtime_session_key="claude-resource-key",
         _vibe_runtime_workdir="/work",
@@ -293,8 +294,19 @@ async def test_hfr_146_shared_codex_target_and_claude_mapping_use_exact_bindings
     )
     assert target is not None
     assert target.resource_key == "claude-resource-key"
+    assert target.bindings[0].session_id == "ses-active"
     assert target.bindings[0].session_anchor == "base-active"
     assert target.bindings[0].workdir == "/work"
+    manager.set_agent_session_id("base-active", None)
+    assert agent._runtime_ownership_target_for_cwd("/work") is None
+    del claude_client._vibe_agent_session_id
+    assert (
+        handler._claude_runtime_ownership_target(
+            "claude-resource-key",
+            claude_client,
+        )
+        is None
+    )
     engine.dispose()
 
 
@@ -338,7 +350,8 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
         )
     )
     opencode._session_manager = SimpleNamespace(
-        list_all=lambda: {"base-a": ("native-a", "/work", "route:a")}
+        list_all=lambda: {"base-a": ("native-a", "/work", "route:a")},
+        get_agent_session_id=lambda _base: "ses-a",
     )
     opencode._active_requests = {}
     opencode.runtime_turn_keys = lambda: {"base-a:/work"}
@@ -352,8 +365,11 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
     assert target.include_all_backend_sessions
     assert target.maps_all_backend_activities
     assert target.maps_all_backend_fallback_runs
+    assert target.bindings[0].session_id == "ses-a"
     assert target.bindings[0].fallback_route_keys == ("route:a",)
     assert target.known_fallback_route_keys == ("route:a",)
+    opencode._session_manager.get_agent_session_id = lambda _base: None
+    assert opencode.runtime_ownership_snapshots() is None
 
 
 def _delivery(conn, delivery_id: str, session_id: str, state: str = "queued") -> None:
@@ -463,6 +479,7 @@ def _activity(
 
 def _target(
     *,
+    session_id: str = "ses-a",
     anchor: str = "base",
     workdir: str = "/work",
     backend: str = "codex",
@@ -476,6 +493,7 @@ def _target(
         resource_key=workdir,
         bindings=(
             RuntimeSessionBinding(
+                session_id=session_id,
                 session_anchor=anchor,
                 workdir=workdir,
                 activity_runtime_keys=(activity_key,),
@@ -487,7 +505,7 @@ def _target(
     )
 
 
-def _codex_reclaimer(engine, bindings: list[tuple[str, str, str]]):
+def _codex_reclaimer(engine, bindings: list[tuple[str, str, str, str]]):
     stopped: list[str] = []
     wakes: list[tuple[RuntimeWorkLane, ...]] = []
 
@@ -495,9 +513,10 @@ def _codex_reclaimer(engine, bindings: list[tuple[str, str, str]]):
         stopped.append("stop")
 
     manager = CodexSessionManager()
-    for base_session_id, cwd, session_key in bindings:
+    for agent_session_id, base_session_id, cwd, session_key in bindings:
         manager.set_cwd(base_session_id, cwd)
         manager.set_session_key(base_session_id, session_key)
+        manager.set_agent_session_id(base_session_id, agent_session_id)
     agent = object.__new__(CodexAgent)
     agent._transports = {"/work": SimpleNamespace(stop=stop_transport)}
     agent._transport_last_activity = {"/work": 0.0}
@@ -590,7 +609,7 @@ def test_hfr_138_exact_delivery_representation_supersedes_fallback_run(
 
 
 @pytest.mark.parametrize("turn_state", ["starting", "active"])
-def test_archived_session_live_turn_still_owns_runtime(
+def test_real_archived_session_live_turn_still_owns_runtime(
     tmp_path: Path,
     turn_state: str,
 ) -> None:
@@ -603,7 +622,6 @@ def test_archived_session_live_turn_still_owns_runtime(
             "ses-archived",
             anchor="base",
             workdir="/work",
-            status="archived",
         )
         _delivery(conn, "delivery-a", "ses-archived")
         claimed = delivery_store.claim_start_batch(
@@ -624,82 +642,93 @@ def test_archived_session_live_turn_still_owns_runtime(
                 runtime_turn_id="runtime-turn-a",
                 native_turn_id="native-turn-a",
             )
+        workbench_sessions.archive_session(conn, "ses-archived")
+        archived = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == "ses-archived")
+        ).mappings().one()
+        assert archived["status"] == "archived"
+        assert archived["session_anchor"] == "archived:ses-archived"
 
-    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(
+        _target(session_id="ses-archived")
+    )
     assert snapshot.disposition is SessionRuntimeDisposition.ACTIVE
     assert snapshot.sessions[0].turn_ids == ("turn-a",)
     engine.dispose()
 
 
-@pytest.mark.parametrize(
-    ("delivery_state", "expected"),
-    [
-        ("queued", SessionRuntimeDisposition.RUNNABLE),
-        ("claimed", SessionRuntimeDisposition.ACTIVE),
-        ("steering", SessionRuntimeDisposition.ACTIVE),
-    ],
-)
-def test_archived_session_unresolved_delivery_still_owns_runtime(
+def test_real_archived_session_unresolved_delivery_still_owns_runtime(
     tmp_path: Path,
-    delivery_state: str,
-    expected: SessionRuntimeDisposition,
 ) -> None:
     """Archival changes admission visibility, not unresolved Delivery ownership."""
 
-    engine = _engine(tmp_path, f"archived-delivery-{delivery_state}.sqlite")
+    engine = _engine(tmp_path, "archived-delivery.sqlite")
     with engine.begin() as conn:
-        _session(
+        _session(conn, "ses-archived", anchor="base", workdir="/work")
+        delivery_store.insert_delivery(
             conn,
-            "ses-archived",
-            anchor="base",
-            workdir="/work",
-            status="archived",
+            delivery_id="delivery-initial",
+            session_id="ses-archived",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses-archived",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="initial",
+            ),
+            dispatch_text="initial",
         )
-        _delivery(conn, "delivery-a", "ses-archived")
-        if delivery_state == "claimed":
-            delivery_store.claim_start_batch(
-                conn,
-                turn_id="turn-a",
-                session_id="ses-archived",
-                backend="codex",
-                deliveries=[delivery_store.get_delivery(conn, "delivery-a")],
-                dispatch_text="delivery-a",
-            )
-        elif delivery_state == "steering":
-            delivery_store.claim_start_batch(
-                conn,
-                turn_id="turn-a",
-                session_id="ses-archived",
-                backend="codex",
-                deliveries=[delivery_store.get_delivery(conn, "delivery-a")],
-                dispatch_text="delivery-a",
-            )
-            turn = delivery_store.get_turn(conn, "turn-a")
-            active_turn = delivery_store.bind_native_start(
-                conn,
-                "turn-a",
-                expected_version=int(turn["version"]),
-                runtime_key="base:/work",
-                runtime_turn_id="runtime-turn-a",
-                native_turn_id="native-turn-a",
-            )
-            assert active_turn is not None
-            _delivery(conn, "delivery-steer", "ses-archived")
-            steer = delivery_store.get_delivery(conn, "delivery-steer")
-            assert delivery_store.open_steer_attempt(
-                conn,
-                "delivery-steer",
-                expected_version=int(steer["version"]),
-                turn_id="turn-a",
-                attempt_id="steer-a",
-                expected_native_turn_id="native-turn-a",
-            )
+        claimed = delivery_store.claim_start_batch(
+            conn,
+            turn_id="turn-a",
+            session_id="ses-archived",
+            backend="codex",
+            deliveries=[delivery_store.get_delivery(conn, "delivery-initial")],
+            dispatch_text="initial",
+        )
+        turn = claimed["turn"]
+        active_turn = delivery_store.bind_native_start(
+            conn,
+            "turn-a",
+            expected_version=int(turn["version"]),
+            runtime_key="base:/work",
+            runtime_turn_id="runtime-turn-a",
+            native_turn_id="native-turn-a",
+        )
+        assert active_turn is not None
+        assert delivery_store.materialize_start_acceptance(
+            conn,
+            turn_id="turn-a",
+            evidence={"kind": "test"},
+        )
+        _delivery(conn, "delivery-steer", "ses-archived")
+        steer = delivery_store.get_delivery(conn, "delivery-steer")
+        assert delivery_store.open_steer_attempt(
+            conn,
+            "delivery-steer",
+            expected_version=int(steer["version"]),
+            turn_id="turn-a",
+            attempt_id="steer-a",
+            expected_native_turn_id="native-turn-a",
+        )
+        workbench_sessions.archive_session(conn, "ses-archived")
+        assert delivery_store.terminalize_turn(
+            conn,
+            "turn-a",
+            outcome="completed",
+            settled_by="test",
+            evidence_kind="test",
+        )["changed"]
 
-    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
-    assert snapshot.disposition is expected
-    assert "delivery-a" in snapshot.sessions[0].delivery_ids
-    if delivery_state == "steering":
-        assert "delivery-steer" in snapshot.sessions[0].delivery_ids
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(
+        _target(session_id="ses-archived")
+    )
+    assert snapshot.disposition is SessionRuntimeDisposition.TRANSITIONING
+    assert snapshot.sessions[0].delivery_ids == ("delivery-steer",)
+    assert snapshot.sessions[0].turn_ids == ()
     engine.dispose()
 
 
@@ -710,7 +739,7 @@ def test_archived_session_unresolved_delivery_still_owns_runtime(
         (123, SessionRuntimeDisposition.ACTIVE),
     ],
 )
-def test_archived_session_running_fallback_run_still_owns_runtime(
+def test_real_archived_session_running_fallback_run_still_owns_runtime(
     tmp_path: Path,
     pid: int | None,
     expected: SessionRuntimeDisposition,
@@ -724,7 +753,6 @@ def test_archived_session_running_fallback_run_still_owns_runtime(
             "ses-archived",
             anchor="base",
             workdir="/work",
-            status="archived",
         )
         _run(
             conn,
@@ -733,14 +761,17 @@ def test_archived_session_running_fallback_run_still_owns_runtime(
             session_id="ses-archived",
             pid=pid,
         )
+        workbench_sessions.archive_session(conn, "ses-archived")
 
-    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(
+        _target(session_id="ses-archived")
+    )
     assert snapshot.disposition is expected
     assert snapshot.sessions[0].fallback_run_ids == ("run-a",)
     engine.dispose()
 
 
-def test_archived_session_without_unresolved_owner_is_reclaimable(
+def test_real_archived_session_without_unresolved_owner_is_reclaimable(
     tmp_path: Path,
 ) -> None:
     """Archival alone is not ownership and terminal history never pins."""
@@ -752,7 +783,6 @@ def test_archived_session_without_unresolved_owner_is_reclaimable(
             "ses-archived",
             anchor="base",
             workdir="/work",
-            status="archived",
         )
         _run(
             conn,
@@ -761,11 +791,73 @@ def test_archived_session_without_unresolved_owner_is_reclaimable(
             session_id="ses-archived",
         )
         _delivery(conn, "delivery-terminal", "ses-archived", "retired")
+        workbench_sessions.archive_session(conn, "ses-archived")
 
-    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(
+        _target(session_id="ses-archived")
+    )
     assert snapshot.disposition is SessionRuntimeDisposition.RECLAIMABLE
     assert snapshot.sessions[0].fallback_run_ids == ()
     assert snapshot.sessions[0].delivery_ids == ()
+    engine.dispose()
+
+
+def test_unrelated_real_archived_session_does_not_pin_target(
+    tmp_path: Path,
+) -> None:
+    """Archived provenance maps only its exact pre-archive resource binding."""
+
+    engine = _engine(tmp_path, "unrelated-archived-owner.sqlite")
+    with engine.begin() as conn:
+        _session(conn, "ses-target", anchor="base", workdir="/work")
+        _session(conn, "ses-other", anchor="other", workdir="/work")
+        _delivery(conn, "delivery-other", "ses-other")
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id="turn-other",
+            session_id="ses-other",
+            backend="codex",
+            deliveries=[delivery_store.get_delivery(conn, "delivery-other")],
+            dispatch_text="other",
+        )
+        workbench_sessions.archive_session(conn, "ses-other")
+
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(
+        _target(session_id="ses-target")
+    )
+    assert snapshot.disposition is SessionRuntimeDisposition.RECLAIMABLE
+    assert [item.session_id for item in snapshot.sessions] == ["ses-target"]
+    engine.dispose()
+
+
+def test_reused_anchor_does_not_transfer_archived_runtime_ownership(
+    tmp_path: Path,
+) -> None:
+    """A replacement Session cannot inherit an archived row's native owner."""
+
+    engine = _engine(tmp_path, "reused-archived-anchor.sqlite")
+    with engine.begin() as conn:
+        _session(conn, "ses-old", anchor="base", workdir="/work")
+        _delivery(conn, "delivery-old", "ses-old")
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id="turn-old",
+            session_id="ses-old",
+            backend="codex",
+            deliveries=[delivery_store.get_delivery(conn, "delivery-old")],
+            dispatch_text="old",
+        )
+        workbench_sessions.archive_session(conn, "ses-old")
+        _session(conn, "ses-new", anchor="base", workdir="/work")
+
+    provider = RuntimeOwnershipProvider(engine)
+    old_snapshot = provider.snapshot(_target(session_id="ses-old"))
+    new_snapshot = provider.snapshot(_target(session_id="ses-new"))
+
+    assert old_snapshot.disposition is SessionRuntimeDisposition.ACTIVE
+    assert [item.session_id for item in old_snapshot.sessions] == ["ses-old"]
+    assert new_snapshot.disposition is SessionRuntimeDisposition.RECLAIMABLE
+    assert [item.session_id for item in new_snapshot.sessions] == ["ses-new"]
     engine.dispose()
 
 

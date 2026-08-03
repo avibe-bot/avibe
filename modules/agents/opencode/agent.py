@@ -588,27 +588,40 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         server = self._client_manager._server_manager
         if server is None:
             return ()
-        bindings = tuple(
-            RuntimeSessionBinding(
-                session_anchor=base_session_id,
-                workdir=working_path,
-                activity_runtime_keys=(f"{base_session_id}:{working_path}",),
-                fallback_route_keys=(session_key,),
-            )
-            for base_session_id, (
-                _native_session_id,
-                working_path,
-                session_key,
-            ) in self._session_manager.list_all().items()
-            if working_path and session_key
+        request_sessions = self._session_manager.list_all()
+        get_agent_session_id = getattr(
+            self._session_manager,
+            "get_agent_session_id",
+            None,
         )
-        if len(bindings) != len(self._session_manager.list_all()):
-            logger.error("OpenCode runtime ownership mapping is incomplete")
+        if request_sessions and not callable(get_agent_session_id):
+            logger.error("OpenCode durable Session ownership mapping is unavailable")
             return None
+        bindings: list[RuntimeSessionBinding] = []
+        for base_session_id, (
+            _native_session_id,
+            working_path,
+            session_key,
+        ) in request_sessions.items():
+            agent_session_id = str(
+                get_agent_session_id(base_session_id) or ""
+            ).strip()
+            if not agent_session_id or not working_path or not session_key:
+                logger.error("OpenCode runtime ownership mapping is incomplete")
+                return None
+            bindings.append(
+                RuntimeSessionBinding(
+                    session_id=agent_session_id,
+                    session_anchor=base_session_id,
+                    workdir=working_path,
+                    activity_runtime_keys=(f"{base_session_id}:{working_path}",),
+                    fallback_route_keys=(session_key,),
+                )
+            )
         target = RuntimeResourceTarget(
             backend="opencode",
             resource_key=server.base_url,
-            bindings=bindings,
+            bindings=tuple(bindings),
             known_activity_runtime_keys=tuple(sorted(self.runtime_turn_keys())),
             known_fallback_route_keys=tuple(
                 sorted(
@@ -617,7 +630,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         _native_session_id,
                         _working_path,
                         session_key,
-                    ) in self._session_manager.list_all().values()
+                    ) in request_sessions.values()
                 )
             ),
             include_all_backend_sessions=True,
@@ -851,6 +864,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             session_id,
             request.working_path,
             request.session_key,
+        )
+        self._session_manager.set_agent_session_id(
+            request.base_session_id,
+            _target_agent_session_id(request),
         )
 
         self._session_manager.mark_initialized(session_id)
@@ -1721,6 +1738,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 poll_info.working_path,
                 restored_session_key_from_poll_info(poll_info),
             )
+            set_agent_session_id = getattr(
+                self._session_manager,
+                "set_agent_session_id",
+                None,
+            )
+            if callable(set_agent_session_id):
+                set_agent_session_id(
+                    poll_info.base_session_id,
+                    self._workbench_session_id_for_poll(poll_info),
+                )
         for session_id in stale_poll_ids:
             self.sessions.remove_active_poll(session_id)
 
