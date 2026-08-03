@@ -360,6 +360,39 @@ class ClaudeAgent(BaseAgent):
         identities = [identity for identity in candidates if identity is not None]
         return identities[0] if len(identities) == 1 else None
 
+    def runtime_activation_identity_for_session_binding(
+        self,
+        *,
+        session_anchor: str,
+        workdir: str | None,
+    ) -> RuntimeActivationIdentity | None:
+        normalized_anchor = str(session_anchor or "").strip()
+        normalized_workdir = str(workdir or "").strip()
+        if not normalized_anchor:
+            return None
+        anchor_clients = [
+            client
+            for client in self.claude_sessions.values()
+            if str(
+                getattr(client, "_vibe_runtime_base_session_id", "") or ""
+            ).strip()
+            == normalized_anchor
+        ]
+        if not anchor_clients:
+            return None
+        exact_clients = [
+            client
+            for client in anchor_clients
+            if str(getattr(client, "_vibe_runtime_workdir", "") or "").strip()
+            == normalized_workdir
+        ]
+        if len(exact_clients) != 1:
+            raise ValueError("Claude Session binding is ambiguous or changed workdir")
+        identity = self._client_activation_identity(exact_clients[0])
+        if identity is None:
+            raise ValueError("Claude runtime generation is not attached")
+        return identity
+
     def record_runtime_turn_start(
         self,
         *,

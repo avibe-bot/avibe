@@ -18,9 +18,10 @@ import asyncio
 import json
 import logging
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Optional
 
 from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
@@ -60,6 +61,10 @@ from storage.models import (
 )
 from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
+from core.runtime_activation import (
+    RuntimeActivationIdentity,
+    RuntimeActivationResolution,
+)
 from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
@@ -459,6 +464,18 @@ class TurnSubmissionResult:
     target_was_busy: bool = False
     delivery_status: str | None = None
     delivery_owner_transferred: bool = False
+
+
+@dataclass(frozen=True)
+class _RuntimeStartOwner:
+    """Proof that one exact Session runtime boundary owns this transaction."""
+
+    session_id: str
+    backend: str
+    session_anchor: str
+    workdir: str | None
+    admitted: bool
+    identity: RuntimeActivationIdentity | None = None
 
 
 class SessionTurnManager:
@@ -931,6 +948,122 @@ class SessionTurnManager:
             raise RuntimeError(f"Session {session_id} has no resolved backend")
         return backend, resolved
 
+    @contextmanager
+    def _runtime_start_owner(
+        self,
+        session_id: str,
+        backend: str,
+    ) -> Iterator[_RuntimeStartOwner]:
+        """Hold the exact runtime generation through the owning SQLite commit."""
+
+        with self._sqlite_engine().connect() as conn:
+            binding = conn.execute(
+                select(
+                    agent_sessions.c.agent_backend,
+                    agent_sessions.c.session_anchor,
+                    agent_sessions.c.workdir,
+                ).where(agent_sessions.c.id == session_id)
+            ).mappings().one_or_none()
+        durable_backend = str((binding or {}).get("agent_backend") or "").strip()
+        requested_backend = str(backend or "").strip()
+        session_anchor = str((binding or {}).get("session_anchor") or "").strip()
+        workdir = (binding or {}).get("workdir")
+        if binding is None or not durable_backend or not session_anchor:
+            logger.warning(
+                "Refusing runtime start with incomplete durable Session binding: "
+                "session=%s",
+                session_id,
+            )
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend or requested_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=False,
+            )
+            return
+        if requested_backend and durable_backend != requested_backend:
+            logger.warning(
+                "Refusing runtime start against stale Session backend: "
+                "session=%s requested=%s durable=%s",
+                session_id,
+                requested_backend,
+                durable_backend,
+            )
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=False,
+            )
+            return
+        service = getattr(self.controller, "agent_service", None)
+        registry = getattr(service, "activation_registry", None) or getattr(
+            self.controller,
+            "runtime_activation",
+            None,
+        )
+        resolve = getattr(
+            service,
+            "runtime_activation_identity_for_session_binding",
+            None,
+        )
+        resolution = RuntimeActivationResolution(authoritative=False)
+        if callable(resolve):
+            resolved = resolve(
+                durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+            )
+            if isinstance(resolved, RuntimeActivationResolution):
+                resolution = resolved
+        if registry is not None and not resolution.authoritative:
+            logger.warning(
+                "Refusing runtime start after inconclusive activation lookup: "
+                "session=%s backend=%s",
+                session_id,
+                durable_backend,
+            )
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=False,
+            )
+            return
+        identity = resolution.identity
+        if registry is None or identity is None:
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=True,
+            )
+            return
+        hold = getattr(registry, "hold_if_current", None)
+        if not callable(hold):
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=False,
+                identity=identity,
+            )
+            return
+        with hold(identity) as admitted:
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=bool(admitted),
+                identity=identity,
+            )
+
     @staticmethod
     def _delivery_snapshot(request: DeliveryRequest) -> dict[str, Any]:
         if request.content is None:
@@ -1006,18 +1139,56 @@ class SessionTurnManager:
             turn_id or None,
         )
 
-    @staticmethod
+    @classmethod
     def _claim_start_batch(
+        cls,
         conn: Connection,
         *,
+        owner: _RuntimeStartOwner,
         turn_id: str,
         session_id: str,
         backend: str,
         deliveries: list[dict[str, Any]],
         dispatch_text: str,
         attempt_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Claim a Delivery batch and all linked Agent Runs atomically."""
+
+        if owner.session_id != session_id:
+            raise RuntimeError("runtime start owner does not match Delivery claim target")
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_backend,
+                agent_sessions.c.session_anchor,
+                agent_sessions.c.workdir,
+            ).where(agent_sessions.c.id == session_id)
+        ).mappings().one_or_none()
+        binding_current = bool(
+            binding is not None
+            and str(binding["agent_backend"] or "").strip() == owner.backend
+            and owner.backend == str(backend or "").strip()
+            and str(binding["session_anchor"] or "").strip() == owner.session_anchor
+            and binding["workdir"] == owner.workdir
+        )
+        if not owner.admitted or not binding_current:
+            for delivery in deliveries:
+                if delivery.get("state") != "reserved":
+                    continue
+                queued = delivery_store.cas_delivery(
+                    conn,
+                    str(delivery["id"]),
+                    expected_version=int(delivery["version"]),
+                    expected_states=("reserved",),
+                    values={"priority": "p3", "state": "queued"},
+                    history_event={
+                        "kind": "admission",
+                        "turn_id": turn_id,
+                        "outcome": "runtime_generation_retired_before_claim",
+                    },
+                )
+                if queued is None:
+                    raise RuntimeError("runtime-rejected Delivery queue fallback lost")
+            return None
 
         run_ids = list(
             dict.fromkeys(
@@ -1102,6 +1273,7 @@ class SessionTurnManager:
         self,
         conn: Connection,
         *,
+        owner: _RuntimeStartOwner,
         session_id: str,
         backend: str,
         expected_head_id: str | None = None,
@@ -1153,15 +1325,16 @@ class SessionTurnManager:
                     )
                 continue
             turn_id = delivery_store.new_turn_id()
-            self._claim_start_batch(
+            claimed = self._claim_start_batch(
                 conn,
+                owner=owner,
                 turn_id=turn_id,
                 session_id=session_id,
                 backend=backend,
                 deliveries=delivery_rows,
                 dispatch_text=_segment_dispatch_text(segment_payloads),
             )
-            return turn_id
+            return turn_id if claimed is not None else None
 
     def _hydrate_delivery_context(
         self,
@@ -1481,7 +1654,7 @@ class SessionTurnManager:
         start_context: MessageContext | None = None
         delivery: dict[str, Any]
         backend_draining = backend in self._draining_backends
-        with self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == request.session_id)
@@ -1556,13 +1729,16 @@ class SessionTurnManager:
                     turn_id = delivery_store.new_turn_id()
                     claimed_batch = self._claim_start_batch(
                         conn,
+                        owner=start_owner,
                         turn_id=turn_id,
                         session_id=request.session_id,
                         backend=backend,
                         deliveries=[row for row in segment if row is not None],
                         dispatch_text=_segment_dispatch_text(segment_payloads),
                     )
-                    for claimed in claimed_batch["deliveries"]:
+                    if claimed_batch is None:
+                        turn_id = None
+                    for claimed in (claimed_batch or {}).get("deliveries", []):
                         if str(claimed["id"]) == str(delivery["id"]):
                             delivery = claimed
                             delivery_turn_id = turn_id
@@ -1607,7 +1783,7 @@ class SessionTurnManager:
         turn_id: str | None = None
         steer_backend = backend
         delivery: dict[str, Any]
-        with self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == request.session_id)
@@ -1698,13 +1874,18 @@ class SessionTurnManager:
                     ) or delivery
                 claimed_batch = self._claim_start_batch(
                     conn,
+                    owner=start_owner,
                     turn_id=turn_id,
                     session_id=request.session_id,
                     backend=backend,
                     deliveries=[delivery],
                     dispatch_text=str(delivery.get("dispatch_text") or ""),
                 )
-                delivery = claimed_batch["deliveries"][0]
+                if claimed_batch is None:
+                    delivery = delivery_store.get_delivery(conn, str(delivery["id"])) or delivery
+                    turn_id = None
+                else:
+                    delivery = claimed_batch["deliveries"][0]
             elif observed_id and str(current["id"]) == observed_id:
                 attempt_id = delivery_store.new_attempt_id()
                 pending_rows = delivery_store.open_pending_steer_batch(
@@ -1795,7 +1976,7 @@ class SessionTurnManager:
         steer_backend = backend
         claimed_rows: list[dict[str, Any]] = []
         dispatch_text = _segment_dispatch_text(observed_segment_payloads)
-        with self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
@@ -1836,13 +2017,17 @@ class SessionTurnManager:
                 turn_id = delivery_store.new_turn_id()
                 claimed = self._claim_start_batch(
                     conn,
+                    owner=start_owner,
                     turn_id=turn_id,
                     session_id=session_id,
                     backend=backend,
                     deliveries=delivery_rows,
                     dispatch_text=dispatch_text,
                 )
-                claimed_rows = claimed["deliveries"]
+                if claimed is None:
+                    turn_id = None
+                else:
+                    claimed_rows = claimed["deliveries"]
             elif any(
                 self._delivery_has_attachment_references(row)
                 for row in delivery_rows
@@ -2105,7 +2290,7 @@ class SessionTurnManager:
         interrupt_target_id: str | None = None
         should_interrupt = False
         joined = False
-        with self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             session_status = conn.execute(
                 select(agent_sessions.c.status).where(
@@ -2153,14 +2338,17 @@ class SessionTurnManager:
                 )
                 delivery_id = str(delivery["id"])
                 successor_id = delivery_store.new_turn_id()
-                self._claim_start_batch(
+                claimed = self._claim_start_batch(
                     conn,
+                    owner=start_owner,
                     turn_id=successor_id,
                     session_id=request.session_id,
                     backend=backend,
                     deliveries=[delivery],
                     dispatch_text=str(delivery.get("dispatch_text") or ""),
                 )
+                if claimed is None:
+                    successor_id = None
             else:
                 interrupt_target_id = current_id
                 delivery = None
@@ -2342,6 +2530,8 @@ class SessionTurnManager:
                 str(delivery_id),
                 attempted_turn_id=successor_id,
             )
+        if current is None and delivery_id:
+            return self._committed_delivery_result(delivery_id)
         if joined:
             return DeliveryResult(
                 delivery_id,
@@ -2881,8 +3071,7 @@ class SessionTurnManager:
         expected_head_version: int | None = None,
     ) -> bool:
         turn_id: str | None = None
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
+        with self._sqlite_engine().connect() as conn:
             backend = str(
                 conn.execute(
                     select(agent_sessions.c.agent_backend).where(
@@ -2891,8 +3080,10 @@ class SessionTurnManager:
                 ).scalar_one_or_none()
                 or ""
             ).strip()
-            if not backend:
-                raise RuntimeError(f"Session {session_id} has no resolved backend")
+        if not backend:
+            raise RuntimeError(f"Session {session_id} has no resolved backend")
+        with self._runtime_start_owner(session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
             if backend in self._draining_backends:
                 self._deferred_restart_sessions.setdefault(backend, set()).add(
                     session_id
@@ -2900,6 +3091,7 @@ class SessionTurnManager:
                 return False
             turn_id = self._claim_fifo_batch_in_transaction(
                 conn,
+                owner=start_owner,
                 session_id=session_id,
                 backend=backend,
                 expected_head_id=expected_head_id,
@@ -2960,7 +3152,13 @@ class SessionTurnManager:
         unknown_start_exhausted = False
         unknown_start_run_ids: list[str] = []
         forced_retire_ids = retire_unwritten_delivery_ids or set()
-        with self._sqlite_engine().begin() as conn:
+        start_deferred = False
+        linked_activation_deferred = False
+        with self._sqlite_engine().connect() as conn:
+            observed_turn = delivery_store.get_turn(conn, turn_id)
+        owner_session_id = str((observed_turn or {}).get("session_id") or "")
+        owner_backend = str((observed_turn or {}).get("backend") or "")
+        with self._runtime_start_owner(owner_session_id, owner_backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, turn_id)
             if (
@@ -3230,13 +3428,14 @@ class SessionTurnManager:
                                 )
                                 started = self._activate_linked_waiting_successor(
                                     conn,
+                                    owner=start_owner,
                                     predecessor=terminal_predecessor,
                                 )
                                 if started is None:
-                                    raise RuntimeError(
-                                        "P0 successor claim lost after terminal proof"
-                                    )
-                                claimed_successor = successor_turn_id
+                                    start_deferred = True
+                                    linked_activation_deferred = True
+                                else:
+                                    claimed_successor = successor_turn_id
                             else:
                                 deferred = self._write_terminal_snapshot(
                                     conn,
@@ -3283,8 +3482,9 @@ class SessionTurnManager:
                                 "unknown start recovery lost its replayable Delivery batch"
                             )
                         claimed_successor = delivery_store.new_turn_id()
-                        self._claim_start_batch(
+                        claimed = self._claim_start_batch(
                             conn,
+                            owner=start_owner,
                             turn_id=claimed_successor,
                             session_id=session_id,
                             backend=str(turn["backend"]),
@@ -3294,6 +3494,9 @@ class SessionTurnManager:
                                 + str(turn.get("dispatch_text") or "")
                             ),
                         )
+                        if claimed is None:
+                            claimed_successor = None
+                            start_deferred = True
                     if (
                         claimed_successor is None
                         and resume_successors
@@ -3302,16 +3505,27 @@ class SessionTurnManager:
                     ):
                         claimed_successor = self._claim_fifo_batch_in_transaction(
                             conn,
+                            owner=start_owner,
                             session_id=session_id,
                             backend=str(turn["backend"]),
                         )
+                        if (
+                            claimed_successor is None
+                            and delivery_store.claimable_fifo_head(conn, session_id)
+                            is not None
+                        ):
+                            start_deferred = True
                     latest_turn = delivery_store.get_turn(conn, turn_id)
-                    if latest_turn is not None and latest_turn.get("control_state") in {
+                    if (
+                        not linked_activation_deferred
+                        and latest_turn is not None
+                        and latest_turn.get("control_state") in {
                         "pending",
                         "interrupting",
                         "waiting_terminal",
                         "reconciling",
-                    }:
+                        }
+                    ):
                         delivery_store.cas_turn(
                             conn,
                             turn_id,
@@ -3328,7 +3542,10 @@ class SessionTurnManager:
                         "changed": True,
                         "successor_turn_id": claimed_successor,
                         "delivery_id": materialized_id,
-                        "preserve_queue": delivery_store.queue_is_held(conn, session_id),
+                        "preserve_queue": (
+                            delivery_store.queue_is_held(conn, session_id)
+                            or start_deferred
+                        ),
                         "unknown_start_exhausted": unknown_start_exhausted,
                     }
                     terminal_run_ids = (
@@ -4761,6 +4978,7 @@ class SessionTurnManager:
     def _activate_linked_waiting_successor(
         conn: Connection,
         *,
+        owner: _RuntimeStartOwner,
         predecessor: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         """Claim the exact linked successor only behind a terminal winner."""
@@ -4792,6 +5010,23 @@ class SessionTurnManager:
             or delivery.get("turn_position") != 0
         ):
             return None
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_backend,
+                agent_sessions.c.session_anchor,
+                agent_sessions.c.workdir,
+            ).where(agent_sessions.c.id == str(successor["session_id"]))
+        ).mappings().one_or_none()
+        if (
+            owner.session_id != str(successor["session_id"])
+            or (owner.backend and owner.backend != str(successor["backend"]))
+            or not owner.admitted
+            or binding is None
+            or str(binding["agent_backend"] or "").strip() != owner.backend
+            or str(binding["session_anchor"] or "").strip() != owner.session_anchor
+            or binding["workdir"] != owner.workdir
+        ):
+            return None
         return delivery_store.activate_waiting_successor(
             conn,
             turn=successor,
@@ -4807,7 +5042,16 @@ class SessionTurnManager:
     ) -> str | None:
         """Start only the exact replacement linked from a settled control Turn."""
         start_attempt_id = ""
-        with self._sqlite_engine().begin() as conn:
+        with self._sqlite_engine().connect() as conn:
+            observed_terminal = delivery_store.get_turn(conn, terminal_turn_id)
+            observed_successor = delivery_store.get_turn(
+                conn,
+                str((observed_terminal or {}).get("control_successor_turn_id") or ""),
+            )
+        owner_backend = str(
+            (observed_successor or observed_terminal or {}).get("backend") or ""
+        )
+        with self._runtime_start_owner(session_id, owner_backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             terminal = delivery_store.get_turn(conn, terminal_turn_id)
             successor_id = str(
@@ -4901,6 +5145,7 @@ class SessionTurnManager:
             if successor["state"] == "waiting":
                 started = self._activate_linked_waiting_successor(
                     conn,
+                    owner=start_owner,
                     predecessor=terminal,
                 )
                 if started is None:
@@ -6212,7 +6457,8 @@ class SessionTurnManager:
         durable_turn_registered = False
         materialized_delivery_id: str | None = None
         if session_exists:
-            with engine.begin() as conn:
+            backend = self._context_backend(context)
+            with self._runtime_start_owner(session_id, backend) as start_owner, engine.begin() as conn:
                 reserve_write_lock(conn)
                 durable = delivery_store.get_turn(conn, turn_token)
                 if durable is None:
@@ -6267,14 +6513,17 @@ class SessionTurnManager:
                             "outcome": "backend_initiated",
                         },
                     )
-                    self._claim_start_batch(
+                    claimed = self._claim_start_batch(
                         conn,
+                        owner=start_owner,
                         turn_id=turn_token,
                         session_id=session_id,
-                        backend=self._context_backend(context),
+                        backend=backend,
                         deliveries=[delivery],
                         dispatch_text="",
                     )
+                    if claimed is None:
+                        return False
                     durable = delivery_store.get_turn(conn, turn_token)
                 if durable is None:
                     return False

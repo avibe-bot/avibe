@@ -6,7 +6,11 @@ from typing import Any, Callable, Dict, Optional
 
 from core.session_activities import SessionActivityRegistry
 from core.message_output import terminal_output_for, terminal_turn_output
-from core.runtime_activation import RuntimeActivationIdentity, RuntimeActivationRegistry
+from core.runtime_activation import (
+    RuntimeActivationIdentity,
+    RuntimeActivationRegistry,
+    RuntimeActivationResolution,
+)
 
 from .base import (
     AGENT_RUNTIME_TURN_KEY,
@@ -95,6 +99,36 @@ class AgentService:
             )
             return None
 
+    def runtime_activation_identity_for_session_binding(
+        self,
+        backend: str,
+        *,
+        session_anchor: str,
+        workdir: str | None,
+    ) -> RuntimeActivationResolution:
+        """Resolve one exact disposable resource from durable Session fields."""
+
+        agent = self.agents.get(str(backend or ""))
+        resolve = getattr(
+            agent,
+            "runtime_activation_identity_for_session_binding",
+            None,
+        )
+        if not callable(resolve):
+            return RuntimeActivationResolution(authoritative=False)
+        try:
+            return RuntimeActivationResolution(
+                authoritative=True,
+                identity=resolve(session_anchor=session_anchor, workdir=workdir),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to resolve runtime activation identity for durable "
+                "Session binding: backend=%s session_anchor=%s",
+                backend,
+                session_anchor,
+            )
+            return RuntimeActivationResolution(authoritative=False)
     async def prepare_backend_restart(self, backend: str) -> None:
         agent = self.agents.get(backend)
         prepare = getattr(agent, "prepare_runtime_restart", None)

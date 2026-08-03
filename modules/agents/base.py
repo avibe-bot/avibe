@@ -184,6 +184,20 @@ class BaseAgent(ABC):
 
         return None
 
+    def runtime_activation_identity_for_session_binding(
+        self,
+        *,
+        session_anchor: str,
+        workdir: str | None,
+    ) -> RuntimeActivationIdentity | None:
+        """Resolve the exact runtime generation for one durable Session binding.
+
+        The durable anchor and workdir are independent fields. Adapters must
+        compare them directly and must not reconstruct or parse composite keys.
+        """
+
+        return None
+
     def record_runtime_turn_start(
         self,
         *,

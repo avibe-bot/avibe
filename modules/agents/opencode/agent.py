@@ -22,6 +22,7 @@ from core.backend_failure import emit_backend_failure
 from core.message_output import stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.resource_governance import governor_from_controller
+from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
     RuntimeResourceTarget,
     RuntimeSessionBinding,
@@ -473,7 +474,82 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             restored_server = self._restored_poll_servers.get(current_task)
             if restored_server is not None:
                 return restored_server
-        return await self._client_manager.get_server()
+        server = await self._client_manager.get_server()
+        self._attach_server_activation(server)
+        return server
+
+    @staticmethod
+    def _server_activation_identity(
+        server: OpenCodeServerManager | None,
+    ) -> RuntimeActivationIdentity | None:
+        identity = getattr(server, "_vibe_runtime_activation_identity", None)
+        return identity if isinstance(identity, RuntimeActivationIdentity) else None
+
+    def _attach_server_activation(
+        self,
+        server: OpenCodeServerManager,
+    ) -> RuntimeActivationIdentity | None:
+        registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
+        if registry is None:
+            return None
+        existing = self._server_activation_identity(server)
+        if existing is not None and registry.is_current(existing):
+            return existing
+        identity = registry.attach(self.name, server.base_url)
+        setattr(server, "_vibe_runtime_activation_identity", identity)
+        set_retire = getattr(server, "set_runtime_activation_retire", None)
+        if callable(set_retire):
+            set_retire(
+                lambda force=False: self._retire_server_activation(
+                    server,
+                    force=force,
+                )
+            )
+        return identity
+
+    def _retire_server_activation(
+        self,
+        server: OpenCodeServerManager,
+        *,
+        force: bool = False,
+    ) -> bool:
+        registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
+        identity = self._server_activation_identity(server)
+        if registry is None or identity is None:
+            return True
+
+        def final_predicate() -> bool:
+            if force:
+                return True
+            snapshots = self.runtime_ownership_snapshots()
+            return bool(
+                snapshots is not None
+                and all(not snapshot.blocks_reclamation for snapshot in snapshots)
+            )
+
+        return bool(registry.retire_if_current(identity, final_predicate))
+
+    def runtime_activation_identity_for_request(
+        self,
+        request: Any,
+    ) -> RuntimeActivationIdentity | None:
+        del request
+        return self._server_activation_identity(self._client_manager._server_manager)
+
+    def runtime_activation_identity_for_session_binding(
+        self,
+        *,
+        session_anchor: str,
+        workdir: str | None,
+    ) -> RuntimeActivationIdentity | None:
+        normalized_anchor = str(session_anchor or "").strip()
+        normalized_workdir = str(workdir or "").strip()
+        if not normalized_anchor:
+            raise ValueError("OpenCode Session binding has no anchor")
+        active = self._session_manager.get_request_session(normalized_anchor)
+        if active is not None and str(active[1] or "").strip() != normalized_workdir:
+            raise ValueError("OpenCode Session binding changed workdir")
+        return self._server_activation_identity(self._client_manager._server_manager)
 
     def _idle_reconciliation_message(
         self,
@@ -690,6 +766,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         logical_turn_id = ""
         start_attempt_id = ""
         native_start_phase = "before_write"
+        activation_identity: RuntimeActivationIdentity | None = None
         try:
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
             turn_mode = getattr(model_hub_runtime, "turn_mode", None)
@@ -706,6 +783,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if callable(configure_overlay):
                 await configure_overlay(model_hub_overlay)
             await server.ensure_running()
+            activation_identity = self._attach_server_activation(server)
         except Exception as e:
             logger.error(f"Failed to start OpenCode server: {e}", exc_info=True)
             await emit_backend_failure(
@@ -977,7 +1055,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 ),
             )
             self._steering_states[request.base_session_id] = steer_state
-            self.mark_runtime_turn_started(request.context)
+            self.mark_runtime_turn_started(
+                request.context,
+                activation_identity=activation_identity,
+            )
             native_start_phase = "accepted"
 
             logger.info(

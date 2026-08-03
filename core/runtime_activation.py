@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import itertools
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Generic, TypeVar
+from typing import Callable, Generic, Iterator, TypeVar
 
 
 _T = TypeVar("_T")
@@ -36,6 +37,14 @@ class RuntimeActivationCommit(Generic[_T]):
 
     admitted: bool
     value: _T | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeActivationResolution:
+    """Tri-state exact-target lookup used by durable admission owners."""
+
+    authoritative: bool
+    identity: RuntimeActivationIdentity | None = None
 
 
 @dataclass
@@ -133,6 +142,25 @@ class RuntimeActivationRegistry:
             if not self._is_current_locked(key, identity):
                 return RuntimeActivationCommit(admitted=False)
             return RuntimeActivationCommit(admitted=True, value=commit())
+
+    @contextmanager
+    def hold_if_current(
+        self,
+        identity: RuntimeActivationIdentity,
+    ) -> Iterator[bool]:
+        """Hold one generation boundary across an externally owned commit.
+
+        SQLite commits only when its transaction context exits. This form lets
+        callers acquire the activation boundary before opening that transaction
+        and release it only after commit. A false value means cleanup already
+        retired or replaced the observed generation; callers may persist a
+        queued/waiting owner, but must not promote it to starting or active.
+        """
+
+        key = self._target_key(identity.backend, identity.resource_key)
+        boundary = self._boundary(key)
+        with boundary:
+            yield self._is_current_locked(key, identity)
 
     def retire_if_current(
         self,

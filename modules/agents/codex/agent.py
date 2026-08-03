@@ -770,6 +770,27 @@ class CodexAgent(BaseAgent):
                 cwd = str(metadata.get("session_workdir") or "").strip()
         return self._transport_activation_identity(self._transports.get(cwd)) if cwd else None
 
+    def runtime_activation_identity_for_session_binding(
+        self,
+        *,
+        session_anchor: str,
+        workdir: str | None,
+    ) -> RuntimeActivationIdentity | None:
+        normalized_anchor = str(session_anchor or "").strip()
+        normalized_workdir = str(workdir or "").strip()
+        if not normalized_anchor or not normalized_workdir:
+            return None
+        bound_workdir = str(self._session_mgr.get_cwd(normalized_anchor) or "").strip()
+        if bound_workdir and bound_workdir != normalized_workdir:
+            raise ValueError("Codex Session binding changed workdir")
+        transport = self._transports.get(normalized_workdir)
+        if transport is None:
+            return None
+        identity = self._transport_activation_identity(transport)
+        if identity is None:
+            raise ValueError("Codex runtime generation is not attached")
+        return identity
+
     def record_runtime_turn_start(
         self,
         *,

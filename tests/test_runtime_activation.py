@@ -7,11 +7,17 @@ from typing import Any
 
 import pytest
 
-from core.runtime_activation import RuntimeActivationCommit, RuntimeActivationRegistry
+from core.runtime_activation import (
+    RuntimeActivationCommit,
+    RuntimeActivationRegistry,
+    RuntimeActivationResolution,
+)
 from core.scheduled_tasks import ScheduledTaskService, TaskExecutionRequest
 from core.session_activities import SessionActivityRegistry
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AGENT_RUNTIME_TURN_TOKEN
 from modules.agents.claude_agent import ClaudeAgent
+from modules.agents.codex.agent import CodexAgent
+from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.service import AgentService
 
 
@@ -127,6 +133,112 @@ def test_replacement_generation_rejects_old_identity() -> None:
     assert old_commit_called is False
     assert current_result == RuntimeActivationCommit(admitted=True, value="started")
     assert registry.current("codex", "/workspace") == current_identity
+
+
+def test_backend_binding_resolvers_use_exact_anchor_and_workdir() -> None:
+    registry = RuntimeActivationRegistry()
+
+    claude_identity = registry.attach("claude", "anchor:/work")
+    claude_client = SimpleNamespace(
+        _vibe_runtime_activation_identity=claude_identity,
+        _vibe_runtime_base_session_id="anchor",
+        _vibe_runtime_workdir="/work",
+    )
+    claude = object.__new__(ClaudeAgent)
+    claude.claude_sessions = {"opaque-runtime-key": claude_client}
+    assert claude.runtime_activation_identity_for_session_binding(
+        session_anchor="anchor",
+        workdir="/work",
+    ) == claude_identity
+    assert claude.runtime_activation_identity_for_session_binding(
+        session_anchor="missing",
+        workdir=None,
+    ) is None
+    with pytest.raises(ValueError, match="changed workdir"):
+        claude.runtime_activation_identity_for_session_binding(
+            session_anchor="anchor",
+            workdir="/other",
+        )
+
+    codex_identity = registry.attach("codex", "/work")
+    codex_transport = SimpleNamespace(
+        _vibe_runtime_activation_identity=codex_identity,
+    )
+    codex = object.__new__(CodexAgent)
+    codex._transports = {"/work": codex_transport}
+    codex._session_mgr = SimpleNamespace(
+        get_cwd=lambda anchor: "/work" if anchor == "anchor" else None,
+    )
+    assert codex.runtime_activation_identity_for_session_binding(
+        session_anchor="anchor",
+        workdir="/work",
+    ) == codex_identity
+    with pytest.raises(ValueError, match="changed workdir"):
+        codex.runtime_activation_identity_for_session_binding(
+            session_anchor="anchor",
+            workdir="/other",
+        )
+
+
+def test_opencode_binding_resolver_returns_pre_prompt_shared_generation() -> None:
+    registry = RuntimeActivationRegistry()
+
+    class _Server:
+        base_url = "http://127.0.0.1:4096"
+
+        def set_runtime_activation_retire(self, callback) -> None:
+            self.retire_activation = callback
+
+    server = _Server()
+    opencode = object.__new__(OpenCodeAgent)
+    opencode.controller = SimpleNamespace(runtime_activation=registry)
+    opencode._client_manager = SimpleNamespace(_server_manager=server)
+    opencode._session_manager = SimpleNamespace(
+        get_request_session=lambda anchor: (
+            ("", "/work", "route") if anchor == "anchor" else None
+        )
+    )
+
+    identity = opencode._attach_server_activation(server)
+
+    assert identity is not None
+    assert opencode.runtime_activation_identity_for_request(SimpleNamespace()) == identity
+    assert opencode.runtime_activation_identity_for_session_binding(
+        session_anchor="anchor",
+        workdir="/work",
+    ) == identity
+    with pytest.raises(ValueError, match="changed workdir"):
+        opencode.runtime_activation_identity_for_session_binding(
+            session_anchor="anchor",
+            workdir="/other",
+        )
+
+    assert server.retire_activation(True)
+    replacement = opencode._attach_server_activation(server)
+    late_prompt_commit = registry.commit_if_current(identity, lambda: "accepted")
+
+    assert replacement is not None and replacement != identity
+    assert late_prompt_commit == RuntimeActivationCommit(admitted=False)
+    assert registry.is_current(replacement)
+
+
+def test_session_binding_lookup_failure_is_not_resource_absence() -> None:
+    service = object.__new__(AgentService)
+    service.agents = {
+        "codex": SimpleNamespace(
+            runtime_activation_identity_for_session_binding=lambda **_binding: (
+                (_ for _ in ()).throw(RuntimeError("lookup failed"))
+            )
+        )
+    }
+
+    resolution = service.runtime_activation_identity_for_session_binding(
+        "codex",
+        session_anchor="anchor",
+        workdir="/work",
+    )
+
+    assert resolution == RuntimeActivationResolution(authoritative=False)
 
 
 class _ActivityStore:

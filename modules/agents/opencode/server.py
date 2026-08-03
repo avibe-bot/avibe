@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 import threading
 from asyncio.subprocess import Process
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import aiohttp
 
@@ -114,6 +114,13 @@ class OpenCodeServerManager:
         self._model_hub_overlay_hash: Optional[str] = None
         self._model_hub_overlay_content: Optional[str] = None
         self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
+        self._runtime_activation_retire: Callable[[bool], bool] | None = None
+
+    def set_runtime_activation_retire(
+        self,
+        callback: Callable[[bool], bool],
+    ) -> None:
+        self._runtime_activation_retire = callback
 
     def _caller_context_path(self) -> str:
         return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
@@ -248,7 +255,13 @@ class OpenCodeServerManager:
                 return
             await self._close_http_session_locked()
 
-    async def _restart_for_auth_refresh_locked(self) -> None:
+    async def _restart_for_auth_refresh_locked(self, *, force: bool = False) -> None:
+        retire_activation = self._runtime_activation_retire
+        if callable(retire_activation) and not retire_activation(force):
+            self._auth_refresh_pending = True
+            raise RuntimeError(
+                "OpenCode runtime restart is blocked by a newly admitted owner"
+            )
         await self._close_http_session_locked()
 
         cleanup_port = self._auth_refresh_pending_port or self.port
@@ -302,7 +315,7 @@ class OpenCodeServerManager:
                     len(self._active_run_sessions),
                 )
                 return
-            await self._restart_for_auth_refresh_locked()
+            await self._restart_for_auth_refresh_locked(force=force)
 
     async def refresh_global_config(self) -> bool:
         """Ask a live OpenCode server to reload global opencode.json config.
@@ -1418,7 +1431,7 @@ class OpenCodeServerManager:
                     len(self._active_run_sessions),
                 )
                 return
-            await self._restart_for_auth_refresh_locked()
+            await self._restart_for_auth_refresh_locked(force=force)
 
     @classmethod
     def stop_instance_sync(cls) -> None:
