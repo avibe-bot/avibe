@@ -238,10 +238,23 @@ Every reclaimer pass follows one order:
 3. For `active`, `transitioning`, or `unknown`, skip reclamation.
 4. For `runnable`, `waiting`, or `reclaimable`, apply the existing idle grace
    rule without mutating Session, hold, queue, Delivery, or Run.
-5. Acquire the same backend runtime-generation mutation lock used by Turn start,
-   then read the snapshot again immediately before cleanup. A new exact owner or
-   replaced generation wins; a still-runnable row may outlive the reclaimed
-   runtime and later recreate it safely.
+5. Acquire the backend runtime-generation mutation lock shared by Turn start and
+   active-Activity admission, then read the snapshot again immediately before
+   cleanup. A new exact owner or replaced generation wins; a still-runnable row
+   may outlive the reclaimed runtime and later recreate it safely.
+
+Every backend path that can persist an Activity in `active` phase participates
+in that same target/generation interlock. The adapter maps the Activity runtime
+key to the disposable resource target, acquires the interlock before
+`SessionActivityRegistry.start()` or a progress upsert that could recreate a
+missing active row, and holds it through the Activity commit. If admission wins
+first, the reclaimer's locked snapshot observes the new owner. If cleanup wins
+first, it marks or detaches that exact generation while holding the interlock;
+the delayed receiver event must revalidate its observed generation and may not
+create an active Activity for the retired one. A stale event follows the
+existing exact backend/Run settlement path when it has an owner, otherwise it
+is ignored as stale telemetry. This adds no Activity state, durable fence, or
+terminal writer.
 
 The reclaimer does not wait for the request to finish. The wake is a hint; the
 `session_deliveries` lane later claims the exact FIFO head under the existing guarded
@@ -645,14 +658,22 @@ keeping a backend process alive forever.
    runnable members have been woken and the locked recheck still finds no live
    owner. Claude composite keys must be mapped by persisted anchor/workdir
    identity, not string-prefix guesses.
+   Inventory every backend receiver path that can persist or recreate an active
+   Activity as well. It must enter the same exact resource-target/generation
+   interlock before the Activity commit and revalidate the observed generation;
+   direct registry writes that can race cleanup are forbidden.
 4. Add the controller-owned `RuntimeWorkSupervisor` contract and register
    `SessionTurnManager` as the sole `session_deliveries` handler. Consult the
    provider in both passes of `evict_idle_sessions`. On a runnable Delivery,
    notify that lane but do not turn durable unclaimed work into an unbounded
    runtime pin; a fallback queued Run not yet represented by Delivery notifies
    `requests`. Recompute under the exact backend runtime-generation mutation
-   lock immediately before cleanup. A newly committed claim/Turn or replaced
-   generation wins; a still-runnable row survives runtime reclamation.
+   lock shared by Turn start and active-Activity admission immediately before
+   cleanup. A newly committed claim, Turn, active Activity, or replaced
+   generation wins; a still-runnable row survives runtime reclamation. The
+   reclaimer keeps the lock through generation detach/cleanup initiation so a
+   delayed old-generation receiver event cannot become a new durable pin after
+   the final snapshot.
    The lane itself uses separate bounded indexed queries for open-hold queued
    Sessions without live Turns and for unresolved Delivery/Turn fences,
    starting owners, and waiting successors. It invokes a manager entry guarded
@@ -709,7 +730,11 @@ keeping a backend process alive forever.
   orphan; a missing map fails closed;
 - `HFR-136`: a `watch_runtime` heartbeat sharing the same definition/session does not pin,
   while an execution-bearing watch Run does;
-- `HFR-137`: a pin admitted between eviction passes wins;
+- `HFR-137`: a Turn or active Activity admitted between eviction passes wins;
+  deterministic barriers cover both interlock orderings, including a
+  Session-less Activity. Admission-before-cleanup is visible in the locked
+  snapshot, while a delayed old-generation Activity event after cleanup cannot
+  recreate an active owner or escape the existing exact settlement path;
 - `HFR-138`: bare-Run to reserved-Delivery and Delivery to Turn ownership handoffs cannot
   disappear across a torn provider read;
 - `HFR-148`: fallback queued, pre-execution claimed, and execution-started Runs
