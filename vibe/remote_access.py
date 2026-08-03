@@ -1743,6 +1743,9 @@ def _start_rollback_replacement(pending: dict[str, Any]) -> bool:
 
 
 def _reconcile_pending_tail_rollback() -> None:
+    with _RECOVERY_LOCK:
+        if _RECOVERY_THREAD is not None:
+            return
     state = _read_state() or {}
     raw_pending = state.get("pending_tail_rollback")
     pending = _pending_tail_rollback()

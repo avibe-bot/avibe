@@ -119,3 +119,15 @@ scenarios:
     kind: lifecycle
     layer: scenario
     test: tests/test_tunnel_recovery.py::test_ra_tq_018_tail_candidate_must_pass_connector_error_gates
+  - id: RA-TQ-019
+    name: Live tail recovery retains ownership of its pending rollback marker
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_019_live_tail_recovery_owns_pending_rollback
+  - id: RA-TQ-020
+    name: Material request-failure reduction can accept a healthy candidate
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_tunnel_quality.py::test_ra_tq_020_request_path_candidate_accepts_material_failure_reduction

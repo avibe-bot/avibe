@@ -310,6 +310,8 @@ def request_path_is_better(active: dict[str, Any], candidate: dict[str, Any]) ->
         return False
     active_slow = float((active.get("slow_request_rate") or {}).get("over_1000_ms") or 0)
     candidate_slow = float((candidate.get("slow_request_rate") or {}).get("over_1000_ms") or 0)
+    active_failure = float(active.get("failure_rate") or 0)
+    candidate_failure = float(candidate.get("failure_rate") or 0)
     p95_improved = candidate_p95 <= active_p95 * 0.80
     tail_improved = (
         active_p99 > 0
@@ -320,7 +322,11 @@ def request_path_is_better(active: dict[str, Any], candidate: dict[str, Any]) ->
         active_slow >= 0.03
         and candidate_slow <= min(active_slow - 0.02, active_slow * 0.50)
     )
-    return p95_improved or tail_improved or slow_rate_improved
+    failure_rate_improved = (
+        active_failure >= 0.10
+        and candidate_failure <= min(active_failure - 0.05, active_failure * 0.50)
+    )
+    return p95_improved or tail_improved or slow_rate_improved or failure_rate_improved
 
 
 class QualityEvaluator:

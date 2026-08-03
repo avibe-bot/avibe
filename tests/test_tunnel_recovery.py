@@ -726,6 +726,46 @@ def test_ra_tq_017_restart_rolls_back_unverified_tail_candidate(monkeypatch, tmp
     assert results == [("failed", {"result_protocol": "quic"})]
 
 
+def test_ra_tq_019_live_tail_recovery_owns_pending_rollback(monkeypatch, tmp_path) -> None:
+    _, previous_pid, candidate_pid, _alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    state["active"] = remote_access._connector_record(
+        candidate_pid,
+        "http://127.0.0.1:29002",
+        stdout_path=remote_access._candidate_cloudflared_stdout_path(),
+        stderr_path=remote_access._candidate_cloudflared_stderr_path(),
+        requested_protocol="http2",
+    )
+    state["draining"] = None
+    state["pending_tail_rollback"] = {
+        "active_pid": candidate_pid,
+        "previous_protocol": "quic",
+    }
+    state["pid"] = candidate_pid
+    runtime.write_json(remote_access._state_path(), state)
+    remote_access._pid_path().write_text(str(candidate_pid), encoding="utf-8")
+    calls = []
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = object()
+    monkeypatch.setattr(
+        remote_access,
+        "_start_rollback_replacement",
+        lambda pending: calls.append(pending) or True,
+    )
+
+    try:
+        remote_access._reconcile_pending_tail_rollback()
+    finally:
+        with remote_access._RECOVERY_LOCK:
+            remote_access._RECOVERY_THREAD = None
+
+    current = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert current["active"]["pid"] == candidate_pid
+    assert current["pending_tail_rollback"]["active_pid"] == candidate_pid
+    assert previous_pid != candidate_pid
+    assert calls == []
+
+
 def test_restart_removes_candidate_recorded_only_in_pid_file(monkeypatch, tmp_path) -> None:
     _, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     remote_access._candidate_pid_path().write_text(str(candidate_pid), encoding="utf-8")

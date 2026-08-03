@@ -122,8 +122,9 @@ request-path comparison:
    promoted connector's availability, request-error, and packet-loss metrics.
    Accept only when those connector gates pass and either P95 improves by 20
    percent, P99 improves by 40 percent without P95 worsening by more than 25
-   percent, or the over-one-second rate is materially reduced. Maximum latency
-   is displayed but never decides a switch by itself.
+   percent, the over-one-second rate is materially reduced, or a failure rate
+   of at least 10 percent is reduced by at least half and five percentage
+   points. Maximum latency is displayed but never decides a switch by itself.
 6. When same-protocol reselection is not materially better and the mode is
    `auto`, repeat steps 2-5 with the opposite explicit protocol.
 7. If neither candidate is materially better, start a replacement using the
@@ -134,7 +135,10 @@ request-path comparison:
    modes never rewrite it.
 
 Promotion persists a local-only `pending_tail_rollback` transition before the
-old connector is drained. The marker is cleared only after the promoted route
+old connector is drained. The live recovery thread remains the sole owner of
+that marker while it is evaluating; lifecycle reconciliation treats it as a
+crash orphan only when no live recovery thread exists. The marker is cleared
+only after the promoted route
 passes both request-path and connector gates, or after the previous protocol is
 restored. If Avibe restarts while the marker exists, the supervisor reuses a
 still-ready draining connector when possible; otherwise it starts a replacement
@@ -175,6 +179,8 @@ rolling deployment.
 | RA-TQ-016 | A failed old-connector drain is retried without disabling probes forever | supervisor lifecycle test |
 | RA-TQ-017 | Restart rolls back a promoted route that was never verified | crash-recovery scenario test |
 | RA-TQ-018 | A faster tail candidate is rejected when connector error gates fail | supervisor candidate-policy test |
+| RA-TQ-019 | A live tail recovery retains ownership of its pending rollback marker | supervisor ownership test |
+| RA-TQ-020 | A candidate that materially eliminates request failures is accepted | candidate-policy contract test |
 
 ## Product Decisions
 

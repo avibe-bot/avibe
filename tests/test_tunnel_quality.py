@@ -348,6 +348,31 @@ def test_request_path_candidate_accepts_material_tail_improvement_with_bounded_p
     assert tunnel_quality.request_path_is_better(active, candidate) is True
 
 
+def test_ra_tq_020_request_path_candidate_accepts_material_failure_reduction() -> None:
+    active = tunnel_quality.summarize_request_path_samples(
+        [
+            tunnel_quality.RequestPathSample(
+                sampled_at=1,
+                latency_ms=tuple([180.0] * 100),
+                successes=tuple([True] * 90 + [False] * 10),
+            )
+        ]
+    )
+    candidate = tunnel_quality.summarize_request_path_samples(
+        [
+            tunnel_quality.RequestPathSample(
+                sampled_at=2,
+                latency_ms=tuple([180.0] * 100),
+                successes=tuple([True] * 100),
+            )
+        ]
+    )
+
+    assert active is not None
+    assert candidate is not None
+    assert tunnel_quality.request_path_is_better(active, candidate) is True
+
+
 def test_unavailable_request_path_does_not_expose_latency_as_usable() -> None:
     request_path = tunnel_quality.summarize_request_path_samples(
         [
