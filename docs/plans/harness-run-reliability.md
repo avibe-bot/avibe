@@ -125,7 +125,11 @@ it. Do not let broken bindings or fake activity create immortal sessions.
    terminal `accepted` / `retired` Delivery history does not pin a session,
    while unresolved fences and turn-owned states do. Reuse current Delivery/Turn
    storage and teardown APIs; do not restore PR2's discarded in-memory resolver
-   design.
+   design. Resolve the Delivery, Turn, and fallback Run union from one SQLite
+   read snapshot. If an implementation must cross store handles, fence the read
+   with a monotonic storage version and fail closed / retry when it changes; it
+   must never decide that a Run is represented by a Delivery omitted from the
+   same snapshot.
    Inventory Claude, Codex, and OpenCode eviction consumers; each path that can
    invalidate a durable target must consume this provider, while a restart-safe
    transport cache needs an explicit test rather than a duplicate interlock.
@@ -153,6 +157,8 @@ it. Do not let broken bindings or fake activity create immortal sessions.
 - a `watch_runtime` heartbeat sharing the same definition/session does not pin,
   while an execution-bearing watch Run does;
 - a pin admitted between eviction passes wins;
+- bare-Run to reserved-Delivery and Delivery to Turn ownership handoffs cannot
+  disappear across a torn provider read;
 - unrelated sessions are not pinned;
 - one positively missing binding fails open;
 - a per-binding lookup exception or provider failure aborts the cycle;
@@ -194,7 +200,12 @@ that owner and fix only the remaining shared-loop and transport-attempt gaps.
    probe inline only when a contention test proves it cannot wait on a database
    lock or storage I/O. Merely wrapping synchronous storage in `create_task` is
    not isolation: a stalled operation must not block the event loop or prevent
-   the stale-run lane from making independent progress.
+   the stale-run lane from making independent progress. Timeout or cancellation
+   of an async wrapper does not release single-flight ownership while its
+   synchronous worker is still running. Keep the underlying worker future as the
+   lane owner, quarantine that lane until it exits, and join it before disposing
+   service state; never launch a replacement against the same store merely
+   because the wrapper timed out.
 2. Bound drain work, not Agent execution. The no-turn-duration-timeout invariant
    remains unchanged.
 3. Treat #1139's persisted Activity batch as the sole owner of output payload,
@@ -251,6 +262,9 @@ that owner and fix only the remaining shared-loop and transport-attempt gaps.
   delay the other drains or stale-run sweeps;
 - a contended reload probe or stale-run store operation does not block the event
   loop, suppress independent drain progress, or serialize unrelated tenants;
+- a timed-out synchronous worker remains the sole lane owner until its real
+  future exits; no overlapping retry starts, and shutdown joins or explicitly
+  quarantines it before store disposal;
 - large request, Run-callback, and vault-callback backlogs drain in bounded pages
   and reliably re-arm;
 - after `maybe_reload()` consumes the only store change, timeout, cancellation,
@@ -288,161 +302,117 @@ operation, every claimed output reaches acknowledged, safely retryable, or
 explicit terminal state, and no request or callback backlog can monopolize a
 pass.
 
-## 6. PR7 — Re-baseline terminal-time truth; then split
+## 6. PR7 — Evidence gate before any new timeout model
 
 Do **not** implement the old PR7 prescription. #1134 added
 `complete_on_return`, durable Delivery ownership, immutable Turn terminal
 evidence, and restart recovery; #1139 added exact Activity output batch receipts,
 Run-union settlement, anti-redelivery evidence, and transport-free local
-settlement retry; #1140 closed teardown-interrupted Run settlement. First
-determine what remains.
+settlement retry; #1140 closed teardown-interrupted Run settlement. The previous
+plan guessed at the remaining timeout model before proving which gaps still
+exist. PR7 starts with evidence, not a schema or writer.
 
-### PR7A — Run and definition truth
+### PR7R — Current-master evidence
 
-1. Prove whether scheduled and watch Runs already remain nonterminal after
-   Delivery ownership transfers and settle from the exact terminal Turn/result
-   or #1139 Activity output batch. If #1134, #1139, and #1140 already fixed the
-   Run timing, close that part with regression tests instead of adding another
-   writer.
-2. Verify success, failure, result-less termination, user Stop, and terminal-write
-   failure in both the direct IM execution lane and the Workbench durable
-   `SessionTurnManager` lane. Exactly one terminal result wins in each; the
-   Workbench path must have exactly one terminal writer, and a failed write must
-   not strand the Run or the Turn waiter. Positive output delivery remains final
-   when Message, Run, Turn, or Activity local settlement later fails; recovery
-   must consume #1139's receipt and retry only local settlement.
-3. Keep `health`, `consecutive_failures`, and `recent_failures` derived from the
-   existing bounded terminal Run history; do not add a mutable health projection
-   or cursor. Scope terminal-time projection to compatibility fields such as
-   `last_run_at` / `last_error` and one-shot lifecycle updates. Make the Run CAS
-   and those updates atomic where they share a transaction, or reconcile them
-   idempotently with monotonic `(completed_at, run_id)` ordering after a crash;
-   replay of an older event must not overwrite a newer compatibility projection.
-   Dispatch or Delivery acceptance is not task success.
-4. Mark only rows with durable evidence that the old writer produced them. Use a
-   conservative fixed cutoff: `completed_at` must be strictly before
-   `2026-08-02T09:56:28Z`, when commit `89befed4` (#1134 / schema 0044) first made
-   the settlement fix available, or explicit persisted writer/version metadata
-   must identify pre-#1134 semantics. Then require the old premature-success
-   signature: scheduled or watch `status=succeeded`, empty `result_text`, and
-   `completed_at` within the dispatch-time window of `created_at`. Never use
-   upgrade time or the field signature alone; if timestamp/version evidence is
-   absent or ambiguous, leave the row unmarked. Stamp qualifying rows with
-   `metadata.pre_settlement_migration=true` and render a quiet “legacy — delivery
-   only” marker. Pin the exact cutoff boundary and a legitimate fast, empty
-   post-#1134 terminal result in tests. Do not mark honest failures,
-   cancellations, or later terminal results. Route UI copy through
-   `ui/src/i18n/en.json` and `ui/src/i18n/zh.json`, and CLI/backend copy through
-   the matching `vibe/i18n/` catalogs; do not hardcode either locale. Do not
-   rewrite historical status or invent result text.
+PR7R changes tests and the plan only. It must publish one executable matrix for:
 
-### PR7B — Cron liveness
+- Claude, Codex, and OpenCode;
+- direct IM and durable Workbench execution lanes;
+- scheduler cron fires, one-shot `at` fires, manual CLI/API task runs, and watch
+  Runs;
+- success, failure, result-less termination, user Stop, terminal persistence
+  failure, pending output delivery, and post-delivery local settlement failure.
 
-1. Scheduler fire is enqueue-only; APScheduler must not hold `max_instances=1`
-   for the duration of an Agent turn. Preserve one-pending-fire-per-definition
-   coalescing so a productive long turn gains one queued successor, not an
-   unbounded backlog.
-2. Honor a durable, per-Run **inactivity** limit for scheduled runs. Start it at
-   enqueue and persist `last_progress_at` only from observable assistant/tool
-   output belonging to the exact Turn; if a Turn owns several coalesced Runs,
-   re-arm those exact Runs. Queued or stalled work ages. Do not derive this from
-   `session_last_activity`, generic `agent_runs.updated_at`, or progress from an
-   unrelated Run sharing the session.
-3. On expiry, first claim timeout ownership with one guarded transition that
-   verifies the Run is nonterminal, its observed stale `last_progress_at` has not
-   advanced, and no terminal or cancellation owner already won. For a linked
-   Turn, contend through that Turn's guarded terminal/cancellation owner. Make
-   the Turn and Run claim one transaction where possible; otherwise claim the
-   Turn first with a stable timeout-claim id, then record the Run owner and
-   `metadata.interrupt_reason=lifetime_timeout` against that same id before
-   cancellation begins. Recovery resumes either half-written phase by claim id.
-   If the Turn is already terminal, reconcile its immutable result into the Run
-   and write no timeout cause; if it is nonterminal, the winning Turn claim must
-   prevent a later natural terminal writer from independently winning. This
-   closes the real terminal-Turn/nonterminal-Run window while awaited result
-   delivery is still pending. Every Run terminal writer must honor the linked
-   claim. Treat the claim result as three-way: newly acquired, already held by
-   this persisted `lifetime_timeout` owner, or lost to fresh progress / another
-   terminal or cancellation owner. The second case resumes reconciliation
-   idempotently after restart; only the third case reloads without writing a
-   timeout cause or canceling anything. Thus a natural result or user Stop that
-   wins first remains authoritative, while one arriving after the timeout claim
-   cannot independently stamp success with timeout metadata.
+For every cell, trace the exact durable facts from Run enqueue through request /
+Delivery reservation, Turn start, terminal-result latch, Turn terminal evidence,
+Activity output batch, accepted Message receipt, Run settlement, and definition
+health projection. The matrix must answer these questions with a consuming test,
+not prose inference:
 
-   Only the timeout owner proceeds to cancellation. First handle a Run with no
-   Delivery under the same guarded ordering boundary used by
-   `reserve_delivery`: retire its queued or bare-claimed request ownership,
-   terminalize the Run as failed, release its pending-fire coalescing slot, and
-   emit the durable notice without claiming that execution was interrupted. If
-   this transition loses to Delivery creation, reload and consume
-   `DELIVERY_STATE_MATRIX` for **every** Delivery state; do not branch only on
-   queued versus accepted. A `run_cancel=retire` state may retire only work the
-   policy proves unwritten. A `run_cancel=turn_owner` state routes through its
-   exact Turn owner's cause-aware cancellation/reconciliation; if no Turn exists,
-   preserve the Delivery's possible/unknown native-effect evidence and reconcile
-   it as an infrastructure failure without replay or an “unwritten” claim. The
-   winning timeout cause deliberately overrides normal restart's one-time
-   unknown-start replay. A terminal `run_cancel=complete` Delivery is not
-   automatically a no-op: cancel its linked nonterminal Turn, reconcile from its
-   linked terminal Turn, or fail an inconsistent ownerless projection durably.
-   Persist or derive enough reconciliation phase to resume the same timeout owner
-   after a crash at every boundary: before/after owner cancellation, terminal Run
-   settlement, durable notice obligation, and request claim / Delivery fence /
-   coalescing cleanup. Recovery must scan timeout-owned incomplete work as well
-   as newly stale Runs. Every resulting failure settles visibly through the
-   notice path, and repeated reconciliation is a no-op once all terminal cleanup
-   is complete.
-4. Cover delivery-less queued and bare-claimed requests, including a race with
-   `reserve_delivery`; cover `claimed`, `pending_steer`, `steering`,
-   `interrupt_waiting`, `reconciling_steer`, and `accepted`, with `accepted` in
-   both nonterminal and terminal linked-Turn cases. Race fresh progress, natural
-   completion, and user Stop immediately before and after the timeout ownership
-   CAS: exactly one cause wins, and a succeeded Run never retains
-   `lifetime_timeout`. Pin the terminal-Turn/nonterminal-Run window and both
-   commit orders between terminal Turn persistence and timeout ownership; a Turn
-   that won first always projects its result. Inject restart between linked Turn
-   and Run claim persistence, after the complete timeout claim, after owner
-   cancellation, and after Run settlement but before cleanup; each resumes the
-   same owner exactly once and reaches the same terminal state.
-   Each Delivery state must reach its exact owner or a durable terminal ambiguity
-   outcome, release its request claim, coalescing slot, or ordering fence as
-   applicable, and never replay work with possible/unknown native effects.
-5. Reuse `run_definitions.lifetime_timeout_seconds` as the per-task override and
-   store a 1,800-second global inactivity default in `config/v2_config.py`. For
-   a recurring cron Run, snapshot at enqueue:
-   `min(positive_override_or_global_default, 0.8 × next_fire_gap)`, where
-   `next_fire_gap` is the duration from this Run's enqueue/fire instant to the
-   same timezone-aware trigger's actual next fire, not an average parsed from the
-   expression. An absent or zero cron override means “use the global default,”
-   not “disable”; reject negatives. For a one-shot `at` Run, use the positive
-   override or global default without a recurrence ceiling. The bound still
-   measures inactivity, not duration.
-   Thread the scheduled-task override through add/update CLI and API payloads and
-   the Web task form, without changing the existing watch lifetime semantics.
-   In the same delivery, update every maintained surface that enumerates task
-   options: the English and Chinese command/CLI guides, matching English and
-   Chinese AVIBE Docs pages, and agent-facing `skills/use-avibe/SKILL.md` plus
-   its compatibility copy where still shipped.
-6. Cover unset, zero, shorter, and longer overrides; irregular cron schedules and
-   a DST boundary; a one-shot `at` Run; progress from another Run in the same
-   session; multiple fires during one productive Turn; add/update round trips;
-   unchanged watch behavior; and restart reconstruction. Pin both sides of the
-   ambiguity policy: ordinary restart may replay an unknown start once, while a
-   Run already expired as `lifetime_timeout` never replays. A long override must
-   clamp before the actual next cron fire without canceling an exact owner that
-   keeps producing observable progress.
+1. Does the Run remain nonterminal until its actual terminal Turn/result or
+   Activity output batch settles it? If yes, close the old premature-success
+   claim with regression evidence instead of adding another writer.
+2. Which observable assistant/tool events can be attributed to the exact Turn
+   and participating Runs? Prove this separately for every backend and both
+   lanes. A backend/lane without an exact signal blocks a generic inactivity
+   timeout; session-wide activity is never an acceptable substitute.
+3. Can scheduler and manual Runs with different source semantics or effective
+   deadlines enter the same Turn? Record the current merge key and every Run in
+   the batch. Cancellation is Turn-level, so no per-Run policy may be specified
+   until this cardinality is explicit.
+4. Which evidence exists before the Turn becomes terminal? A terminal-result
+   latch, durable pending-output fact, accepted Message, or Activity
+   local-settlement-only marker proves that natural completion has started and
+   must outrank a later inactivity decision.
+5. Are `health`, `consecutive_failures`, `recent_failures`, `last_run_at`, and
+   `last_error` already monotonic projections of bounded terminal Run history?
+   Dispatch or Delivery acceptance is never task success.
 
-The old D7 blocker is retired by an explicit split, not by claiming ambiguity
-vanished. Normal crash recovery preserves #1134's bounded one-time replay for a
-`starting` Turn whose start receipt is `unknown`. PR7B inactivity expiry is a
-different, cause-first terminal decision: once `lifetime_timeout` wins, the same
-unknown evidence fails visibly and never replays. Unstarted work remains
-retryable; known-started work interrupted by infrastructure fails; and
-natural/user-stop compare-and-set winners prevail.
+Exit criterion: the checked-in matrix and tests identify each remaining defect
+and its current owner. PR7R adds no status, timeout field, terminal writer,
+health cursor, or cancellation path.
+
+### Conditional PR7A — Terminal truth closure
+
+Open PR7A only for a defect reproduced by PR7R. Route settlement through the
+existing exact Turn, Activity batch, Message receipt, and Run CAS owners. Keep
+Workbench's single terminal writer; make compatibility projections atomic with
+the Run CAS or reconcile them idempotently using monotonic
+`(completed_at, run_id)` ordering. Positive output delivery remains final when
+later Message, Run, Turn, or Activity local settlement fails; recovery retries
+only the owed local settlement.
+
+If current data still contains misleading pre-#1134 success rows, mark only rows
+with durable writer/version evidence or `completed_at` strictly before
+`2026-08-02T09:56:28Z` plus the old premature-success signature. Ambiguous rows
+remain unchanged. The marker is display-only: never rewrite historical status or
+invent result text, and route all visible copy through the English and Chinese
+catalogs.
+
+### Conditional PR7B — Cron liveness closure
+
+Open PR7B only when PR7R reproduces scheduler starvation or ownerless inactive
+work. Its implementation contract is:
+
+1. Scheduler fire is enqueue-only; preserve at most one pending fire per
+   definition while productive work continues.
+2. Progress is exact-Turn evidence wired and tested for Claude, Codex, and
+   OpenCode in both direct IM and Workbench lanes. Queuing, claims, unrelated
+   session activity, and another Run's progress do not refresh it.
+3. Inactivity ownership is Turn-level. Runs may share a Turn only when their
+   effective inactivity policy is identical; incompatible scheduler/manual
+   participants remain separate queued Turns. All compatible participants re-arm
+   from the same attributed progress and settle from the same winning cause.
+4. A scheduler-created recurring Run snapshots
+   `min(positive_override_or_global_default, 0.8 × actual_next_fire_gap)`. A
+   manual CLI/API run and a one-shot `at` run use the positive override or global
+   default without a recurrence ceiling. Zero means the default and negatives
+   are rejected. Snapshot the chosen policy at enqueue so a nearby cron fire
+   cannot shorten a manual run.
+5. Before claiming inactivity, re-read exact progress plus terminal-result latch,
+   Turn, pending-output, accepted-Message, and Activity receipt evidence. Any
+   natural terminal/output evidence wins even when delivery or local settlement
+   is still pending. User Stop and natural completion retain their existing
+   precedence.
+6. The winning timeout owner consumes `DELIVERY_STATE_MATRIX` and the exact Turn
+   owner. It retires only work proven unwritten, never replays possible native
+   effects, resumes partial cleanup by one stable claim id, releases ordering and
+   coalescing fences, and emits #1072's durable visible failure notice.
+7. Cover the no-Delivery reservation race, every nonterminal Delivery role,
+   terminal-latch-before-Turn-terminal, natural/Stop/timeout races, restart at
+   each persisted boundary, manual execution adjacent to a cron fire, and
+   incompatible Runs that must not share a Turn. Ordinary unknown-start recovery
+   keeps #1134's bounded replay policy; only a previously persisted
+   `lifetime_timeout` owner suppresses that replay.
+8. If PR7R proves a task inactivity option is required, thread it through task
+   add/update CLI and API payloads, the Web form, English and Chinese command/CLI
+   and AVIBE Docs pages, and agent-facing `skills/use-avibe/SKILL.md` guidance.
+   Do not change existing watch lifetime semantics.
 
 Exit criterion: Run status, definition health, scheduler availability, and user
-notifications all describe the same terminal event without replaying accepted
-work or timing out productive turns.
+notifications describe one winning terminal event without replaying accepted
+work, timing out a productive Turn, or letting one participant cancel siblings
+that have a different policy.
 
 ## 7. Order and review boundaries
 
@@ -456,15 +426,16 @@ PR3 eviction interlock
 PR4 shared-drain liveness + proven transport-attempt delta
     |
     v
-PR7A terminal-time truth
+PR7R current-master evidence matrix
     |
     v
-PR7B cron liveness
+conditional PR7A terminal truth / PR7B cron liveness
 ```
 
-PR7A and PR7B are separate review units unless the re-baseline proves one is
-already complete. Keep PR3 and PR4 separate: PR3 protects session ownership;
-PR4 fixes the global liveness failure.
+PR7R is a separate test/documentation review unit. It may close either old claim
+without an implementation PR; any reproduced PR7A and PR7B defects remain
+separate implementation units. Keep PR3 and PR4 separate: PR3 protects session
+ownership; PR4 fixes the global liveness failure.
 
 Scenario ranges reserved by the original plan remain available on current
 `master`:
