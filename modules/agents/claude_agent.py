@@ -483,6 +483,7 @@ class ClaudeAgent(BaseAgent):
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
         runtime_lock_held: bool = False,
+        activation_retired: bool = False,
     ) -> None:
         """Drop Claude runtime state without canceling the current receiver task."""
 
@@ -493,6 +494,7 @@ class ClaudeAgent(BaseAgent):
                 current_receiver_task=current_receiver_task,
                 preserve_pending_request_state=preserve_pending_request_state,
                 runtime_lock_held=runtime_lock_held,
+                activation_retired=activation_retired,
             )
         finally:
             self._retire_steering_state(composite_key)
@@ -504,6 +506,7 @@ class ClaudeAgent(BaseAgent):
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
         runtime_lock_held: bool = False,
+        activation_retired: bool = False,
     ) -> None:
 
         self._last_assistant_text.pop(composite_key, None)
@@ -522,7 +525,11 @@ class ClaudeAgent(BaseAgent):
         cleanup_name = "_cleanup_session_locked" if runtime_lock_held else "cleanup_session"
         cleanup = getattr(self.session_handler, cleanup_name, None)
         if callable(cleanup):
-            await cleanup(composite_key, current_receiver_task=current_receiver_task)
+            await cleanup(
+                composite_key,
+                current_receiver_task=current_receiver_task,
+                activation_retired=activation_retired,
+            )
             return
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
@@ -545,6 +552,7 @@ class ClaudeAgent(BaseAgent):
         composite_key: str,
         *,
         runtime_lock_held: bool = False,
+        activation_retired: bool = False,
     ) -> None:
         """Settle and drop a Claude session whose active flag is stale.
 
@@ -573,6 +581,7 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     preserve_pending_request_state=True,
                     runtime_lock_held=runtime_lock_held,
+                    activation_retired=activation_retired,
                 )
             except Exception:
                 if context is not None:

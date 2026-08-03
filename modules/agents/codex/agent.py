@@ -743,6 +743,22 @@ class CodexAgent(BaseAgent):
         setattr(transport, "_vibe_runtime_activation_identity", identity)
         return identity
 
+    def _retire_transport_activation(
+        self,
+        cwd: str,
+        transport: CodexTransport,
+        final_predicate: Callable[[], bool],
+    ) -> bool:
+        registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
+        if registry is None:
+            return bool(final_predicate())
+        identity = self._transport_activation_identity(transport)
+        if identity is None:
+            identity = self._attach_transport_activation(cwd, transport)
+        if identity is None:
+            return False
+        return bool(registry.retire_if_current(identity, final_predicate))
+
     def runtime_activation_identity_for_request(
         self,
         request: Any,
@@ -871,16 +887,41 @@ class CodexAgent(BaseAgent):
                     ownership = self._runtime_ownership_snapshot_for_cwd(cwd)
                     if ownership is None or ownership.blocks_reclamation:
                         continue
+                final: dict[str, float] = {}
 
-                has_active = self._has_active_turns_for_cwd(cwd)
-                if has_active or idle_for < idle_timeout:
+                def final_reclamation_predicate() -> bool:
+                    if self._transports.get(cwd) is not transport:
+                        return False
+                    latest_activity = self._transport_last_activity.get(cwd)
+                    if latest_activity is None:
+                        return False
+                    current_ownership = self._runtime_ownership_snapshot_for_cwd(cwd)
+                    if current_ownership is None or current_ownership.blocks_reclamation:
+                        return False
+                    current_idle_for = time.monotonic() - latest_activity
+                    final["idle_for"] = current_idle_for
+                    return bool(
+                        not self._has_active_turns_for_cwd(cwd)
+                        and current_idle_for >= idle_timeout
+                    )
+
+                if not self._retire_transport_activation(
+                    cwd,
+                    transport,
+                    final_reclamation_predicate,
+                ):
                     continue
+                idle_for = final.get("idle_for", idle_for)
 
                 logger.info(
                     "Evicting idle Codex transport for cwd=%s after %.1fs idle",
                     cwd,
                     idle_for,
                 )
+                self._transports.pop(cwd, None)
+                self._transport_last_activity.pop(cwd, None)
+                self._cwd_inodes().pop(cwd, None)
+                self._retire_model_hub_process_scope(cwd)
                 try:
                     await transport.stop()
                 except Exception as exc:
@@ -889,12 +930,6 @@ class CodexAgent(BaseAgent):
                         cwd,
                         exc,
                     )
-                    continue
-
-                self._transports.pop(cwd, None)
-                self._transport_last_activity.pop(cwd, None)
-                self._cwd_inodes().pop(cwd, None)
-                self._retire_model_hub_process_scope(cwd)
 
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
                     self._session_mgr.invalidate_thread(base_session_id)

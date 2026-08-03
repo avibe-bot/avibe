@@ -16,6 +16,7 @@ from config.v2_compat import to_app_config
 from config.v2_config import AgentsConfig, ClaudeConfig, RuntimeConfig, SlackConfig, V2Config
 from core import git_runtime as git_runtime_module
 from core.handlers.session_handler import SessionHandler
+from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import SessionRuntimeDisposition
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
@@ -1520,12 +1521,14 @@ def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
     handler = SessionHandler(controller)
     context = MessageContext(user_id="U123", channel_id="C123")
 
-    _run_session(handler, context)
+    client = _run_session(handler, context)
 
     composite_key = f"slack_C123:{tmp_path}"
+    identity = getattr(client, "_vibe_runtime_activation_identity")
     handler.session_last_activity[composite_key] = 0.0
 
     evicted = asyncio.run(handler.evict_idle_sessions(600))
@@ -1534,6 +1537,12 @@ def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path)
     assert captured["disconnects"] == 1
     assert composite_key not in controller.claude_sessions
     assert composite_key not in handler.session_last_activity
+    assert controller.runtime_activation.current("claude", composite_key) is None
+    assert controller.runtime_activation.current(
+        "claude",
+        composite_key,
+        include_retired=True,
+    ) == identity
 
 
 def test_session_handler_keeps_active_claude_session(monkeypatch, tmp_path: Path) -> None:

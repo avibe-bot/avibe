@@ -11,6 +11,8 @@ from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.runtime_activation import RuntimeActivationRegistry
+
 _AGENT_PATH = Path(__file__).resolve().parents[1] / "modules/agents/codex/agent.py"
 
 _modules_pkg = types.ModuleType("modules")
@@ -380,7 +382,8 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         async def stop_transport():
             stop_calls.append("stop")
 
-        agent._transports = {"/tmp/work": SimpleNamespace(stop=stop_transport)}
+        transport = SimpleNamespace(stop=stop_transport)
+        agent._transports = {"/tmp/work": transport}
         agent._transport_last_activity = {"/tmp/work": 1.0}
         invalidated = []
         cleared_sessions = []
@@ -444,7 +447,8 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         async def stop_transport():
             stop_calls.append("stop")
 
-        agent._transports = {"/tmp/work": SimpleNamespace(stop=stop_transport)}
+        transport = SimpleNamespace(stop=stop_transport)
+        agent._transports = {"/tmp/work": transport}
         agent._transport_last_activity = {"/tmp/work": 0.0}
         agent._transport_locks = {"/tmp/work": asyncio.Lock()}
         agent._session_mgr = SimpleNamespace(
@@ -457,11 +461,14 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._session_locks = {"session-1": asyncio.Lock()}
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+        activation = RuntimeActivationRegistry()
         agent.controller = SimpleNamespace(
+            runtime_activation=activation,
             model_hub_runtime=SimpleNamespace(
                 retire_process_scope=retire_scope,
             )
         )
+        identity = agent._attach_transport_activation("/tmp/work", transport)
 
         with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
             evicted = await agent.evict_idle_transports(600)
@@ -473,6 +480,11 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions.clear_agent_session_mapping.assert_not_called()
         self.assertEqual(agent._transports, {})
         self.assertIn("/tmp/work", agent._transport_locks)
+        self.assertIsNone(activation.current("codex", "/tmp/work"))
+        self.assertEqual(
+            activation.current("codex", "/tmp/work", include_retired=True),
+            identity,
+        )
         self.assertEqual(agent._transport_last_activity, {})
         retire_scope.assert_called_once_with("codex", "/tmp/work")
 
@@ -531,7 +543,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/tmp/work", agent._transports)
         agent.sessions.clear_agent_session_mapping.assert_not_called()
 
-    async def test_evict_idle_transports_preserves_state_when_stop_fails(self):
+    async def test_evict_idle_transports_detaches_retired_generation_when_stop_fails(self):
         agent = object.__new__(CodexAgent)
         invalidated_sessions = []
         cleared_turns = []
@@ -559,12 +571,12 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
             evicted = await agent.evict_idle_transports(600)
 
-        self.assertEqual(evicted, 0)
-        self.assertIs(agent._transports["/tmp/work"], transport)
+        self.assertEqual(evicted, 1)
+        self.assertNotIn("/tmp/work", agent._transports)
         self.assertIs(agent._transport_locks["/tmp/work"], lock)
-        self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
-        self.assertEqual(invalidated_sessions, [])
-        self.assertEqual(cleared_turns, [])
+        self.assertNotIn("/tmp/work", agent._transport_last_activity)
+        self.assertEqual(invalidated_sessions, ["session-1"])
+        self.assertEqual(cleared_turns, ["session-1"])
         agent.sessions.clear_agent_session_mapping.assert_not_called()
 
     async def test_evict_idle_transports_revalidates_activity_before_stop(self):

@@ -197,6 +197,22 @@ class SessionHandler(BaseHandler):
         setattr(client, "_vibe_runtime_activation_identity", identity)
         return identity
 
+    def _retire_claude_runtime_activation(
+        self,
+        composite_key: str,
+        client: ClaudeSDKClient,
+        final_predicate,
+    ) -> bool:
+        registry = self._runtime_activation_registry()
+        if registry is None:
+            return bool(final_predicate())
+        identity = self._claude_runtime_activation_identity(client)
+        if identity is None:
+            identity = self._attach_claude_runtime_activation(client, composite_key)
+        if identity is None:
+            return False
+        return bool(registry.retire_if_current(identity, final_predicate))
+
     async def _set_claude_model_if_needed(self, client: ClaudeSDKClient, desired_model: Optional[str]) -> None:
         unknown = object()
         current_model = getattr(client, "_vibe_current_model", unknown)
@@ -1605,6 +1621,7 @@ class SessionHandler(BaseHandler):
         *,
         current_receiver_task=None,
         retire_model_hub_scope: bool = True,
+        activation_retired: bool = False,
     ):
         """Clean up one Claude generation under the same lock used by creation."""
 
@@ -1613,6 +1630,7 @@ class SessionHandler(BaseHandler):
                 composite_key,
                 current_receiver_task=current_receiver_task,
                 retire_model_hub_scope=retire_model_hub_scope,
+                activation_retired=activation_retired,
             )
 
     async def _cleanup_session_locked(
@@ -1621,8 +1639,20 @@ class SessionHandler(BaseHandler):
         *,
         current_receiver_task=None,
         retire_model_hub_scope: bool = True,
+        activation_retired: bool = False,
     ):
         """Clean up a specific session by composite key"""
+        client = self.claude_sessions.get(composite_key)
+        activation_retired = activation_retired or bool(
+            getattr(client, "_vibe_runtime_activation_retired", False)
+        )
+        if client is not None and not activation_retired:
+            if not self._retire_claude_runtime_activation(
+                composite_key,
+                client,
+                lambda: self.claude_sessions.get(composite_key) is client,
+            ):
+                return
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
         if client is not None and retire_model_hub_scope:
@@ -1878,31 +1908,53 @@ class SessionHandler(BaseHandler):
             lock = self._claude_runtime_generation_lock(composite_key)
             async with lock:
                 client = self.claude_sessions.get(composite_key)
-                current_last_activity = self.session_last_activity.get(composite_key)
                 if client is None:
                     self.session_last_activity.pop(composite_key, None)
                     self.session_turn_started.pop(composite_key, None)
                     self.active_sessions.discard(composite_key)
                     continue
-                if current_last_activity is None:
-                    continue
-                ownership = self._claude_runtime_ownership_snapshot(
+                final: dict[str, Any] = {}
+
+                def final_reclamation_predicate() -> bool:
+                    if self.claude_sessions.get(composite_key) is not client:
+                        return False
+                    current_last_activity = self.session_last_activity.get(composite_key)
+                    if current_last_activity is None:
+                        return False
+                    ownership = self._claude_runtime_ownership_snapshot(
+                        composite_key,
+                        client,
+                    )
+                    if ownership is None:
+                        return False
+                    recheck_idle = time.monotonic() - current_last_activity
+                    final["idle_for"] = recheck_idle
+                    is_active = composite_key in self.active_sessions
+                    final["active"] = is_active
+                    if is_active:
+                        return bool(
+                            stuck_threshold is not None
+                            and recheck_idle >= stuck_threshold
+                            and ownership.disposition
+                            not in {
+                                SessionRuntimeDisposition.TRANSITIONING,
+                                SessionRuntimeDisposition.UNKNOWN,
+                            }
+                        )
+                    return bool(
+                        not ownership.blocks_reclamation
+                        and recheck_idle >= idle_timeout
+                    )
+
+                if not self._retire_claude_runtime_activation(
                     composite_key,
                     client,
-                )
-                if ownership is None:
+                    final_reclamation_predicate,
+                ):
                     continue
-                # Re-derive the decision from current state under the exact
-                # runtime-generation lock used by creation.
-                recheck_idle = time.monotonic() - current_last_activity
-                if composite_key in self.active_sessions:
-                    if stuck_threshold is None or recheck_idle < stuck_threshold:
-                        continue
-                    if ownership.disposition in {
-                        SessionRuntimeDisposition.TRANSITIONING,
-                        SessionRuntimeDisposition.UNKNOWN,
-                    }:
-                        continue
+                setattr(client, "_vibe_runtime_activation_retired", True)
+                recheck_idle = float(final.get("idle_for", idle_for))
+                if final.get("active"):
                     logger.warning(
                         "Force-evicting stuck-active Claude session %s after %.1fs idle "
                         "(>= stuck-active threshold %.1fs; multiplier=%s idle_timeout=%ss); "
@@ -1930,16 +1982,20 @@ class SessionHandler(BaseHandler):
                             runtime_lock_held=True,
                         )
                     else:
-                        await self._cleanup_session_locked(composite_key)
+                        await self._cleanup_session_locked(
+                            composite_key,
+                            activation_retired=True,
+                        )
                 else:
-                    if ownership.blocks_reclamation or recheck_idle < idle_timeout:
-                        continue
                     logger.info(
                         "Evicting idle Claude session %s after %.1fs idle",
                         composite_key,
                         recheck_idle,
                     )
-                    await self._cleanup_session_locked(composite_key)
+                    await self._cleanup_session_locked(
+                        composite_key,
+                        activation_retired=True,
+                    )
                 evicted += 1
 
         return evicted
