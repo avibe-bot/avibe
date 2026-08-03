@@ -90,9 +90,9 @@ for send-now's stale-head/refusal result. At no point is `last_activity`
 falsified, and neither the hint nor the reclaimer owns `Q1`.
 
 Now suppose recovered Activity output delivery is hung at the same time. Its
-`activity_outputs` lane remains single-flight and overdue, but the independent
-`session_deliveries` lane still starts `Q1`. This is the user-visible outcome
-the design must produce.
+exact Activity batch worker remains single-flight for its partition and overdue,
+but another output partition and the independent `session_deliveries` lane can
+still progress. This is the user-visible outcome the design must produce.
 
 ### 3.1 Separate facts, hints, and resources
 
@@ -150,25 +150,32 @@ class SessionRuntimeOwnershipSnapshot:
 @dataclass(frozen=True)
 class RuntimeTargetOwnershipSnapshot:
     backend: str
-    runtime_key: str
+    resource_key: str
+    activity_runtime_keys: tuple[str, ...]
     sessions: tuple[SessionRuntimeOwnershipSnapshot, ...]
     sessionless_active_activity_ids: tuple[str, ...]
     disposition: SessionRuntimeDisposition
 ```
 
-Reclamation operates on a runtime target, not blindly on one Session. Claude's
-runtime key is a session-base/workdir composite, while one Codex transport is
-keyed by cwd and can serve several Sessions. Each backend exposes only its
-current runtime key plus candidate session bases; the shared provider resolves
-those bases to durable `agent_sessions` rows and then computes each Session
-snapshot in the same SQLite transaction. The same query also collects active
-Activity rows by exact backend/runtime key even when `session_id` is NULL; those
-rows are target-level owners and force `active`. The target disposition is the
-safest member disposition, using `unknown > active > transitioning > runnable >
-waiting > reclaimable` for the aggregate. Before the cleanup decision, every
-runnable member emits its wake even when another member already blocks the
-shared target. Any target-level active Activity or `active`, `transitioning`, or
-`unknown` Session blocks target cleanup.
+Reclamation operates on a runtime resource target, not blindly on one Session.
+The disposable resource key and durable Activity runtime key are separate
+identities. For example, one Codex transport resource is keyed by cwd, while its
+Activity/Turn keys are `base_session_id:cwd`; one cwd can therefore map to many
+Activity runtime keys. Each backend exposes its exact current resource key,
+candidate Session bases, and the set of Activity runtime keys belonging to that
+resource. The provider never derives this relation by splitting strings.
+
+The shared provider resolves those bases to durable `agent_sessions` rows and
+computes each Session snapshot in one SQLite transaction. The same query
+collects active Activity rows for the backend and matches them through the
+adapter-supplied resource-to-Activity-key mapping even when `session_id` is NULL;
+those rows are target-level owners and force `active`. An active Activity whose
+runtime key cannot be mapped is `unknown`, not an orphan. The target disposition
+is the safest member disposition, using `unknown > active > transitioning >
+runnable > waiting > reclaimable` for the aggregate. Before the cleanup
+decision, every runnable member emits its wake even when another member already
+blocks the shared target. Any target-level active Activity or `active`,
+`transitioning`, or `unknown` Session blocks target cleanup.
 `runnable` wakes activation but, like `waiting`, does not itself own the current
 backend process; an all-`runnable|waiting|reclaimable` target may release idle
 resources after the final locked recheck. A positively orphaned runtime with no
@@ -180,7 +187,9 @@ The exact classification is:
 |---|---|---|
 | `starting|active` Turn, Turn-owned Delivery, persisted active Activity, or exact in-process backend operation | `active` | forbid ordinary idle reclamation |
 | unresolved Delivery fence, waiting successor, or an ownership handoff that cannot yet be classified | `transitioning` | fail closed; reconcile the exact owner |
-| open-hold ownerless FIFO head or queued execution-bearing Run not yet represented by a Delivery | `runnable` | wake its delivery/request lane; it does not itself pin backend resources |
+| open-hold ownerless FIFO head or queued execution-bearing fallback Run not yet represented by a Delivery | `runnable` | wake its delivery/request lane; it does not itself pin backend resources |
+| claimed fallback Run in normalized `running` / legacy `processing` with no persisted execution-start marker (`pid IS NULL` or absent) | `transitioning` | preserve the pre-execution handoff until exact recovery requeues or starts it |
+| fallback Run in normalized `running` / legacy `processing` with the persisted execution-start marker (`pid IS NOT NULL`) | `active` | preserve its runtime until #1140's exact terminal/teardown settlement |
 | held FIFO backlog with no live Turn/fence | `waiting` | preserve durable work but allow disposable backend runtime reclamation |
 | terminal Delivery/Turn history and terminal Runs only | `reclaimable` | no pin |
 | read failure, unknown Delivery state, or unknown execution-bearing Run type | `unknown` | fail closed for this cycle and log the reason |
@@ -239,7 +248,7 @@ policy; this work does not add another recovery layer or silently replay it.
 ### 3.4 Work lanes and wake protocol
 
 Add one controller-owned `RuntimeWorkSupervisor` and replace `_watch_store`'s
-serial executor role with independently registered single-flight lanes:
+serial executor role with independently registered, partitioned work lanes:
 
 ```python
 class RuntimeWorkLane(str, Enum):
@@ -262,13 +271,37 @@ handlers only while its service lease is valid. Registration returns a
 generation token; duplicate live registration is rejected, and unregistering a
 token suppresses re-arm from that generation before awaiting its exact worker.
 An event for an unregistered lane is discarded because startup reconciliation
-is mandatory when a new handler registers. Each lane owns exactly one event,
-one current async task, and, when
-synchronous work is delegated, one underlying executor future. A wake while the
-lane is running sets the event for another bounded pass; it never starts a
-second worker. A bounded page that leaves eligible work re-arms itself. A
-transient failure records bounded backoff for that lane only. One lane cannot
-await or cancel another lane.
+is mandatory when a new handler registers.
+
+Each lane owns one coordinator event/task plus a bounded map of item workers by
+partition key. The coordinator alone queries eligibility and never awaits item
+execution. It starts work only when that lane has capacity and no worker already
+owns the same partition. The existing guarded durable claim remains the item
+authority. A wake while the coordinator or an item is running sets the event for
+another bounded scan; it never starts a second worker for the same partition. A
+bounded page that leaves eligible work re-arms itself. A transient failure
+records bounded backoff for that item/partition only. One lane cannot await or
+cancel another lane.
+
+Partition keys follow the existing serialization boundary: Session id for
+Delivery activation; request execution-lock key (or standalone Run id) for Run
+admission; callback target Session for Run/Vault callbacks; persisted Activity
+batch/runtime identity for recovered outputs; and notice destination/Run for
+failure notices. One Activity batch is indivisible. `definitions` and
+`stale_runs` retain one bounded coordinator because their owner operations are
+local guarded store/scheduler mutations, not tenant transport calls. Every lane
+has a small internal maximum greater than one where item workers are supported;
+the limit is injectable in tests and is not a public product setting. One hung
+tenant therefore consumes one partition/slot rather than the whole lane, while
+the global bound prevents unbounded tasks. If all slots are occupied, remaining
+durable work waits and is re-read when one exits.
+
+`InboxEventBus.subscribe_callback` runs on the publishing thread, which may not
+be the controller event-loop thread. The supervisor captures its owning loop at
+startup; callbacks only call `loop.call_soon_threadsafe(...)`. The scheduled
+loop callback is the sole mutator of coordinator events, tasks, partitions, and
+generation state. A closed or superseded loop drops the hint and relies on
+startup/periodic reconciliation.
 
 The supervisor belongs to one controller process generation and is gated by the
 same global service-instance ownership check as dispatch. Controller shutdown or
@@ -304,12 +337,16 @@ recovery can notify its lane directly because its producer is controller-owned.
 
 The external-process bridge must not depend on that process having zero local
 browser/event subscribers. Browser presence is unrelated to whether the
-controller received the hint. A non-controller publisher bridges first after
-commit; on success the controller bus supplies the UI fanout and lane wake, and
-on socket failure it falls back to local UI fanout. This avoids duplicate browser
-events while keeping the UI responsive when the controller is unavailable.
-Socket absence or timeout leaves the command successful because the durable row
-is still authoritative.
+controller received the hint, and a successful socket POST does not prove the
+controller-to-UI event stream was connected at that instant. After commit, a
+non-controller UI publisher therefore fans out locally and also posts the hint
+to the controller with one ephemeral event id/origin. The UI bridge keeps a
+small bounded TTL set of ids it already fanned out locally and drops only the
+matching echoed event; other UI processes still receive it once. This id is
+transport deduplication metadata, not durable work identity or acceptance
+evidence. Socket absence, timeout, or a disconnected return stream leaves the
+command successful and the local UI responsive because the durable row remains
+authoritative.
 
 The producer map is load-bearing:
 
@@ -382,11 +419,11 @@ subscription is transferred between generations.
 No synchronous SQLite or filesystem call runs on the controller event loop
 unless a contention test proves it cannot block. Synchronous work runs through
 a tracked executor future. A wrapper timeout does not cancel that underlying
-operation or release the lane's single-flight ownership:
+operation or release that partition's single-flight ownership:
 
-- the future remains the lane owner until it actually exits;
-- the lane is marked overdue and does not launch a replacement;
-- an independent supervisor logs the exact overdue lane;
+- the future remains the partition owner until it actually exits;
+- the partition is marked overdue and does not launch a replacement;
+- an independent supervisor logs the exact overdue lane and partition;
 - completion re-arms the lane if durable work remains;
 - shutdown stops new wakes, cancels async work, and joins each exact owner before
   disposing shared stores.
@@ -471,9 +508,10 @@ keeping a backend process alive forever.
    Reuse the existing engine and storage tables; add no table,
    cache, or background resolver. Resolve a backend runtime target to every
    durable Session it can serve, then classify those Sessions in the same
-   transaction. Also classify active Activity rows with a matching
-   backend/runtime key and NULL Session as target-level owners. A returned
-   snapshot is valid only for that transaction and exact runtime target.
+   transaction. Also classify active Activity rows with a NULL Session as
+   target-level owners, using the backend-provided resource-key to Activity-key
+   mapping rather than assuming those keys are equal. A returned snapshot is
+   valid only for that transaction and exact runtime resource target.
 2. Derive `active`, `transitioning`, `runnable`, `waiting`, `reclaimable`, or
    `unknown` exactly as §3.2 specifies. In particular:
    - an open, ownerless FIFO head is `runnable`, not a permanent runtime pin;
@@ -481,8 +519,11 @@ keeping a backend process alive forever.
      resources without changing durable queue state;
    - a fence or Turn owner forbids reclamation;
    - terminal history and `watch_runtime` do not pin;
-   - a queued or running execution-bearing Run is considered only when its exact
-     Delivery/Turn representation is absent from the same snapshot.
+   - an execution-bearing Run is considered only when its exact Delivery/Turn
+     representation is absent from the same snapshot: queued is `runnable`,
+     normalized running/legacy processing without the persisted PID boundary is
+     `transitioning`, and the same state with a persisted PID is `active` until
+     exact settlement.
 3. Inventory Claude, Codex, and OpenCode runtime-reclamation paths. Every path
    that can invalidate the exact runtime needed by a live owner consumes the
    shared provider. A backend transport cache that is proven restart-safe may
@@ -541,13 +582,17 @@ keeping a backend process alive forever.
   and Delivery history alone do not;
 - `HFR-135`: active Activity rows pin their exact runtime, while `awaiting_output` and
   terminal Activity snapshots do not;
-- `HFR-147`: an active Activity with no Session id pins its exact backend/runtime
-  target and cannot be mistaken for an orphan;
+- `HFR-147`: an active Activity with no Session id maps from its durable Activity
+  runtime key to the exact backend resource target and cannot be mistaken for an
+  orphan; a missing map fails closed;
 - `HFR-136`: a `watch_runtime` heartbeat sharing the same definition/session does not pin,
   while an execution-bearing watch Run does;
 - `HFR-137`: a pin admitted between eviction passes wins;
 - `HFR-138`: bare-Run to reserved-Delivery and Delivery to Turn ownership handoffs cannot
   disappear across a torn provider read;
+- `HFR-148`: fallback queued, pre-execution claimed, and execution-started Runs
+  classify as `runnable`, `transitioning`, and `active` respectively from the
+  persisted PID boundary;
 - `HFR-139`: unrelated sessions are not pinned;
 - `HFR-140`: one positively missing binding fails open, while a per-binding
   lookup exception or provider failure aborts the cycle;
@@ -585,10 +630,11 @@ Activity-output owner.
    drain or perform storage I/O.
 2. Give `definitions`, `requests`, `run_callbacks`, `vault_callbacks`,
    `activity_outputs`, `failure_notices`, and `stale_runs` independent
-   single-flight state. Reuse current drain functions behind the lane boundary
-   where their ownership is already correct; split only unbounded passes into
-   bounded pages. Do not create seven new service classes merely to rename seven
-   methods.
+   coordinator state and the §3.4 bounded partition workers where item work can
+   block. Reuse current drain functions behind the lane boundary where their
+   ownership is already correct; split only unbounded passes into bounded pages
+   and item calls. Do not create seven new service classes merely to rename
+   seven methods.
 3. Implement one shared coalescing notifier. An event means "query durable
    eligibility again" and carries no item id. A running lane consumes the event
    before its next page so a concurrent commit cannot be lost between the final
@@ -596,14 +642,16 @@ Activity-output owner.
 4. Subscribe the supervisor to the existing inbox event bus and reuse the
    `/internal/events` socket bridge. Add only `definitions.updated` to the
    allowlist and shared event vocabulary. Map events to coalescing lane wakes;
-   ignore payload identity and status when deciding durable work. Make external
-   publishers bridge-first with local fanout only as the unavailable-controller
-   fallback, so local subscribers never suppress the controller bridge or see
-   duplicate successful-bridge events.
+   ignore payload identity and status when deciding durable work. External UI
+   publishers perform local fanout and bridge the hint with an ephemeral event
+   id; the return bridge deduplicates only the origin process's echoed id. Local
+   subscribers therefore neither suppress the controller wake nor miss an
+   update while the return stream reconnects.
 5. Instrument every producer in the §3.4 map after its authoritative commit.
    Cross-process notification is best effort and short-lived. In-process
-   notification is synchronous event setting. A notifier exception is logged
-   but never changes the producer's committed result.
+   notification marshals event setting onto the captured controller loop with
+   `call_soon_threadsafe`. A notifier exception is logged but never changes the
+   producer's committed result.
    Preserve `notify_transport_ready()` as the direct non-commit `requests` wake
    after an IM transport reconnects.
 6. Run every lane as bounded work. Request, Run-callback, and Vault-callback
@@ -615,11 +663,11 @@ Activity-output owner.
    the controller event loop. Track the underlying executor future as the lane
    owner through timeout/cancellation as §3.6 requires. Never start a replacement
    until that exact future exits.
-8. Keep one independent supervisor task that reports the exact overdue lane and
-   service generation. It observes lane timestamps only and cannot query the
-   stores or write terminal state. Repeated service start/stop creates one new
-   generation and leaves no task from the previous generation able to re-arm
-   work.
+8. Keep one independent supervisor task that reports the exact overdue lane,
+   partition, and service generation. It observes worker timestamps only and
+   cannot query the stores or write terminal state. Repeated service start/stop
+   creates one new generation and leaves no task from the previous generation
+   able to re-arm work.
 9. Startup wakes every lane after backend identity restoration and Delivery/Turn
    recovery. The periodic reconcile timer later wakes every lane regardless of
    `data_version`; time eligibility and lost notifications therefore recover.
@@ -662,30 +710,32 @@ membership, create a second receipt, or infer resend safety from timeout alone.
 
 ### Required evidence
 
-- `HFR-155`: an in-process post-commit wake starts the exact eligible lane
-  without waiting for periodic reconciliation;
+- `HFR-155`: an in-process post-commit wake from either the controller loop or a
+  worker/receiver thread is marshaled onto that loop and starts the exact
+  eligible lane without waiting for periodic reconciliation;
 - `HFR-156`: a cross-process commit followed by the Unix-socket hint starts the
   lane, while socket failure leaves the committed work recoverable;
 - `HFR-157`: process death or a deliberately dropped hint is recovered by
   startup or slow reconciliation exactly once at the guarded owner boundary;
-- `HFR-158`: a hung request-admission store call, Run-callback lookup/enqueue,
-  vault-callback storage/dispatch operation, or recovered-output send does not
-  delay the other drains or stale-run sweeps;
+- `HFR-158`: a hung request admission, callback delivery, vault callback, or
+  recovered-output send for one partition does not delay another partition in
+  the same lane, the other lanes, or stale-run sweeps;
 - `HFR-159`: a contended reload probe or stale-run store operation does not block the event
   loop, suppress independent drain progress, or serialize unrelated tenants;
 - `HFR-176`: injected legacy file stores retain separately supervised
   two-second signature hints without running work inline; a request-directory
   change wakes both request and callback lanes, while production SQLite uses
   post-commit wakes plus the slow reconcile timer;
-- `HFR-160`: a timed-out synchronous worker remains the sole lane owner until its real
-  future exits; no overlapping retry starts, and shutdown cannot dispose its
-  store or restart the service before it joins;
+- `HFR-160`: a timed-out synchronous worker remains the sole partition owner
+  until its real future exits; no overlapping retry starts for that partition,
+  and shutdown cannot dispose its store or restart the service before it joins;
 - `HFR-161`: large request, Run-callback, and vault-callback backlogs drain in bounded pages
   and reliably re-arm;
 - `HFR-162`: a wake during the final empty query is not lost; timeout, cancellation, and
   exception completion each re-arm remaining eligible work with backoff, while
   shutdown cancellation does not re-arm;
-- `HFR-163`: only one instance of each drain can run;
+- `HFR-163`: each lane enforces its configured global worker bound and only one
+  item worker per partition while allowing a different partition to progress;
 - `HFR-164`: routine scheduled-service stop/restart unregisters and joins only
   its Harness lane registrations and their watchdog state; the controller-owned
   supervisor and `session_deliveries` lane remain active;
@@ -701,13 +751,16 @@ membership, create a second receipt, or infer resend safety from timeout alone.
 - `HFR-169`: work with no Run row still reaches an Activity-owned terminal outcome visible
   from its session;
 - `HFR-170`: every skip re-arms with backoff;
-- `HFR-171`: the independent supervisor reports which owned lane is overdue;
+- `HFR-171`: the independent supervisor reports which owned lane and partition
+  are overdue;
 - `HFR-172`: the table-driven producer contract fails when an official entry
   point lacks the mapped post-commit event; it observes no event before commit,
-  after rollback, or after a losing CAS;
-- `HFR-173`: unsupported event types remain rejected by the existing socket endpoint;
-  browser subscribers cannot suppress a controller wake, and successful bridge
-  fanout reaches the browser once.
+  after rollback, or after a losing CAS, and a worker-thread publisher touches
+  asyncio state only through the controller loop;
+- `HFR-173`: unsupported event types remain rejected by the existing socket
+  endpoint; browser subscribers cannot suppress a controller wake; and local
+  fanout plus bounded event-id deduplication delivers once both while the return
+  stream is connected and while it is reconnecting;
 - `HFR-174`: definition changes wake reconcile without waiting for fallback;
 - `HFR-175`: global service-instance lock loss stops every lane registration,
   including `session_deliveries`, before the old process can query or claim, and
