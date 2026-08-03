@@ -913,22 +913,47 @@ Activity-output owner.
    readiness owner and adds one synchronous final-decision guard per configured
    platform. The current global `_ready_lock` continues to protect only brief
    reads/mutations of the `_ready_platforms` set; it is never held across a
-   database call. The keyed guards serialize only one platform's reconnect and
-   stale settlement, so a slow Slack settlement cannot delay Discord readiness.
-   They are bounded in-memory capability locks, not readiness state or work
-   owners. Candidate discovery happens outside the platform guard. For a
-   queued row carrying stale `transport_unavailable` evidence, the worker first
-   reserves the SQLite write transaction with `BEGIN IMMEDIATE` or the
-   repository's equivalent, then enters the exact platform guard, briefly reads
-   readiness under `_ready_lock`, re-reads the Run evidence, and commits only an
+   database call. The keyed guards serialize only one platform's readiness
+   transitions and stale settlement, so a slow Slack settlement cannot delay
+   Discord readiness. They are bounded in-memory capability locks, not work
+   owners.
+
+   The same readiness owner records an in-memory generation and injected UTC
+   `unready_since` for the current outage. Registering or hot-adding a configured
+   platform that is not ready starts a fresh generation before its child thread
+   or the stale lane can observe it; a ready transition closes it. Every later
+   ready-to-unready edge starts another generation under the exact platform
+   guard, whether that edge comes from explicit disconnect, the client runner's
+   `finally`, or hot removal. Repeated observations while the platform is
+   already unready do not refresh the generation or timestamp. A new process
+   conservatively starts a new generation for each configured but not-ready
+   platform, granting another bounded reconnect window rather than failing a
+   Run from unverifiable pre-restart history. This metadata describes the
+   current capability edge only. It is not a durable queue, Run fact, or
+   settlement owner, and no transition bulk rewrites queued Runs.
+
+   Candidate discovery happens outside the platform guard. For a queued row
+   carrying `transport_unavailable` evidence, the worker first reserves the
+   SQLite write transaction with `BEGIN IMMEDIATE` or the repository's
+   equivalent, then enters the exact platform guard, briefly reads readiness
+   plus the current outage generation under `_ready_lock`, releases that brief
+   set lock, and re-reads the Run evidence. If the platform is ready, the worker
+   uses the same exact queued/reason/timestamp CAS to clear the ended outage's
+   stale evidence and returns without terminalizing. If it is unready, the
+   effective outage start is the later of the persisted `last_skip_at` and the
+   current generation's `unready_since`; settlement is ineligible until that
+   effective start exceeds the reconnect TTL. The worker then commits only an
    exact `status=queued` CAS with the observed reason/timestamp while still
-   holding the platform guard. Reconnect takes that same platform guard, briefly
-   mutates the set under `_ready_lock`, releases both, and then publishes its
-   wake; it never performs database work while holding either lock. A reconnect
-   that wins first makes settlement no-op; a settlement that wins first commits before
-   readiness publication; a request claim that already changed the row to
-   `running` makes the stale CAS lose. This is a final-decision interlock, not a
-   durable readiness state or a second Run owner.
+   holding the platform guard. Both ready and ready-to-unready transitions take
+   that same platform guard, mutate the readiness set and generation briefly
+   under `_ready_lock`, release both, and only then publish any wake; neither
+   transition performs database work while holding either lock. A reconnect
+   that wins first makes terminal settlement no-op and permits exact evidence
+   cleanup; a later disconnect rebases the effective age even when capacity
+   kept the old row stamp from being cleared; a settlement that wins first
+   commits before readiness publication; a request claim that already changed
+   the row to `running` makes the stale CAS lose. This is a final-decision
+   interlock, not a durable readiness state or a second Run owner.
    A scheduler fire or manual task run only enqueues and notifies; remove
    `_run_task`'s direct claim/spawn/await path so `requests` is the single durable
    Run admission consumer. Preserve the existing one queued follower behind an
@@ -1103,8 +1128,16 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   reconnect winning the final readiness guard (no failure notice; one request
   claim), stale settlement winning and committing before readiness publication
   (one terminal failure; zero claim), and a queued-to-running request claim
-  making the stale exact CAS lose. A blocked Slack final-decision guard does not
-  block Discord readiness mutation or its `requests` wake;
+  making the stale exact CAS lose. They also keep an expired stamp queued when
+  the platform reconnects and drops again before any worker clears that stamp:
+  the second outage receives its own full TTL from the injected readiness clock,
+  then permits exactly one terminal settlement after that TTL. They prove that
+  exact evidence cleanup may win before the second disconnect, that repeated
+  disconnect observations do not extend one outage, and that every disconnect
+  producer uses the same edge owner. Process startup gives a configured but
+  not-ready platform the same fresh bounded window. A blocked Slack
+  final-decision guard does not block Discord readiness mutation,
+  outage-generation changes, or its `requests` wake;
 - `HFR-178`: a real signal while the controller loop is running requests
   nonblocking async shutdown; a synchronous lane outliving shutdown grace
   retains the service-instance lock and exact dependencies until its worker or
