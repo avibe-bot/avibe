@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
+from starlette.requests import Request
+
 from core.memory.artifact import EVEROS_VERSION
 from core.memory.everos import MemoryProviderFailure
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
@@ -44,7 +46,7 @@ def serve(uds: Path) -> None:
     attachments_root = Path(os.environ["AVIBE_MEMORY_ATTACHMENTS_ROOT"])
 
     @app.post("/avibe/v1/profile-report")
-    async def profile_report(request: Any) -> Any:
+    async def profile_report(request: Request) -> Any:
         try:
             payload = await request.json()
         except (TypeError, ValueError):

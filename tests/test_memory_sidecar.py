@@ -4,6 +4,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import httpx
+
 from core.memory import everos
 from core.memory import sidecar
 from core.memory.sidecar import _processing_healthy_from_child_environment, _request_rejection
@@ -235,6 +237,67 @@ def test_sidecar_report_route_builds_generator_from_child_environment_only(monke
         "language": "zh",
     }
     assert received["profile"].summary == "喜欢简洁更新。"
+
+
+def test_sidecar_report_route_accepts_json_through_real_fastapi(monkeypatch, tmp_path: Path) -> None:
+    from fastapi import FastAPI
+    import uvicorn
+
+    captured: dict[str, object] = {}
+
+    class _FactoryModule:
+        @staticmethod
+        def create_app() -> FastAPI:
+            return FastAPI()
+
+    class _Config:
+        def __init__(self, app, **_kwargs) -> None:
+            captured["app"] = app
+
+    class _Server:
+        def __init__(self, _config) -> None:
+            return None
+
+        def run(self) -> None:
+            return None
+
+    class _Generator:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def generate(self, _profile, _language) -> str:
+            return "Overview\n\nReport."
+
+    monkeypatch.setattr(sidecar, "ProfileReportGenerator", _Generator)
+    monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.1")
+    monkeypatch.setattr(sidecar.importlib, "import_module", lambda _module: _FactoryModule())
+    monkeypatch.setattr(sidecar.os, "umask", lambda _mode: 0o022)
+    monkeypatch.setattr(uvicorn, "Config", _Config)
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+    monkeypatch.setenv("AVIBE_MEMORY_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+
+    sidecar.serve(tmp_path / "everos.sock")
+
+    async def request_report() -> httpx.Response:
+        transport = httpx.ASGITransport(app=captured["app"])
+        async with httpx.AsyncClient(transport=transport, base_url="http://memory-sidecar") as client:
+            return await client.post(
+                "/avibe/v1/profile-report",
+                json={
+                    "language": "en",
+                    "profile": {
+                        "summary": "Prefers concise updates.",
+                        "explicit_info": [],
+                        "implicit_traits": [],
+                        "updated_at": "2026-08-02T10:30:00Z",
+                    },
+                },
+            )
+
+    response = asyncio.run(request_report())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "report": "Overview\n\nReport."}
 
 
 def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path) -> None:
