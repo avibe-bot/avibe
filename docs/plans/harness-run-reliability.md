@@ -354,17 +354,27 @@ Callers that require a synchronous result observe the persisted Run outcome
 rather than taking execution ownership from the lane.
 
 Likewise, every completed Activity output batch, whether produced during a live
-Turn or found after restart, is persisted and wakes `activity_outputs`. Before
-claiming a batch, both the context-sensitive live flush and restart recovery
-enter the same supervisor partition keyed by exact `(backend, runtime_key)`.
-The live path may use its existing in-memory Turn/context while it owns that
-partition. Its existing expected-Turn selection may scan past unrelated
-unbound output to choose the causally matching batch; the supervisor does not
-replace that #1139 rule with a global row-order policy. The partition lease spans
-claim, emit, and settle/requeue, so no second live or recovery worker can claim
-or send another batch for that runtime while the selected batch owns the
-boundary. After release, the registry again chooses by its existing causal/FIFO
-contract. Neither path carries payload or receipt authority in the wake.
+Turn or found after restart, is persisted and wakes `activity_outputs`. A wake
+does not make a newly unbound completion immediately claimable. Preserve
+Claude's existing `ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS` coalescing window: the
+first unbound completion establishes the eligibility deadline from its
+persisted `completed_at`, and later matching completions inside that window do
+not extend it. A restart recomputes the remaining window from durable
+timestamps. An already bound batch or local-settlement-only retry is complete
+evidence and is eligible immediately. No new durable deadline or batch owner is
+added.
+
+Once due, both the context-sensitive live flush and restart recovery enter the
+same supervisor partition keyed by exact `(backend, runtime_key)` before
+claiming. The live path may use its existing in-memory Turn/context while it
+owns that partition. Its existing expected-Turn selection may scan past
+unrelated unbound output to choose the causally matching batch; the supervisor
+does not replace that #1139 rule with a global row-order policy. The partition
+lease spans claim, emit, and settle/requeue, so no second live or recovery
+worker can claim or send another batch for that runtime while the selected
+batch owns the boundary. After release, the registry again chooses by its
+existing causal/FIFO contract. Neither the wake nor the grace timer carries
+payload, membership, or receipt authority.
 
 Each lane owns one coordinator event/task plus a bounded map of item workers by
 partition key. The coordinator alone queries eligibility and never awaits item
@@ -394,13 +404,25 @@ contract, including expected-Turn causal matching; the supervisor forbids
 overlap but does not replace that policy with a second queue.
 `task_definitions`, `watch_definitions`, and `stale_runs` each retain one bounded
 coordinator because their owner operations mutate shared local store/scheduler
-state. In particular, every `ManagedWatchStore` reload, reconcile, cycle marker,
-and runtime-state write stays behind the one `watch_definitions` single-flight
-store boundary: its mutable full-store mirror is not safe for concurrent
-watch-id writers. Long-running waiter processes/tasks remain outside that
-maintenance worker. The supervisor moves the single writer off the controller
-loop and tracks its real future; it does not invent row-level concurrency or a
-second mirror owner.
+state. In particular, every blocking `ManagedWatchStore` reload, cycle marker,
+and runtime-state storage write stays behind the one `watch_definitions`
+single-flight store boundary: its mutable full-store mirror is not safe for
+concurrent watch-id writers. The store phase returns an immutable snapshot or
+guarded write result. `ManagedWatchService.reconcile_watches()` and all
+`_active_tasks` creation, cancellation, done-callback, and runtime projection
+assembly remain on the controller event loop. Only the assembled projection's
+blocking persistence enters the tracked store worker. Long-running waiter
+processes/tasks remain outside that maintenance worker. This preserves one
+store writer and one loop-owned lifecycle without creating a second mirror
+owner.
+
+That prepare/apply split is the general execution-placement rule. Blocking,
+side-effect-free reads and serialized store commits run in tracked synchronous
+workers. Asyncio task/timer mutation and in-memory lifecycle application run on
+their owning event loop after the worker returns. Existing domain claim and
+settlement APIs remain the semantic owners under the lane partition. Moving a
+blocking call off-loop never authorizes moving its caller's event-loop state
+machine into the executor.
 Every lane has a small internal maximum greater than one
 where item workers are supported; the limit is injectable in tests and is not a
 public product setting. One hung tenant therefore consumes one partition/slot
@@ -843,22 +865,30 @@ Activity-output owner.
    path keeps #1139's context-sensitive expected-Turn selection inside that
    lease, including scanning past unrelated unbound output. The lease remains
    owned through emit and settle/requeue. No backend-local flush may race the
-   recovery lane as an independent claimant.
+   recovery lane as an independent claimant. Preserve the current live
+   coalescing grace before claiming an unbound batch. Compute its due time from
+   the first matching persisted `completed_at`, do not extend it for later
+   members, and preserve the remaining delay across restart. Bound batches and
+   local-settlement-only retries bypass the grace because their immutable
+   membership already exists.
 6. Run every lane as bounded work. Request, Run-callback, and Vault-callback
    queries use explicit page limits. A page that reaches its limit or reports
    another eligible item re-arms the same lane. A temporarily skipped item uses
    existing durable eligibility/backoff when present; do not hot-spin on an
    in-memory event.
-7. Move synchronous `maybe_reload`, eligibility, and stale-run storage work off
-   the controller event loop. `watch_definitions` is the single writer for
-   managed-watch stale-worker recovery retry, store reload,
-   `reconcile_watches`, cycle markers, and runtime-state projection. Per-watch
-   guarded store calls currently made by `_run_watch` enter that same serialized
-   tracked worker because `ManagedWatchStore` owns one mutable full-store mirror.
-   The long-running waiter process/task remains under the existing managed-watch
-   lifecycle and is never subjected to a maintenance-lane timeout. Track the
-   underlying executor future as its lane owner through timeout/cancellation as
-   §3.6 requires. Never start a replacement until that exact future exits.
+7. Move synchronous `maybe_reload`, eligibility, stale-run, cycle-marker, and
+   runtime-state persistence work off the controller event loop.
+   `watch_definitions` is the single store worker for managed-watch stale-worker
+   recovery retry, reload, guarded per-watch writes, and persistence of an
+   already assembled runtime projection. It returns immutable snapshots/results
+   to the controller loop. Keep `reconcile_watches()`, `_active_tasks`, task
+   creation/cancellation, done callbacks, timer state, and projection assembly
+   on that loop; never call `asyncio.create_task()` or mutate those maps from an
+   executor thread. The long-running waiter process/task remains under the
+   existing managed-watch lifecycle and is never subjected to a maintenance-
+   lane timeout. Track each underlying store future as its lane owner through
+   timeout/cancellation as §3.6 requires. Never start a replacement store call
+   until that exact future exits.
 8. Keep one independent supervisor task that reports the exact overdue lane,
    partition, and service generation. It observes worker timestamps only and
    cannot query the stores or write terminal state. Repeated service start/stop
@@ -952,12 +982,16 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   current Harness registration generation and no stale overdue-drain logs;
 - `HFR-166`: complete multi-Activity batches preserve persisted order, one stable
   receipt per batch, and each complete Run union while delayed, restarted, or
-  locally retried; one selected batch for exact `(backend, runtime_key)` owns the
-  partition through emit and settle/requeue so another batch cannot overlap it;
-  after release, the registry preserves #1139's expected-Turn causal selection,
-  including scanning past unrelated unbound output, and loss of live context
-  falls back to persisted Activity/Turn/Run settlement without a competing
-  claimant;
+  locally retried. Two same-Turn unbound completions inside the injected live
+  grace produce one batch, receipt, and user-visible message; the first wake
+  cannot claim early, a second completion does not extend the deadline, and a
+  restart midway waits only the durable remaining grace. Bound and local-only
+  retry batches are immediately eligible. One selected batch for exact
+  `(backend, runtime_key)` owns the partition through emit and settle/requeue so
+  another batch cannot overlap it; after release, the registry preserves
+  #1139's expected-Turn causal selection, including scanning past unrelated
+  unbound output, and loss of live context falls back to persisted
+  Activity/Turn/Run settlement without a competing claimant;
 - `HFR-167`: an accepted Message or persisted Activity-batch
   local-settlement-only marker suppresses transport replay, including after
   restart; graceful shutdown after remote acceptance but before local receipt
@@ -993,10 +1027,13 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   startup follows the same ownership decision;
 - `HFR-179`: contended managed-watch store reconciliation and per-watch guarded
   store writes stay single-flight, keep the SQLite row and full-store mirror
-  consistent, and cannot wrongly restart a completed one-shot watch; they do not
-  block the controller loop or another lane, while a legitimately long-running
-  waiter is not canceled by the maintenance timeout and remains owned by the
-  managed-watch lifecycle.
+  consistent, and cannot wrongly restart a completed one-shot watch. Blocking
+  store phases run in the tracked worker, while `reconcile_watches()`,
+  `asyncio.create_task()`, `_active_tasks`, cancellation, callbacks, and runtime
+  projection assembly are asserted to run on the controller loop. Store
+  contention does not block that loop or another lane, while a legitimately
+  long-running waiter is not canceled by the maintenance timeout and remains
+  owned by the managed-watch lifecycle.
 
 Exit criterion: normal work is event-woken, missed hints are recovered, a hung
 lane cannot block another lane or the controller event loop, lifecycle teardown
