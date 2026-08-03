@@ -49,7 +49,7 @@ class _Sessions:
         return None
 
     @staticmethod
-    def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+    def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
         return "sesk8m4q2p7x"
 
 
@@ -347,7 +347,7 @@ def test_session_handler_ensures_agent_session_id_before_prompt(
 
     class _PromptSessions(_Sessions):
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             assert settings_key == "test::C123"
             assert agent_name == "claude"
             assert base_session_id == "slack_C123"
@@ -390,7 +390,7 @@ def test_session_handler_preserves_passed_agent_system_prompt(monkeypatch, tmp_p
 
     class _PromptSessions(_Sessions):
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             return "sesk8m4q2p7x"
 
     class _StubClaudeSDKClient:
@@ -461,7 +461,7 @@ def test_session_handler_recreates_cached_claude_client_when_prompt_changes(
         current_id = "sesold"
 
         @classmethod
-        def ensure_agent_session_id(cls, settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(cls, settings_key, agent_name, base_session_id, **_kwargs):
             assert settings_key == "test::C123"
             assert agent_name == "claude"
             assert base_session_id == "slack_C123"
@@ -507,7 +507,7 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
 
     class _PromptSessions(_Sessions):
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             assert settings_key == "slack::C123"
             assert agent_name == "claude"
             assert base_session_id == "slack_C123"
@@ -1117,7 +1117,7 @@ def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env
             return None
 
         @classmethod
-        def ensure_agent_session_id(cls, settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(cls, settings_key, agent_name, base_session_id, **_kwargs):
             cls.ensured.append((settings_key, agent_name, base_session_id))
             return "ses-subagent"
 
@@ -1300,7 +1300,7 @@ def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp
             return None
 
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             return "sesk8m4q2p7x"
 
     class _StubClaudeSDKClient:
@@ -1416,7 +1416,7 @@ def test_session_handler_uses_scheduled_turn_source_for_dm_anchor(monkeypatch, t
             return None
 
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             return "sesk8m4q2p7x"
 
     class _ScheduledSettingsManager:
