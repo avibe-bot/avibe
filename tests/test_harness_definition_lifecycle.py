@@ -249,21 +249,39 @@ def test_an_unknown_status_is_rejected_rather_than_silently_ignored(store) -> No
 
 
 @pytest.mark.parametrize(
-    ("exit_code", "error", "expected"),
+    ("exit_code", "error", "timed_out", "expected"),
     [
-        (0, None, "normal"),
-        (None, None, "normal"),
-        (124, "waiter timed out", "timeout"),
-        (1, "boom", "error"),
+        (0, None, None, "normal"),
+        (None, None, None, "normal"),
+        # A watch cycle, and every row written before the scheduler recorded the fact:
+        # 124 is all there is to go on, so it still reads as a timeout.
+        (124, "waiter timed out", None, "timeout"),
+        (1, "boom", None, "error"),
         # Scheduled tasks never write an exit code, so the code alone would call
         # every failed one a normal ending.
-        (None, "boom", "error"),
-        (0, "   ", "normal"),
+        (None, "boom", None, "error"),
+        (0, "   ", None, "normal"),
+        # SCT-024. The scheduler is the only witness to its own timeout: a command
+        # that wraps itself in ``timeout`` reports a REAL one as 124 too, and calling
+        # that "stopped for running too long" tells the user to raise a limit that
+        # was never reached.
+        (124, "command exited with status 124", False, "error"),
+        (124, "command timed out after 5 second(s)", True, "timeout"),
+        # And the flag outranks the code in the other direction as well: a command
+        # killed by the scheduler that still managed its own exit status.
+        (137, "command timed out after 5 second(s)", True, "timeout"),
     ],
 )
-def test_lifecycle_detail_names_how_a_finished_row_ended(exit_code, error, expected) -> None:
+def test_lifecycle_detail_names_how_a_finished_row_ended(
+    exit_code, error, timed_out, expected
+) -> None:
     assert (
-        definition_lifecycle_detail(lifecycle_state="finished", last_exit_code=exit_code, last_error=error)
+        definition_lifecycle_detail(
+            lifecycle_state="finished",
+            last_exit_code=exit_code,
+            last_error=error,
+            timed_out=timed_out,
+        )
         == expected
     )
 

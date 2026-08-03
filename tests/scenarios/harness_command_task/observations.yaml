@@ -57,3 +57,36 @@ observations:
       - reap surviving workers at startup, before recover_processing settles the very rows the identity is stored on
       - authorise the kill by process identity (start time plus inherited marker), never by pid alone, because the number is recycled across a crash
       - share the identity serialize/parse helpers with the watch lane instead of copying them
+  - id: OBS-HARNESS-COMMAND-TASK-006
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-024
+    summary: Exit code 124 was read as proof that the scheduler timed the command out.
+    previous_assumption: 124 is the runner's timeout code, so a row carrying it timed out.
+    observed_behavior: A --shell script that wraps its own work in timeout exits 124 by itself, and the UI then told the user to raise a limit that was never reached; separately, a float --timeout was rendered through int(), so a 0.5s limit read as "timed out after 0 second(s)" and hid the setting that had to change.
+    required_updates:
+      - record on the definition that the SCHEDULER is what stopped the command, and let that flag outrank the exit code in both directions
+      - keep 124-implies-timeout only as the fallback for rows written before the flag existed
+      - state the limit as the user configured it, without truncating a sub-second value to zero
+  - id: OBS-HARNESS-COMMAND-TASK-007
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-025
+    summary: The supervisor's protocol error lines were surfaced to the user verbatim.
+    previous_assumption: A spawn failure is an internal fault, so the worker's stderr is a diagnostic that only developers read.
+    observed_behavior: The line reached the failure notice and vibe task list unchanged, so a mistyped executable read as a machine token rather than a sentence, and it stayed English inside otherwise-translated copy.
+    required_updates:
+      - decode the worker's error line into a localized sentence through vibe/i18n/
+      - keep that decoding beside the protocol that emits it (core/watch_worker.py) so both lanes share one mapping
+  - id: OBS-HARNESS-COMMAND-TASK-008
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-026
+      - SCT-027
+    summary: The escalation Agent turn and the stamp that suppresses the failure notice were two separate commits.
+    previous_assumption: A fire that reaches the settle still owns its outcome, so stamping and enqueueing in sequence is equivalent to doing both.
+    observed_behavior: A cancel or reclaim landing between them produced either an Agent turn for a job the user had just stopped, or a stamped suppression with no report at all; the second is the unrecoverable half, because nothing later re-derives that a notice was owed.
+    required_updates:
+      - commit the stamp and the escalation enqueue in one transaction, guarded by compare-and-set preconditions on the binding and the uncancelled run id
+      - bias the surviving crash window toward BOTH reports rather than neither
+      - re-arm the owed notice when a session teardown cancels an escalation that had already suppressed one

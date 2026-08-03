@@ -185,3 +185,46 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_tasks.py::test_a_crashed_service_reaps_the_command_worker_it_left_running
+  - id: SCT-024
+    name: a scheduler timeout is told apart from a command that exited 124 on its own
+    status: covered
+    kind: timeout
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_command_task_timeout_fails_the_run_with_the_timeout_exit_code
+    # Same scenario, read side: the recorded flag outranks the bare exit code both
+    # ways, and a sub-second limit is stated as the user wrote it rather than
+    # rounded to "0 second(s)":
+    # tests/test_harness_definition_lifecycle.py::test_lifecycle_detail_names_how_a_finished_row_ended
+  - id: SCT-025
+    name: a worker's machine-readable error line reaches the user as a sentence
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_command_whose_executable_is_missing_reads_as_a_sentence
+  - id: SCT-026
+    name: a cancel during the command refuses the escalation and settles cancelled
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_cancel_during_the_command_refuses_the_escalation_and_settles_canceled
+  - id: SCT-027
+    name: a teardown between the stamp and the settle cancels the fire itself
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_teardown_between_the_stamp_and_the_settle_cancels_the_fire_itself
+    # The negative half of SCT-026: archiving the session cancels EVERY non-terminal
+    # run of it, the parent fire included, so the settle sees a cancelled fire that
+    # owes no notice. That is why the settle needs no second check on the escalation
+    # run it just enqueued.
+  - id: SCT-028
+    name: the run snapshot names the command the fire actually claimed, not an older copy
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_the_run_snapshot_names_the_command_the_fire_actually_ran

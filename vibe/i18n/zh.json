@@ -36,6 +36,15 @@
     "command": {
       "workdirMissing": "\u5de5\u4f5c\u76ee\u5f55\u4e0d\u5b58\u5728\uff1a{cwd}",
       "supervisorExitedDuringStartup": "\u547d\u4ee4\u76d1\u63a7\u8fdb\u7a0b\u5728\u542f\u52a8\u671f\u95f4\u9000\u51fa\u3002",
+      "supervisorFailed": "\u547d\u4ee4\u76d1\u63a7\u8fdb\u7a0b\u5931\u8d25\uff1a{detail}",
+      "unknownSupervisorFailure": "\u672a\u77e5\u7684\u76d1\u63a7\u8fdb\u7a0b\u9519\u8bef\u3002",
+      "protocolErrors": {
+        "specTooLarge": "\u547d\u4ee4\u914d\u7f6e\u8fc7\u5927\u3002",
+        "invalidEncoding": "\u547d\u4ee4\u914d\u7f6e\u4e0d\u662f\u6709\u6548\u7684 UTF-8\u3002",
+        "invalidJson": "\u547d\u4ee4\u914d\u7f6e\u4e0d\u662f\u6709\u6548\u7684 JSON\u3002",
+        "unsupportedVersion": "\u4e0d\u652f\u6301\u6b64\u547d\u4ee4\u914d\u7f6e\u7248\u672c\u3002",
+        "invalidCommand": "\u547d\u4ee4\u65e0\u6548\u3002"
+      },
       "timedOut": "\u547d\u4ee4\u5728 {seconds} \u79d2\u540e\u8d85\u65f6\u3002",
       "exited": "\u547d\u4ee4\u9000\u51fa\uff0c\u72b6\u6001\u7801 {code}\u3002",
       "exitedWithDetail": "\u547d\u4ee4\u9000\u51fa\uff0c\u72b6\u6001\u7801 {code}\uff1a{detail}"

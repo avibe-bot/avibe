@@ -637,6 +637,20 @@ def _row_lifecycle_state(row: Any) -> Optional[str]:
         return None
 
 
+def _definition_timed_out(metadata: Any) -> Optional[bool]:
+    """Whether the scheduler stopped this definition's last fire, or ``None`` if unknown.
+
+    Anything other than a real boolean reads as unknown: an absent key is a row from
+    before the fact was recorded, and a corrupted one must not be trusted to overrule
+    the exit code either way.
+    """
+
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get(COMMAND_TIMED_OUT_METADATA_KEY)
+    return value if isinstance(value, bool) else None
+
+
 def definition_lifecycle_detail(
     *,
     lifecycle_state: Optional[str],
@@ -644,6 +658,7 @@ def definition_lifecycle_detail(
     last_run_at: Any = None,
     last_exit_code: Any = None,
     last_error: Any = None,
+    timed_out: Optional[bool] = None,
 ) -> Optional[str]:
     """How a finished task/watch ended: ``normal``, ``timeout``, or ``error``.
 
@@ -651,13 +666,25 @@ def definition_lifecycle_detail(
     have no ending to report yet. Python rather than SQL because it has exactly
     one consumer — the row — and never a ``GROUP BY``: the filter groups by
     state, and the row alone says which of the three endings it was.
+
+    ``timed_out`` is THE ANSWER when the row has one, and the three states are
+    distinct on purpose. 124 is the code the runner synthesizes for a limit it
+    enforced itself, but it is also an exit status a command is free to return —
+    ``timeout 5 ...`` inside a ``--shell`` script returns exactly that — so reading
+    the code alone told a user their backup had been cut short by Avibe when it had
+    in fact cut itself short. ``False`` therefore SUPPRESSES the old inference rather
+    than merely not triggering it; ``None`` means the row never recorded the fact
+    (a watch, or a task stamped before this key existed) and keeps the inference,
+    which is still the best guess available for those rows.
     """
 
     if lifecycle_state != "finished":
         return None
     if definition_type == "scheduled" and last_run_at is None:
         return None
-    if last_exit_code == _TIMEOUT_EXIT_CODE:
+    if timed_out:
+        return "timeout"
+    if timed_out is None and last_exit_code == _TIMEOUT_EXIT_CODE:
         return "timeout"
     if last_exit_code not in (None, 0):
         return "error"
@@ -907,6 +934,12 @@ COMMAND_SNAPSHOT_METADATA_KEY = "command"
 #: Entry: the ``core.process_isolation.serialize_process_identity`` payload. Distinct
 #: from the ``pid`` column, which holds the SERVICE pid and gates startup recovery.
 COMMAND_WORKER_METADATA_KEY = "command_worker"
+
+#: Whether the SCHEDULER stopped the DEFINITION's last command fire, on the definition's
+#: own ``metadata``. Entry: ``True``/``False``, written by every command stamp and
+#: absent on every row that predates it -- see ``definition_lifecycle_detail``, which
+#: needs those three states apart.
+COMMAND_TIMED_OUT_METADATA_KEY = "last_command_timed_out"
 
 
 def command_snapshot_from_definition_row(row: Any) -> Optional[dict[str, Any]]:
@@ -1373,6 +1406,15 @@ def _owed_failure_notice_for_transition(
     never neither. A cross-row lookup ("does some queued run name me as its parent?")
     would close the duplicate at the cost of the never-silent bias, and the duplicate
     is the cheaper failure.
+
+    THE OPPOSITE ORDERING NEEDS NO GUARD HERE, and the reason is worth stating because
+    it looks like it should. A teardown that cancels the escalation in that same window
+    cancels the PARENT with it -- ``archive_session`` flags every non-terminal run of
+    the session, and the hard-delete path removes their rows -- so this settle sees
+    ``canceled`` (or no row at all) and owes nothing to suppress. Checking the
+    escalation's status from here would only describe ``vibe runs cancel`` aimed at the
+    escalation itself, which is the user declining that report the same way
+    ``canceled`` above declines a notice.
     """
 
     if normalize_run_status(status) != "failed":
@@ -2709,6 +2751,7 @@ class SQLiteBackgroundTaskStore:
         *,
         expect: DefinitionWriteExpectation | None,
         run_payload: dict[str, Any],
+        expected_uncanceled_run_id: Optional[str] = None,
     ) -> bool:
         """A guarded task stamp and the outbox row it authorises, ONE transaction.
 
@@ -2733,11 +2776,25 @@ class SQLiteBackgroundTaskStore:
         Deliberately NOT ``enqueue_definition_run``: that writer re-reads the
         definition server-side and RAISES on a disabled one, and the stamp in this very
         transaction is what disables a failed one-shot.
+
+        ``expected_uncanceled_run_id`` is the PARENT fire, re-read here rather than in
+        the caller for the same reason ``cancel_not_requested`` is a SQL predicate: a
+        ``vibe runs cancel`` committed while the command was exiting sets the flag from
+        another connection, and the caller's snapshot is older than this write. Without
+        the re-read the flag could land after the command returned and before this
+        stamp, and the run then settled as ``canceled`` while this transaction had
+        already marked the definition failed and durably queued an Agent turn -- a
+        stopped run that goes on to start follow-up work. Refusing leaves the outcome
+        to the terminal projection lane, which is where a canceled fire belongs.
         """
 
         values = self._scheduled_task_values(payload)
         run_values = self._run_values(run_payload)
         with run_update_event_transaction(self.engine) as conn:
+            if expected_uncanceled_run_id and agent_run_cancellation_won_in_connection(
+                conn, expected_uncanceled_run_id
+            ):
+                return False
             if not upsert_definition_in_connection(
                 # Only the refusal LOG's label; the row's ``definition_type`` column
                 # comes from ``_scheduled_task_values``. Spelled the way the rest of
@@ -3446,18 +3503,18 @@ class SQLiteBackgroundTaskStore:
         _publish_run_rows_updated([row_to_publish])
         return row_to_publish is not None
 
-    def record_command_worker(
+    def merge_running_run_metadata(
         self,
         run_id: str,
-        identity: Optional[dict[str, Any]],
+        key: str,
+        value: Optional[dict[str, Any]],
     ) -> bool:
-        """Remember (or forget) the isolated supervisor a command run has spawned.
+        """Set (or drop) ONE key on a ``running`` run's metadata document.
 
-        Written the instant the child exists and cleared the instant it is reaped, so
-        the window in which a SIGKILLed service leaves an untracked orphan is the
-        spawn itself. Restricted to ``running`` rows because a terminal run's worker
-        is by definition already gone, and re-stamping one would hand startup
-        recovery a pid that has since been recycled.
+        Restricted to ``running`` rows because every caller is an in-flight execution
+        describing itself: a terminal run's worker is by definition already gone, and
+        re-stamping one would hand startup recovery a pid that has since been
+        recycled.
 
         Read-modify-write of ``metadata_json`` inside one transaction: the column is
         a whole-blob JSON document, so a bare UPDATE of the key would drop whatever
@@ -3477,12 +3534,12 @@ class SQLiteBackgroundTaskStore:
             metadata = _json_loads(row["metadata_json"], {})
             if not isinstance(metadata, dict):
                 metadata = {}
-            if identity is None:
-                if COMMAND_WORKER_METADATA_KEY not in metadata:
+            if value is None:
+                if key not in metadata:
                     return False
-                metadata.pop(COMMAND_WORKER_METADATA_KEY, None)
+                metadata.pop(key, None)
             else:
-                metadata[COMMAND_WORKER_METADATA_KEY] = dict(identity)
+                metadata[key] = dict(value)
             result = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
@@ -3490,6 +3547,43 @@ class SQLiteBackgroundTaskStore:
                 .values(metadata_json=_json_dumps(metadata), updated_at=now)
             )
             return bool(result.rowcount)
+
+    def record_command_worker(
+        self,
+        run_id: str,
+        identity: Optional[dict[str, Any]],
+    ) -> bool:
+        """Remember (or forget) the isolated supervisor a command run has spawned.
+
+        Written the instant the child exists and cleared the instant it is reaped, so
+        the window in which a SIGKILLed service leaves an untracked orphan is the
+        spawn itself.
+        """
+
+        return self.merge_running_run_metadata(
+            run_id, COMMAND_WORKER_METADATA_KEY, identity
+        )
+
+    def record_command_snapshot(
+        self,
+        run_id: str,
+        snapshot: Optional[dict[str, Any]],
+    ) -> bool:
+        """Re-stamp what this run is ABOUT TO RUN, over what its enqueue predicted.
+
+        The enqueue writes the snapshot from the definition row as it stood then, but
+        the executor re-reads the definition after claiming the run -- so an edit
+        committed in the enqueue-to-claim window left the run naming command A while
+        command B ran, and the notice, the escalation prompt and the Workbench run
+        detail all repeated that wrong answer with the authority of a snapshot.
+
+        Called from the execution path with the exact definition instance being
+        executed, which is the only object that can settle the question.
+        """
+
+        return self.merge_running_run_metadata(
+            run_id, COMMAND_SNAPSHOT_METADATA_KEY, snapshot
+        )
 
     def list_running_command_workers(self) -> list[dict[str, Any]]:
         """Every ``running`` run that still names a command worker.
@@ -6357,6 +6451,7 @@ class SQLiteBackgroundTaskStore:
                 last_run_at=row.get("last_run_at"),
                 last_exit_code=row.get("last_exit_code"),
                 last_error=row.get("last_error"),
+                timed_out=_definition_timed_out(row.get("metadata")),
             )
             row["next_run_at"] = compute_next_run_at(
                 enabled=bool(row.get("enabled")),

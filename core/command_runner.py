@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import signal
 import sys
 from collections import deque
@@ -42,6 +43,34 @@ _READ_CHUNK_BYTES = 64 * 1024
 #: rather than user-facing chrome. Its own length is charged to the cap, so the returned
 #: output never exceeds ``max_output_bytes``.
 STREAM_TRUNCATION_MARKER = b"[avibe: output truncated]\n"
+
+#: One line is all any surface gives a command, so the cap is shared rather than
+#: repeated: an uncapped ``bash -lc`` pipeline would bury the error text that follows
+#: it in a failure notice, and wrap the row in ``vibe task list``.
+COMMAND_PREVIEW_MAX_CHARS = 120
+
+
+def command_line_preview(
+    shell_command: Optional[str],
+    argv: Optional[list[str]],
+    *,
+    max_chars: int = COMMAND_PREVIEW_MAX_CHARS,
+) -> str:
+    """The one-line form of a command, or ``""`` when there is none.
+
+    Lives beside the runner because every surface that names a command has to name the
+    SAME string: ``vibe task list``, ``vibe watch list``, a failure notice, and an Agent
+    escalation prompt were three separate copies of this, and a user comparing the
+    notice against the list had no guarantee they were reading one command.
+
+    ``shell_command`` wins when present -- it is the string the user typed -- and an
+    argv is re-quoted with ``shlex.join`` so the preview is something they could paste.
+    """
+
+    preview = (shell_command or (shlex.join(argv) if argv else "")).strip()
+    if len(preview) <= max_chars:
+        return preview
+    return preview[: max_chars - 1].rstrip() + "…"
 
 
 @dataclass(frozen=True)

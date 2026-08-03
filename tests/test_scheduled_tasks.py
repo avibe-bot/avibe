@@ -60,10 +60,16 @@ from core.scheduled_tasks import (
     resolve_session_id_target,
     session_anchor_for_target,
 )
+from core.watch_worker import WATCH_WORKER_ERROR_PREFIX
 from modules.im import MessageContext
 from storage import message_deliveries
 from storage.db import create_sqlite_engine
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    COMMAND_SNAPSHOT_METADATA_KEY,
+    COMMAND_TIMED_OUT_METADATA_KEY,
+    SQLiteBackgroundTaskStore,
+    definition_lifecycle_detail,
+)
 from storage.models import (
     agent_events,
     agent_runs,
@@ -13186,12 +13192,20 @@ def test_command_task_timeout_fails_the_run_with_the_timeout_exit_code(
     ``124`` is the runner's timeout code, and it must reach both the run row and the
     definition: a wedged command that merely stopped being awaited would leave the
     run ``running`` forever with nothing naming the cause.
+
+    SCT-024 rides along on the same fire, because both halves are about the sentence
+    the user reads. ``--timeout`` is a FLOAT, so the limit is stated as the user wrote
+    it: ``int()`` was not rounding a sub-second limit, it was deleting it, and "timed
+    out after 0 second(s)" describes an impossible event while hiding the setting that
+    has to change. And the definition records that the SCHEDULER is why the command
+    stopped, which nothing else can say -- ``timeout 5 ...`` inside a ``--shell``
+    script exits 124 all by itself.
     """
 
     _command_task_env(tmp_path, monkeypatch)
     store = ScheduledTaskStore()
     task = _add_command_task(
-        store, shell_command="sleep 30", cwd=str(tmp_path), timeout_seconds=1.0
+        store, shell_command="sleep 30", cwd=str(tmp_path), timeout_seconds=0.5
     )
     service = _scheduled_service_with_ledger(tmp_path, store, [])
 
@@ -13204,10 +13218,43 @@ def test_command_task_timeout_fails_the_run_with_the_timeout_exit_code(
     assert "timed out" in (run["error"] or ""), (
         f"the error text does not say the command timed out: {run['error']!r}"
     )
+    assert "0.5 second" in (run["error"] or ""), (
+        "the fractional limit was truncated away, so the text names a limit that was "
+        f"never configured: {run['error']!r}"
+    )
 
     stored = ScheduledTaskStore().get_task(task.id)
     assert stored is not None
     assert stored.last_exit_code == 124
+    assert (stored.metadata or {}).get(COMMAND_TIMED_OUT_METADATA_KEY) is True, (
+        "the definition did not record that the scheduler is what stopped this fire, "
+        f"so 124 is all the row has to go on: {stored.metadata!r}"
+    )
+
+    # And a real 124 from the command itself POSITIVELY clears the claim, rather than
+    # merely failing to make it: the same definition, the next fire.
+    _edit_definition_command(task.id, "exit 124")
+    reread = ScheduledTaskStore().get_task(task.id)
+    assert reread is not None
+    _fire_command_task(service, reread)
+
+    settled = ScheduledTaskStore().get_task(task.id)
+    assert settled is not None and settled.last_exit_code == 124
+    assert (settled.metadata or {}).get(COMMAND_TIMED_OUT_METADATA_KEY) is False, (
+        "a command that chose its own 124 still reads as a scheduler timeout: "
+        f"{settled.metadata!r}"
+    )
+    assert (
+        definition_lifecycle_detail(
+            lifecycle_state="finished",
+            definition_type="scheduled",
+            last_run_at=settled.last_run_at,
+            last_exit_code=settled.last_exit_code,
+            last_error=settled.last_error,
+            timed_out=(settled.metadata or {}).get(COMMAND_TIMED_OUT_METADATA_KEY),
+        )
+        == "error"
+    ), "the UI would tell the user to raise a limit that was never reached"
 
 
 def test_command_task_with_a_missing_cwd_fails_without_spawning(
@@ -13284,6 +13331,60 @@ def test_command_task_reports_a_supervisor_startup_failure_verbatim(
     stored = ScheduledTaskStore().get_task(task.id)
     assert stored is not None
     assert stored.last_error == "bad spec"
+
+
+def test_a_command_whose_executable_is_missing_reads_as_a_sentence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-025 -- the worker's machine-readable error line is not user-facing text.
+
+    ``SupervisedCommandStartupError`` is raised ONLY when the stdin handshake breaks,
+    so the ordinary failure -- an ``argv`` whose executable does not exist -- takes the
+    other route entirely: the worker accepts the spec, fails to spawn, and exits 1
+    with ``AVIBE_WATCH_WORKER_ERROR:{...}`` on stderr. The watch lane decodes that; the
+    scheduled lane did not, so the raw JSON became the definition's ``last_error``, the
+    text of the failure notice, and the body of the Agent escalation prompt.
+
+    Driven through the REAL worker, because the wire format is the thing under test:
+    a hand-written stderr string would keep passing if the encoder changed.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        cwd=str(tmp_path),
+        command=[str(tmp_path / "no-such-executable"), "--now"],
+        metadata={"origin": "cli"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the spawn failed ({run['error']!r})"
+    for field, value in (
+        ("error", run["error"]),
+        ("stderr", run["stderr"]),
+    ):
+        assert WATCH_WORKER_ERROR_PREFIX not in (value or ""), (
+            f"the run's {field} is raw worker protocol JSON, not a sentence: {value!r}"
+        )
+    assert "supervisor failed" in (run["error"] or "").lower(), (
+        f"the decoded text does not say what went wrong: {run['error']!r}"
+    )
+    assert "no-such-executable" in (run["error"] or ""), (
+        f"the decoded text dropped the detail naming the cause: {run['error']!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert WATCH_WORKER_ERROR_PREFIX not in (stored.last_error or ""), (
+        f"the definition stored the raw protocol line: {stored.last_error!r}"
+    )
 
 
 def test_command_run_is_not_gated_on_im_transport_readiness(
@@ -14020,6 +14121,23 @@ def test_hard_deleting_the_session_also_cancels_the_runs_bound_to_it(
     )
 
 
+def _edit_definition_command(definition_id: str, shell_command: str) -> None:
+    """Commit a command edit from another connection, the way ``vibe task update`` does."""
+
+    from storage.models import run_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == definition_id)
+                .values(shell_command=shell_command)
+            )
+    finally:
+        engine.dispose()
+
+
 def _repoint_definition_session(definition_id: str, session_id: str) -> None:
     """Commit a binding change from another connection, the way ``/new`` does."""
 
@@ -14095,6 +14213,150 @@ def test_a_reclaim_during_the_command_refuses_the_stamp_and_escalates_nowhere(
     )
 
 
+def test_a_cancel_during_the_command_refuses_the_escalation_and_settles_canceled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-026 -- a stopped job must not answer by starting an Agent.
+
+    The reclaim twin above guards the BINDING; this guards the STOP, and the window is
+    narrower than the one SCT-013 covers. There the flag is observed by the tick, which
+    cancels the awaiting coroutine and the fire never reaches its stamp. Here the
+    command has already exited, so nothing is left to interrupt: ``mark_task_result``
+    stamps the failure and durably queues the escalation, and only afterwards does
+    ``complete`` read ``cancel_requested`` and settle the run ``canceled``.
+
+    Two commits are not one decision. The turn the stamp authorises is durable by then,
+    so the user stops a job and the job answers by starting an Agent. The stop has to be
+    re-read SERVER-SIDE inside the stamp's own transaction, which is the only place it
+    can still roll the escalation back with it.
+
+    The definition must still end up describing this fire rather than the one before it
+    -- that is the terminal projection's job, and a refused stamp is exactly when it is
+    needed.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_cancel_stamp")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        session_id=session_id,
+    )
+    # The premise for the projection assertion: a PREVIOUS fire left an outcome behind.
+    store.mark_task_result(task.id, error=None, exit_code=3, records_command_outcome=True)
+
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    real_runner = scheduled_tasks.run_supervised_command
+
+    async def _stop_it_as_it_exits(**kwargs):
+        result = await real_runner(**kwargs)
+        # The only ordering that reaches the window: after the command is done, so the
+        # tick has nothing left to interrupt, and before the stamp opens its transaction.
+        service.request_store.cancel_run(queued.id)
+        return result
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _stop_it_as_it_exits)
+
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "canceled", (
+        f"the premise: the stop won the settlement race ({run['status']!r})"
+    )
+    assert _escalation_runs(store) == [], (
+        "the user stopped this run and it answered by durably queueing an Agent turn"
+    )
+    assert run["metadata"].get("escalation_run_id") in (None, ""), (
+        "the run claims an escalation that was rolled back with the stamp: "
+        f"{run['metadata'].get('escalation_run_id')!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    # 7, not the 3 the previous fire left: the stamp was refused, so the terminal
+    # projection is what describes this fire -- and the fire did exit 7, which the run
+    # row carries. The refusal rolls back the ESCALATION, not the record of the outcome.
+    assert stored.last_exit_code == 7, (
+        "the refused stamp left the definition reporting the exit code of the fire "
+        f"BEFORE this one: {stored.last_exit_code!r}"
+    )
+    assert (stored.metadata or {}).get(COMMAND_TIMED_OUT_METADATA_KEY) is False, (
+        "the projection left the timeout claim of an earlier fire standing beside a "
+        f"code this one chose for itself: {stored.metadata!r}"
+    )
+
+
+def test_teardown_between_the_stamp_and_the_settle_cancels_the_fire_itself(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-027 -- why the settle needs no second check on the escalation it names.
+
+    SCT-005 and SCT-009 both let the parent settle FIRST, so
+    ``rearm_notices_for_escalations_canceled_with_session`` finds a ``failed`` row and
+    can hand it a notice. The window in between looks like it breaks that: teardown
+    lands after the atomic stamp+enqueue and before ``complete``, so the re-arm sees a
+    parent that is still ``running`` and owes nothing yet, and ``complete`` then writes
+    ``escalation_run_id`` -- apparently suppressing a notice in favour of a turn that
+    was cancelled a moment earlier, leaving the failure reported by nothing.
+
+    IT DOES NOT, and this test is the reason a status check inside the settle would be
+    dead code. The teardown that cancels the escalation cannot cancel only the
+    escalation: ``archive_session`` flags EVERY non-terminal run of that session, and
+    this fire is one of them. So the settle normalizes the parent to ``canceled``, and
+    ``canceled`` owes no notice by design -- the run is recorded as stopped, not as a
+    failure whose report went missing. Nothing is suppressed because nothing was owed.
+    """
+
+    from storage.workbench_sessions_service import archive_session
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_stamp_teardown")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    real_mark = store.mark_task_result
+
+    def _stamp_then_tear_down(*args, **kwargs):
+        stamped = real_mark(*args, **kwargs)
+        engine = create_sqlite_engine(paths.get_sqlite_state_path())
+        try:
+            with engine.begin() as conn:
+                archive_session(conn, session_id)
+        finally:
+            engine.dispose()
+        return stamped
+
+    monkeypatch.setattr(store, "mark_task_result", _stamp_then_tear_down)
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "canceled", (
+        "the teardown that cancelled the escalation left this fire settling as a "
+        f"failure, so the settle really can suppress a notice for a dead turn: {run['status']!r}"
+    )
+    assert _escalation_runs(store) == [], (
+        "the premise: teardown cancelled the escalation this fire queued"
+    )
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "a cancelled fire stamped a failure notice, which is the noise "
+        "``_owed_failure_notice_for_transition`` exists to refuse"
+    )
+
+
 def test_the_escalation_prompt_prepends_the_stored_message_and_names_the_run(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -14157,12 +14419,35 @@ def test_an_escalating_command_runs_in_its_bound_sessions_workdir(
     Session rule rejects.
 
     So the binding has to supply what it refused to let the user state.
+
+    The lookup opens a store per FIRE, and each one carries an engine and an
+    invalidation probe, so the second assertion is that it does not outlive the read:
+    a cron command running every minute would otherwise leak a connection a minute for
+    the life of the service.
     """
+
+    import storage.sessions_service as sessions_service
 
     _command_task_env(tmp_path, monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
     (project / "marker").write_text("bound-session-workdir\n", encoding="utf-8")
+
+    opened: list[str] = []
+    closed: list[str] = []
+
+    class _CountedSessionsService(sessions_service.SQLiteSessionsService):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            opened.append(str(id(self)))
+
+        def close(self) -> None:
+            closed.append(str(id(self)))
+            super().close()
+
+    monkeypatch.setattr(
+        sessions_service, "SQLiteSessionsService", _CountedSessionsService
+    )
 
     store = ScheduledTaskStore()
     session_id = _bare_session_row(workdir=project, anchor="avibe_task_cwd")
@@ -14190,6 +14475,68 @@ def test_an_escalating_command_runs_in_its_bound_sessions_workdir(
         f"ran somewhere else: {run['error']!r}"
     )
     assert _escalation_runs(store) == [], "a succeeded fire must not escalate"
+    assert opened, "the premise: the fire resolved its workdir through a Session store"
+    assert closed == opened, (
+        "the workdir lookup left its Session store open, so every fire of this cron "
+        f"leaks an engine and its invalidation probe: opened {opened!r}, closed {closed!r}"
+    )
+
+
+def test_the_run_snapshot_names_the_command_the_fire_actually_ran(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-028 -- the snapshot is only worth having if it is the executed copy.
+
+    The enqueue stamps the definition as it stood THEN, but the executor re-reads the
+    definition after claiming the run -- so an edit committed in that window left the
+    run naming command A while command B ran, and the notice, the escalation prompt and
+    the Workbench run detail all repeated that wrong answer with a snapshot's authority.
+    Worse than no snapshot: it is the record readers were told to trust precisely
+    because the definition is mutable.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="echo original", cwd=str(tmp_path)
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    predicted = service.request_store.get_run(queued.id)
+    assert predicted is not None
+    assert predicted["metadata"].get(COMMAND_SNAPSHOT_METADATA_KEY) == {
+        "shell": "echo original",
+        "argv": [],
+    }, f"the premise: the enqueue predicted a command ({predicted['metadata']!r})"
+
+    # ``SqliteInvalidationProbe`` reports "changed" only by COMPARING two readings of
+    # ``PRAGMA data_version``, so its very first call always answers no. A live service
+    # has ticked long before a fire claims anything; a test has to prime it, or the
+    # mirror below never reloads and the executor cannot see the edit at all.
+    service.store.maybe_reload()
+
+    # The window: the user rewrites the command after it was queued and before it runs.
+    _edit_definition_command(task.id, "echo edited")
+
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert "edited" in (run["stdout"] or ""), (
+        f"the premise: the executor ran the edited command ({run['stdout']!r})"
+    )
+    assert run["metadata"].get(COMMAND_SNAPSHOT_METADATA_KEY) == {
+        "shell": "echo edited",
+        "argv": [],
+    }, (
+        "the run's immutable record of what it executed names a command it did not "
+        f"execute: {run['metadata'].get(COMMAND_SNAPSHOT_METADATA_KEY)!r}"
+    )
 
 
 def test_a_running_command_fire_does_not_hold_its_conversations_turn_lock(

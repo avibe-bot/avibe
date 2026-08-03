@@ -48,6 +48,7 @@ from core.scheduled_tasks import (
     session_anchor_for_target,
 )
 from core.caller_context import caller_context_from_env
+from core.command_runner import command_line_preview
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
@@ -1652,15 +1653,11 @@ def _task_command_fields(task) -> tuple[Optional[str], list[str], dict]:
     )
 
 
-def _task_has_command(task) -> bool:
-    shell_command, command, _metadata = _task_command_fields(task)
-    return bool(shell_command or command)
-
-
 def _task_kind(task) -> str:
     """``"command"`` when this definition runs a subprocess, else ``"message"``."""
 
-    return "command" if _task_has_command(task) else "message"
+    shell_command, command, _metadata = _task_command_fields(task)
+    return "command" if (shell_command or command) else "message"
 
 
 def _task_on_failure(task) -> str:
@@ -1669,12 +1666,9 @@ def _task_on_failure(task) -> str:
     return value or "none"
 
 
-def _task_command_preview(task, *, max_chars: int = 120) -> str:
+def _task_command_preview(task) -> str:
     shell_command, command, _metadata = _task_command_fields(task)
-    preview = (shell_command or (shlex.join(command) if command else "")).strip()
-    if len(preview) <= max_chars:
-        return preview
-    return preview[: max_chars - 1].rstrip() + "…"
+    return command_line_preview(shell_command, command)
 
 
 def _task_display_name(task) -> str:
@@ -2808,12 +2802,8 @@ def _resolve_task_command(args, *, help_command: str) -> tuple[list[str], Option
     return [], None, False
 
 
-def _watch_command_preview(watch, *, max_chars: int = 120) -> str:
-    preview = watch.shell_command or shlex.join(watch.command)
-    preview = preview.strip()
-    if len(preview) <= max_chars:
-        return preview
-    return preview[: max_chars - 1].rstrip() + "…"
+def _watch_command_preview(watch) -> str:
+    return command_line_preview(watch.shell_command, watch.command)
 
 
 def _watch_display_name(watch) -> str:

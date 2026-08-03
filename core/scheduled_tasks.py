@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import shlex
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
@@ -64,6 +63,7 @@ from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
 from core.command_runner import (
     SupervisedCommandStartupError,
+    command_line_preview,
     run_supervised_command,
 )
 from core.delivery_evidence import (
@@ -79,8 +79,10 @@ from core.process_isolation import (
     serialize_process_identity,
     terminate_process_tree_by_pid,
 )
+from core.watch_worker import localize_worker_error
 from storage.background import (
     COMMAND_SNAPSHOT_METADATA_KEY,
+    COMMAND_TIMED_OUT_METADATA_KEY,
     COMMAND_WORKER_METADATA_KEY,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
@@ -166,6 +168,19 @@ def _last_nonempty_line(text: Optional[str]) -> str:
         if stripped:
             return stripped[:_COMMAND_ERROR_DETAIL_MAX_CHARS]
     return ""
+
+
+def _format_seconds(seconds: float) -> str:
+    """A duration as the user wrote it: ``3600``, ``0.5``, ``1.9``.
+
+    ``--timeout`` is a float, so ``int()`` was not rounding, it was DELETING the value
+    for every sub-second limit: ``--timeout 0.5`` reported "timed out after 0
+    second(s)", a sentence that describes an impossible event and hides the actual
+    setting the user has to change.
+    """
+
+    value = float(seconds)
+    return str(int(value)) if value.is_integer() else f"{value:g}"
 
 
 def _json_loads(value: str | None, default: Any) -> Any:
@@ -1345,6 +1360,7 @@ class ScheduledTaskStore:
         expect: DefinitionWriteExpectation,
         *,
         queued_run: Optional[dict[str, Any]] = None,
+        expected_uncanceled_run_id: Optional[str] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
@@ -1388,7 +1404,10 @@ class ScheduledTaskStore:
                 # No agent-guard kwargs: the only caller that passes a queued run is
                 # ``mark_task_result``, which never passes them either.
                 landed = self._sqlite.upsert_scheduled_task_with_queued_run(
-                    task.to_dict(), expect=expect, run_payload=queued_run
+                    task.to_dict(),
+                    expect=expect,
+                    run_payload=queued_run,
+                    expected_uncanceled_run_id=expected_uncanceled_run_id,
                 )
         except Exception:
             self._reload_after_lost_write(task.id)
@@ -1708,7 +1727,9 @@ class ScheduledTaskStore:
         expected_binding: Optional[tuple[Optional[str], str, str]] = None,
         exit_code: Optional[int] = None,
         records_command_outcome: bool = False,
+        timed_out: bool = False,
         queued_run: Optional[dict[str, Any]] = None,
+        expected_uncanceled_run_id: Optional[str] = None,
     ) -> bool:
         """Stamp a fire's outcome; ``False`` means the store refused the write.
 
@@ -1721,6 +1742,11 @@ class ScheduledTaskStore:
         ``records_command_outcome`` marks the ONE stamp that is a command fire's own
         result, and it is what makes ``exit_code`` authoritative in both directions --
         see the write below.
+
+        ``expected_uncanceled_run_id`` re-asserts, inside that same transaction, that
+        the fire being stamped has not been stopped -- see
+        ``upsert_scheduled_task_with_queued_run``. Only meaningful alongside
+        ``queued_run``, because it exists to stop a stopped run queuing an Agent turn.
         """
 
         self.maybe_reload()
@@ -1745,6 +1771,15 @@ class ScheduledTaskStore:
             # refuses to print an exit code it does not have; the row must refuse to
             # keep one it no longer has.
             task.last_exit_code = int(exit_code) if exit_code is not None else None
+            # AND WHETHER THE SCHEDULER IS WHY IT STOPPED, which the code cannot say on
+            # its own: the runner reports its own timeout as 124, and a command that
+            # wraps itself in ``timeout`` reports a real one as 124 too. Written on
+            # every command stamp, both values, so a fire that did NOT time out
+            # positively clears the previous fire's claim that one did.
+            task.metadata = {
+                **(task.metadata if isinstance(task.metadata, dict) else {}),
+                COMMAND_TIMED_OUT_METADATA_KEY: bool(timed_out),
+            }
         elif exit_code is not None:
             # A stamp from any other lane reports the code only when it has one: a
             # message task has none and must never blank what a command fire of the
@@ -1757,7 +1792,12 @@ class ScheduledTaskStore:
         # guarded: this payload carries the mirror's ``session_id`` and ``enabled``, so
         # a run result landing after a ``/new`` reclaim would re-enable the definition
         # and re-point it at the session the reclaim just tore down.
-        return self._write_task(task, expect, queued_run=queued_run)
+        return self._write_task(
+            task,
+            expect,
+            queued_run=queued_run,
+            expected_uncanceled_run_id=expected_uncanceled_run_id,
+        )
 
 
 class TaskExecutionStore:
@@ -1923,13 +1963,41 @@ class TaskExecutionStore:
     ) -> bool:
         """Remember (or forget) the isolated supervisor this in-flight fire spawned.
 
-        See ``SQLiteBackgroundTaskStore.record_command_worker``. The file backend
-        keeps the same key in the processing payload's ``metadata`` so a store
-        swapped in by a test observes the same contract.
+        See ``SQLiteBackgroundTaskStore.record_command_worker``.
+        """
+
+        return self._merge_inflight_metadata(
+            request_id, COMMAND_WORKER_METADATA_KEY, identity
+        )
+
+    def record_command_snapshot(
+        self,
+        request_id: str,
+        snapshot: Optional[dict[str, Any]],
+    ) -> bool:
+        """Re-stamp what this in-flight fire is about to run.
+
+        See ``SQLiteBackgroundTaskStore.record_command_snapshot``.
+        """
+
+        return self._merge_inflight_metadata(
+            request_id, COMMAND_SNAPSHOT_METADATA_KEY, snapshot
+        )
+
+    def _merge_inflight_metadata(
+        self,
+        request_id: str,
+        key: str,
+        value: Optional[dict[str, Any]],
+    ) -> bool:
+        """Set (or drop) one metadata key on an in-flight fire.
+
+        The file backend keeps the same keys in the processing payload's ``metadata``
+        so a store swapped in by a test observes the same contract as SQLite.
         """
 
         if self._sqlite is not None:
-            return self._sqlite.record_command_worker(request_id, identity)
+            return self._sqlite.merge_running_run_metadata(request_id, key, value)
         processing_path = self._request_path(request_id, state="processing")
         try:
             payload = json.loads(processing_path.read_text(encoding="utf-8"))
@@ -1939,12 +2007,12 @@ class TaskExecutionStore:
             return False
         metadata = payload.get("metadata")
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
-        if identity is None:
-            if COMMAND_WORKER_METADATA_KEY not in metadata:
+        if value is None:
+            if key not in metadata:
                 return False
-            metadata.pop(COMMAND_WORKER_METADATA_KEY, None)
+            metadata.pop(key, None)
         else:
-            metadata[COMMAND_WORKER_METADATA_KEY] = dict(identity)
+            metadata[key] = dict(value)
         payload["metadata"] = metadata
         payload["updated_at"] = _utc_now_iso()
         with tempfile.NamedTemporaryFile(
@@ -3044,6 +3112,20 @@ class ScheduledTaskService:
         lang = str(getattr(config, "language", "en") or "en")
         return i18n_t(key, lang, **kwargs)
 
+    def _localize_worker_error(self, stderr: Optional[str]) -> str:
+        """The shared worker-error decoder, reading this lane's copy.
+
+        Both lanes spawn the SAME supervisor, so both can receive its
+        machine-readable error line -- see ``core.watch_worker.localize_worker_error``.
+        The ``harness.command`` namespace is what keeps the sentence honest: a user
+        managing a cron job has no watch worker, and should not be told about one.
+        Ordinary command stderr passes through untouched.
+        """
+
+        return localize_worker_error(
+            stderr or "", self._t, namespace="harness.command"
+        )
+
     def _record_command_worker(
         self,
         execution_id: str,
@@ -3066,6 +3148,28 @@ class ScheduledTaskService:
         except Exception:
             logger.debug(
                 "failed to record command worker for %s", execution_id, exc_info=True
+            )
+
+    def _record_executed_command(self, execution_id: str, task: ScheduledTask) -> None:
+        """Correct the run's command snapshot to the definition actually being run.
+
+        The enqueue stamped the definition as it stood THEN; this stamps it as it
+        stands at the moment of execution, which is the copy the fire will really
+        spawn (``_execute_claimed_request`` re-reads the definition after claiming).
+        An edit committed in that window otherwise left the notice, the escalation
+        prompt and the Workbench run detail naming a command that never ran.
+
+        Best-effort like the worker stamp: a store hiccup must degrade the record,
+        not fail a command that is about to run correctly.
+        """
+
+        try:
+            self.request_store.record_command_snapshot(
+                execution_id, command_snapshot(task)
+            )
+        except Exception:
+            logger.debug(
+                "failed to record executed command for %s", execution_id, exc_info=True
             )
 
     def _reap_orphaned_command_workers(self) -> None:
@@ -5184,23 +5288,17 @@ class ScheduledTaskService:
         return "\n".join(lines)
 
     @staticmethod
-    def _notice_command_preview(task: Any, *, max_chars: int = 120) -> str:
+    def _notice_command_preview(task: Any) -> str:
         """The one-line command a notice names, or ``""`` for a non-command definition.
 
-        Mirrors the CLI's ``_task_command_preview`` idiom deliberately — same
-        shell-string-or-``shlex.join`` choice, same 120-char cap with a trailing
-        ellipsis — so the command a user reads in a failure notice is the same string
-        ``vibe task list`` showed them. A notice is delivered into a chat message, and
-        an uncapped command (a long ``bash -lc`` pipeline) would bury the error line
-        that follows it.
+        Reads whichever shape the caller has -- a ``ScheduledTask`` or the run's own
+        snapshot -- and hands both to the shared ``command_line_preview``, so the
+        command in a failure notice is the same string ``vibe task list`` showed.
         """
 
-        shell_command = getattr(task, "shell_command", None)
-        argv = getattr(task, "command", None)
-        preview = (shell_command or (shlex.join(argv) if argv else "")).strip()
-        if len(preview) <= max_chars:
-            return preview
-        return preview[: max_chars - 1].rstrip() + "…"
+        return command_line_preview(
+            getattr(task, "shell_command", None), getattr(task, "command", None)
+        )
 
     def _task_lifecycle_state(self, definition_id: Optional[str], task: Any) -> str:
         """The lifecycle state the badge shows for this task — asked of the badge.
@@ -5916,7 +6014,21 @@ class ScheduledTaskService:
                     stderr=stderr,
                     escalation_run_id=escalation_run_id,
                 )
-                if project_terminal_definition_on_cancel and written_status is not None:
+                if written_status is not None and (
+                    project_terminal_definition_on_cancel
+                    # A STOP THAT NEVER BECAME A ``CancelledError``. ``cancel_run``
+                    # can commit its flag after the work returned, so ``complete``
+                    # normalizes this run to ``canceled`` while the coroutine ran to
+                    # the end without ever being interrupted -- and a command stamp
+                    # refused by that same flag then left the definition still
+                    # reporting the fire BEFORE this one. The projection is the lane
+                    # that settles a canceled fire; the flag above only says the
+                    # cancellation arrived the usual way.
+                    or (
+                        written_status == "canceled"
+                        and request.request_type in {"task_run", "scheduled"}
+                    )
+                ):
                     self._project_terminal_definition_result(
                         self.request_store.get_run(request.id),
                         execution_id=request.id,
@@ -5995,7 +6107,14 @@ class ScheduledTaskService:
             from storage.sessions_service import SQLiteSessionsService
 
             service = SQLiteSessionsService(paths.get_sqlite_state_path())
-            row = service.get_agent_session_by_id(session_id)
+            try:
+                row = service.get_agent_session_by_id(session_id)
+            finally:
+                # One store per FIRE, so it must not outlive the read: each one
+                # carries an engine and an invalidation probe, and a cron command
+                # running every minute would otherwise accumulate a connection a
+                # minute for the life of the service.
+                service.close()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
                 "Could not read the workdir of Session %s bound to task %s: %s",
@@ -6038,6 +6157,16 @@ class ScheduledTaskService:
         exit_code: Optional[int] = None
         stdout_value: Optional[str] = None
         stderr_value: Optional[str] = None
+        #: Whether the SCHEDULER stopped this fire, as opposed to the command choosing
+        #: its own exit status. Recorded separately because the two are indistinguishable
+        #: from the code alone: the runner reports a timeout as 124, and ``timeout 5 ...``
+        #: inside a shell command reports a real one as 124 too.
+        timed_out = False
+
+        # BEFORE anything can fail, and before the spawn: the enqueue predicted this
+        # command from the definition as it stood then, and the executor re-read the
+        # definition after claiming. This is the copy that will actually run.
+        self._record_executed_command(execution_id, task)
 
         spawn_cwd = task.cwd or self._bound_session_workdir(task)
         if not spawn_cwd:
@@ -6072,9 +6201,7 @@ class ScheduledTaskService:
                 # Its own clause, BEFORE the broad one: the class subclasses
                 # ``RuntimeError``, so a single ``except Exception`` would swallow it and
                 # report the worker's startup failure as an ordinary command error.
-                # ``exc.detail`` is the worker's own stderr, which no catalog can
-                # translate; only the fallback is ours to localize.
-                error = exc.detail or self._t(
+                error = self._localize_worker_error(exc.detail) or self._t(
                     "harness.command.supervisorExitedDuringStartup"
                 )
             except Exception as exc:
@@ -6084,30 +6211,36 @@ class ScheduledTaskService:
                 )
             else:
                 exit_code = result.exit_code
+                # THE WORKER'S OWN FAILURES ARRIVE HERE, not only through
+                # ``SupervisedCommandStartupError``: that is raised solely when the
+                # stdin handshake breaks, so a worker that accepted the spec and THEN
+                # could not spawn (an argv whose executable does not exist is the
+                # ordinary case) simply exits 1 with its machine-readable error line on
+                # stderr. Left undecoded, that raw JSON became the definition's
+                # ``last_error``, the failure notice, and the Agent escalation prompt.
+                stderr_value = self._localize_worker_error(result.stderr)
+                stdout_value = result.stdout
                 if result.timed_out:
                     # Both streams are kept: whatever the command printed before it
                     # hung is the only evidence of WHY it hung, and a timeout has no
                     # exit status that explains itself. The runner preserves the
                     # capped readers' buffers across the kill for exactly this.
-                    stdout_value = result.stdout
-                    stderr_value = result.stderr
+                    timed_out = True
                     error = self._t(
-                        "harness.command.timedOut", seconds=int(effective_timeout)
+                        "harness.command.timedOut",
+                        seconds=_format_seconds(effective_timeout),
                     )
-                else:
-                    stdout_value = result.stdout
-                    stderr_value = result.stderr
-                    if exit_code:
-                        detail = _last_nonempty_line(result.stderr)
-                        error = (
-                            self._t(
-                                "harness.command.exitedWithDetail",
-                                code=exit_code,
-                                detail=detail,
-                            )
-                            if detail
-                            else self._t("harness.command.exited", code=exit_code)
+                elif exit_code:
+                    detail = _last_nonempty_line(stderr_value)
+                    error = (
+                        self._t(
+                            "harness.command.exitedWithDetail",
+                            code=exit_code,
+                            detail=detail,
                         )
+                        if detail
+                        else self._t("harness.command.exited", code=exit_code)
+                    )
             finally:
                 # Reached on success, on failure, and on the ``CancelledError`` a
                 # stop raises: by the time control is here the runner has reaped
@@ -6158,6 +6291,7 @@ class ScheduledTaskService:
             # ``None`` for a fire that never spawned -- is the whole truth about the
             # definition's last status.
             records_command_outcome=True,
+            timed_out=timed_out,
             # THE BINDING THIS FIRE STARTED AGAINST, and only when a turn is being
             # authorised. ``mark_task_result`` reloads the mirror and derives its
             # compare-and-set expectation from the RELOADED row, so a ``/new`` reclaim
@@ -6172,6 +6306,14 @@ class ScheduledTaskService:
                 (task.session_id, task.session_key, task.schedule_type)
                 if escalation_request is not None
                 else None
+            ),
+            # AND THAT THIS FIRE HAS NOT BEEN STOPPED, re-read server-side for the same
+            # reason and in the same transaction. A ``vibe runs cancel`` committed while
+            # the command was exiting settles the run ``canceled`` a moment later, and
+            # without this the turn it authorises would already be durably queued: the
+            # user stops a job and the job answers by starting an Agent.
+            expected_uncanceled_run_id=(
+                execution_id if escalation_request is not None else None
             ),
             queued_run=(
                 self.request_store.queued_run_payload(escalation_request)
