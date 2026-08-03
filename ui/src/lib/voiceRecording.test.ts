@@ -180,8 +180,8 @@ describe('VoiceRecordingPipeline', () => {
       [3, 4, 5, 6],
     ]);
     expect(onSegment.mock.calls.map(([, metadata]) => metadata)).toEqual([
-      { durationMs: 1000 },
-      { durationMs: 1000, overlapMs: 500 },
+      { durationMs: 1000, final: false },
+      { durationMs: 1000, overlapMs: 500, final: false },
     ]);
   });
 
@@ -210,7 +210,7 @@ describe('VoiceRecordingPipeline', () => {
     capture().settle();
 
     expect(onSegment).toHaveBeenCalledTimes(1);
-    expect(onSegment.mock.calls[0]?.[1]).toEqual({ durationMs: 500 });
+    expect(onSegment.mock.calls[0]?.[1]).toEqual({ durationMs: 500, final: true });
     expect(await wavDataBytes(onSegment.mock.calls[0]![0])).toBe(4);
     expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 1 });
     expect(track.stop).toHaveBeenCalledTimes(1);
