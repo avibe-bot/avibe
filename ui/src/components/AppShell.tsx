@@ -49,6 +49,10 @@ type ShellNavItem = {
   variant?: 'workbench';
 };
 
+// Keep the Organization routes available for direct access while the product
+// entry points remain hidden. Re-enable every shell surface from one switch.
+const ORGANIZATION_NAV_ENABLED = false;
+
 const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
   item.match
     ? item.match(pathname)
@@ -321,7 +325,14 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    { to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2, match: (p) => p.startsWith('/admin/organization') },
+    ...(ORGANIZATION_NAV_ENABLED
+      ? [{
+          to: '/admin/organization/overview',
+          label: t('nav.organization'),
+          icon: Building2,
+          match: (p: string) => p.startsWith('/admin/organization'),
+        }]
+      : []),
     // Permanent escape hatch to the App Library (a workbench app). Always present,
     // so the Library is reachable from the control panel even when it is undocked
     // (§7.1c #7). Matches any /apps/library path so it stays active on the route.
@@ -381,20 +392,24 @@ export const AppShell: React.FC = () => {
 
   const items: ShellNavItem[] = shellMode === 'admin' ? adminItems : [];
 
-  // A bottom tab bar can't hold the nested admin nav (6 sections, one with a
-  // submenu), so mobile keeps a trimmed 4-tab bar — back-to-workbench (emphasized
-  // green circle), 控制台, Organization, 菜单 (opens the full nested nav sheet) —
-  // and the 菜单 sheet renders the same nested adminItems so every page is
-  // reachable + groups expand. See ``adminMenuOpen``.
+  // A bottom tab bar can't hold the nested admin nav, so mobile keeps a trimmed
+  // bar with Workbench, Control Panel, and More (which opens the full nested nav
+  // sheet). The Organization tab follows the same temporary visibility switch
+  // as every other shell entry point. See ``adminMenuOpen``.
   const adminMobileTabs: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    { to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2 },
+    ...(ORGANIZATION_NAV_ENABLED
+      ? [{ to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2 }]
+      : []),
     { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
   ];
-  // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom
-  // bar (控制台 + Organization) — so nothing is duplicated.
-  const adminBottomBarPaths = new Set(['/admin/dashboard', '/admin/organization/overview']);
+  // The More sheet shows the overflow: admin sections not already on the bottom
+  // bar. Keep its filtering aligned with the currently visible primary tabs.
+  const adminBottomBarPaths = new Set([
+    '/admin/dashboard',
+    ...(ORGANIZATION_NAV_ENABLED ? ['/admin/organization/overview'] : []),
+  ]);
   const adminSheetItems = adminItems
     .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))
     // Groups start expanded in the sheet (the sheet is transient — show the
@@ -504,7 +519,7 @@ export const AppShell: React.FC = () => {
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
               {capabilities.can_use_system && <AppsLauncher />}
-              {shellMode === 'workbench' && (
+              {shellMode === 'workbench' && ORGANIZATION_NAV_ENABLED && (
                 <Link
                   to="/admin/organization/overview"
                   title={t('nav.organization')}
@@ -595,14 +610,16 @@ export const AppShell: React.FC = () => {
               when not yet installed; null everywhere else). Version / language /
               theme / account live in the More tab. */}
           <div className="flex items-center gap-1.5">
-            <Link
-              to="/admin/organization/overview"
-              title={t('nav.organization')}
-              aria-label={t('nav.organization')}
-              className="grid size-9 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
-            >
-              <Building2 className="size-[18px]" />
-            </Link>
+            {ORGANIZATION_NAV_ENABLED && (
+              <Link
+                to="/admin/organization/overview"
+                title={t('nav.organization')}
+                aria-label={t('nav.organization')}
+                className="grid size-9 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
+              >
+                <Building2 className="size-[18px]" />
+              </Link>
+            )}
             <InstallHint />
           </div>
         </header>
