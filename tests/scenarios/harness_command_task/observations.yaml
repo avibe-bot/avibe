@@ -301,3 +301,26 @@ observations:
       - translate the refused-terminal-stamp sentence through vibe/i18n on both call sites
       - keep quoted material (str(exc), worker stderr) untranslated, since nobody here authored it
       - guard both refusal keys with a resolution test that also fails if zh.json is filled with the English string
+  - id: OBS-HARNESS-COMMAND-TASK-019
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-039
+      - SCT-025
+    summary: >-
+      Decoding the supervisor's error line fixed the sentence and left the number lying.
+    previous_assumption: >-
+      A worker that accepted the spec and then failed to spawn is reported once the raw
+      protocol JSON on its stderr is turned into a sentence; the exit status travelling
+      beside it is just the runner's report of what the process returned.
+    observed_behavior: >-
+      That status is the SUPERVISOR's -- ``main()`` returns 1 for both of its own failures
+      -- and this lane publishes it as a fact about the user's command: "Exit code: 1" in
+      the failure notice and the Agent escalation prompt, ``last_exit_code`` on the
+      definition, an ``exit_code`` in the run row ``vibe runs show`` prints. The message
+      then said "Command exited with status 1" and "Command supervisor failed" in one
+      breath, for a command that never started.
+    required_updates:
+      - decode the worker error line rather than sniffing it, and leave the command exit code unset for that outcome
+      - report it with the supervisor sentence alone, the way the handshake failure already does
+      - keep a real command's status intact, since blanking every failing fire's exit code would be the worse defect
+      - leave the watch lane's exit code alone, where a cycle status drives retry_exit_codes and there is no "no status" to spell

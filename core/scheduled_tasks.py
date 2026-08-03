@@ -78,7 +78,7 @@ from core.process_isolation import (
     reap_orphaned_process_tree,
     serialize_process_identity,
 )
-from core.watch_worker import localize_worker_error
+from core.watch_worker import decode_watch_worker_error, localize_worker_error
 from storage.background import (
     COMMAND_SNAPSHOT_METADATA_KEY,
     COMMAND_TIMED_OUT_METADATA_KEY,
@@ -6383,6 +6383,7 @@ class ScheduledTaskService:
                 # ordinary case) simply exits 1 with its machine-readable error line on
                 # stderr. Left undecoded, that raw JSON became the definition's
                 # ``last_error``, the failure notice, and the Agent escalation prompt.
+                worker_error = decode_watch_worker_error(result.stderr or "")
                 stderr_value = self._localize_worker_error(result.stderr)
                 stdout_value = result.stdout
                 if result.timed_out:
@@ -6394,6 +6395,32 @@ class ScheduledTaskService:
                     error = self._t(
                         "harness.command.timedOut",
                         seconds=_format_seconds(effective_timeout),
+                    )
+                elif worker_error is not None:
+                    # THE SUPERVISOR'S EXIT STATUS IS NOT THE COMMAND'S. ``main()``
+                    # returns 1 for both of its own failures, so a spawn the worker
+                    # could not perform arrived here as ``exit_code == 1`` and was
+                    # published as a fact about the user's command: "Exit code: 1" in
+                    # the failure notice and the escalation prompt, ``last_exit_code = 1``
+                    # on the definition, an ``exit_code`` in the run row that
+                    # ``vibe runs show`` prints -- for a command that never started, and
+                    # alongside "Command exited with status 1" contradicting the
+                    # supervisor sentence in the same message. There IS no command exit
+                    # status in this outcome, and ``None`` is how this lane spells that
+                    # (the handshake failure above reports it the same way). The error
+                    # line the worker wrote is the discriminator, decoded rather than
+                    # sniffed: only the supervisor emits it, before any of the command's
+                    # own output can reach the stream, and a command that forged it is
+                    # already reporting itself as a supervisor failure through
+                    # ``_localize_worker_error`` -- losing an exit code it lied about is
+                    # the smaller half of that.
+                    #
+                    # The WATCH lane keeps its exit code here by design: a cycle's status
+                    # drives ``retry_exit_codes`` and ``_CycleResult`` has no "no status"
+                    # to spell, so leave that behaviour to the lane that owns it.
+                    exit_code = None
+                    error = stderr_value or self._t(
+                        "harness.command.unknownSupervisorFailure"
                     )
                 elif exit_code:
                     detail = _last_nonempty_line(stderr_value)

@@ -13392,6 +13392,74 @@ def test_a_command_whose_executable_is_missing_reads_as_a_sentence(
     )
 
 
+def test_a_supervisor_failure_records_no_command_exit_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-039 -- the supervisor's exit status is not the command's.
+
+    SCT-025 decoded the worker's error LINE and left its exit STATUS misattributed.
+    ``core/watch_worker.py``'s ``main()`` returns 1 for both of its own failures, so a
+    spawn the worker could not perform arrived as ``exit_code == 1`` and was published as
+    a fact about the user's command: ``Exit code: 1`` in the failure notice and the
+    escalation prompt, ``last_exit_code = 1`` on the definition, an ``exit_code`` in the
+    run row ``vibe runs show`` prints -- for a command that never ran, and next to
+    "Command exited with status 1" contradicting the supervisor sentence beside it.
+
+    The negative half is the point of the discriminator: a command that DID run and
+    exited 1 must keep saying so, or this fix would blind every failing cron job.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        cwd=str(tmp_path),
+        command=[str(tmp_path / "no-such-executable"), "--now"],
+        metadata={"origin": "cli"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the spawn failed ({run['error']!r})"
+    assert run["exit_code"] is None, (
+        "the run row published the SUPERVISOR's status as the command's exit code "
+        f"({run['exit_code']!r}); the command never started"
+    )
+    assert "supervisor failed" in (run["error"] or "").lower(), (
+        f"the failure stopped naming the supervisor: {run['error']!r}"
+    )
+    assert "exited with status" not in (run["error"] or "").lower(), (
+        "one message claims the command exited AND that the supervisor failed: "
+        f"{run['error']!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code is None, (
+        "the definition's lifecycle claims a command exited: "
+        f"last_exit_code={stored.last_exit_code!r}"
+    )
+
+    # The negative half, through the same real worker: a command that ran and failed.
+    ran = _add_command_task(
+        store, shell_command="exit 3", cwd=str(tmp_path), timeout_seconds=30.0
+    )
+    ran_run = _fire_command_task(service, ran)
+    assert ran_run["status"] == "failed"
+    assert ran_run["exit_code"] == 3, (
+        "a real command's exit status was blanked along with the supervisor's: "
+        f"{ran_run['exit_code']!r}"
+    )
+    assert "3" in (ran_run["error"] or ""), (
+        f"the failure no longer reports the status the command exited with: {ran_run['error']!r}"
+    )
+
+
 def test_command_run_is_not_gated_on_im_transport_readiness(
     tmp_path: Path, monkeypatch
 ) -> None:

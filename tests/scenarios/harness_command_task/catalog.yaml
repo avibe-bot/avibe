@@ -348,3 +348,16 @@ scenarios:
     # fill through ``vibe/i18n``. What stays untranslated there is quoted text nobody
     # here wrote (``str(exc)``, a worker's own stderr), so the line is between our copy
     # and quoted material, not one convention per channel.
+  - id: SCT-039
+    name: a supervisor failure records no command exit code
+    status: covered
+    kind: observability
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_supervisor_failure_records_no_command_exit_code
+    # SCT-025 decoded the worker's error LINE and left its exit STATUS misattributed.
+    # ``main()`` returns 1 for both of the supervisor's own failures, so a spawn it could
+    # not perform was published as the command's exit code -- in the notice, the
+    # escalation prompt, ``last_exit_code`` and the run row -- for a command that never
+    # started. The negative half is the discriminator's proof: a command that ran and
+    # exited 3 still reports 3, or the fix would blind every failing cron job.
