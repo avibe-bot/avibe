@@ -190,9 +190,13 @@ the other inline drains.
    Activity claim and settles a linked deferred Run without requiring one.
    Surface `failed` / `abandoned` through the session Activity projection and,
    when linked, the Harness Run detail.
-6. Re-arm `_drain_dirty` for every temporary request/callback skip. Persist retry
-   timing and apply backoff to unrunnable work so a retry cannot hot-spin on the
-   two-second tick.
+6. Do not rely on a SQLite data-version edge after `maybe_reload()` as the only
+   trigger for any detached drain. Probe each lane independently every tick, or
+   give it durable `next_attempt_at` eligibility. Its task-completion path must
+   re-arm after timeout, cancellation, or exception as well as after a partial
+   page or temporary request/callback skip; only service shutdown suppresses
+   re-arming. Persist retry timing and apply bounded backoff to unrunnable or
+   repeatedly failing work so retries cannot hot-spin on the two-second tick.
 7. Add a heartbeat plus one separately tracked supervisor task per service
    instance that is not awaited by `_watch_store`. It must identify the overdue
    drain in a loud log; a watchdog running inside the blocked loop cannot diagnose
@@ -207,6 +211,9 @@ the other inline drains.
   delay the other drains or stale-run sweeps;
 - large request, Run-callback, and vault-callback backlogs drain in bounded pages
   and reliably re-arm;
+- after `maybe_reload()` consumes the only store change, timeout, cancellation,
+  and exception completion each re-arm remaining work with backoff; shutdown
+  cancellation does not re-arm;
 - only one instance of each drain can run;
 - service stop/restart cancels and joins owned drain tasks and the supervisor;
 - repeated start/stop cycles leave exactly one current supervisor and no stale
@@ -278,15 +285,24 @@ evidence, and restart recovery. First determine what remains.
    unrelated Run sharing the session.
 3. On expiry, first claim timeout ownership with one guarded transition that
    verifies the Run is nonterminal, its observed stale `last_progress_at` has not
-   advanced, and no terminal or cancellation owner already won. That same CAS
-   records `metadata.interrupt_reason=lifetime_timeout`; every terminal writer
-   must honor the claimed owner. Treat the claim result as three-way: newly
-   acquired, already held by this persisted `lifetime_timeout` owner, or lost to
-   fresh progress / another terminal or cancellation owner. The second case
-   resumes reconciliation idempotently after restart; only the third case reloads
-   without writing a timeout cause or canceling anything. Thus a natural result
-   or user Stop that wins first remains authoritative, while one arriving after
-   the timeout claim cannot independently stamp success with timeout metadata.
+   advanced, and no terminal or cancellation owner already won. For a linked
+   Turn, contend through that Turn's guarded terminal/cancellation owner. Make
+   the Turn and Run claim one transaction where possible; otherwise claim the
+   Turn first with a stable timeout-claim id, then record the Run owner and
+   `metadata.interrupt_reason=lifetime_timeout` against that same id before
+   cancellation begins. Recovery resumes either half-written phase by claim id.
+   If the Turn is already terminal, reconcile its immutable result into the Run
+   and write no timeout cause; if it is nonterminal, the winning Turn claim must
+   prevent a later natural terminal writer from independently winning. This
+   closes the real terminal-Turn/nonterminal-Run window while awaited result
+   delivery is still pending. Every Run terminal writer must honor the linked
+   claim. Treat the claim result as three-way: newly acquired, already held by
+   this persisted `lifetime_timeout` owner, or lost to fresh progress / another
+   terminal or cancellation owner. The second case resumes reconciliation
+   idempotently after restart; only the third case reloads without writing a
+   timeout cause or canceling anything. Thus a natural result or user Stop that
+   wins first remains authoritative, while one arriving after the timeout claim
+   cannot independently stamp success with timeout metadata.
 
    Only the timeout owner proceeds to cancellation. First handle a Run with no
    Delivery under the same guarded ordering boundary used by
@@ -317,12 +333,15 @@ evidence, and restart recovery. First determine what remains.
    both nonterminal and terminal linked-Turn cases. Race fresh progress, natural
    completion, and user Stop immediately before and after the timeout ownership
    CAS: exactly one cause wins, and a succeeded Run never retains
-   `lifetime_timeout`. Inject restart after the timeout claim, after owner
+   `lifetime_timeout`. Pin the terminal-Turn/nonterminal-Run window and both
+   commit orders between terminal Turn persistence and timeout ownership; a Turn
+   that won first always projects its result. Inject restart between linked Turn
+   and Run claim persistence, after the complete timeout claim, after owner
    cancellation, and after Run settlement but before cleanup; each resumes the
-   same owner exactly once and reaches the same terminal state. Each Delivery
-   state must reach its exact owner or a durable terminal ambiguity outcome,
-   release its request claim, coalescing slot, or ordering fence as applicable,
-   and never replay work with possible/unknown native effects.
+   same owner exactly once and reaches the same terminal state.
+   Each Delivery state must reach its exact owner or a durable terminal ambiguity
+   outcome, release its request claim, coalescing slot, or ordering fence as
+   applicable, and never replay work with possible/unknown native effects.
 5. Reuse `run_definitions.lifetime_timeout_seconds` as the per-task override and
    store a 1,800-second global inactivity default in `config/v2_config.py`. For
    a recurring cron Run, snapshot at enqueue:
