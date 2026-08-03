@@ -142,20 +142,26 @@ it. Do not let broken bindings or fake activity create immortal sessions.
 Exit criterion: no queued work is lost or misclassified, no productive turn is
 timed out, and the interlock cannot make a stuck session immortal.
 
-## 5. PR4 — Bound and supervise recovered-output delivery
+## 5. PR4 — Bound and supervise shared drains
 
 ### Goal
 
-One hung post-turn delivery must not block `_watch_store` or every other Harness
-tenant. This is the direct fix for the observed 65-minute stall.
+One hung post-turn delivery or vault callback pass must not block `_watch_store`
+or every other Harness tenant. This is the direct fix for the observed 65-minute
+stall and the same unbounded critical-path shape in `_drain_vault_callbacks`.
 
 ### Required behavior
 
-1. Move `_drain_recovered_activity_outputs` off the `_watch_store` critical path,
-   or bound it there. A detached drain must still be tracked, single-flight,
-   time-bounded, and canceled/awaited during service stop.
-2. Bound post-turn delivery, not Agent execution. The no-turn-duration-timeout
-   invariant remains unchanged.
+1. Move `_drain_recovered_activity_outputs` and `_drain_vault_callbacks` off the
+   `_watch_store` critical path, or bound each there. Process vault callbacks in
+   bounded pages rather than calling `list_pending_request_callbacks` without a
+   limit, and re-arm when a page leaves work. A detached drain must still be
+   tracked, single-flight, time-bounded, and canceled/awaited during service
+   stop. Merely wrapping synchronous vault storage in `create_task` is not
+   isolation: use an async-compatible store path or a bounded worker so a stalled
+   database operation cannot block the event loop.
+2. Bound post-turn delivery and vault callback work, not Agent execution. The
+   no-turn-duration-timeout invariant remains unchanged.
 3. Add one durable, Activity-owned output-attempt record keyed by the stable
    `MessageOutput.idempotency_key`. It must survive restart without a Run row and
    carry guarded `pending` / `sending` / `delivered` / `failed` / `acknowledged` /
@@ -188,7 +194,9 @@ tenant. This is the direct fix for the observed 65-minute stall.
 
 ### Required evidence
 
-- a hung recovered-output send does not delay request/callback draining;
+- a hung recovered-output send or vault callback storage/dispatch operation does
+  not delay Harness request draining or stale-run sweeps;
+- a large vault callback backlog drains in bounded pages and reliably re-arms;
 - only one instance of each drain can run;
 - service stop cancels and joins owned drain tasks;
 - a definitive failure before transport invocation retries safely;
@@ -204,9 +212,10 @@ tenant. This is the direct fix for the observed 65-minute stall.
 - every skip re-arms with backoff;
 - the independent watchdog reports which owned drain is overdue.
 
-Exit criterion: the watch loop continues to make progress under a hung transport,
-and every claimed output reaches acknowledged, safely retryable, or explicit
-terminal state.
+Exit criterion: the watch loop continues to make progress under a hung transport
+or vault callback operation, every claimed output reaches acknowledged, safely
+retryable, or explicit terminal state, and callback backlog cannot monopolize a
+pass.
 
 ## 6. PR7 — Re-baseline terminal-time truth; then split
 
