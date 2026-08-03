@@ -187,6 +187,20 @@ next dispatch misses, rebuilds, and resumes — a cold start, not a lost turn. T
 persisted resume state (native session id, Codex thread mapping) is what makes
 the rebuild a resume, so eviction must never clear it. Covered by HFR-150/151.
 
+"A cold start, not a lost turn" is a property of the whole teardown path, not
+just of popping the registry entry, and PR3's fifth review head found the place
+it did not yet hold. On Claude, the *same* thing that makes the rebuild a resume
+— the replacement client running with the same `--resume <native_session_id>` —
+also makes it indistinguishable from a leaked duplicate to the reaper
+`cleanup_session` runs in its `finally`, and the idle-eviction path passed
+`keep_pid=None`, which SIGTERMs every match plus its descendants. The losing
+dispatch's replacement could therefore be killed mid-turn. So any teardown step
+that acts on the *native session id* rather than on the object being retired has
+to be written to spare a replacement: the reap now keeps a live replacement's
+PID, and skips entirely when a replacement exists but has not published one yet,
+since a duplicate surviving one cycle is reaped by the next while a SIGTERM into
+live work is not recoverable. Covered by HFR-431.
+
 Serializing admission through eviction per runtime would put a backend lock on
 the acceptance path and is out of scope here; if a future change makes a cold
 start unacceptable (a costly warm-up, say), that is the point to revisit.
@@ -446,6 +460,11 @@ Scenario ranges reserved by the original plan remain available on current
 Check the catalog again immediately before coding. If a range has been occupied,
 allocate a fresh contiguous block above the highest merged ID; never reuse a
 closed branch's overflow table.
+
+PR3 filled `HFR-130…154` and then needed one more ID for a late review finding,
+so by that rule it overflowed to `HFR-431` (the catalog's highest allocated ID
+was 430). PR4 and PR7 keep their reserved ranges intact; the next overflow starts
+at `HFR-432`.
 
 ## 8. Validation and non-goals
 

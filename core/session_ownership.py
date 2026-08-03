@@ -309,10 +309,25 @@ class DurableSessionOwnershipProvider:
         try:
             engine = self._engine_factory()
             with engine.connect() as conn:
-                if not self._schema_available(conn):
-                    # No durable tables means no durable owner can exist. That is
-                    # positive proof, not missing data.
+                present = self._present_owner_tables(conn)
+                if not present:
+                    # NO durable table exists, so no durable owner can exist. That
+                    # is positive proof, not missing data.
                     return EMPTY_SNAPSHOT
+                missing = sorted(set(_REQUIRED_TABLES) - present)
+                if missing:
+                    # A PARTIAL schema is the opposite case, and conflating the two
+                    # is how the interlock gets lost on a half-migrated or damaged
+                    # state DB: the tables that survived say nothing about the owners
+                    # recorded in the ones that did not, so an execution-bearing Run
+                    # in a database missing its Delivery table would read as "nothing
+                    # owns anything" and eviction would proceed.
+                    logger.warning(
+                        "Durable owner schema is only partially present (missing %s); "
+                        "skipping eviction",
+                        missing,
+                    )
+                    return UNRESOLVED_SNAPSHOT
                 conn.exec_driver_sql("BEGIN DEFERRED")
                 try:
                     return self._read(conn)
@@ -323,8 +338,12 @@ class DurableSessionOwnershipProvider:
             return UNRESOLVED_SNAPSHOT
 
     @staticmethod
-    def _schema_available(conn: Connection) -> bool:
-        """Whether every owner table exists, asked of this exact handle.
+    def _present_owner_tables(conn: Connection) -> frozenset[str]:
+        """Which owner tables exist, asked of this exact handle.
+
+        Returns the set rather than a boolean so the caller can tell an entirely
+        absent schema (positive proof that no owner exists) from a partial one
+        (missing safety data, which must fail closed).
 
         Read from ``sqlite_master`` rather than through ``Dialect.has_table``,
         which is documented as internal and rejects anything but a real
@@ -337,7 +356,7 @@ class DurableSessionOwnershipProvider:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        return all(table in present for table in _REQUIRED_TABLES)
+        return frozenset(table for table in _REQUIRED_TABLES if table in present)
 
     def _read(self, conn: Connection) -> SessionOwnershipSnapshot:
         bindings: list[OwnerBinding] = []

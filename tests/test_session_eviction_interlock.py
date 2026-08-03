@@ -13,7 +13,10 @@ These tests drive the two real eviction entry points --
 -- against REAL durable rows in the isolated state database, so what is asserted
 is the join between the two keyspaces, not a stub's opinion of it.
 
-Scenarios: HFR-130 … HFR-153 (tests/scenarios/harness_failure_recovery/catalog.yaml).
+Scenarios: HFR-130 … HFR-154 plus HFR-431
+(tests/scenarios/harness_failure_recovery/catalog.yaml). PR3's reserved block ends
+at HFR-154, so the last review-driven addition takes a fresh ID above the highest
+allocated one rather than borrowing PR4's range.
 """
 
 from __future__ import annotations
@@ -1294,3 +1297,139 @@ def test_a_run_pins_the_backend_it_captured_not_the_switched_session_backend(
     assert _sweep(handler) == 0
     assert composite_key in handler.claude_sessions
     assert captured["disconnects"] == 0
+
+
+# ---------------------------------------------------------------------------
+# HFR-154 + HFR-431: partial safety data, and the reap that must spare a
+# replacement client
+# ---------------------------------------------------------------------------
+
+
+def _drop_table(table: str) -> None:
+    """Drop one owner table to build a PARTIALLY migrated state database.
+
+    Foreign keys are suspended for the drop only: the point is a database whose
+    surviving tables still hold owners, which is exactly what FK enforcement
+    would otherwise refuse to leave behind.
+    """
+
+    raw = _engine().raw_connection()
+    try:
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA foreign_keys = OFF")
+        cursor.execute(f"DROP TABLE IF EXISTS {table}")
+        raw.commit()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.close()
+    finally:
+        raw.close()
+
+
+def test_a_partially_migrated_owner_schema_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    """HFR-154: a half-present schema is missing data, not proof of no owner.
+
+    An ENTIRELY absent schema is positive proof -- no durable table can hold an
+    owner, so eviction may proceed. A PARTIAL one is the opposite: the tables that
+    survived say nothing about the owners recorded in the ones that did not. Here a
+    live execution-bearing Run sits in ``agent_runs`` while ``message_deliveries``
+    is gone, so treating the two cases alike reads as "nothing owns anything" and
+    evicts the runtime that Run is about to be dispatched into.
+
+    RED against the previous head: both cases returned a resolved EMPTY snapshot,
+    and the sweep evicted (``evicted == 1``).
+    """
+
+    from sqlalchemy import create_engine
+
+    _state_db()
+    handler, _controller, composite_key, captured = _claude_handler(monkeypatch, tmp_path)
+    _seed_session(BASE_SESSION_ID, anchor=ANCHOR, workdir=str(tmp_path))
+    _seed_run(BASE_SESSION_ID)
+
+    _drop_table("message_deliveries")
+
+    snapshot = DurableSessionOwnershipProvider().snapshot()
+    assert snapshot.failed, "a partial owner schema must not resolve"
+    assert _sweep(handler) == 0
+    assert composite_key in handler.claude_sessions
+    assert captured["disconnects"] == 0
+
+    # The positive control, so this cannot pass by refusing to resolve anything:
+    # with NO owner table at all there is nothing to be missing.
+    empty = DurableSessionOwnershipProvider(engine_factory=lambda: create_engine("sqlite://")).snapshot()
+    assert empty.resolved and not empty.bindings
+
+
+def test_the_duplicate_reap_spares_a_replacement_claude_client(monkeypatch, tmp_path: Path) -> None:
+    """HFR-431: teardown must not SIGTERM the client that replaced it.
+
+    This is the sharp edge of the residual HFR-151 documents. ``cleanup_session``
+    pops the client before it awaits, so a Delivery admitted mid-teardown starts a
+    REPLACEMENT client -- which resumes the same native session id and therefore
+    runs with the same ``--resume`` argument the duplicate reap matches on. With no
+    PID to keep, the reaper treats every match as a leak and SIGTERMs it along with
+    its descendants, so the race would cost work killed mid-turn rather than a cold
+    start.
+
+    Three cases: a replacement with an observable PID is spared; a replacement
+    without one skips the reap entirely (an unreaped duplicate is recoverable, a
+    SIGTERM into live work is not); and with no replacement the reap-everything
+    behaviour is unchanged, so genuine leaks are still collected.
+
+    RED against the previous head: ``keep_pid`` was ``None`` in all three.
+    """
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_reap(native_session_id, *, keep_pid=None, cli_path=None, logger=None):
+        calls.append({"native_session_id": native_session_id, "keep_pid": keep_pid})
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", _fake_reap)
+
+    def _client_with_pid(pid: Optional[int]):
+        process = SimpleNamespace(pid=pid) if pid is not None else SimpleNamespace()
+        return SimpleNamespace(
+            _transport=SimpleNamespace(_process=process),
+            _vibe_native_session_id="native-resume-id",
+            disconnect=_noop_disconnect,
+        )
+
+    async def _noop_disconnect() -> None:
+        return None
+
+    handler, _controller, composite_key, _captured = _claude_handler(monkeypatch, tmp_path)
+
+    # 1. A replacement lands during the retiring client's own disconnect.
+    replacement = _client_with_pid(4242)
+
+    class _AdmitsReplacement:
+        _vibe_native_session_id = "native-resume-id"
+
+        async def disconnect(self) -> None:
+            handler.claude_sessions[composite_key] = replacement
+
+    handler.claude_sessions[composite_key] = _AdmitsReplacement()
+    asyncio.run(handler.cleanup_session(composite_key))
+    assert calls[-1] == {"native_session_id": "native-resume-id", "keep_pid": 4242}
+
+    # 2. A replacement is live but has not published a PID yet: reap nothing.
+    handler.claude_sessions.pop(composite_key, None)
+    before = len(calls)
+    blind_replacement = _client_with_pid(None)
+
+    class _AdmitsPidlessReplacement:
+        _vibe_native_session_id = "native-resume-id"
+
+        async def disconnect(self) -> None:
+            handler.claude_sessions[composite_key] = blind_replacement
+
+    handler.claude_sessions[composite_key] = _AdmitsPidlessReplacement()
+    asyncio.run(handler.cleanup_session(composite_key))
+    assert len(calls) == before, "a blind reap may not run while a replacement is live"
+
+    # 3. No replacement: unchanged, so a genuinely leaked duplicate is still reaped.
+    handler.claude_sessions.pop(composite_key, None)
+    handler.claude_sessions[composite_key] = _client_with_pid(999)
+    asyncio.run(handler.cleanup_session(composite_key))
+    assert calls[-1] == {"native_session_id": "native-resume-id", "keep_pid": None}

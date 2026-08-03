@@ -1533,12 +1533,57 @@ class SessionHandler(BaseHandler):
         finally:
             if not cleanup_from_receiver:
                 await self._stop_receiver_task(receiver_task, composite_key)
-            await reap_duplicate_claude_resume_processes(
+            await self._reap_duplicates_sparing_replacement(
+                composite_key,
                 native_session_id,
-                keep_pid=keep_pid if cleanup_from_receiver else None,
-                cli_path=self._get_claude_cli_path_override(),
-                logger=logger,
+                own_pid=keep_pid,
+                cleanup_from_receiver=cleanup_from_receiver,
             )
+
+    async def _reap_duplicates_sparing_replacement(
+        self,
+        composite_key: str,
+        native_session_id: Optional[str],
+        *,
+        own_pid: Optional[int],
+        cleanup_from_receiver: bool,
+    ) -> None:
+        """Reap leaked ``--resume`` duplicates without killing a replacement client.
+
+        ``cleanup_session`` pops the client before it awaits anything, which is what
+        makes a Delivery admitted mid-teardown survivable: the dispatch misses, and
+        ``get_or_create_claude_session`` builds a REPLACEMENT client that resumes the
+        same native session id. But resuming the same id means the replacement runs
+        with the same ``--resume`` argument this reap matches on, and with no PID to
+        keep the reaper treats every match as a leak and SIGTERMs it together with
+        its descendants. That would turn an eviction race whose cost should be a cold
+        start into work killed mid-turn.
+
+        So a live replacement is spared. If one is present but has not published a
+        PID yet, the reap is skipped outright rather than run blind: a duplicate that
+        survives one cycle is reaped by the next cleanup, whereas a SIGTERM into live
+        work is not recoverable. The replacement outranks ``own_pid`` because the
+        client this cleanup is retiring is being torn down by design.
+        """
+
+        keep_pid = own_pid if cleanup_from_receiver else None
+        replacement = self.claude_sessions.get(composite_key)
+        if replacement is not None:
+            replacement_pid = get_claude_client_pid(replacement)
+            if not replacement_pid:
+                logger.info(
+                    "Skipping duplicate Claude resume reap for %s: a replacement client is live "
+                    "without an observable PID",
+                    composite_key,
+                )
+                return
+            keep_pid = replacement_pid
+        await reap_duplicate_claude_resume_processes(
+            native_session_id,
+            keep_pid=keep_pid,
+            cli_path=self._get_claude_cli_path_override(),
+            logger=logger,
+        )
 
     async def _disconnect_client(self, client, composite_key: str) -> None:
         try:

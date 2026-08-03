@@ -2716,6 +2716,23 @@ scenarios:
     # the per-session backend union, recorded before the delivery-represented skip
     # because the Delivery standing in for a Run dispatches to the same backend.
     test: tests/test_session_eviction_interlock.py::test_a_run_pins_the_backend_it_captured_not_the_switched_session_backend
+  - id: HFR-154
+    name: a partially migrated owner schema fails closed
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Found by review on PR #1150's fifth head. The provider treated "an owner table
+    # is missing" as a single case and returned a RESOLVED empty snapshot for it,
+    # which conflates two opposite situations. An entirely absent schema is positive
+    # proof that no durable owner can exist. A PARTIAL schema -- half-migrated,
+    # damaged, or mid-upgrade -- is missing safety data: the tables that survived say
+    # nothing about the owners recorded in the ones that did not, so an
+    # execution-bearing Run in a database that lost its Delivery table read as
+    # "nothing owns anything" and eviction proceeded. Fixed by returning WHICH owner
+    # tables are present: none -> empty snapshot, some -> unresolved, which skips the
+    # cycle and names the missing tables in a warning.
+    test: tests/test_session_eviction_interlock.py::test_a_partially_migrated_owner_schema_fails_closed
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
@@ -3761,6 +3778,26 @@ scenarios:
     # A refused Stop leaves both owners intact, and an idle backlog starts directly
     # without a post-submit call racing and interrupting the newly started head.
     test: tests/test_internal_server.py::test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head
+  - id: HFR-431
+    name: the duplicate Claude resume reap spares a replacement client
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # Found by review on PR #1150's fifth head. PR3's reserved block ends at HFR-154,
+    # so this takes a fresh ID above the highest allocated one instead of borrowing
+    # PR4's range. What makes a Delivery admitted mid-teardown survivable is that
+    # cleanup_session pops the client before it awaits: the dispatch misses and
+    # get_or_create_claude_session builds a REPLACEMENT client resuming the same
+    # native session id. But resuming the same id means the replacement carries the
+    # same --resume argument the duplicate reaper matches on, and the idle-eviction
+    # path passed keep_pid=None, whose branch SIGTERMs every match plus its
+    # descendants. That turned the documented cold-start cost into work killed
+    # mid-turn. Fixed by sparing a live replacement's PID, and skipping the reap
+    # entirely when a replacement is live but has not published a PID yet -- a
+    # duplicate surviving one cycle is reaped by the next, a SIGTERM into live work
+    # is not recoverable. With no replacement, leak reaping is unchanged.
+    test: tests/test_session_eviction_interlock.py::test_the_duplicate_reap_spares_a_replacement_claude_client
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
