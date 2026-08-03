@@ -32,10 +32,7 @@ from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT
 from core.runtime_commands import RuntimeCommandWatcher
 from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeOwnershipProvider
-from core.runtime_recovery import (
-    FallbackRequestRecoveryHandler,
-    SessionDeliveryRecoveryHandler,
-)
+from core.runtime_recovery import SessionDeliveryRecoveryHandler
 from core.runtime_work import RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import ScheduledTaskService
 from core.show_git import ShowGitCheckpointService
@@ -277,14 +274,6 @@ class Controller:
         # Consolidated message dispatcher
         self.message_dispatcher = ConsolidatedMessageDispatcher(self)
         self.scheduled_task_service = ScheduledTaskService(self)
-        request_sqlite = self.scheduled_task_service.request_store.sqlite_backend
-        if request_sqlite is not None:
-            self._runtime_work_tokens.append(
-                self.runtime_work_supervisor.register(
-                    RuntimeWorkLane.REQUESTS,
-                    FallbackRequestRecoveryHandler(request_sqlite),
-                )
-            )
         self.watch_service = ManagedWatchService(self)
         self.runtime_command_watcher = RuntimeCommandWatcher(self)
         self.show_git_checkpoint_service = ShowGitCheckpointService()
@@ -1000,7 +989,6 @@ class Controller:
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
 
-        delivery_recovery_ok = True
         recover_deliveries = getattr(
             self.session_turns,
             "recover_durable_delivery_state",
@@ -1015,15 +1003,15 @@ class Controller:
                         ",".join(recovered),
                     )
             except Exception:
-                delivery_recovery_ok = False
                 logger.exception("Failed to recover durable Session delivery owners")
+                raise
 
         recover_queue = getattr(
             self.session_turns,
             "recover_persisted_agent_run_queue",
             None,
         )
-        if callable(recover_queue) and delivery_recovery_ok:
+        if callable(recover_queue):
             try:
                 recovered = await recover_queue()
                 if recovered:
@@ -1033,6 +1021,13 @@ class Controller:
                     )
             except Exception:
                 logger.exception("Failed to recover persisted Workbench Agent Run queues")
+                raise
+
+        try:
+            self.scheduled_task_service.recover_processing_requests()
+        except Exception:
+            logger.exception("Failed to recover fallback request owners")
+            raise
 
         await self.runtime_work_supervisor.activate()
         self._delivery_recovery_complete.set()
@@ -1674,11 +1669,11 @@ class Controller:
             self.cleanup_task = None
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
+        _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         supervisor = getattr(self, "runtime_work_supervisor", None)
         stop_supervisor = getattr(supervisor, "stop", None)
         if callable(stop_supervisor):
             _stop_loop_coroutine(stop_supervisor(), "Runtime work supervisor")
-        _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
         model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)

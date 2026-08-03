@@ -39,6 +39,11 @@ from core.message_context import (
 from core.origin_links import origin_link
 from core.reply_enhancer import strip_silent_blocks
 from core.runtime_activation import RuntimeActivationIdentity
+from core.runtime_recovery import FallbackRequestRecoveryHandler
+from core.runtime_work import (
+    RuntimeWorkLane,
+    RuntimeWorkRegistrationToken,
+)
 from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     RUN_INTERRUPTION_REASONS,
@@ -2626,6 +2631,8 @@ class ScheduledTaskService:
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._reconcile_task: Optional[asyncio.Task] = None
         self._service_teardown_task: Optional["asyncio.Task[None]"] = None
+        self._request_recovery_token: RuntimeWorkRegistrationToken | None = None
+        self._request_recovery_unregistration_task: asyncio.Task[None] | None = None
         # The owed-notice drain pass currently in flight, if any. It runs OUTSIDE the
         # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
         # be torn down by name: cancelling the watch no longer stops it.
@@ -2663,6 +2670,10 @@ class ScheduledTaskService:
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._drain_dirty = True
         self._recover_activity_lifecycle()
+
+    def recover_processing_requests(self) -> None:
+        """Reconcile fallback Run owners after backend and Turn recovery."""
+
         self.request_store.recover_processing(
             interruption_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_RESTARTED]),
             cancellation_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
@@ -2886,7 +2897,18 @@ class ScheduledTaskService:
     def start(self) -> None:
         if self._running:
             return
-        self.scheduler.start()
+        teardown = self._service_teardown_task
+        if teardown is not None:
+            if not teardown.done():
+                raise RuntimeError("scheduled task service generation is still stopping")
+            teardown.result()
+            self._service_teardown_task = None
+        self._register_request_recovery()
+        try:
+            self.scheduler.start()
+        except BaseException:
+            self._begin_stop()
+            raise
         self._running = True
         self._spawn_watch_store()
         try:
@@ -2928,6 +2950,52 @@ class ScheduledTaskService:
         except RuntimeError:
             return None
 
+    def _register_request_recovery(self) -> None:
+        previous = self._request_recovery_unregistration_task
+        if previous is not None:
+            if not previous.done():
+                raise RuntimeError(
+                    "scheduled task service request recovery generation is still stopping"
+                )
+            previous.result()
+            self._request_recovery_unregistration_task = None
+        if self._request_recovery_token is not None:
+            raise RuntimeError(
+                "scheduled task service request recovery generation is already registered"
+            )
+
+        sqlite_store = self.request_store.sqlite_backend
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        register = getattr(supervisor, "register", None)
+        begin_unregister = getattr(supervisor, "begin_unregister", None)
+        if sqlite_store is None or not callable(register) or not callable(begin_unregister):
+            return
+        self._request_recovery_token = register(
+            RuntimeWorkLane.REQUESTS,
+            FallbackRequestRecoveryHandler(sqlite_store),
+        )
+
+    def _begin_request_recovery_unregistration(
+        self,
+    ) -> asyncio.Task[None] | None:
+        existing = self._request_recovery_unregistration_task
+        if existing is not None:
+            return existing
+        token = self._request_recovery_token
+        if token is None:
+            return None
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        begin_unregister = getattr(supervisor, "begin_unregister", None)
+        if not callable(begin_unregister):
+            return None
+
+        # The supervisor invalidates synchronously before returning the join task.
+        # A restart must wait for that exact generation to finish joining workers.
+        task = begin_unregister(token)
+        self._request_recovery_token = None
+        self._request_recovery_unregistration_task = task
+        return task
+
     async def _settle_service_teardown_owners(self) -> None:
         manager = getattr(self.controller, "session_turns", None)
         release_durable = getattr(manager, "release_for_service_shutdown", None)
@@ -2965,8 +3033,13 @@ class ScheduledTaskService:
             return SETTLED_BY_STOPPED
         return SETTLED_BY_RESTARTED
 
-    def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
+    def _begin_stop(
+        self,
+        *,
+        cancel_reconcile: bool = True,
+    ) -> asyncio.Task[None] | None:
         self._running = False
+        request_recovery_stop = self._begin_request_recovery_unregistration()
         current_task = self._current_asyncio_task()
         if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
             self._reconcile_task.cancel()
@@ -2987,6 +3060,7 @@ class ScheduledTaskService:
         except Exception:
             logger.debug("Failed to shut down scheduler", exc_info=True)
         self._ensure_service_teardown_task()
+        return request_recovery_stop
 
     def _owns_service_instance(self) -> bool:
         if not self._requires_service_lease:
@@ -2998,7 +3072,7 @@ class ScheduledTaskService:
         return False
 
     async def stop(self) -> None:
-        self._begin_stop()
+        request_recovery_stop = self._begin_stop()
         if self._reconcile_task:
             self._reconcile_task.cancel()
             try:
@@ -3029,6 +3103,12 @@ class ScheduledTaskService:
         teardown = self._ensure_service_teardown_task()
         if teardown is not None:
             await teardown
+        if request_recovery_stop is None:
+            request_recovery_stop = self._begin_request_recovery_unregistration()
+        if request_recovery_stop is not None:
+            await request_recovery_stop
+            if self._request_recovery_unregistration_task is request_recovery_stop:
+                self._request_recovery_unregistration_task = None
         self._inflight_executions.clear()
         self._inflight_requests.clear()
         self._inflight_cancellation_causes.clear()

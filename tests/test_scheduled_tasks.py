@@ -39,6 +39,10 @@ from core.run_settlement import (
     TEARDOWN_SETTLEMENT_SURFACES,
 )
 from core.runtime_activation import RuntimeActivationRegistry
+from core.runtime_work import (
+    RuntimeWorkLane,
+    RuntimeWorkRegistrationToken,
+)
 from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
@@ -2752,6 +2756,8 @@ def test_restart_recovers_running_row_and_preserves_same_session_fifo(monkeypatc
         store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
         request_store=restarted_store,
     )
+    assert restarted_store.get_run(first.id)["status"] == "running"
+    service.recover_processing_requests()
     assert [request.id for request in restarted_store.list_pending()] == [first.id, second.id]
 
     async def _exercise() -> None:
@@ -3905,9 +3911,9 @@ def test_late_terminal_result_cannot_reopen_a_stopped_run(tmp_path: Path, monkey
 # only thing that can close them, which also makes it the only thing that can
 # WRONGLY close a healthy run — so the negative cases matter as much as the positive.
 #
-# Note on staging: ``ScheduledTaskService.__init__`` runs ``recover_processing()``.
-# It requeues bare claims and terminalizes executions whose coroutine had started,
-# so these tests build the service first and stage the live-process orphan after it.
+# Note on staging: startup owner recovery requeues bare claims and terminalizes
+# executions whose coroutine had started. These tests build the service first and
+# stage the live-process orphan after it.
 # ---------------------------------------------------------------------------
 
 
@@ -8490,6 +8496,104 @@ def test_watch_store_does_not_respawn_after_stop(tmp_path: Path) -> None:
     asyncio.run(_exercise())
 
 
+@pytest.mark.parametrize("stop_entrypoint", ["stop", "lease_loss"])
+def test_request_recovery_registration_is_owned_by_exact_service_generation(
+    tmp_path: Path,
+    monkeypatch,
+    stop_entrypoint: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    class BarrierSupervisor:
+        def __init__(self) -> None:
+            self.generation = 0
+            self.current: RuntimeWorkRegistrationToken | None = None
+            self.handlers: list[Any] = []
+            self.unregister_calls: list[RuntimeWorkRegistrationToken] = []
+            self.unregister_entered = asyncio.Event()
+            self.allow_unregister = asyncio.Event()
+
+        def register(self, lane, handler):  # noqa: ANN001, ANN202
+            assert lane is RuntimeWorkLane.REQUESTS
+            assert self.current is None, "a replacement overlapped the prior generation"
+            self.generation += 1
+            token = RuntimeWorkRegistrationToken(lane=lane, generation=self.generation)
+            self.current = token
+            self.handlers.append(handler)
+            return token
+
+        def begin_unregister(
+            self,
+            token: RuntimeWorkRegistrationToken,
+        ) -> asyncio.Task[None]:
+            self.unregister_calls.append(token)
+            assert self.current == token
+            self.unregister_entered.set()
+
+            async def _join() -> None:
+                await self.allow_unregister.wait()
+                if self.current == token:
+                    self.current = None
+
+            return asyncio.create_task(_join())
+
+    async def _exercise() -> None:
+        supervisor = BarrierSupervisor()
+        controller = SimpleNamespace(
+            platform_settings_managers={},
+            runtime_work_supervisor=supervisor,
+        )
+        request_store = TaskExecutionStore()
+        service = ScheduledTaskService(
+            controller=controller,
+            store=ScheduledTaskStore(),
+            request_store=request_store,
+        )
+        service.scheduler = _StubScheduler()
+
+        async def _watch_store() -> None:
+            await asyncio.Event().wait()
+
+        service._watch_store = _watch_store  # type: ignore[method-assign]
+        service.start()
+        first_token = service._request_recovery_token
+        assert first_token is not None
+        assert supervisor.handlers[-1].store is request_store.sqlite_backend
+
+        if stop_entrypoint == "stop":
+            stop_task = asyncio.create_task(service.stop())
+        else:
+            service._requires_service_lease = True
+            monkeypatch.setattr(
+                "core.scheduled_tasks.runtime.current_process_owns_service_instance",
+                lambda: False,
+            )
+            assert service._owns_service_instance() is False
+            stop_task = asyncio.create_task(service.stop())
+
+        await asyncio.wait_for(supervisor.unregister_entered.wait(), timeout=1)
+        assert service._request_recovery_token is None
+        assert supervisor.unregister_calls == [first_token]
+        with pytest.raises(RuntimeError, match="generation is still stopping"):
+            service.start()
+
+        supervisor.allow_unregister.set()
+        await asyncio.wait_for(stop_task, timeout=1)
+        assert supervisor.current is None
+
+        service._requires_service_lease = False
+        service.scheduler = _StubScheduler()
+        service.start()
+        second_token = service._request_recovery_token
+        assert second_token is not None
+        assert second_token.generation == first_token.generation + 1
+        assert supervisor.current == second_token
+        await service.stop()
+        assert supervisor.unregister_calls == [first_token, second_token]
+
+    asyncio.run(_exercise())
+
+
 def test_scheduled_task_service_idle_tick_does_not_drain_empty_queues(tmp_path: Path, monkeypatch) -> None:
     original_sleep = asyncio.sleep
 
@@ -8827,7 +8931,8 @@ def test_drain_serializes_session_id_against_matching_session_key(tmp_path: Path
     def fake_resolve(session_id, *, db_path=None):
         # Both runs resolve to the same canonical session key.
         return SimpleNamespace(
-            session_key=ParsedSessionKey(platform="slack", scope_type="channel", scope_id="C123")
+            session_key=ParsedSessionKey(platform="slack", scope_type="channel", scope_id="C123"),
+            agent_backend="",
         )
 
     monkeypatch.setattr("core.scheduled_tasks.resolve_session_id_target", fake_resolve)
