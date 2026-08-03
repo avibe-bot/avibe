@@ -28,6 +28,7 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
+import { isAdvancedSettingsPath } from '../lib/adminNavigation';
 
 type ShellNavItem = {
   // Optional: a parent that only groups children (no page of its own) omits `to`
@@ -335,17 +336,13 @@ export const AppShell: React.FC = () => {
       ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain }]
       : []),
     {
-      // 高级设置: the remaining Settings tabs (messaging leads). Platforms +
-      // backends moved out to their own sidebar destinations above, so exclude
-      // their routes from the active match.
+      // 高级设置: the remaining Settings tabs (messaging leads). Platforms,
+      // backends, models, and Memory have their own sidebar destinations, so
+      // exclude those routes from the active match.
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),
       icon: Settings,
-      match: (p) =>
-        p.startsWith('/admin/settings') &&
-        !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends') &&
-        !p.startsWith('/admin/settings/models'),
+      match: isAdvancedSettingsPath,
     },
   ];
 
@@ -364,11 +361,7 @@ export const AppShell: React.FC = () => {
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),
       icon: Settings,
-      match: (p) =>
-        p.startsWith('/admin/settings') &&
-        !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends') &&
-        !p.startsWith('/admin/settings/models'),
+      match: isAdvancedSettingsPath,
     },
   ];
   // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom
