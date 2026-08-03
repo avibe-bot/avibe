@@ -6,6 +6,7 @@ import { useApi } from '../../../context/ApiContext';
 import type { SkillScope, SkillSearchItem } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
 import { AiScoreBadge } from './QualityMeter';
+import { errorMessage } from '@/lib/errorMessage';
 
 export interface BrowseRegistryDialogProps {
   scope: SkillScope;
@@ -64,8 +65,8 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
       } else {
         showToast(res.error?.message ?? t('skills.addSkill'), 'error');
       }
-    } catch (err: any) {
-      showToast(err?.message ?? String(err), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) ?? String(err), 'error');
     } finally {
       setInstalling(null);
     }

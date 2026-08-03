@@ -32,7 +32,8 @@ import {
 } from './eventFeed';
 import { AddCustomModelDialog } from './menus/AddCustomModelDialog';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
-import { modelsApi, type ModelsApi } from './modelsApi';
+import { modelsApi } from './modelsApi';
+import { pollRuntimeStatus, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { connectOutcome, isSupplyWarning } from './sufficiency';
 import {
   manualModelSources,
@@ -127,47 +128,6 @@ export const ModelsPageActions: React.FC<{
     </div>
   );
 };
-
-export async function startRuntimeWithStatusRefresh(
-  api: Pick<ModelsApi, 'startRuntime' | 'getRuntimeStatus'>,
-): Promise<{ runtime: RuntimeDependency | null; failed: boolean }> {
-  try {
-    const runtime = await api.startRuntime();
-    return { runtime, failed: runtime.status.health !== 'ok' };
-  } catch {
-    // A failed start changes supervisor health. Read that authoritative state
-    // back so the persistent page does not keep presenting lazy-start idleness.
-    const runtime = await api.getRuntimeStatus().catch(() => null);
-    return { runtime, failed: runtime?.status.health !== 'ok' };
-  }
-}
-
-export function pollRuntimeStatus(
-  api: Pick<ModelsApi, 'getRuntimeStatus'>,
-  onRuntime: (runtime: RuntimeDependency) => void,
-  intervalMs = 5_000,
-): () => void {
-  let active = true;
-  let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
-  const schedule = () => {
-    timeout = globalThis.setTimeout(() => void refresh(), intervalMs);
-  };
-  const refresh = async () => {
-    try {
-      const runtime = await api.getRuntimeStatus();
-      if (active) onRuntime(runtime);
-    } catch {
-      // Keep the last authoritative snapshot and try again on the next tick.
-    } finally {
-      if (active) schedule();
-    }
-  };
-  schedule();
-  return () => {
-    active = false;
-    if (timeout !== undefined) globalThis.clearTimeout(timeout);
-  };
-}
 
 const CHAIN_READ_CONCURRENCY = 6;
 

@@ -19,5 +19,22 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // The codebase already marks a binding as deliberately unused by naming it
+      // `_something` — an argument kept for signature shape, a destructured slot
+      // being skipped, a caught error that is intentionally swallowed. Opt the
+      // rule into that convention instead of asking every such site for a
+      // suppression comment. Anything not explicitly marked still errors, which
+      // `scripts/eslintConventions.test.mjs` pins.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+          destructuredArrayIgnorePattern: '^_',
+        },
+      ],
+    },
   },
 ])

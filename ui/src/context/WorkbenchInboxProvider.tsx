@@ -1,34 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { useApi } from './ApiContext';
 import type { InboxSession } from './ApiContext';
+import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext';
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 
 const PAGE_SIZE = 30;
-
-interface InboxState {
-  /** Per-session ("Slack-like") feed: one card per conversation, newest
-   *  activity first. Driven by realtime ``inbox.session.updated`` upserts. */
-  inboxSessions: InboxSession[];
-  /** Pagination-independent per-session unread counts — the sidebar badges
-   *  each session row from this (a session with unread may sit past the first
-   *  inbox page, so the feed array alone isn't a complete source). */
-  unreadBySession: Record<string, number>;
-  /** Sum of ``unreadBySession`` — the Inbox nav badge. */
-  totalUnread: number;
-  /** Number of sessions with ≥1 unread reply — the header "N unread" count. */
-  unreadSessions: number;
-  /** Keyset cursor for "load more"; null when the feed is fully loaded. */
-  nextCursor: string | null;
-  loading: boolean;
-  loadingMore: boolean;
-  refresh: () => Promise<void>;
-  loadMore: () => Promise<void>;
-  markRead: (sessionId: string, untilMessageId?: string) => Promise<void>;
-}
-
-const WorkbenchInboxContext = createContext<InboxState | undefined>(undefined);
 
 // Sort matches the backend keyset order: last activity (any author) desc, then
 // session_id desc as the stable tie-break, so client upserts stay consistent
@@ -351,12 +329,4 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   );
 
   return <WorkbenchInboxContext.Provider value={value}>{children}</WorkbenchInboxContext.Provider>;
-};
-
-export const useWorkbenchInbox = (): InboxState => {
-  const ctx = useContext(WorkbenchInboxContext);
-  if (ctx === undefined) {
-    throw new Error('useWorkbenchInbox must be used inside <WorkbenchInboxProvider>');
-  }
-  return ctx;
 };

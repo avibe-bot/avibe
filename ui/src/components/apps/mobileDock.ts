@@ -4,7 +4,7 @@
 // there is no window layer, so every Dock tile opens as a full-screen `/apps/*`
 // route instead of a workbench window (§7.1b).
 
-import { dockIdToSession } from '../../context/DockContext';
+import { dockIdToSession } from '../../context/dockDoc';
 
 /**
  * The in-shell route that frames a pinned Show Page full-screen on mobile

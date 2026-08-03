@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, KeyRound, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { badgeVariants } from './badge';
+import { badgeVariants } from './badge-variants';
 import { VaultSecretDialog } from './vault-secret-dialog';
 import { useApi, type VaultRequest } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';

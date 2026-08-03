@@ -24,6 +24,7 @@ import { StepHeader, StepShell } from '../shared/WizardStep';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { errorMessage } from '@/lib/errorMessage';
 
 interface TelegramConfigProps {
   data: any;
@@ -78,8 +79,8 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
     try {
       const result = await api.telegramAuthTest(botToken, proxyUrl);
       setAuthResult(result);
-    } catch (err: any) {
-      setAuthResult({ ok: false, error: err?.message || 'Request failed' });
+    } catch (err) {
+      setAuthResult({ ok: false, error: errorMessage(err) || 'Request failed' });
     } finally {
       setChecking(false);
     }

@@ -46,6 +46,7 @@ jobs:
         run: |
           npm ci
           npm run validate:theme
+          npm run lint
           npm test
           npm run build
 

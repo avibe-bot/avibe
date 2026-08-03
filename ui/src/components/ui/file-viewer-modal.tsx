@@ -11,7 +11,7 @@ import { contentUrl, downloadFile } from '@/lib/filesApi';
 import { isProxyMediaUrl } from '@/lib/mediaProxy';
 import { formatBytes } from '@/lib/filePreview';
 import { copyTextToClipboard } from '@/lib/utils';
-import type { FilePreviewTarget } from '@/components/ui/file-viewer';
+import type { FilePreviewTarget } from '@/components/ui/file-viewer-context';
 
 // The chat file viewer: a Dialog shell (header + copy/download) around the shared <FilePreview>
 // kernel, which owns every renderer (Shiki, the JSON tree, papaparse, the Office parsers, images, PDF,

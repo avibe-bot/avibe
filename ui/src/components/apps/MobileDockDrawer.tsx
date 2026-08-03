@@ -6,7 +6,8 @@ import { LayoutGrid, Minus, MoreHorizontal, PinOff, Settings, UserRound, X } fro
 import { APP_REGISTRY, type AppDefinition, type AppId } from '../../apps/registry';
 import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
-import { dockIdToSession, useDock } from '../../context/DockContext';
+import { useDock } from '../../context/DockContext';
+import { dockIdToSession } from '../../context/dockDoc';
 import { useAuthAccount } from '../../lib/useAuthAccount';
 import { useShowPageInventory } from '../useShowPages';
 import { MoreAccountSection, MoreAppearanceSection, MoreConnectionSection } from '../workbench/MorePage';
