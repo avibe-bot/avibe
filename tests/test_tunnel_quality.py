@@ -23,6 +23,29 @@ def _sample(
     )
 
 
+def test_request_path_probe_rejects_redirects() -> None:
+    class RedirectResponse:
+        status_code = 302
+
+        def close(self) -> None:
+            pass
+
+    class RedirectSession:
+        def get(self, *args, **kwargs):
+            assert kwargs["allow_redirects"] is False
+            return RedirectResponse()
+
+    sample = tunnel_quality.probe_request_path(
+        RedirectSession(),
+        "https://example.avibe.bot/health",
+        attempts=1,
+        now=100,
+    )
+
+    assert sample.sampled_at == 100
+    assert sample.successes == (False,)
+
+
 def test_ra_tq_001_parse_cloudflared_metrics_extracts_quality_inputs() -> None:
     sample = tunnel_quality.parse_metrics(
         """
@@ -220,3 +243,81 @@ def test_baseline_state_round_trips_without_raw_samples() -> None:
     restored.load_state(evaluator.export_state(), now=10_000 + 15 * 60)
 
     assert restored.baseline(10_000 + 15 * 60) == 77.5
+
+
+def test_ra_tq_010_request_path_tail_overrides_good_connector_rtt() -> None:
+    evaluator = tunnel_quality.QualityEvaluator()
+    snapshot = None
+
+    for index in range(10):
+        sampled_at = 10_000 + index * 15
+        snapshot = evaluator.update(
+            _sample(sampled_at, (70, 75, 80, 85)),
+            configured_protocol="auto",
+            effective_protocol="quic",
+            request_path_sample=tunnel_quality.RequestPathSample(
+                sampled_at=sampled_at,
+                latency_ms=(120, 140, 1600),
+                successes=(True, True, True),
+            ),
+        )
+
+    assert snapshot is not None
+    assert snapshot["schema_version"] == 2
+    assert snapshot["rtt_ms"]["median"] == 77.5
+    assert snapshot["request_path"]["confidence"] == "high"
+    assert snapshot["request_path"]["latency_ms"]["p95"] == 1600
+    assert snapshot["grade"] == "critical"
+    assert snapshot["state"] == "degraded"
+    assert evaluator.recovery_trigger(snapshot) == "tail_latency"
+
+
+def test_ra_tq_011_http2_uses_request_path_grade_without_rtt() -> None:
+    evaluator = tunnel_quality.QualityEvaluator()
+    snapshot = None
+
+    for index in range(4):
+        sampled_at = 20_000 + index * 15
+        snapshot = evaluator.update(
+            _sample(sampled_at, (), connections=4),
+            configured_protocol="auto",
+            effective_protocol="http2",
+            request_path_sample=tunnel_quality.RequestPathSample(
+                sampled_at=sampled_at,
+                latency_ms=(180, 200, 220),
+                successes=(True, True, True),
+            ),
+        )
+
+    assert snapshot is not None
+    assert snapshot["protocol"] == "http2"
+    assert snapshot["transport"] == {"configured": "auto", "effective": "http2"}
+    assert snapshot["rtt_ms"] is None
+    assert snapshot["request_path"]["confidence"] == "medium"
+    assert snapshot["grade"] == "good"
+    assert snapshot["state"] == "healthy"
+
+
+def test_request_path_candidate_accepts_material_tail_improvement_with_bounded_p95_regression() -> None:
+    active = tunnel_quality.summarize_request_path_samples(
+        [
+            tunnel_quality.RequestPathSample(
+                sampled_at=1,
+                latency_ms=tuple([202.0] * 93 + [324.0] * 5 + [1840.0] * 2),
+                successes=tuple([True] * 100),
+            )
+        ]
+    )
+    candidate = tunnel_quality.summarize_request_path_samples(
+        [
+            tunnel_quality.RequestPathSample(
+                sampled_at=2,
+                latency_ms=tuple([170.0] * 93 + [386.0] * 5 + [621.0] * 2),
+                successes=tuple([True] * 100),
+            )
+        ]
+    )
+
+    assert active is not None
+    assert candidate is not None
+    assert tunnel_quality.request_path_is_better(active, candidate) is True

@@ -356,11 +356,15 @@ export type VaultMetadataUpdatePayload = {
 };
 
 export type TunnelQualitySnapshot = {
-  schema_version: 1;
+  schema_version: 1 | 2;
   state: 'healthy' | 'degraded' | 'recovering' | 'unknown';
   grade: 'good' | 'fair' | 'poor' | 'critical' | 'unknown';
   sampled_at: string;
   protocol: 'quic' | 'http2' | 'unknown';
+  transport?: {
+    configured: 'auto' | 'quic' | 'http2';
+    effective: 'quic' | 'http2' | 'unknown';
+  };
   connector_count: number;
   ha_connections: number;
   rtt_ms: { min: number; median: number; max: number } | null;
@@ -369,13 +373,35 @@ export type TunnelQualitySnapshot = {
   window_seconds: number;
   request_errors_per_minute: number;
   packet_loss_per_minute: number;
+  request_path?: {
+    source: 'synthetic_local';
+    status: 'healthy' | 'degraded' | 'unavailable' | 'insufficient';
+    confidence: 'low' | 'medium' | 'high';
+    window_seconds: number;
+    sample_count: number;
+    success_count: number;
+    latency_ms: { p50: number; p95: number; p99: number; max: number } | null;
+    failure_rate: number;
+    slow_request_rate: {
+      over_500_ms: number;
+      over_1000_ms: number;
+      over_2000_ms: number;
+    };
+    baseline_p95_ms: number | null;
+  } | null;
   recovery: {
     state: 'idle' | 'evaluating' | 'draining' | 'cooldown';
     last_attempt_at: string | null;
-    last_trigger: 'availability' | 'latency' | 'errors' | 'manual' | null;
+    last_trigger: 'availability' | 'latency' | 'tail_latency' | 'errors' | 'manual' | null;
     last_result: 'improved' | 'no_improvement' | 'failed' | null;
     previous_median_rtt_ms: number | null;
     result_median_rtt_ms: number | null;
+    previous_protocol?: 'quic' | 'http2' | null;
+    result_protocol?: 'quic' | 'http2' | null;
+    previous_p95_ms?: number | null;
+    result_p95_ms?: number | null;
+    previous_p99_ms?: number | null;
+    result_p99_ms?: number | null;
     next_attempt_at: string | null;
     attempt_count_window: number;
   };
@@ -388,6 +414,7 @@ export type RemoteAccessStatus = {
   running: boolean;
   public_url?: string;
   pid_state?: string;
+  transport_protocol?: 'auto' | 'quic' | 'http2';
   tunnel_quality?: TunnelQualitySnapshot;
   error?: string;
   optimization_started?: boolean;

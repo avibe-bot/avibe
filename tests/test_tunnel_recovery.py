@@ -16,6 +16,25 @@ def _quality(median: float) -> dict:
     }
 
 
+def _request_path(p50: float, p95: float, p99: float, *, slow_rate: float = 0.0) -> dict:
+    return {
+        "source": "synthetic_local",
+        "status": "degraded" if p95 >= 750 or slow_rate >= 0.05 else "healthy",
+        "confidence": "high",
+        "window_seconds": 180,
+        "sample_count": 100,
+        "success_count": 100,
+        "latency_ms": {"p50": p50, "p95": p95, "p99": p99, "max": p99},
+        "failure_rate": 0.0,
+        "slow_request_rate": {
+            "over_500_ms": slow_rate,
+            "over_1000_ms": slow_rate,
+            "over_2000_ms": 0.0,
+        },
+        "baseline_p95_ms": 250.0,
+    }
+
+
 def _metrics_sample(*, connections: int = 4) -> remote_access.tunnel_quality.MetricsSample:
     return remote_access.tunnel_quality.MetricsSample(
         sampled_at=time.time(),
@@ -112,6 +131,98 @@ def test_ra_tq_005_non_improving_candidate_keeps_active(monkeypatch, tmp_path) -
     assert state["candidate"] is None
     assert stopped == [candidate_pid]
     assert results[0]["result"] == "no_improvement"
+
+
+def test_ra_tq_012_tail_recovery_keeps_better_alternate_protocol(monkeypatch, tmp_path) -> None:
+    config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    alternate_pid = 333
+    alive.add(alternate_pid)
+    previous = {
+        **_quality(80),
+        "protocol": "quic",
+        "request_path": _request_path(202, 900, 1840, slow_rate=0.08),
+    }
+    candidate_path = _request_path(170, 386, 621)
+    spawned_protocols = []
+    spawned_pids = iter([candidate_pid, alternate_pid])
+    results = []
+
+    def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
+        spawned_protocols.append(env["TUNNEL_TRANSPORT_PROTOCOL"])
+        pid = next(spawned_pids)
+        pid_path.write_text(str(pid), encoding="utf-8")
+        return pid
+
+    def stop_pid(pid, timeout=8):
+        alive.discard(pid)
+        return True
+
+    monkeypatch.setattr(runtime, "spawn_background", spawn_background)
+    monkeypatch.setattr(runtime, "stop_pid", stop_pid)
+    monkeypatch.setattr(
+        remote_access,
+        "_measure_request_path",
+        lambda cfg, protocol: candidate_path if protocol == "http2" else _request_path(250, 950, 1900, slow_rate=0.08),
+    )
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))
+    monkeypatch.setattr(remote_access, "_set_preferred_protocol", lambda protocol: None)
+
+    remote_access._run_route_optimization(config, "tail_latency", previous)
+
+    state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert remote_access._read_pid() == alternate_pid
+    assert state["active"]["requested_protocol"] == "http2"
+    assert state["draining"] is None
+    assert active_pid not in alive
+    assert spawned_protocols == ["quic", "http2"]
+    assert results[0]["result"] == "improved"
+    assert results[0]["previous_protocol"] == "quic"
+    assert results[0]["result_protocol"] == "http2"
+    assert results[0]["result_p99"] == 621
+
+
+def test_ra_tq_013_tail_recovery_rolls_back_protocol(monkeypatch, tmp_path) -> None:
+    config, active_pid, first_candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    alternate_pid = 333
+    rollback_pid = 444
+    alive.add(alternate_pid)
+    alive.add(rollback_pid)
+    previous_path = _request_path(202, 900, 1840, slow_rate=0.08)
+    previous = {**_quality(80), "protocol": "quic", "request_path": previous_path}
+    worse_path = _request_path(300, 1200, 2400, slow_rate=0.12)
+    spawned_pids = iter([first_candidate_pid, alternate_pid, rollback_pid])
+    spawned_protocols = []
+    drained = []
+    results = []
+
+    def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
+        pid = next(spawned_pids)
+        spawned_protocols.append(env["TUNNEL_TRANSPORT_PROTOCOL"])
+        pid_path.write_text(str(pid), encoding="utf-8")
+        return pid
+
+    def stop_pid(pid, timeout=8):
+        drained.append(pid)
+        alive.discard(pid)
+        return True
+
+    monkeypatch.setattr(runtime, "spawn_background", spawn_background)
+    monkeypatch.setattr(runtime, "stop_pid", stop_pid)
+    monkeypatch.setattr(remote_access, "_measure_request_path", lambda cfg, protocol: worse_path)
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))
+    monkeypatch.setattr(remote_access, "_set_preferred_protocol", lambda protocol: None)
+
+    remote_access._run_route_optimization(config, "tail_latency", previous)
+
+    state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert remote_access._read_pid() == rollback_pid
+    assert state["active"]["requested_protocol"] == "quic"
+    assert state["candidate"] is None
+    assert state["draining"] is None
+    assert spawned_protocols == ["quic", "http2", "quic"]
+    assert drained == [active_pid, first_candidate_pid, alternate_pid]
+    assert results[0]["result"] == "no_improvement"
+    assert results[0]["result_protocol"] == "quic"
 
 
 def test_optimize_route_reserves_single_candidate_atomically(monkeypatch, tmp_path) -> None:

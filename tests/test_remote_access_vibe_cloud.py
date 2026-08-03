@@ -803,6 +803,38 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
     assert payload["tunnel_quality"]["grade"] == "good"
 
 
+def test_ra_tq_014_runtime_status_payload_includes_v2_request_path(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.save()
+    monkeypatch.setattr(remote_access, "_local_ui_healthy", lambda cfg: True)
+    monkeypatch.setattr(remote_access, "_observed_cloudflared_origin_service", lambda: "http://127.0.0.1:5123")
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda cfg=None: {
+            "ok": True,
+            "running": True,
+            "binary_found": True,
+            "tunnel_quality": {
+                "schema_version": 2,
+                "state": "degraded",
+                "grade": "critical",
+                "sampled_at": "2026-08-03T12:45:00Z",
+                "request_path": {
+                    "confidence": "high",
+                    "latency_ms": {"p50": 202, "p95": 1100, "p99": 2300, "max": 2700},
+                },
+            },
+        },
+    )
+
+    payload = remote_access.runtime_status_payload(config, event="tunnel_quality")
+
+    assert payload["tunnel_quality"]["schema_version"] == 2
+    assert payload["tunnel_quality"]["request_path"]["latency_ms"]["p95"] == 1100
+
+
 def test_observed_cloudflared_origin_service_reads_only_log_tail(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     remote_access._cloudflared_stderr_path().parent.mkdir(parents=True, exist_ok=True)

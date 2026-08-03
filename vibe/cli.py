@@ -9803,7 +9803,27 @@ def _doctor(*, deep: bool = False):
                 )
             else:
                 rtt = quality.get("rtt_ms") if isinstance(quality.get("rtt_ms"), dict) else None
-                if rtt is None:
+                request_path = (
+                    quality.get("request_path")
+                    if isinstance(quality.get("request_path"), dict)
+                    else None
+                )
+                request_latency = (
+                    request_path.get("latency_ms")
+                    if request_path
+                    and request_path.get("confidence") != "low"
+                    and isinstance(request_path.get("latency_ms"), dict)
+                    else None
+                )
+                if request_latency is not None:
+                    slow_rate = request_path.get("slow_request_rate") or {}
+                    quality_message = (
+                        f"Tunnel quality: {state}/{grade}; remote requests P95 "
+                        f"{request_latency.get('p95')} ms, P99 {request_latency.get('p99')} ms, "
+                        f"{round(float(slow_rate.get('over_1000_ms') or 0) * 100)}% above 1 second; "
+                        f"connector {quality.get('protocol') or 'unknown'}"
+                    )
+                elif rtt is None:
                     quality_message = (
                         f"Tunnel quality: {state}; edge RTT unavailable for "
                         f"{quality.get('protocol') or 'unknown'} transport"

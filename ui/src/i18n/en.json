@@ -1125,6 +1125,12 @@
     "qualityUnknown": "Measuring",
     "qualityRecovering": "Optimizing",
     "qualityDegraded": "Degraded",
+    "protocolAutomatic": "{{protocol}} (Auto)",
+    "protocolUnknown": "Detecting",
+    "connectorPath": "Connector · {{protocol}} · {{connections}}/4 · RTT {{rtt}}",
+    "rttUnavailable": "Unavailable",
+    "requestPath": "Requests · P95 {{p95}} · P99 {{p99}} · {{slow}}% > 1 s",
+    "requestPathMeasuring": "Measuring requests · {{count}} samples",
     "optimizeRoute": "Optimize route",
     "optimizingRoute": "Optimizing...",
     "optimizeStarted": "A second Connector is evaluating a better route"

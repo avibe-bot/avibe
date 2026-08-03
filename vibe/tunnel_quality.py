@@ -19,6 +19,11 @@ RATE_WINDOW_SECONDS = 60
 BASELINE_MINUTE_SAMPLES = 15
 BASELINE_RETENTION_SAMPLES = 24 * 60
 CANDIDATE_MIN_SAMPLES = 4
+REQUEST_PATH_WINDOW_SECONDS = 180
+REQUEST_PATH_MAX_SAMPLES = 48
+REQUEST_PATH_MIN_SAMPLES = 12
+REQUEST_PATH_HIGH_CONFIDENCE_SAMPLES = 30
+REQUEST_BASELINE_RETENTION_SAMPLES = 2 * 24 * 60
 
 
 def utc_timestamp(now: float) -> str:
@@ -36,6 +41,13 @@ class MetricsSample:
     packet_loss_total: float
     closed_connections_total: float
     timeout_packet_loss_by_connection: tuple[tuple[str, float], ...] = ()
+
+
+@dataclass(frozen=True)
+class RequestPathSample:
+    sampled_at: float
+    latency_ms: tuple[float, ...]
+    successes: tuple[bool, ...]
 
 
 def parse_metrics(text: str, *, ready: bool = True, now: float | None = None) -> MetricsSample:
@@ -100,6 +112,41 @@ def scrape_metrics(metrics_url: str, *, timeout: float = 0.5, now: float | None 
     return parse_metrics(metrics_response.text, ready=ready_response.ok, now=now)
 
 
+def probe_request_path(
+    session: requests.Session,
+    url: str,
+    *,
+    attempts: int = 3,
+    timeout: float = 3.5,
+    now: float | None = None,
+) -> RequestPathSample:
+    """Measure a bounded public health window through one persistent session."""
+
+    latency_values: list[float] = []
+    successes: list[bool] = []
+    for _ in range(max(1, attempts)):
+        started_at = time.perf_counter()
+        success = False
+        try:
+            response = session.get(
+                url,
+                timeout=timeout,
+                allow_redirects=False,
+                headers={"Accept": "application/json", "Cache-Control": "no-cache"},
+            )
+            success = 200 <= response.status_code < 300
+            response.close()
+        except requests.RequestException:
+            pass
+        latency_values.append(round((time.perf_counter() - started_at) * 1000, 1))
+        successes.append(success)
+    return RequestPathSample(
+        sampled_at=now if now is not None else time.time(),
+        latency_ms=tuple(latency_values),
+        successes=tuple(successes),
+    )
+
+
 def rtt_stats(values: tuple[float, ...] | list[float]) -> dict[str, float] | None:
     if not values:
         return None
@@ -132,13 +179,152 @@ def _percentile(values: list[float], percentile: float) -> float | None:
     return round(ordered[index], 1)
 
 
+def request_path_grade(request_path: dict[str, Any] | None) -> str:
+    if not request_path or request_path.get("confidence") == "low":
+        return "unknown"
+    latency = request_path.get("latency_ms")
+    if not isinstance(latency, dict):
+        return "critical" if request_path.get("status") == "unavailable" else "unknown"
+    p95 = float(latency.get("p95") or 0)
+    p99 = float(latency.get("p99") or 0)
+    slow = request_path.get("slow_request_rate") or {}
+    over_one_second = float(slow.get("over_1000_ms") or 0)
+    failure_rate = float(request_path.get("failure_rate") or 0)
+    if failure_rate >= 0.10:
+        return "critical"
+    if p95 < 350 and p99 < 750 and over_one_second < 0.02:
+        return "good"
+    if p95 < 600 and p99 < 1200 and over_one_second < 0.05:
+        return "fair"
+    if p95 < 1000 and p99 < 2000 and over_one_second < 0.10:
+        return "poor"
+    return "critical"
+
+
+def request_path_is_degraded(request_path: dict[str, Any] | None) -> bool:
+    if not request_path or request_path.get("confidence") != "high":
+        return False
+    if request_path.get("status") == "unavailable":
+        return True
+    latency = request_path.get("latency_ms")
+    if not isinstance(latency, dict):
+        return False
+    p95 = float(latency.get("p95") or 0)
+    p99 = float(latency.get("p99") or 0)
+    slow = request_path.get("slow_request_rate") or {}
+    over_one_second = float(slow.get("over_1000_ms") or 0)
+    baseline = request_path.get("baseline_p95_ms")
+    baseline_regression = baseline is not None and p95 >= max(350.0, 2 * float(baseline))
+    return (
+        p95 >= 750
+        or baseline_regression
+        or over_one_second >= 0.05
+        or (p99 >= 1500 and over_one_second >= 0.03)
+    )
+
+
+def summarize_request_path_samples(
+    samples: list[RequestPathSample] | tuple[RequestPathSample, ...],
+    *,
+    baseline_p95_ms: float | None = None,
+) -> dict[str, Any] | None:
+    latencies: list[float] = []
+    successes: list[bool] = []
+    for sample in samples:
+        count = min(len(sample.latency_ms), len(sample.successes))
+        for index in range(count):
+            latency = float(sample.latency_ms[index])
+            if not math.isfinite(latency) or latency < 0:
+                continue
+            latencies.append(latency)
+            successes.append(bool(sample.successes[index]))
+    sample_count = len(latencies)
+    if sample_count == 0:
+        return None
+    success_count = sum(successes)
+    confidence = (
+        "high"
+        if sample_count >= REQUEST_PATH_HIGH_CONFIDENCE_SAMPLES
+        else "medium"
+        if sample_count >= REQUEST_PATH_MIN_SAMPLES
+        else "low"
+    )
+    latency = {
+        "p50": _percentile(latencies, 0.50),
+        "p95": _percentile(latencies, 0.95),
+        "p99": _percentile(latencies, 0.99),
+        "max": round(max(latencies), 1),
+    }
+    failure_rate = round((sample_count - success_count) / sample_count, 4)
+    slow_request_rate = {
+        "over_500_ms": round(sum(value > 500 for value in latencies) / sample_count, 4),
+        "over_1000_ms": round(sum(value > 1000 for value in latencies) / sample_count, 4),
+        "over_2000_ms": round(sum(value > 2000 for value in latencies) / sample_count, 4),
+    }
+    payload: dict[str, Any] = {
+        "source": "synthetic_local",
+        "status": "insufficient",
+        "confidence": confidence,
+        "window_seconds": REQUEST_PATH_WINDOW_SECONDS,
+        "sample_count": sample_count,
+        "success_count": success_count,
+        "latency_ms": latency,
+        "failure_rate": failure_rate,
+        "slow_request_rate": slow_request_rate,
+        "baseline_p95_ms": baseline_p95_ms,
+    }
+    if confidence != "low":
+        if success_count == 0:
+            payload["status"] = "unavailable"
+        else:
+            payload["status"] = "degraded" if request_path_is_degraded(payload) else "healthy"
+    return payload
+
+
+def request_path_is_better(active: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    active_latency = active.get("latency_ms")
+    candidate_latency = candidate.get("latency_ms")
+    if not isinstance(active_latency, dict) or not isinstance(candidate_latency, dict):
+        return False
+    candidate_count = int(candidate.get("sample_count") or 0)
+    candidate_success = int(candidate.get("success_count") or 0)
+    if candidate_count < REQUEST_PATH_MIN_SAMPLES or candidate_success / candidate_count < 0.95:
+        return False
+    active_p50 = float(active_latency.get("p50") or 0)
+    active_p95 = float(active_latency.get("p95") or 0)
+    active_p99 = float(active_latency.get("p99") or 0)
+    candidate_p50 = float(candidate_latency.get("p50") or 0)
+    candidate_p95 = float(candidate_latency.get("p95") or 0)
+    candidate_p99 = float(candidate_latency.get("p99") or 0)
+    if active_p95 <= 0 or candidate_p95 > active_p95 * 1.25:
+        return False
+    active_slow = float((active.get("slow_request_rate") or {}).get("over_1000_ms") or 0)
+    candidate_slow = float((candidate.get("slow_request_rate") or {}).get("over_1000_ms") or 0)
+    p95_improved = candidate_p95 <= active_p95 * 0.80
+    tail_improved = (
+        active_p99 > 0
+        and candidate_p99 <= active_p99 * 0.60
+        and (active_p50 <= 0 or candidate_p50 <= active_p50 * 1.25)
+    )
+    slow_rate_improved = (
+        active_slow >= 0.03
+        and candidate_slow <= min(active_slow - 0.02, active_slow * 0.50)
+    )
+    return p95_improved or tail_improved or slow_rate_improved
+
+
 class QualityEvaluator:
     """Stateful evaluator shared by status, Doctor, reporting, and recovery."""
 
     def __init__(self) -> None:
         self._counter_samples: deque[MetricsSample] = deque(maxlen=8)
         self._baseline_samples: deque[tuple[float, float]] = deque(maxlen=BASELINE_RETENTION_SAMPLES)
+        self._request_samples: deque[RequestPathSample] = deque(maxlen=REQUEST_PATH_MAX_SAMPLES)
+        self._request_baseline_samples: deque[tuple[float, str, float]] = deque(
+            maxlen=REQUEST_BASELINE_RETENTION_SAMPLES
+        )
         self._last_baseline_minute: int | None = None
+        self._last_request_baseline_minute: dict[str, int] = {}
         self._last_snapshot: dict[str, Any] | None = None
         self._latency_bad_samples = 0
         self._partial_samples = 0
@@ -158,10 +344,18 @@ class QualityEvaluator:
     def reset_healthy_samples(self) -> None:
         self._healthy_samples = 0
 
+    def reset_request_window(self) -> None:
+        self._request_samples.clear()
+
     def export_state(self) -> dict[str, Any]:
         return {
             "baseline_samples": [[timestamp, value] for timestamp, value in self._baseline_samples],
             "last_baseline_minute": self._last_baseline_minute,
+            "request_baseline_samples": [
+                [timestamp, protocol, value]
+                for timestamp, protocol, value in self._request_baseline_samples
+            ],
+            "last_request_baseline_minute": dict(self._last_request_baseline_minute),
         }
 
     def load_state(self, payload: dict[str, Any], *, now: float | None = None) -> None:
@@ -183,6 +377,30 @@ class QualityEvaluator:
         self._baseline_samples = deque(restored, maxlen=BASELINE_RETENTION_SAMPLES)
         last_minute = payload.get("last_baseline_minute")
         self._last_baseline_minute = int(last_minute) if isinstance(last_minute, int) else None
+        request_samples = payload.get("request_baseline_samples")
+        restored_request_samples: list[tuple[float, str, float]] = []
+        if isinstance(request_samples, list):
+            for item in request_samples[-REQUEST_BASELINE_RETENTION_SAMPLES:]:
+                if not isinstance(item, list) or len(item) != 3 or item[1] not in {"quic", "http2"}:
+                    continue
+                try:
+                    timestamp = float(item[0])
+                    value = float(item[2])
+                except (TypeError, ValueError):
+                    continue
+                if timestamp >= cutoff and value >= 0 and math.isfinite(value):
+                    restored_request_samples.append((timestamp, str(item[1]), value))
+        self._request_baseline_samples = deque(
+            restored_request_samples,
+            maxlen=REQUEST_BASELINE_RETENTION_SAMPLES,
+        )
+        request_minutes = payload.get("last_request_baseline_minute")
+        if isinstance(request_minutes, dict):
+            self._last_request_baseline_minute = {
+                protocol: int(value)
+                for protocol, value in request_minutes.items()
+                if protocol in {"quic", "http2"} and isinstance(value, int)
+            }
 
     def baseline(self, now: float | None = None) -> float | None:
         cutoff = (now if now is not None else time.time()) - 24 * 60 * 60
@@ -191,6 +409,59 @@ class QualityEvaluator:
         if len(self._baseline_samples) < BASELINE_MINUTE_SAMPLES:
             return None
         return _percentile([value for _, value in self._baseline_samples], 0.20)
+
+    def request_baseline(self, protocol: str, now: float | None = None) -> float | None:
+        cutoff = (now if now is not None else time.time()) - 24 * 60 * 60
+        while self._request_baseline_samples and self._request_baseline_samples[0][0] < cutoff:
+            self._request_baseline_samples.popleft()
+        values = [
+            value
+            for _, sample_protocol, value in self._request_baseline_samples
+            if sample_protocol == protocol
+        ]
+        if len(values) < BASELINE_MINUTE_SAMPLES:
+            return None
+        return _percentile(values, 0.20)
+
+    def _request_path(
+        self,
+        sample: RequestPathSample | None,
+        *,
+        protocol: str,
+        now: float,
+    ) -> dict[str, Any] | None:
+        if sample is not None:
+            self._request_samples.append(sample)
+        cutoff = now - REQUEST_PATH_WINDOW_SECONDS
+        while self._request_samples and self._request_samples[0].sampled_at < cutoff:
+            self._request_samples.popleft()
+        return summarize_request_path_samples(
+            list(self._request_samples),
+            baseline_p95_ms=self.request_baseline(protocol, now) if protocol in {"quic", "http2"} else None,
+        )
+
+    def _record_request_baseline(
+        self,
+        request_path: dict[str, Any] | None,
+        *,
+        protocol: str,
+        now: float,
+    ) -> None:
+        if (
+            protocol not in {"quic", "http2"}
+            or not request_path
+            or request_path.get("status") != "healthy"
+            or request_path.get("confidence") == "low"
+        ):
+            return
+        latency = request_path.get("latency_ms")
+        if not isinstance(latency, dict) or latency.get("p95") is None:
+            return
+        minute = int(now // 60)
+        if self._last_request_baseline_minute.get(protocol) == minute:
+            return
+        self._request_baseline_samples.append((now, protocol, float(latency["p95"])))
+        self._last_request_baseline_minute[protocol] = minute
 
     def _rates(self, sample: MetricsSample) -> tuple[float, float]:
         self._counter_samples.append(sample)
@@ -216,11 +487,20 @@ class QualityEvaluator:
         *,
         connector_count: int = 1,
         recovery: dict[str, Any] | None = None,
+        configured_protocol: str = "auto",
+        effective_protocol: str | None = None,
+        request_path_sample: RequestPathSample | None = None,
         now: float | None = None,
     ) -> dict[str, Any]:
         current_time = now if now is not None else (sample.sampled_at if sample else time.time())
         recovery_payload = recovery or empty_recovery()
         previous_state = str((self._last_snapshot or {}).get("state") or "unknown")
+        previous_protocol = str((self._last_snapshot or {}).get("protocol") or "unknown")
+        protocol = effective_protocol if effective_protocol in {"quic", "http2"} else previous_protocol
+        if sample is not None:
+            if effective_protocol not in {"quic", "http2"}:
+                protocol = "quic" if sample.smoothed_rtt_ms else "http2" if sample.ready else "unknown"
+        request_path = self._request_path(request_path_sample, protocol=protocol, now=current_time)
 
         if sample is None:
             self._metrics_failures += 1
@@ -229,12 +509,14 @@ class QualityEvaluator:
                 state = "unknown"
             previous_connections = int((self._last_snapshot or {}).get("ha_connections") or 0)
             previous_locations = list((self._last_snapshot or {}).get("edge_locations") or [])
+            request_grade = request_path_grade(request_path)
             snapshot = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "state": "recovering" if recovery_payload["state"] in {"evaluating", "draining"} else state,
-                "grade": "unknown",
+                "grade": request_grade,
                 "sampled_at": utc_timestamp(current_time),
-                "protocol": "unknown",
+                "protocol": protocol,
+                "transport": {"configured": configured_protocol, "effective": protocol},
                 "connector_count": max(0, connector_count),
                 "ha_connections": previous_connections,
                 "rtt_ms": None,
@@ -243,6 +525,7 @@ class QualityEvaluator:
                 "window_seconds": RATE_WINDOW_SECONDS,
                 "request_errors_per_minute": 0.0,
                 "packet_loss_per_minute": 0.0,
+                "request_path": request_path,
                 "recovery": recovery_payload,
             }
             self._last_snapshot = snapshot
@@ -250,10 +533,12 @@ class QualityEvaluator:
 
         self._metrics_failures = 0
         rtt = rtt_stats(sample.smoothed_rtt_ms)
-        grade = latency_grade(rtt)
+        connector_grade = latency_grade(rtt)
+        request_grade = request_path_grade(request_path)
+        grade = request_grade if request_grade != "unknown" else connector_grade
         errors_per_minute, loss_per_minute = self._rates(sample)
 
-        self._latency_bad_samples = self._latency_bad_samples + 1 if grade in {"poor", "critical"} else 0
+        self._latency_bad_samples = self._latency_bad_samples + 1 if connector_grade in {"poor", "critical"} else 0
         self._partial_samples = self._partial_samples + 1 if sample.ha_connections < 4 else 0
         self._error_windows = self._error_windows + 1 if errors_per_minute >= 3 else 0
         self._loss_windows = self._loss_windows + 1 if loss_per_minute >= 10 else 0
@@ -265,6 +550,7 @@ class QualityEvaluator:
             or self._error_windows >= 2
             or self._loss_windows >= 2
             or self._latency_bad_samples >= 12
+            or request_path_is_degraded(request_path)
         )
         baseline = self.baseline(current_time)
         recovery_state = recovery_payload["state"]
@@ -277,9 +563,10 @@ class QualityEvaluator:
             healthy_rtt = (
                 rtt is None or rtt["median"] < max(160.0, 1.5 * baseline)
                 if baseline is not None
-                else grade in {"good", "fair", "unknown"}
+                else connector_grade in {"good", "fair", "unknown"}
             )
-            self._healthy_samples = self._healthy_samples + 1 if sample.ha_connections == 4 and errors_per_minute < 3 and loss_per_minute < 10 and healthy_rtt else 0
+            healthy_request_path = not request_path_is_degraded(request_path)
+            self._healthy_samples = self._healthy_samples + 1 if sample.ha_connections == 4 and errors_per_minute < 3 and loss_per_minute < 10 and healthy_rtt and healthy_request_path else 0
             state = "healthy" if self._healthy_samples >= 20 else "degraded"
         else:
             state = "healthy"
@@ -288,7 +575,7 @@ class QualityEvaluator:
         minute = int(current_time // 60)
         if (
             state == "healthy"
-            and grade in {"good", "fair"}
+            and connector_grade in {"good", "fair"}
             and sample.ha_connections == 4
             and errors_per_minute < 3
             and loss_per_minute < 10
@@ -299,12 +586,16 @@ class QualityEvaluator:
             self._last_baseline_minute = minute
             baseline = self.baseline(current_time)
 
+        if state == "healthy":
+            self._record_request_baseline(request_path, protocol=protocol, now=current_time)
+
         snapshot = {
-            "schema_version": 1,
+            "schema_version": 2,
             "state": state,
             "grade": grade,
             "sampled_at": utc_timestamp(current_time),
-            "protocol": "quic" if rtt is not None else "http2" if sample.ready else "unknown",
+            "protocol": protocol,
+            "transport": {"configured": configured_protocol, "effective": protocol},
             "connector_count": max(0, connector_count),
             "ha_connections": min(4, sample.ha_connections),
             "rtt_ms": rtt,
@@ -313,6 +604,7 @@ class QualityEvaluator:
             "window_seconds": RATE_WINDOW_SECONDS,
             "request_errors_per_minute": errors_per_minute,
             "packet_loss_per_minute": loss_per_minute,
+            "request_path": request_path,
             "recovery": recovery_payload,
         }
         self._last_snapshot = snapshot
@@ -326,6 +618,8 @@ class QualityEvaluator:
             return "availability"
         if float(current.get("request_errors_per_minute") or 0) >= 3 or float(current.get("packet_loss_per_minute") or 0) >= 10:
             return "errors"
+        if request_path_is_degraded(current.get("request_path")):
+            return "tail_latency"
         rtt = current.get("rtt_ms")
         if not isinstance(rtt, dict):
             return None
@@ -350,6 +644,12 @@ def empty_recovery() -> dict[str, Any]:
         "last_result": None,
         "previous_median_rtt_ms": None,
         "result_median_rtt_ms": None,
+        "previous_protocol": None,
+        "result_protocol": None,
+        "previous_p95_ms": None,
+        "result_p95_ms": None,
+        "previous_p99_ms": None,
+        "result_p99_ms": None,
         "next_attempt_at": None,
         "attempt_count_window": 0,
     }
@@ -364,6 +664,14 @@ def candidate_is_better(active: dict[str, Any], candidate: dict[str, Any], *, tr
         return False
     if trigger == "availability" and int(active.get("ha_connections") or 0) < 4:
         return True
+    if trigger == "tail_latency":
+        active_path = active.get("request_path")
+        candidate_path = candidate.get("request_path")
+        return (
+            isinstance(active_path, dict)
+            and isinstance(candidate_path, dict)
+            and request_path_is_better(active_path, candidate_path)
+        )
     active_rtt = active.get("rtt_ms")
     candidate_rtt = candidate.get("rtt_ms")
     if trigger == "errors":
