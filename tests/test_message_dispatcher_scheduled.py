@@ -1263,6 +1263,354 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(activity_store.list_activities(), [])
 
+    async def test_separate_flushes_from_one_turn_get_distinct_receipts(self):
+        controller = _StubController()
+        registry = SessionActivityRegistry()
+        controller.agent_service = SimpleNamespace(
+            activities=registry,
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+        )
+        accepted_by_native_id = {}
+        persisted = []
+        run_settlements = []
+
+        def persist_message(_context, _message_type, text, **kwargs):
+            accepted = {
+                "id": f"message-{len(persisted) + 1}",
+                "native_message_id": kwargs["native_message_id"],
+                "text": text,
+                "content": {"result_footer": kwargs["result_footer"]},
+                "metadata": kwargs["metadata"],
+            }
+            accepted_by_native_id[kwargs["native_message_id"]] = accepted
+            persisted.append(accepted)
+            return accepted
+
+        class _RunStore:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **kwargs):
+                run_settlements.append((run_id, kwargs["text"]))
+
+            def close(self):
+                pass
+
+        async def flush(activity_id, run_id, summary):
+            registry.start(
+                backend="claude",
+                runtime_key="runtime-two-flushes",
+                session_id="sess-two-flushes",
+                activity_id=activity_id,
+                kind="local_agent",
+                turn_id="turn-shared",
+                run_id=run_id,
+            )
+            registry.complete(
+                backend="claude",
+                runtime_key="runtime-two-flushes",
+                activity_id=activity_id,
+                status="completed",
+                metadata={"summary": summary},
+                expects_output=True,
+            )
+            claimed = registry.claim_completed_output_batch(
+                "claude",
+                "runtime-two-flushes",
+            )
+            self.assertEqual([item.id for item in claimed], [activity_id])
+            output = activity_completion_output(
+                claimed[0],
+                activities=claimed,
+                detached=True,
+                completes_turn=False,
+            )
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                summary,
+                output=output,
+            )
+            return output
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_RunStore(),
+            ),
+            patch.object(
+                message_dispatcher_module,
+                "agent_message_exists",
+                side_effect=lambda _context, native_id: accepted_by_native_id.get(native_id),
+            ),
+            patch.object(
+                message_dispatcher_module,
+                "persist_agent_message",
+                side_effect=persist_message,
+            ),
+        ):
+            first = await flush("activity-first", "run-first", "First result")
+            second = await flush("activity-second", "run-second", "Second result")
+
+        self.assertNotEqual(first.activity_batch_id, second.activity_batch_id)
+        self.assertNotEqual(
+            first.native_message_id(context),
+            second.native_message_id(context),
+        )
+        self.assertEqual(
+            controller.im_client.sent,
+            [
+                ("C123", None, "First result"),
+                ("C123", None, "Second result"),
+            ],
+        )
+        self.assertEqual(
+            [(item["text"], item["metadata"]["activity_ids"]) for item in persisted],
+            [
+                ("First result", ["activity-first"]),
+                ("Second result", ["activity-second"]),
+            ],
+        )
+        self.assertEqual(
+            run_settlements,
+            [
+                ("run-first", "First result"),
+                ("run-second", "Second result"),
+            ],
+        )
+
+    async def test_invisible_activity_releases_claim_after_local_settlement(self):
+        controller = _StubController()
+        registry = SessionActivityRegistry()
+        controller.agent_service = SimpleNamespace(
+            activities=registry,
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-invisible",
+            session_id="sess-invisible",
+            activity_id="activity-invisible",
+            kind="local_agent",
+            run_id="run-invisible",
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-invisible",
+            activity_id="activity-invisible",
+            status="completed",
+            metadata={"summary": "<silent>internal only</silent>"},
+            expects_output=True,
+        )
+        claimed = registry.claim_completed_output_batch(
+            "claude",
+            "runtime-invisible",
+        )
+        settled = asyncio.Event()
+        events = []
+
+        def output_settled(activity):
+            events.append(("waiter", activity.id, registry.has_completed_output(
+                "claude", "runtime-invisible"
+            )))
+            settled.set()
+
+        registry.set_output_settled_callback(output_settled)
+
+        class _RunStore:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **_kwargs):
+                events.append(("run", run_id))
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_RunStore(),
+            ),
+            patch.object(
+                registry,
+                "_delete_activity",
+                side_effect=RuntimeError("delete unavailable"),
+            ),
+            patch.object(
+                registry,
+                "_persist_activity",
+                side_effect=RuntimeError("terminal write unavailable"),
+            ),
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                MessageContext(
+                    user_id="scheduled",
+                    channel_id="C123",
+                    platform="slack",
+                ),
+                "result",
+                "<silent>internal only</silent>",
+                level="silent",
+                output=activity_completion_output(
+                    claimed[0],
+                    activities=claimed,
+                    detached=True,
+                    completes_turn=False,
+                ),
+            )
+
+        self.assertIsNone(message_id)
+        self.assertEqual(controller.im_client.sent, [])
+        await asyncio.wait_for(settled.wait(), timeout=1)
+        self.assertEqual(
+            events,
+            [
+                ("run", "run-invisible"),
+                ("waiter", "activity-invisible", False),
+            ],
+        )
+        self.assertFalse(registry.has_completed_output("claude", "runtime-invisible"))
+        later = registry.start(
+            backend="claude",
+            runtime_key="runtime-invisible",
+            session_id="sess-invisible",
+            activity_id="activity-later",
+            kind="local_agent",
+            turn_id="turn-later",
+        )
+        self.assertEqual(later.id, "activity-later")
+
+    async def test_real_scheduler_settles_run_before_activity_claim_is_consumed(self):
+        from core.scheduled_tasks import ScheduledTaskService
+        from modules.agents.service import AgentService
+
+        controller = _StubController()
+        registry = SessionActivityRegistry()
+        agent_service = AgentService(controller, activities=registry)
+        controller.agent_service = agent_service
+        events = []
+        terminal_runs = set()
+
+        class _RequestStore:
+            def defer_run_terminal(self, run_id, *, terminal_status):
+                events.append(("defer", run_id, terminal_status))
+
+            def settle_deferred_run(self, run_id, *, error):
+                events.append(("run", run_id, error))
+                terminal_runs.add(run_id)
+                return True
+
+        scheduled = object.__new__(ScheduledTaskService)
+        scheduled.controller = controller
+        scheduled.request_store = _RequestStore()
+        scheduled._drain_dirty = False
+        real_settle = scheduled.settle_activity_runs
+
+        def observed_settle(activity):
+            events.append(
+                ("terminal-owner", registry.has_pending_run_output("run-real-scheduler"))
+            )
+            return real_settle(activity)
+
+        scheduled.settle_activity_runs = observed_settle
+        controller.scheduled_task_service = scheduled
+        agent_service.agents["claude"] = SimpleNamespace(
+            on_activity_output_settled=lambda runtime_key: events.append(
+                (
+                    "waiter",
+                    runtime_key,
+                    "run-real-scheduler" in terminal_runs,
+                    registry.has_completed_output("claude", runtime_key),
+                )
+            )
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-real-scheduler",
+            session_id="sess-real-scheduler",
+            activity_id="activity-real-scheduler",
+            kind="local_agent",
+            run_id="run-real-scheduler",
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-real-scheduler",
+            activity_id="activity-real-scheduler",
+            status="completed",
+            metadata={"summary": "Visible result"},
+            expects_output=True,
+        )
+        claimed = registry.claim_completed_output_batch(
+            "claude",
+            "runtime-real-scheduler",
+        )
+
+        class _InitialRunStore:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, _run_id, **_kwargs):
+                raise RuntimeError("initial Run write unavailable")
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_InitialRunStore(),
+            ),
+            patch.object(message_dispatcher_module, "agent_message_exists", return_value=None),
+            patch.object(message_dispatcher_module, "persist_agent_message", return_value=None),
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                MessageContext(
+                    user_id="scheduled",
+                    channel_id="C123",
+                    platform="slack",
+                ),
+                "result",
+                "Visible result",
+                output=activity_completion_output(
+                    claimed[0],
+                    activities=claimed,
+                    detached=True,
+                    completes_turn=False,
+                ),
+            )
+
+        self.assertEqual(message_id, "bot-msg-1")
+        self.assertEqual(
+            events,
+            [
+                ("terminal-owner", False),
+                ("defer", "run-real-scheduler", "failed"),
+                (
+                    "run",
+                    "run-real-scheduler",
+                    "Background Activity activity-real-scheduler failed",
+                ),
+                ("waiter", "runtime-real-scheduler", True, False),
+            ],
+        )
+        self.assertFalse(
+            registry.has_completed_output("claude", "runtime-real-scheduler")
+        )
+
     async def test_activity_run_settlement_follows_message_persistence(self):
         controller = _StubController()
         controller.agent_service = SimpleNamespace(
