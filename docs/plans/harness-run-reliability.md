@@ -1,8 +1,9 @@
 # Harness Run Reliability
 
-Status (2026-08-03): **PR1, PR2, PR5, and PR6 are complete. PR3 and PR4
-remain. PR7 must be re-baselined against the durable Delivery/Turn model before
-implementation.**
+Status (2026-08-03): **PR1, PR2, PR5, PR6, and #1139's Activity-output
+settlement closure are complete. PR3 and PR4's shared-drain liveness work
+remain. PR4's transport-attempt delta and PR7 must be re-baselined against the
+durable Delivery/Turn/Activity model before implementation.**
 
 This is the execution plan, not the investigation log. The original detailed
 diagnosis and its review history remain available in Git before `fe821905`.
@@ -18,8 +19,9 @@ numbers or old ownership assumptions.
 | Durable, user-visible failure notices | **#1072 merged** |
 | Delivery / Turn / Message ownership model | **#1134 merged** |
 | Teardown-interrupted Run settlement | **#1140 merged**; supersedes closed #1131 |
+| Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **Open — PR3** |
-| Bounded and supervised recovered-output drain | **Open — PR4** |
+| Bounded and supervised shared drains | **Open — PR4**; attempt-state delta requires a current-master reproducer |
 | Scheduled/watch terminal-time truth and cron liveness | **Re-baseline — PR7** |
 
 The post-plan architecture is load-bearing:
@@ -28,21 +30,28 @@ The post-plan architecture is load-bearing:
   attempts, receipts, and retirement.
 - `session_turns` owns native execution and terminal Turn evidence.
 - `messages` is accepted communication history, not a queue.
+- durable Activity snapshots own pending output payload, ordered batch
+  membership, the linked Run union, and the stable output receipt identity.
+  Accepted Message evidence or a persisted Activity batch marked for local
+  settlement only prevents transport replay; a delivered output that still owes
+  local settlement retries only that settlement.
 - `agent_runs` is the Harness projection and callback/notice anchor.
 - #1140 distinguishes an unstarted claim from an execution that crossed the
   running boundary. Unstarted work returns to queued; infrastructure-interrupted
   running work fails and is not replayed; explicit user Stop remains canceled.
 
-Consequently, the old PR2 resolver design and PR7's old “claimed message row”
-decision are obsolete. New work must use the current durable owners instead of
-recreating pre-#1134 side maps.
+Consequently, the old PR2 resolver design, PR7's old “claimed message row”
+decision, and any pre-#1139 single-Activity output assumptions are obsolete. New
+work must use the current durable owners instead of recreating side maps or a
+parallel output ledger.
 
 ## 2. Invariants
 
 Every remaining change must preserve these rules:
 
 1. **One durable owner per phase.** Delivery owns input before native
-   acceptance; Turn owns accepted execution; Run reflects the outcome.
+   acceptance; Turn owns accepted execution; the Activity batch owns pending
+   terminal output; Run reflects the outcome.
 2. **No silent replay after execution starts.** Infrastructure interruption is
    `failed` with a structured cause and an actionable notice. User Stop is
    `canceled` and does not generate an infrastructure-failure notice.
@@ -62,13 +71,18 @@ Every remaining change must preserve these rules:
    apply to inactivity and post-turn delivery, never to productive execution.
 8. **Failures remain visible.** Reconcile paths must use #1072's durable notice
    path; a terminal row alone is not the exit criterion.
+9. **One output batch has one receipt.** Preserve #1139's stable receipt,
+   persisted ordered Activity membership, complete linked Run union, and
+   transport-free local-settlement retry. Incomplete or conflicting recovered
+   membership fails closed; it never emits a partial batch or invents a second
+   receipt.
 
 ## 3. Required pre-code baseline
 
 Before each remaining PR, write or run a current-master reproducer. Classify the
-old defect as `reproduces`, `fixed by #1134/#1140`, or `superseded by a new
-owner`. Do not preserve an old prescription merely because the symptom still has
-the same name.
+old defect as `reproduces`, `fixed by #1134/#1139/#1140`, or `superseded by a
+new owner`. Do not preserve an old prescription merely because the symptom still
+has the same name.
 
 Minimum baseline cases:
 
@@ -77,6 +91,10 @@ Minimum baseline cases:
   Delivery history does not pin it;
 - each backend-specific idle eviction path is classified as requiring the shared
   owner interlock or as restart-safe for queued work;
+- a complete #1139 Activity output batch with multiple Activities and linked
+  Runs is restored in its persisted order; accepted-Message evidence and the
+  persisted local-settlement-only marker each prevent transport replay while
+  local settlement is retried;
 - recovered Activity output delivery hangs while a new Harness request becomes
   ready;
 - scheduled and watch Runs transfer to a durable Delivery/Turn and later produce
@@ -155,7 +173,9 @@ timed out, and the interlock cannot make a stuck session immortal.
 One hung or unbounded request, Run-callback, vault-callback, or post-turn-output
 pass must not block `_watch_store` or every other Harness tenant. This is the
 direct fix for the observed 65-minute stall and the same critical-path shape in
-the other inline drains.
+the other inline drains. #1139 already owns output batch identity,
+anti-redelivery evidence, and post-delivery local settlement; PR4 must preserve
+that owner and fix only the remaining shared-loop and transport-attempt gaps.
 
 ### Required behavior
 
@@ -173,37 +193,47 @@ the other inline drains.
    loop.
 2. Bound drain work, not Agent execution. The no-turn-duration-timeout invariant
    remains unchanged.
-3. Add one durable, Activity-owned output-attempt record keyed by the stable
-   `MessageOutput.idempotency_key`. It must survive restart without a Run row and
-   carry guarded `pending` / `sending` / `delivered` / `failed` / `acknowledged` /
-   `abandoned` phase, attempts, `next_attempt_at`, returned delivery id or
-   persisted receipt, and terminal error. Persist intent before the transport
-   call and acknowledge/delete the Activity snapshot only from a guarded
-   terminal transition.
-4. Extend the structured `DeliveryEvidence` plumbing through the `result` path
+3. Treat #1139's persisted Activity batch as the sole owner of output payload,
+   ordered Activity membership, linked Run provenance, stable receipt identity,
+   and post-delivery local settlement. Start with a red current-master test for
+   the remaining ambiguous transport window. Do not create a second output
+   ledger, copy batch content or membership into an attempt record, or let a
+   drain become a second settlement owner.
+4. Only if that reproducer proves durable operational evidence is still missing,
+   add one batch-level transport-attempt record keyed by the stable
+   `MessageOutput.idempotency_key` inside the existing Activity runtime-record
+   aggregate. It may carry only guarded `pending` / `sending` / `delivered` /
+   `failed` / `acknowledged` / `abandoned` phase, attempts, `next_attempt_at`,
+   returned delivery id or persisted receipt, terminal error, and a reference to
+   the existing output batch. `SessionActivityRegistry` and its store remain the
+   single transition owner. Persist intent before the transport call and
+   acknowledge/delete the Activity snapshots only from a guarded terminal
+   transition.
+5. Extend the structured `DeliveryEvidence` plumbing through the `result` path
    used here; today `core/delivery_evidence.py` is notification-oriented and
    in-memory. Treat it as evidence for the current attempt, not as a substitute
-   for the durable Activity record. Before retrying, also consult the stable
-   output id and any persisted message receipt. Never implement
+   for the durable Activity batch and batch-level attempt state. Before retrying,
+   also consult the stable output id, accepted Message, persisted
+   local-settlement-only marker, and any persisted transport receipt. Never implement
    `except TimeoutError: requeue` from absence of a return value alone.
    Preserve the existing target-class evidence rule: a real IM delivery id may
    be `delivery_only` evidence, but an Avibe synthetic id is not acknowledgement
    without a persisted receipt.
-5. Keep ambiguous post-send retries bounded: retry at most once when a send may
+6. Keep ambiguous post-send retries bounded: retry at most once when a send may
    have succeeded, then move the same Activity-owned record to a durable failure
    state. Delivery of that failure notice has its own bounded backoff and ends in
    `acknowledged` or operator-visible `abandoned`; either terminal releases the
    Activity claim and settles a linked deferred Run without requiring one.
    Surface `failed` / `abandoned` through the session Activity projection and,
    when linked, the Harness Run detail.
-6. Do not rely on a SQLite data-version edge after `maybe_reload()` as the only
+7. Do not rely on a SQLite data-version edge after `maybe_reload()` as the only
    trigger for any detached drain. Probe each lane independently every tick, or
    give it durable `next_attempt_at` eligibility. Its task-completion path must
    re-arm after timeout, cancellation, or exception as well as after a partial
    page or temporary request/callback skip; only service shutdown suppresses
    re-arming. Persist retry timing and apply bounded backoff to unrunnable or
    repeatedly failing work so retries cannot hot-spin on the two-second tick.
-7. Add a heartbeat plus one separately tracked supervisor task per service
+8. Add a heartbeat plus one separately tracked supervisor task per service
    instance that is not awaited by `_watch_store`. It must identify the overdue
    drain in a loud log; a watchdog running inside the blocked loop cannot diagnose
    that loop. Cancel and await the supervisor alongside the owned drain tasks in
@@ -226,6 +256,13 @@ the other inline drains.
   overdue-drain logs;
 - a definitive failure before transport invocation retries safely;
 - timeout after confirmed delivery does not resend;
+- a complete multi-Activity batch preserves its persisted order, one stable
+  receipt, and the complete Run union through timeout, restart, and local
+  settlement failure;
+- an accepted Message or persisted Activity-batch local-settlement-only marker
+  suppresses transport replay, including after restart;
+- incomplete or conflicting recovered batch membership fails closed before
+  transport and remains under the same Activity owner;
 - a real IM id with no persisted row acknowledges without resending, while an
   Avibe synthetic id with no persisted row remains unacknowledged;
 - cancellation during or after the transport call remains ambiguous unless
@@ -246,19 +283,25 @@ pass.
 
 Do **not** implement the old PR7 prescription. #1134 added
 `complete_on_return`, durable Delivery ownership, immutable Turn terminal
-evidence, and restart recovery. First determine what remains.
+evidence, and restart recovery; #1139 added exact Activity output batch receipts,
+Run-union settlement, anti-redelivery evidence, and transport-free local
+settlement retry; #1140 closed teardown-interrupted Run settlement. First
+determine what remains.
 
 ### PR7A — Run and definition truth
 
 1. Prove whether scheduled and watch Runs already remain nonterminal after
-   Delivery ownership transfers and settle from the exact terminal Turn/result.
-   If #1134 already fixed the Run timing, close that part with regression tests
-   instead of adding another writer.
+   Delivery ownership transfers and settle from the exact terminal Turn/result
+   or #1139 Activity output batch. If #1134, #1139, and #1140 already fixed the
+   Run timing, close that part with regression tests instead of adding another
+   writer.
 2. Verify success, failure, result-less termination, user Stop, and terminal-write
    failure in both the direct IM execution lane and the Workbench durable
    `SessionTurnManager` lane. Exactly one terminal result wins in each; the
    Workbench path must have exactly one terminal writer, and a failed write must
-   not strand the Run or the Turn waiter.
+   not strand the Run or the Turn waiter. Positive output delivery remains final
+   when Message, Run, Turn, or Activity local settlement later fails; recovery
+   must consume #1139's receipt and retry only local settlement.
 3. Keep `health`, `consecutive_failures`, and `recent_failures` derived from the
    existing bounded terminal Run history; do not add a mutable health projection
    or cursor. Scope terminal-time projection to compatibility fields such as
@@ -391,13 +434,13 @@ work or timing out productive turns.
 ## 7. Order and review boundaries
 
 ```text
-complete: #1063, #1064, #1072, #1134, #1140
+complete: #1063, #1064, #1072, #1134, #1139, #1140
     |
     v
 PR3 eviction interlock
     |
     v
-PR4 recovered-output drain
+PR4 shared-drain liveness + proven transport-attempt delta
     |
     v
 PR7A terminal-time truth
@@ -442,7 +485,10 @@ For every PR:
 Non-goals:
 
 - a new Run status value such as `interrupted`;
+- a second Activity output ledger, receipt identity, or settlement owner beside
+  #1139's persisted Activity batch;
 - backend-level exactly-once execution;
 - an absolute Agent turn-duration timeout;
 - widening this work into unrelated session/process lifecycle cleanup;
-- preserving old implementation details that #1134 or #1140 superseded.
+- preserving old implementation details that #1134, #1139, or #1140
+  superseded.
