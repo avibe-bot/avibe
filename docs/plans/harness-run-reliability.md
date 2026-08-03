@@ -110,10 +110,11 @@ it. Do not let broken bindings or fake activity create immortal sessions.
 2. Consult the provider in both passes of `evict_idle_sessions`. Recompute during
    the second pass so work admitted between the two reads pins the session.
 3. Use two failure modes:
-   - one individually unresolvable binding fails open for that binding, so a
-     dangling row cannot pin an unrelated session forever;
-   - a provider-wide failure fails closed for the eviction cycle, because
-     missing safety data is not evidence that eviction is safe.
+   - a lookup that positively proves one binding is dangling fails open for only
+     that binding, so a deleted target cannot pin an unrelated session forever;
+   - any exception while resolving a binding, or any provider-wide failure,
+     fails closed for the eviction cycle, because missing safety data is not
+     evidence that eviction is safe.
 4. Bound the interlock with the existing real-progress inactivity clock and
    stuck-active threshold. A newly admitted pin does not restart that clock.
    Beyond the bound, use the #1140 teardown path to settle exact running
@@ -129,12 +130,12 @@ it. Do not let broken bindings or fake activity create immortal sessions.
   history without a nonterminal Turn does not;
 - a pin admitted between eviction passes wins;
 - unrelated sessions are not pinned;
-- one unresolvable binding fails open;
-- provider failure aborts the cycle;
+- one positively missing binding fails open;
+- a per-binding lookup exception or provider failure aborts the cycle;
 - repeated queued followers cannot extend the pin past the stuck threshold, and
   teardown settles only exact running ownership;
 - a claimed or gate-waiting request does not refresh activity;
-- a long turn with observable progress is not evicted.
+- a long turn with observable progress is not evicted;
 - every enabled backend eviction path either honors the provider or proves queued
   work resumes without loss or replay.
 
@@ -220,14 +221,18 @@ evidence, and restart recovery. First determine what remains.
    If #1134 already fixed the Run timing, close that part with regression tests
    instead of adding another writer.
 2. Verify success, failure, result-less termination, user Stop, and terminal-write
-   failure. Exactly one terminal result wins; a failed write must not strand the
-   Run or the Turn waiter.
-3. Project definition health only from the terminal Run event. Make the Run and
-   health update atomic where they share a transaction, or persist an idempotent,
-   monotonic `(completed_at, run_id)` projection cursor and reconcile it after a
-   crash; a process may die after the Run CAS but before an in-memory follow-up,
-   and replay of an older event must not overwrite a newer projection. Dispatch
-   or Delivery acceptance is not task success.
+   failure in both the direct IM execution lane and the Workbench durable
+   `SessionTurnManager` lane. Exactly one terminal result wins in each; the
+   Workbench path must have exactly one terminal writer, and a failed write must
+   not strand the Run or the Turn waiter.
+3. Keep `health`, `consecutive_failures`, and `recent_failures` derived from the
+   existing bounded terminal Run history; do not add a mutable health projection
+   or cursor. Scope terminal-time projection to compatibility fields such as
+   `last_run_at` / `last_error` and one-shot lifecycle updates. Make the Run CAS
+   and those updates atomic where they share a transaction, or reconcile them
+   idempotently with monotonic `(completed_at, run_id)` ordering after a crash;
+   replay of an older event must not overwrite a newer compatibility projection.
+   Dispatch or Delivery acceptance is not task success.
 4. If pre-fix rows still match the old premature-success signature — scheduled
    or watch `status=succeeded`, empty `result_text`, and `completed_at` within the
    dispatch-time window of `created_at` — stamp
@@ -257,10 +262,12 @@ evidence, and restart recovery. First determine what remains.
    policy proves unwritten. A `run_cancel=turn_owner` state routes through its
    exact Turn owner's cause-aware cancellation/reconciliation; if no Turn exists,
    preserve the Delivery's possible/unknown native-effect evidence and reconcile
-   it as an infrastructure failure without replay or an “unwritten” claim. A
-   terminal `run_cancel=complete` Delivery is not automatically a no-op: cancel
-   its linked nonterminal Turn, reconcile from its linked terminal Turn, or fail
-   an inconsistent ownerless projection durably. Every resulting failure settles
+   it as an infrastructure failure without replay or an “unwritten” claim. The
+   previously recorded timeout cause deliberately overrides normal restart's
+   one-time unknown-start replay. A terminal `run_cancel=complete` Delivery is
+   not automatically a no-op: cancel its linked nonterminal Turn, reconcile from
+   its linked terminal Turn, or fail an inconsistent ownerless projection
+   durably. Every resulting failure settles
    visibly through the notice path.
 4. Cover `claimed`, `pending_steer`, `steering`, `interrupt_waiting`,
    `reconciling_steer`, and `accepted`; cover `accepted` with both nonterminal
@@ -282,18 +289,19 @@ evidence, and restart recovery. First determine what remains.
 6. Cover unset, zero, shorter, and longer overrides; irregular cron schedules and
    a DST boundary; a one-shot `at` Run; progress from another Run in the same
    session; multiple fires during one productive Turn; add/update round trips;
-   unchanged watch behavior; and restart reconstruction. A long override must
+   unchanged watch behavior; and restart reconstruction. Pin both sides of the
+   ambiguity policy: ordinary restart may replay an unknown start once, while a
+   Run already expired as `lifetime_timeout` never replays. A long override must
    clamp before the actual next cron fire without canceling an exact owner that
    keeps producing observable progress.
 
-The old D7 blocker is retired, not carried forward. Its premise was that a
-message row simultaneously represented queued input and ambiguous execution.
-That is no longer the model. Current recovery policy is the #1134/#1140 matrix:
-unstarted work is retryable, started work interrupted by infrastructure fails,
-and natural/user-stop compare-and-set winners prevail. Pin that matrix with
-tests. `native_effect=unknown` is preserved as evidence and resolved by the
-matrix's existing Turn-owner policy; it is not permission to replay or reopen the
-old message-row binary choice.
+The old D7 blocker is retired by an explicit split, not by claiming ambiguity
+vanished. Normal crash recovery preserves #1134's bounded one-time replay for a
+`starting` Turn whose start receipt is `unknown`. PR7B inactivity expiry is a
+different, cause-first terminal decision: once `lifetime_timeout` wins, the same
+unknown evidence fails visibly and never replays. Unstarted work remains
+retryable; known-started work interrupted by infrastructure fails; and
+natural/user-stop compare-and-set winners prevail.
 
 Exit criterion: Run status, definition health, scheduler availability, and user
 notifications all describe the same terminal event without replaying accepted
