@@ -2050,7 +2050,15 @@ class TaskExecutionStore:
         return True
 
     def list_running_command_workers(self) -> list[dict[str, Any]]:
-        """Every in-flight fire that still names a command worker."""
+        """Every in-flight fire that still names a command worker.
+
+        ``definition_id`` is part of the contract, not decoration: a caller asking
+        whether ITS definition still has a worker running filters on it, so a backend
+        that omits the field does not report "no worker" -- it reports it about every
+        definition at once, and single flight silently stops holding here. The file
+        payload spells the same association ``task_id`` (SQLite renamed that column),
+        so the field is normalized at this boundary rather than at each reader.
+        """
 
         if self._sqlite is not None:
             return self._sqlite.list_running_command_workers()
@@ -2070,7 +2078,14 @@ class TaskExecutionStore:
                 else None
             )
             if isinstance(identity, dict):
-                workers.append({"run_id": path.stem, "identity": identity})
+                definition_id = payload.get("task_id")
+                workers.append(
+                    {
+                        "run_id": path.stem,
+                        "definition_id": str(definition_id) if definition_id else None,
+                        "identity": identity,
+                    }
+                )
         return workers
 
     @staticmethod

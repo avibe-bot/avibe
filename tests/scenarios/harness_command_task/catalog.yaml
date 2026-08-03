@@ -391,3 +391,18 @@ scenarios:
     # survives a failed write untouched, so "kept" is the honest answer, and the attempt
     # cap is charged only for attempts actually made. The test fails the re-stamp alone,
     # leaving the clear working, or a kept record could not be told from an undeletable one.
+  - id: SCT-042
+    name: both run stores name the definition a command worker belongs to
+    status: covered
+    kind: crash_recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_both_run_stores_name_the_definition_a_command_worker_belongs_to
+    # SCT-040's guard filters recorded workers by definition, so the attribution IS the
+    # contract. The file backend omitted it -- SQLite's column was renamed
+    # ``definition_id`` while the file payload still spells the association ``task_id``
+    # -- and a missing field does not read as "no worker": it reads as "no worker for
+    # every definition at once", so single flight silently stopped holding on that
+    # backend while looking healthy on the other. Normalized at the store boundary and
+    # asserted on both backends in one test, because a reader cannot tell which one it
+    # was handed.

@@ -15781,6 +15781,57 @@ def test_a_definition_does_not_fire_while_its_own_worker_may_be_alive(
     ], "the proven-dead worker's record was left to block later fires forever"
 
 
+def test_both_run_stores_name_the_definition_a_command_worker_belongs_to(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-042 -- a worker record nobody can attribute defers nothing.
+
+    SCT-040's guard filters the recorded workers by definition, because "some command
+    is running" is not a reason to skip a different one. The file backend omitted the
+    field: the SQLite column was renamed ``definition_id`` while the file payload still
+    spells the association ``task_id``, so its entries matched no definition at all --
+    which does not read as "no worker", it reads as "no worker for every definition at
+    once", and single flight silently stopped holding on that backend.
+
+    Asserted on both backends together, since the field is a store contract and a
+    reader cannot tell which one it was handed.
+    """
+
+    db_path = _command_task_env(tmp_path, monkeypatch)
+    assert db_path is not None
+    task_store = ScheduledTaskStore()
+    task = _add_command_task(task_store, shell_command="sleep 3600", cwd=str(tmp_path))
+    identity = {
+        "pid": 424242,
+        "create_time": 1.0,
+        "worker_fingerprint": fingerprint_process_marker("attributed-worker"),
+    }
+
+    for label, store in (
+        ("sqlite", TaskExecutionStore()),
+        ("file", TaskExecutionStore(tmp_path / "task_requests")),
+    ):
+        claimed = store.claim(
+            store.enqueue_task_run(task.id, source_kind="scheduler", task=task).id
+        )
+        assert claimed is not None, f"{label}: could not claim the fire"
+        assert store.record_command_worker(claimed.id, identity), (
+            f"{label}: the worker record did not land"
+        )
+        workers = [
+            worker
+            for worker in store.list_running_command_workers()
+            if worker["run_id"] == claimed.id
+        ]
+        assert workers, f"{label}: the recorded worker was not listed"
+        assert workers[0].get("definition_id") == task.id, (
+            f"{label}: the worker is not attributed to its definition "
+            f"({workers[0].get('definition_id')!r}), so a fire of that definition "
+            "cannot tell this worker apart from another definition's and starts a "
+            "second copy of the command"
+        )
+
+
 def test_a_failed_retention_write_keeps_the_stored_worker_record(
     tmp_path: Path, monkeypatch
 ) -> None:

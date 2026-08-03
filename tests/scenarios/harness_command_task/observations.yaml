@@ -367,3 +367,23 @@ observations:
       - keep the record when the write fails, and log it at warning rather than debug
       - reserve the give-up answer for a spent attempt cap or a row that is no longer running
       - charge the attempt cap only for attempts that were actually stored
+  - id: OBS-HARNESS-COMMAND-TASK-022
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-042
+      - SCT-040
+    summary: >-
+      A guard that filters on a field is only as strong as the weakest backend that fills it.
+    previous_assumption: >-
+      Adding the definition id to the SQLite query gave the new single-flight check what it
+      needs, since that is the backend a real install runs on.
+    observed_behavior: >-
+      The file backend answers the same method and omitted the field, so every one of its
+      records matched no definition -- and the absence reads as permission, not as caution:
+      the fire concluded no worker of its own was running and started a second copy. The
+      association was there all along under the older name the SQLite column was renamed
+      away from.
+    required_updates:
+      - normalize the field at the store boundary so both backends answer the same contract
+      - say in the docstring why the field is required, not merely that it is returned
+      - assert the contract on both backends in one test, since a reader cannot tell them apart
