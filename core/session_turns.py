@@ -149,6 +149,21 @@ class RuntimeDeliveryObservation:
     turn_version: int | None
     start_attempt_id: str | None
     native_turn_id: str | None
+    predecessor_turn_id: str | None = None
+    predecessor_state: str | None = None
+    predecessor_version: int | None = None
+    predecessor_control_state: str | None = None
+    predecessor_control_mode: str | None = None
+    predecessor_control_attempt_id: str | None = None
+    predecessor_control_expected_native_turn_id: str | None = None
+    predecessor_control_receipt_outcome: str | None = None
+    predecessor_successor_delivery_id: str | None = None
+    predecessor_successor_turn_id: str | None = None
+    predecessor_terminal_outcome: str | None = None
+    predecessor_settled_by: str | None = None
+    predecessor_terminal_evidence_kind: str | None = None
+    predecessor_terminal_evidence_json: str | None = None
+    predecessor_terminal_at: str | None = None
 
 
 def _start_replay_count(deliveries: list[dict[str, Any]]) -> int:
@@ -3210,10 +3225,12 @@ class SessionTurnManager:
                                 if retired is None:
                                     raise RuntimeError("archived P0 successor retirement lost")
                             elif resume_successors:
-                                started = delivery_store.activate_waiting_successor(
+                                terminal_predecessor = delivery_store.get_turn(
+                                    conn, turn_id
+                                )
+                                started = self._activate_linked_waiting_successor(
                                     conn,
-                                    turn=successor,
-                                    delivery=successor_delivery,
+                                    predecessor=terminal_predecessor,
                                 )
                                 if started is None:
                                     raise RuntimeError(
@@ -3486,12 +3503,44 @@ class SessionTurnManager:
         self,
         session_id: str,
         logical_turn_id: str,
-    ) -> None:
+        *,
+        expected_state: str | None = None,
+        expected_version: int | None = None,
+        expected_control_state: str | None = None,
+        expected_control_attempt_id: str | None = None,
+        expected_native_turn_id: str | None = None,
+        expected_successor_delivery_id: str | None = None,
+        expected_successor_turn_id: str | None = None,
+    ) -> bool:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             pending = delivery_store.pending_control_for_turn(conn, logical_turn_id)
             if pending is None:
-                return
+                return False
+            if (
+                str(pending.get("session_id") or "") != session_id
+                or (
+                    expected_version is not None
+                    and (
+                        int(pending.get("version") or 0) != expected_version
+                        or str(pending.get("state") or "")
+                        != str(expected_state or "")
+                        or str(pending.get("control_state") or "")
+                        != str(expected_control_state or "")
+                        or str(pending.get("control_attempt_id") or "")
+                        != str(expected_control_attempt_id or "")
+                        or str(
+                            pending.get("control_expected_native_turn_id") or ""
+                        )
+                        != str(expected_native_turn_id or "")
+                        or str(pending.get("control_successor_delivery_id") or "")
+                        != str(expected_successor_delivery_id or "")
+                        or str(pending.get("control_successor_turn_id") or "")
+                        != str(expected_successor_turn_id or "")
+                    )
+                )
+            ):
+                return False
             claimed = delivery_store.cas_turn(
                 conn,
                 logical_turn_id,
@@ -3501,6 +3550,8 @@ class SessionTurnManager:
             )
         if claimed is not None:
             await self._interrupt_durable_turn(session_id, logical_turn_id)
+            return True
+        return False
 
     async def _run_pending_steers(
         self,
@@ -3793,6 +3844,7 @@ class SessionTurnManager:
 
         page_limit = max(1, int(limit))
         with self._sqlite_engine().connect() as conn:
+            predecessor_rows = session_turn_rows.alias("recovery_predecessor")
             live_turn = exists(
                 select(session_turn_rows.c.id)
                 .where(
@@ -3864,12 +3916,58 @@ class SessionTurnManager:
                     session_turn_rows.c.version.label("turn_version"),
                     session_turn_rows.c.start_attempt_id.label("start_attempt_id"),
                     session_turn_rows.c.native_turn_id.label("native_turn_id"),
+                    predecessor_rows.c.id.label("predecessor_turn_id"),
+                    predecessor_rows.c.state.label("predecessor_state"),
+                    predecessor_rows.c.version.label("predecessor_version"),
+                    predecessor_rows.c.control_state.label(
+                        "predecessor_control_state"
+                    ),
+                    predecessor_rows.c.control_mode.label(
+                        "predecessor_control_mode"
+                    ),
+                    predecessor_rows.c.control_attempt_id.label(
+                        "predecessor_control_attempt_id"
+                    ),
+                    predecessor_rows.c.control_expected_native_turn_id.label(
+                        "predecessor_control_expected_native_turn_id"
+                    ),
+                    predecessor_rows.c.control_receipt_outcome.label(
+                        "predecessor_control_receipt_outcome"
+                    ),
+                    predecessor_rows.c.control_successor_delivery_id.label(
+                        "predecessor_successor_delivery_id"
+                    ),
+                    predecessor_rows.c.control_successor_turn_id.label(
+                        "predecessor_successor_turn_id"
+                    ),
+                    predecessor_rows.c.terminal_outcome.label(
+                        "predecessor_terminal_outcome"
+                    ),
+                    predecessor_rows.c.settled_by.label("predecessor_settled_by"),
+                    predecessor_rows.c.terminal_evidence_kind.label(
+                        "predecessor_terminal_evidence_kind"
+                    ),
+                    predecessor_rows.c.terminal_evidence_json.label(
+                        "predecessor_terminal_evidence_json"
+                    ),
+                    predecessor_rows.c.terminal_at.label("predecessor_terminal_at"),
                     session_turn_rows.c.created_at.label("sort_at"),
                     literal(0).label("sort_kind"),
                 )
                 .join(
                     delivery_rows,
                     delivery_rows.c.id == session_turn_rows.c.initial_delivery_id,
+                )
+                .outerjoin(
+                    predecessor_rows,
+                    and_(
+                        predecessor_rows.c.session_id
+                        == session_turn_rows.c.session_id,
+                        predecessor_rows.c.control_successor_turn_id
+                        == session_turn_rows.c.id,
+                        predecessor_rows.c.control_successor_delivery_id
+                        == delivery_rows.c.id,
+                    ),
                 )
                 .where(
                     or_(
@@ -3943,7 +4041,13 @@ class SessionTurnManager:
 
         by_session: dict[str, dict[str, Any]] = {}
         for row in turn_rows + fence_rows + open_rows:
-            by_session.setdefault(str(row["session_id"]), row)
+            session_id = str(row["session_id"])
+            current = by_session.get(session_id)
+            if current is None or (
+                row.get("turn_state") == "waiting"
+                and current.get("turn_state") != "waiting"
+            ):
+                by_session[session_id] = row
         selected = list(by_session.values())[:page_limit]
         observations = [
             RuntimeDeliveryObservation(
@@ -3974,6 +4078,60 @@ class SessionTurnManager:
                 ),
                 start_attempt_id=str(row.get("start_attempt_id") or "") or None,
                 native_turn_id=str(row.get("native_turn_id") or "") or None,
+                predecessor_turn_id=(
+                    str(row.get("predecessor_turn_id") or "") or None
+                ),
+                predecessor_state=(
+                    str(row.get("predecessor_state") or "") or None
+                ),
+                predecessor_version=(
+                    int(row["predecessor_version"])
+                    if row.get("predecessor_version") is not None
+                    else None
+                ),
+                predecessor_control_state=(
+                    str(row.get("predecessor_control_state") or "") or None
+                ),
+                predecessor_control_mode=(
+                    str(row.get("predecessor_control_mode") or "") or None
+                ),
+                predecessor_control_attempt_id=(
+                    str(row.get("predecessor_control_attempt_id") or "") or None
+                ),
+                predecessor_control_expected_native_turn_id=(
+                    str(
+                        row.get("predecessor_control_expected_native_turn_id")
+                        or ""
+                    )
+                    or None
+                ),
+                predecessor_control_receipt_outcome=(
+                    str(row.get("predecessor_control_receipt_outcome") or "")
+                    or None
+                ),
+                predecessor_successor_delivery_id=(
+                    str(row.get("predecessor_successor_delivery_id") or "") or None
+                ),
+                predecessor_successor_turn_id=(
+                    str(row.get("predecessor_successor_turn_id") or "") or None
+                ),
+                predecessor_terminal_outcome=(
+                    str(row.get("predecessor_terminal_outcome") or "") or None
+                ),
+                predecessor_settled_by=(
+                    str(row.get("predecessor_settled_by") or "") or None
+                ),
+                predecessor_terminal_evidence_kind=(
+                    str(row.get("predecessor_terminal_evidence_kind") or "")
+                    or None
+                ),
+                predecessor_terminal_evidence_json=(
+                    str(row.get("predecessor_terminal_evidence_json") or "")
+                    or None
+                ),
+                predecessor_terminal_at=(
+                    str(row.get("predecessor_terminal_at") or "") or None
+                ),
             )
             for row in selected
         ]
@@ -3985,10 +4143,53 @@ class SessionTurnManager:
         )
         return observations, has_more
 
+    @staticmethod
+    def _terminal_predecessor_matches_observation(
+        predecessor: dict[str, Any],
+        observation: RuntimeDeliveryObservation,
+    ) -> bool:
+        return bool(
+            str(predecessor.get("id") or "")
+            == str(observation.predecessor_turn_id or "")
+            and str(predecessor.get("session_id") or "") == observation.session_id
+            and str(predecessor.get("state") or "")
+            == str(observation.predecessor_state or "")
+            and int(predecessor.get("version") or 0)
+            == observation.predecessor_version
+            and str(predecessor.get("control_state") or "")
+            == str(observation.predecessor_control_state or "")
+            and str(predecessor.get("control_mode") or "")
+            == str(observation.predecessor_control_mode or "")
+            and str(predecessor.get("control_attempt_id") or "")
+            == str(observation.predecessor_control_attempt_id or "")
+            and str(predecessor.get("control_expected_native_turn_id") or "")
+            == str(observation.predecessor_control_expected_native_turn_id or "")
+            and str(predecessor.get("control_receipt_outcome") or "")
+            == str(observation.predecessor_control_receipt_outcome or "")
+            and str(predecessor.get("control_successor_delivery_id") or "")
+            == str(observation.predecessor_successor_delivery_id or "")
+            and str(predecessor.get("control_successor_turn_id") or "")
+            == str(observation.predecessor_successor_turn_id or "")
+            and str(predecessor.get("terminal_outcome") or "")
+            == str(observation.predecessor_terminal_outcome or "")
+            and str(predecessor.get("settled_by") or "")
+            == str(observation.predecessor_settled_by or "")
+            and str(predecessor.get("terminal_evidence_kind") or "")
+            == str(observation.predecessor_terminal_evidence_kind or "")
+            and str(predecessor.get("terminal_evidence_json") or "")
+            == str(observation.predecessor_terminal_evidence_json or "")
+            and str(predecessor.get("terminal_at") or "")
+            == str(observation.predecessor_terminal_at or "")
+        )
+
     def _runtime_observation_is_current(
         self,
         observation: RuntimeDeliveryObservation,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    ) -> tuple[
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+    ]:
         with self._sqlite_engine().connect() as conn:
             delivery = (
                 delivery_store.get_delivery(conn, observation.delivery_id)
@@ -3998,6 +4199,11 @@ class SessionTurnManager:
             turn = (
                 delivery_store.get_turn(conn, observation.turn_id)
                 if observation.turn_id
+                else None
+            )
+            predecessor = (
+                delivery_store.get_turn(conn, observation.predecessor_turn_id)
+                if observation.predecessor_turn_id
                 else None
             )
         if observation.delivery_id and (
@@ -4012,7 +4218,7 @@ class SessionTurnManager:
             or str(delivery.get("current_expected_native_turn_id") or "")
             != str(observation.delivery_expected_native_turn_id or "")
         ):
-            return None, None
+            return None, None, None
         if observation.turn_id and (
             turn is None
             or str(turn.get("session_id") or "") != observation.session_id
@@ -4023,8 +4229,16 @@ class SessionTurnManager:
             or str(turn.get("native_turn_id") or "")
             != str(observation.native_turn_id or "")
         ):
-            return None, None
-        return delivery, turn
+            return None, None, None
+        if observation.predecessor_turn_id and (
+            predecessor is None
+            or not self._terminal_predecessor_matches_observation(
+                predecessor,
+                observation,
+            )
+        ):
+            return None, None, None
+        return delivery, turn, predecessor
 
     async def recover_runtime_delivery_observation(
         self,
@@ -4032,10 +4246,12 @@ class SessionTurnManager:
     ) -> bool:
         """Re-enter only the exact owner seen by a bounded lane scan."""
 
-        delivery, turn = self._runtime_observation_is_current(observation)
+        delivery, turn, predecessor = self._runtime_observation_is_current(observation)
         if observation.delivery_id and delivery is None:
             return False
         if observation.turn_id and turn is None:
+            return False
+        if observation.predecessor_turn_id and predecessor is None:
             return False
         if observation.kind == "open_head":
             return await self.drain_delivery_queue(
@@ -4049,12 +4265,6 @@ class SessionTurnManager:
                 expected_start_attempt_id=str(turn.get("start_attempt_id") or ""),
             )
         if turn is not None and turn["state"] == "waiting":
-            with self._sqlite_engine().connect() as conn:
-                predecessor = conn.execute(
-                    select(session_turn_rows).where(
-                        session_turn_rows.c.control_successor_turn_id == turn["id"]
-                    )
-                ).mappings().first()
             if predecessor is None:
                 return False
             predecessor_id = str(predecessor["id"])
@@ -4063,10 +4273,28 @@ class SessionTurnManager:
                     await self._resume_linked_control_successor(
                         observation.session_id,
                         predecessor_id,
+                        observation=observation,
                     )
                 )
-            await self._run_pending_interrupt(observation.session_id, predecessor_id)
-            return True
+            return await self._run_pending_interrupt(
+                observation.session_id,
+                predecessor_id,
+                expected_state=observation.predecessor_state,
+                expected_version=observation.predecessor_version,
+                expected_control_state=observation.predecessor_control_state,
+                expected_control_attempt_id=(
+                    observation.predecessor_control_attempt_id
+                ),
+                expected_native_turn_id=(
+                    observation.predecessor_control_expected_native_turn_id
+                ),
+                expected_successor_delivery_id=(
+                    observation.predecessor_successor_delivery_id
+                ),
+                expected_successor_turn_id=(
+                    observation.predecessor_successor_turn_id
+                ),
+            )
         if turn is not None and turn.get("control_state") in {
             "pending",
             "interrupting",
@@ -4529,30 +4757,184 @@ class SessionTurnManager:
         elif owner["state"] == "starting":
             await self._start_persisted_turn(str(owner["id"]))
 
+    @staticmethod
+    def _activate_linked_waiting_successor(
+        conn: Connection,
+        *,
+        predecessor: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Claim the exact linked successor only behind a terminal winner."""
+
+        if (
+            predecessor is None
+            or predecessor.get("state") != "terminal"
+            or predecessor.get("control_mode") != "replace"
+            or predecessor.get("control_state")
+            not in {"pending", "interrupting", "waiting_terminal", "reconciling"}
+        ):
+            return None
+        successor_id = str(predecessor.get("control_successor_turn_id") or "")
+        delivery_id = str(predecessor.get("control_successor_delivery_id") or "")
+        if not successor_id or not delivery_id:
+            return None
+        successor = delivery_store.get_turn(conn, successor_id)
+        delivery = delivery_store.get_delivery(conn, delivery_id)
+        if (
+            successor is None
+            or delivery is None
+            or str(successor.get("session_id") or "")
+            != str(predecessor.get("session_id") or "")
+            or str(successor.get("initial_delivery_id") or "") != delivery_id
+            or str(delivery.get("session_id") or "")
+            != str(predecessor.get("session_id") or "")
+            or str(delivery.get("turn_id") or "") != successor_id
+            or str(delivery.get("turn_role") or "") != "initial"
+            or delivery.get("turn_position") != 0
+        ):
+            return None
+        return delivery_store.activate_waiting_successor(
+            conn,
+            turn=successor,
+            delivery=delivery,
+        )
+
     async def _resume_linked_control_successor(
         self,
         session_id: str,
         terminal_turn_id: str,
+        *,
+        observation: RuntimeDeliveryObservation | None = None,
     ) -> str | None:
         """Start only the exact replacement linked from a settled control Turn."""
-        with self._sqlite_engine().connect() as conn:
+        start_attempt_id = ""
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
             terminal = delivery_store.get_turn(conn, terminal_turn_id)
             successor_id = str(
                 (terminal or {}).get("control_successor_turn_id") or ""
             )
-            owner = delivery_store.active_turn(conn, session_id)
-        if (
-            terminal is None
-            or terminal["state"] != "terminal"
-            or str(terminal["session_id"]) != session_id
-            or terminal.get("control_mode") != "replace"
-            or not successor_id
-            or owner is None
-            or str(owner["id"]) != successor_id
-            or owner["state"] != "starting"
-        ):
-            return None
-        await self._start_persisted_turn(successor_id)
+            successor_delivery_id = str(
+                (terminal or {}).get("control_successor_delivery_id") or ""
+            )
+            predecessors = list(
+                conn.execute(
+                    select(session_turn_rows.c.id).where(
+                        session_turn_rows.c.control_successor_turn_id == successor_id,
+                        session_turn_rows.c.control_successor_delivery_id
+                        == successor_delivery_id,
+                    )
+                ).scalars()
+            )
+            session_status = conn.execute(
+                select(agent_sessions.c.status)
+                .where(agent_sessions.c.id == session_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if (
+                terminal is None
+                or terminal["state"] != "terminal"
+                or str(terminal["session_id"]) != session_id
+                or terminal.get("control_mode") != "replace"
+                or not successor_id
+                or not successor_delivery_id
+                or predecessors != [terminal_turn_id]
+                or session_status != "active"
+                or (
+                    observation is not None
+                    and not self._terminal_predecessor_matches_observation(
+                        terminal,
+                        observation,
+                    )
+                )
+            ):
+                return None
+            successor = delivery_store.get_turn(conn, successor_id)
+            successor_delivery = delivery_store.get_delivery(
+                conn, successor_delivery_id
+            )
+            if (
+                successor is None
+                or successor_delivery is None
+                or str(successor.get("session_id") or "") != session_id
+                or str(successor.get("initial_delivery_id") or "")
+                != successor_delivery_id
+                or str(successor_delivery.get("session_id") or "") != session_id
+                or str(successor_delivery.get("turn_id") or "") != successor_id
+                or str(successor_delivery.get("turn_role") or "") != "initial"
+                or successor_delivery.get("turn_position") != 0
+                or (
+                    observation is not None
+                    and (
+                        str(successor.get("id") or "")
+                        != str(observation.turn_id or "")
+                        or str(successor.get("state") or "")
+                        != str(observation.turn_state or "")
+                        or int(successor.get("version") or 0)
+                        != observation.turn_version
+                        or str(successor.get("start_attempt_id") or "")
+                        != str(observation.start_attempt_id or "")
+                        or str(successor.get("native_turn_id") or "")
+                        != str(observation.native_turn_id or "")
+                        or str(successor_delivery.get("id") or "")
+                        != str(observation.delivery_id or "")
+                        or str(successor_delivery.get("state") or "")
+                        != str(observation.delivery_state or "")
+                        or int(successor_delivery.get("version") or 0)
+                        != observation.delivery_version
+                        or str(successor_delivery.get("current_attempt_id") or "")
+                        != str(observation.delivery_attempt_id or "")
+                        or str(
+                            successor_delivery.get("current_target_turn_id") or ""
+                        )
+                        != str(observation.delivery_target_turn_id or "")
+                        or str(
+                            successor_delivery.get(
+                                "current_expected_native_turn_id"
+                            )
+                            or ""
+                        )
+                        != str(observation.delivery_expected_native_turn_id or "")
+                    )
+                )
+            ):
+                return None
+            if successor["state"] == "waiting":
+                started = self._activate_linked_waiting_successor(
+                    conn,
+                    predecessor=terminal,
+                )
+                if started is None:
+                    return None
+                successor = started
+            elif successor["state"] != "starting" or successor_delivery["state"] != "claimed":
+                return None
+            start_attempt_id = str(successor.get("start_attempt_id") or "")
+            if not start_attempt_id:
+                raise RuntimeError("linked successor activation has no start attempt")
+            if terminal.get("control_state") in {
+                "pending",
+                "interrupting",
+                "waiting_terminal",
+                "reconciling",
+            }:
+                settled = delivery_store.cas_turn(
+                    conn,
+                    terminal_turn_id,
+                    expected_version=int(terminal["version"]),
+                    expected_states=("terminal",),
+                    values={
+                        "control_state": "settled",
+                        "control_receipt_outcome": (
+                            terminal.get("control_receipt_outcome") or "accepted"
+                        ),
+                    },
+                )
+                if settled is None:
+                    raise RuntimeError("linked successor terminal resume lost")
+        await self._start_persisted_turn(
+            successor_id,
+            expected_start_attempt_id=start_attempt_id,
+        )
         return successor_id
 
     async def _resume_post_terminal(self, session_id: str) -> None:

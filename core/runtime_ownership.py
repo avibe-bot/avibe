@@ -348,12 +348,20 @@ class RuntimeOwnershipProvider:
                 ).mappings()
             ]
             resolved_agent = agents.alias("resolved_agent")
+            resolved_run_session = agent_sessions.alias("resolved_run_session")
+            missing_run_backend = or_(
+                agent_runs.c.agent_backend.is_(None),
+                func.trim(agent_runs.c.agent_backend) == "",
+            )
             run_rows = [
                 dict(row)
                 for row in connection.execute(
                     select(
                         agent_runs,
                         resolved_agent.c.backend.label("resolved_agent_backend"),
+                        resolved_run_session.c.agent_backend.label(
+                            "resolved_session_backend"
+                        ),
                     )
                     .select_from(
                         agent_runs.outerjoin(
@@ -366,6 +374,9 @@ class RuntimeOwnershipProvider:
                                     == resolved_agent.c.name,
                                 ),
                             ),
+                        ).outerjoin(
+                            resolved_run_session,
+                            agent_runs.c.session_id == resolved_run_session.c.id,
                         )
                     )
                     .where(agent_runs.c.status.notin_(_TERMINAL_RAW_RUN_STATUSES))
@@ -373,10 +384,12 @@ class RuntimeOwnershipProvider:
                     .where(
                         or_(
                             agent_runs.c.agent_backend == backend,
-                            resolved_agent.c.backend == backend,
                             and_(
-                                agent_runs.c.agent_backend.is_(None),
-                                agent_runs.c.agent_name == backend,
+                                missing_run_backend,
+                                or_(
+                                    resolved_agent.c.backend == backend,
+                                    agent_runs.c.agent_name == backend,
+                                ),
                             ),
                         )
                     )
@@ -448,10 +461,37 @@ class RuntimeOwnershipProvider:
             session_id: [] for session_id in session_by_id
         }
 
+        waiting_turns = {
+            str(row["id"]): row
+            for row in turn_rows
+            if str(row.get("state") or "") == "waiting"
+        }
+        paired_waiting_turn_ids: set[str] = set()
         for row in delivery_rows:
             session_id = str(row["session_id"])
             state = str(row["state"])
             delivery_ids[session_id].append(str(row["id"]))
+            if state == "interrupt_waiting":
+                turn_id = str(row.get("turn_id") or "")
+                waiting_turn = waiting_turns.get(turn_id)
+                exact_pair = bool(
+                    waiting_turn is not None
+                    and str(waiting_turn.get("session_id") or "") == session_id
+                    and str(waiting_turn.get("initial_delivery_id") or "")
+                    == str(row["id"])
+                    and str(row.get("turn_role") or "") == "initial"
+                    and row.get("turn_position") == 0
+                )
+                disposition = (
+                    SessionRuntimeDisposition.TRANSITIONING
+                    if exact_pair
+                    else SessionRuntimeDisposition.UNKNOWN
+                )
+                if exact_pair:
+                    paired_waiting_turn_ids.add(turn_id)
+                facts[session_id].append(disposition)
+                reasons[session_id].append(f"delivery:{state}")
+                continue
             try:
                 ordering = policy_for(state).ordering
             except ValueError:
@@ -476,11 +516,16 @@ class RuntimeOwnershipProvider:
         for row in turn_rows:
             session_id = str(row["session_id"])
             state = str(row["state"])
-            turn_ids[session_id].append(str(row["id"]))
+            turn_id = str(row["id"])
+            turn_ids[session_id].append(turn_id)
             if state in {"starting", "active"}:
                 disposition = SessionRuntimeDisposition.ACTIVE
             elif state == "waiting":
-                disposition = SessionRuntimeDisposition.TRANSITIONING
+                disposition = (
+                    SessionRuntimeDisposition.TRANSITIONING
+                    if turn_id in paired_waiting_turn_ids
+                    else SessionRuntimeDisposition.UNKNOWN
+                )
             else:
                 disposition = SessionRuntimeDisposition.UNKNOWN
             facts[session_id].append(disposition)
@@ -581,12 +626,26 @@ class RuntimeOwnershipProvider:
             if session_id:
                 if session_id not in facts:
                     route_key = str(row.get("legacy_session_key") or "")
-                    if (
-                        target.include_all_backend_sessions
-                        or route_key in target_route_keys
-                    ):
+                    current_session_backend = str(
+                        row.get("resolved_session_backend") or ""
+                    ).strip()
+                    if current_session_backend == target.backend:
+                        continue
+                    if target.maps_all_backend_fallback_runs:
+                        sessionless_run_ids.append(run_id)
+                        target_facts.append(disposition)
+                        target_reasons.append(
+                            f"run:{run_id}:detached_session:{disposition.value}"
+                        )
+                    elif route_key in target_route_keys:
+                        sessionless_run_ids.append(run_id)
+                        target_facts.append(disposition)
+                        target_reasons.append(
+                            f"run:{run_id}:detached_session:{disposition.value}"
+                        )
+                    elif route_key not in known_route_keys:
                         target_facts.append(SessionRuntimeDisposition.UNKNOWN)
-                        target_reasons.append(f"run:{run_id}:missing_session")
+                        target_reasons.append(f"run:{run_id}:unmapped_route")
                     continue
                 run_ids[session_id].append(run_id)
                 facts[session_id].append(disposition)

@@ -24,8 +24,10 @@ from modules.agents.codex.session import CodexSessionManager
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.service import AgentService
 from storage import message_deliveries as delivery_store
+from storage.background import SQLiteBackgroundTaskStore
 from storage.db import create_sqlite_engine
 from storage.models import (
+    agents,
     agent_runs,
     agent_sessions,
     metadata,
@@ -592,7 +594,7 @@ def test_hfr_138_exact_delivery_representation_supersedes_fallback_run(
         ("reserved", None, SessionRuntimeDisposition.TRANSITIONING),
         ("claimed", "starting", SessionRuntimeDisposition.ACTIVE),
         ("claimed", "active", SessionRuntimeDisposition.ACTIVE),
-        ("interrupt_waiting", "waiting", SessionRuntimeDisposition.ACTIVE),
+        ("interrupt_waiting", "waiting", SessionRuntimeDisposition.TRANSITIONING),
         ("retired", "terminal", SessionRuntimeDisposition.RECLAIMABLE),
     ],
 )
@@ -643,6 +645,41 @@ def test_hfr_133_hfr_134_delivery_and_turn_contract_blocks_only_live_owners(
                     evidence_kind="test",
                 )
     assert RuntimeOwnershipProvider(engine).snapshot(_target()).disposition is expected
+    engine.dispose()
+
+
+@pytest.mark.parametrize("mismatch", ["missing_delivery_half", "wrong_position"])
+def test_hfr_134_waiting_successor_mismatch_fails_closed(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    """HFR-134: a waiting/interrupt half is ownership-unknown unless exact."""
+
+    engine = _engine(tmp_path, f"waiting-mismatch-{mismatch}.sqlite")
+    with engine.begin() as conn:
+        _session(conn, "ses-a", anchor="base", workdir="/work")
+        _delivery(conn, "delivery-a", "ses-a")
+        delivery_store.insert_turn(
+            conn,
+            turn_id="turn-a",
+            session_id="ses-a",
+            initial_delivery_id="delivery-a",
+            state="waiting",
+            backend="codex",
+        )
+        if mismatch == "wrong_position":
+            conn.execute(
+                update(delivery_store.message_deliveries)
+                .where(delivery_store.message_deliveries.c.id == "delivery-a")
+                .values(
+                    state="interrupt_waiting",
+                    turn_id="turn-a",
+                    turn_role="initial",
+                    turn_position=1,
+                )
+            )
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is SessionRuntimeDisposition.UNKNOWN
     engine.dispose()
 
 
@@ -750,6 +787,83 @@ def test_hfr_148_hfr_150_fallback_run_uses_pid_boundary_and_exact_route(
     engine.dispose()
 
 
+def test_hfr_150_enqueue_captures_backend_before_session_and_agent_switch(
+    tmp_path: Path,
+) -> None:
+    """HFR-150: a Run keeps its enqueue-time backend and exact colon route."""
+
+    db_path = tmp_path / "backend-capture.sqlite"
+    engine = _engine(tmp_path, db_path.name)
+    route_key = "slack::channel::C1::thread::1712.9"
+    with engine.begin() as conn:
+        conn.execute(
+            agents.insert().values(
+                id="agent-a",
+                name="reviewer",
+                normalized_name="reviewer",
+                description=None,
+                backend="codex",
+                model=None,
+                reasoning_effort=None,
+                system_prompt=None,
+                enabled=1,
+                source="user",
+                source_ref=None,
+                metadata_json="{}",
+                archived_at=None,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        _session(conn, "ses-a", anchor="base", workdir="/work")
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.enqueue_run(
+            {
+                "id": "run-a",
+                "run_type": "agent_run",
+                "status": "running",
+                "agent_id": "agent-a",
+                "agent_name": "reviewer",
+                "session_id": "ses-a",
+                "legacy_session_key": route_key,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        assert store.get_run("run-a")["agent_backend"] == "codex"
+        with engine.begin() as conn:
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == "ses-a")
+                .values(agent_backend="opencode")
+            )
+            conn.execute(
+                update(agents)
+                .where(agents.c.id == "agent-a")
+                .values(backend="opencode")
+            )
+
+        old_target = _target(route_key=route_key)
+        old_snapshot = RuntimeOwnershipProvider(engine).snapshot(old_target)
+        assert old_snapshot.disposition is SessionRuntimeDisposition.TRANSITIONING
+        assert old_snapshot.sessionless_fallback_run_ids == ("run-a",)
+
+        current_target = _target(backend="opencode", route_key=route_key)
+        assert (
+            RuntimeOwnershipProvider(engine).snapshot(current_target).disposition
+            is SessionRuntimeDisposition.RECLAIMABLE
+        )
+        prefix_target = _target(route_key="slack::channel::C1")
+        assert (
+            RuntimeOwnershipProvider(engine).snapshot(prefix_target).disposition
+            is SessionRuntimeDisposition.UNKNOWN
+        )
+    finally:
+        store.close()
+        engine.dispose()
+
+
 def test_hfr_148_unknown_execution_type_fails_closed(tmp_path: Path) -> None:
     """HFR-148: an unnamed execution-bearing Run type cannot be reclaimed."""
 
@@ -825,3 +939,18 @@ def test_hfr_140_missing_binding_fails_open_but_provider_failure_fails_closed(
         RuntimeOwnershipProvider(_BrokenEngine()).snapshot(_target()).disposition
         is SessionRuntimeDisposition.UNKNOWN
     )
+
+
+def test_hfr_140_partial_real_sqlite_schema_fails_closed(tmp_path: Path) -> None:
+    """HFR-140: a partially migrated real database is never reclaimable."""
+
+    engine = create_sqlite_engine(tmp_path / "partial.sqlite")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE agent_sessions "
+            "(id TEXT PRIMARY KEY, agent_backend TEXT, status TEXT)"
+        )
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is SessionRuntimeDisposition.UNKNOWN
+    assert snapshot.reasons == ("provider_failure",)
+    engine.dispose()

@@ -79,6 +79,71 @@ def _delivery(
     )
 
 
+def _linked_waiting_successor(conn, session_id: str) -> tuple[str, str, str]:
+    predecessor_id = f"turn-predecessor-{session_id}"
+    predecessor_delivery_id = f"delivery-predecessor-{session_id}"
+    successor_id = f"turn-successor-{session_id}"
+    successor_delivery_id = f"delivery-successor-{session_id}"
+    _delivery(conn, predecessor_delivery_id, session_id)
+    delivery_store.insert_turn(
+        conn,
+        turn_id=predecessor_id,
+        session_id=session_id,
+        initial_delivery_id=predecessor_delivery_id,
+        state="active",
+        backend="codex",
+        dispatch_text="predecessor",
+    )
+    conn.execute(
+        update(delivery_store.message_deliveries)
+        .where(delivery_store.message_deliveries.c.id == predecessor_delivery_id)
+        .values(
+            state="claimed",
+            turn_id=predecessor_id,
+            turn_role="initial",
+            turn_position=0,
+        )
+    )
+    _delivery(conn, successor_delivery_id, session_id)
+    delivery_store.insert_turn(
+        conn,
+        turn_id=successor_id,
+        session_id=session_id,
+        initial_delivery_id=successor_delivery_id,
+        state="waiting",
+        backend="codex",
+    )
+    conn.execute(
+        update(delivery_store.message_deliveries)
+        .where(delivery_store.message_deliveries.c.id == successor_delivery_id)
+        .values(
+            state="interrupt_waiting",
+            turn_id=successor_id,
+            turn_role="initial",
+            turn_position=0,
+        )
+    )
+    predecessor = delivery_store.get_turn(conn, predecessor_id)
+    assert predecessor is not None
+    assert delivery_store.cas_turn(
+        conn,
+        predecessor_id,
+        expected_version=int(predecessor["version"]),
+        expected_states=("active",),
+        values={
+            "control_state": "pending",
+            "control_mode": "replace",
+            "control_attempt_id": f"control-{session_id}",
+            "control_expected_native_turn_id": None,
+            "control_receipt_outcome": None,
+            "control_receipt_json": "{}",
+            "control_successor_delivery_id": successor_delivery_id,
+            "control_successor_turn_id": successor_id,
+        },
+    )
+    return predecessor_id, successor_id, successor_delivery_id
+
+
 @pytest.mark.anyio
 async def test_hfr_149_session_lane_recovers_only_current_exact_observation(
     tmp_path: Path,
@@ -187,6 +252,104 @@ def test_hfr_149_periodic_session_scan_finds_every_unresolved_owner(
     assert by_session["ses-fence"].kind == "delivery_fence"
     assert by_session["ses-starting"].turn_state == "starting"
     assert by_session["ses-waiting"].turn_state == "waiting"
+    engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_hfr_134_hfr_149_waiting_recovery_freezes_terminal_winner(
+    tmp_path: Path,
+) -> None:
+    """HFR-134/HFR-149: only a current terminal winner starts its exact successor."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        _session(conn, "ses-linked")
+        predecessor_id, successor_id, successor_delivery_id = (
+            _linked_waiting_successor(conn, "ses-linked")
+        )
+        _delivery(conn, "delivery-follower", "ses-linked")
+
+    manager = SessionTurnManager(SimpleNamespace())
+    manager._engine = engine
+    manager._start_persisted_turn = AsyncMock(return_value=True)
+    manager._run_pending_interrupt = AsyncMock(return_value=True)
+
+    before_terminal, _ = manager.scan_runtime_delivery_recovery(
+        limit=10,
+        occupied=frozenset(),
+    )
+    observed_before_terminal = next(
+        item for item in before_terminal if item.session_id == "ses-linked"
+    )
+    assert observed_before_terminal.turn_id == successor_id
+    assert observed_before_terminal.predecessor_turn_id == predecessor_id
+    assert observed_before_terminal.predecessor_state == "active"
+    assert await manager.recover_runtime_delivery_observation(
+        observed_before_terminal
+    )
+    manager._run_pending_interrupt.assert_awaited_once_with(
+        "ses-linked",
+        predecessor_id,
+        expected_state="active",
+        expected_version=observed_before_terminal.predecessor_version,
+        expected_control_state="pending",
+        expected_control_attempt_id="control-ses-linked",
+        expected_native_turn_id=None,
+        expected_successor_delivery_id=successor_delivery_id,
+        expected_successor_turn_id=successor_id,
+    )
+    manager._start_persisted_turn.assert_not_awaited()
+    with engine.connect() as conn:
+        assert delivery_store.get_turn(conn, successor_id)["state"] == "waiting"
+
+    with engine.begin() as conn:
+        terminal = delivery_store.terminalize_turn(
+            conn,
+            predecessor_id,
+            outcome="canceled",
+            settled_by="test_terminal_winner",
+            evidence_kind="test_terminal_winner",
+            evidence={"winner": True},
+        )
+        assert terminal["changed"]
+    after_terminal, _ = manager.scan_runtime_delivery_recovery(
+        limit=10,
+        occupied=frozenset(),
+    )
+    stale_terminal = next(
+        item for item in after_terminal if item.session_id == "ses-linked"
+    )
+    assert stale_terminal.predecessor_state == "terminal"
+    assert stale_terminal.predecessor_terminal_outcome == "canceled"
+    with engine.begin() as conn:
+        predecessor = delivery_store.get_turn(conn, predecessor_id)
+        conn.execute(
+            update(delivery_store.session_turns)
+            .where(delivery_store.session_turns.c.id == predecessor_id)
+            .values(version=int(predecessor["version"]) + 1)
+        )
+    assert not await manager.recover_runtime_delivery_observation(stale_terminal)
+    manager._start_persisted_turn.assert_not_awaited()
+
+    current_rows, _ = manager.scan_runtime_delivery_recovery(
+        limit=10,
+        occupied=frozenset(),
+    )
+    current = next(item for item in current_rows if item.session_id == "ses-linked")
+    assert await manager.recover_runtime_delivery_observation(current)
+    with engine.connect() as conn:
+        successor = delivery_store.get_turn(conn, successor_id)
+        successor_delivery = delivery_store.get_delivery(conn, successor_delivery_id)
+        follower = delivery_store.get_delivery(conn, "delivery-follower")
+    assert successor["state"] == "starting"
+    assert successor_delivery["state"] == "claimed"
+    assert follower["state"] == "queued"
+    manager._start_persisted_turn.assert_awaited_once_with(
+        successor_id,
+        expected_start_attempt_id=successor["start_attempt_id"],
+    )
+    assert not await manager.recover_runtime_delivery_observation(current)
+    assert manager._start_persisted_turn.await_count == 1
     engine.dispose()
 
 
