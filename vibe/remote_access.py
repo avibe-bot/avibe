@@ -59,6 +59,7 @@ QUALITY_SAMPLE_SECONDS = tunnel_quality.SAMPLE_INTERVAL_SECONDS
 STATUS_LOG_TAIL_BYTES = 64 * 1024
 STATUS_REPORT_DRAIN_SECONDS = 1.0
 RECOVERY_READY_TIMEOUT_SECONDS = 30.0
+START_PREFERRED_READY_TIMEOUT_SECONDS = 8.0
 RECOVERY_EVALUATION_SECONDS = 45.0
 RECOVERY_DRAIN_SECONDS = 35.0
 QUALITY_COMPARISON_MAX_AGE_SECONDS = 2 * QUALITY_SAMPLE_SECONDS
@@ -1015,8 +1016,8 @@ def _candidate_average_snapshot(metrics_url: str) -> dict[str, Any] | None:
     return tunnel_quality.summarize_candidate_snapshots(snapshots)
 
 
-def _wait_candidate_ready(pid: int, metrics_url: str) -> bool:
-    deadline = time.monotonic() + RECOVERY_READY_TIMEOUT_SECONDS
+def _wait_connector_ready(pid: int, metrics_url: str, *, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if _connector_ready_now(pid, metrics_url):
             return True
@@ -1024,6 +1025,14 @@ def _wait_candidate_ready(pid: int, metrics_url: str) -> bool:
             return False
         time.sleep(1.0)
     return False
+
+
+def _wait_candidate_ready(pid: int, metrics_url: str) -> bool:
+    return _wait_connector_ready(
+        pid,
+        metrics_url,
+        timeout_seconds=RECOVERY_READY_TIMEOUT_SECONDS,
+    )
 
 
 def _connector_ready_now(pid: int, metrics_url: str) -> bool:
@@ -1172,7 +1181,23 @@ def _run_tail_protocol_recovery(
         promoted = False
         try:
             with _CONNECTOR_LOCK:
-                candidate_pid, metrics_url = _start_candidate_connector(config, binary, protocol)
+                if _RECOVERY_CANCEL_EVENT.is_set():
+                    raise RuntimeError("route_optimization_cancelled")
+                active = _state_connector("active") or {}
+                active_pid = active.get("pid")
+                if not isinstance(active_pid, int) or not _is_cloudflared_pid(active_pid):
+                    raise RuntimeError("active_connector_unavailable")
+                live_config = V2Config.load()
+                if (
+                    not live_config.remote_access.vibe_cloud.enabled
+                    or not live_config.remote_access.vibe_cloud.tunnel_token
+                ):
+                    raise RuntimeError("route_optimization_cancelled")
+                candidate_pid, metrics_url = _start_candidate_connector(
+                    live_config,
+                    binary,
+                    protocol,
+                )
             if not _wait_candidate_ready(candidate_pid, metrics_url):
                 raise RuntimeError("candidate_not_ready")
             _set_recovery_state(
@@ -1311,6 +1336,8 @@ def _run_route_optimization(
             requested_protocol = str((active or {}).get("requested_protocol") or _initial_connector_protocol(loaded))
             if requested_protocol not in {"auto", "quic", "http2"}:
                 requested_protocol = _initial_connector_protocol(loaded)
+            if recovery_trigger == "availability" and _configured_protocol(loaded) == "auto":
+                requested_protocol = "auto"
             candidate_pid, metrics_url = _start_candidate_connector(
                 loaded,
                 binary,
@@ -1810,8 +1837,8 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
                     "restarted": False,
                 }
         requested_protocol = _initial_connector_protocol(config)
-        env = _connector_environment(cloud.tunnel_token, requested_protocol)
-        try:
+
+        def spawn_connector(protocol: str) -> tuple[int, str, dict[str, Any]]:
             _clear_cloudflared_logs()
             metrics_url = _allocate_metrics_url()
             pid = runtime.spawn_background(
@@ -1819,20 +1846,62 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
                 _pid_path(),
                 "remote_access_cloudflared_stdout.log",
                 "remote_access_cloudflared_stderr.log",
-                env=env,
+                env=_connector_environment(cloud.tunnel_token, protocol),
             )
             _write_state(
                 pid,
                 config,
                 binary,
                 metrics_url,
-                requested_protocol=requested_protocol,
+                requested_protocol=protocol,
             )
+            time.sleep(0.2)
+            return pid, metrics_url, status(config)
+
+        try:
+            pid, metrics_url, current = spawn_connector(requested_protocol)
+            preferred_needs_fallback = (
+                _configured_protocol(config) == "auto"
+                and requested_protocol in {"quic", "http2"}
+                and not _wait_connector_ready(
+                    pid,
+                    metrics_url,
+                    timeout_seconds=START_PREFERRED_READY_TIMEOUT_SECONDS,
+                )
+            )
+            if preferred_needs_fallback:
+                preferred_state = _cloudflared_pid_state(pid)
+                if preferred_state == "unknown":
+                    _report_runtime_status_async(
+                        config,
+                        event="start_failed",
+                        last_error="cloudflared_process_unknown",
+                    )
+                    return {
+                        **current,
+                        "ok": False,
+                        "error": "cloudflared_process_unknown",
+                        "started": False,
+                    }
+                if preferred_state == "cloudflared" and not runtime.stop_pid(pid, timeout=8):
+                    _report_runtime_status_async(
+                        config,
+                        event="start_failed",
+                        last_error="cloudflared_stop_failed",
+                    )
+                    return {
+                        **status(config),
+                        "ok": False,
+                        "error": "cloudflared_stop_failed",
+                        "started": False,
+                    }
+                _pid_path().unlink(missing_ok=True)
+                _state_path().unlink(missing_ok=True)
+                requested_protocol = "auto"
+                pid, metrics_url, current = spawn_connector(requested_protocol)
         except Exception as exc:
             _report_runtime_status_async(config, event="start_failed", last_error="cloudflared_spawn_failed")
             return {**status(config), "ok": False, "error": "cloudflared_spawn_failed", "detail": str(exc)}
-        time.sleep(0.2)
-        current = status(config)
         if not current.get("running"):
             _report_runtime_status_async(config, event="start_failed", last_error="cloudflared_exited")
             return {**current, "ok": False, "error": "cloudflared_exited"}

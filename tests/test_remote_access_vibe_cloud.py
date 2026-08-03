@@ -1644,6 +1644,53 @@ def test_start_clears_previous_cloudflared_logs_before_spawn(monkeypatch, tmp_pa
     assert spawn_args == [[binary, "tunnel", "--metrics", "127.0.0.1:29999", "--no-autoupdate", "run"]]
 
 
+def test_start_falls_back_to_auto_when_preferred_protocol_is_not_ready(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    binary = "/usr/local/bin/cloudflared"
+    preferred_pid = 222
+    fallback_pid = 333
+    alive = {preferred_pid, fallback_pid}
+    spawned_protocols = []
+    spawned_pids = iter([preferred_pid, fallback_pid])
+    metrics_urls = iter(["http://127.0.0.1:29998", "http://127.0.0.1:29999"])
+
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda cfg: binary)
+    monkeypatch.setattr(remote_access, "_version", lambda path: "cloudflared test")
+    monkeypatch.setattr(remote_access, "_allocate_metrics_url", lambda: next(metrics_urls))
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in alive)
+    monkeypatch.setattr(runtime, "get_process_command", lambda pid: f"{binary} tunnel run")
+    monkeypatch.setattr(remote_access, "_wait_connector_ready", lambda *args, **kwargs: False)
+
+    def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
+        pid = next(spawned_pids)
+        spawned_protocols.append(env["TUNNEL_TRANSPORT_PROTOCOL"])
+        pid_path.write_text(str(pid), encoding="utf-8")
+        return pid
+
+    def stop_pid(pid, timeout=8):
+        alive.discard(pid)
+        return True
+
+    monkeypatch.setattr(runtime, "spawn_background", spawn_background)
+    monkeypatch.setattr(runtime, "stop_pid", stop_pid)
+    previous_preference = remote_access._PREFERRED_PROTOCOL
+    remote_access._PREFERRED_PROTOCOL = "http2"
+    try:
+        result = remote_access.start(config)
+    finally:
+        remote_access._PREFERRED_PROTOCOL = previous_preference
+
+    state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert result["ok"] is True
+    assert result["pid"] == fallback_pid
+    assert spawned_protocols == ["http2", "auto"]
+    assert preferred_pid not in alive
+    assert state["active"]["requested_protocol"] == "auto"
+
+
 def test_effective_ui_bind_host_uses_setup_host_when_tunnel_disabled() -> None:
     config = _config()
     config.remote_access.vibe_cloud.enabled = False

@@ -321,3 +321,19 @@ def test_request_path_candidate_accepts_material_tail_improvement_with_bounded_p
     assert active is not None
     assert candidate is not None
     assert tunnel_quality.request_path_is_better(active, candidate) is True
+
+
+def test_unavailable_request_path_does_not_expose_latency_as_usable() -> None:
+    request_path = tunnel_quality.summarize_request_path_samples(
+        [
+            tunnel_quality.RequestPathSample(
+                sampled_at=1,
+                latency_ms=tuple([20.0] * 12),
+                successes=tuple([False] * 12),
+            )
+        ]
+    )
+
+    assert request_path is not None
+    assert request_path["status"] == "unavailable"
+    assert tunnel_quality.request_path_has_usable_latency(request_path) is False

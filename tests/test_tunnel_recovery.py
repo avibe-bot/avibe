@@ -225,6 +225,76 @@ def test_ra_tq_013_tail_recovery_rolls_back_protocol(monkeypatch, tmp_path) -> N
     assert results[0]["result_protocol"] == "quic"
 
 
+def test_tail_recovery_rechecks_cancellation_before_next_protocol(monkeypatch, tmp_path) -> None:
+    config, _active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    previous_path = _request_path(202, 900, 1840, slow_rate=0.08)
+    previous = {**_quality(80), "protocol": "quic", "request_path": previous_path}
+    spawned_protocols = []
+    results = []
+
+    def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
+        spawned_protocols.append(env["TUNNEL_TRANSPORT_PROTOCOL"])
+        pid_path.write_text(str(candidate_pid), encoding="utf-8")
+        return candidate_pid
+
+    def stop_pid(pid, timeout=8):
+        alive.discard(pid)
+        return True
+
+    def stop_during_measurement(cfg, protocol):
+        assert remote_access.stop(cfg)["ok"] is True
+        return _request_path(250, 950, 1900, slow_rate=0.08)
+
+    monkeypatch.setattr(runtime, "spawn_background", spawn_background)
+    monkeypatch.setattr(runtime, "stop_pid", stop_pid)
+    monkeypatch.setattr(remote_access, "_measure_request_path", stop_during_measurement)
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))
+
+    try:
+        remote_access._run_route_optimization(config, "tail_latency", previous)
+    finally:
+        remote_access._RECOVERY_CANCEL_EVENT.clear()
+
+    assert spawned_protocols == ["quic"]
+    assert remote_access._read_pid() is None
+    assert results[0]["result"] == "failed"
+
+
+def test_availability_recovery_uses_cloudflared_auto_fallback(monkeypatch, tmp_path) -> None:
+    config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(80))
+    remote_access._write_state(
+        active_pid,
+        config,
+        "/usr/local/bin/cloudflared",
+        "http://127.0.0.1:29001",
+        requested_protocol="quic",
+    )
+    spawned_protocols = []
+    results = []
+
+    def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
+        spawned_protocols.append(env["TUNNEL_TRANSPORT_PROTOCOL"])
+        pid_path.write_text(str(candidate_pid), encoding="utf-8")
+        return candidate_pid
+
+    def stop_pid(pid, timeout=8):
+        alive.discard(pid)
+        return True
+
+    monkeypatch.setattr(runtime, "spawn_background", spawn_background)
+    monkeypatch.setattr(runtime, "stop_pid", stop_pid)
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))
+
+    remote_access._run_route_optimization(
+        config,
+        "availability",
+        {**_quality(80), "ha_connections": 0, "protocol": "quic"},
+    )
+
+    assert spawned_protocols == ["auto"]
+    assert results[0]["result"] == "improved"
+
+
 def test_optimize_route_reserves_single_candidate_atomically(monkeypatch, tmp_path) -> None:
     started = []
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))

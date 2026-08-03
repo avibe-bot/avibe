@@ -64,7 +64,11 @@ continue to exchange that payload.
    drain, with make-before-break rollback when the new path is not better.
 5. `transport_protocol` is persisted as `auto`, `quic`, or `http2`. Pinned
    `quic`/`http2` modes permit route reselection but never change protocol.
-   `auto` may remember the last verified protocol across service restarts.
+   `auto` may remember the last verified protocol across service restarts, but
+   a remembered explicit protocol that cannot establish four connections
+   within eight seconds is replaced by Cloudflare `auto`. Availability recovery
+   in `auto` mode also uses Cloudflare `auto`, preserving connectivity fallback
+   when network policy changes.
 6. No raw URL, response body, IP, connector identifier, or per-request sample is
    reported to avibe.bot. Only the bounded V2 aggregate is uploaded.
 

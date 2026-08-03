@@ -223,6 +223,14 @@ def request_path_is_degraded(request_path: dict[str, Any] | None) -> bool:
     )
 
 
+def request_path_has_usable_latency(request_path: dict[str, Any] | None) -> bool:
+    if not request_path or request_path.get("confidence") == "low":
+        return False
+    if request_path.get("status") == "unavailable" or int(request_path.get("success_count") or 0) == 0:
+        return False
+    return isinstance(request_path.get("latency_ms"), dict)
+
+
 def summarize_request_path_samples(
     samples: list[RequestPathSample] | tuple[RequestPathSample, ...],
     *,

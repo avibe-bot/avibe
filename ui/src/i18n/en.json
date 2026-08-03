@@ -1130,6 +1130,7 @@
     "connectorPath": "Connector · {{protocol}} · {{connections}}/4 · RTT {{rtt}}",
     "rttUnavailable": "Unavailable",
     "requestPath": "Requests · P95 {{p95}} · P99 {{p99}} · {{slow}}% > 1 s",
+    "requestPathUnavailable": "Requests unavailable · {{success}}/{{count}} succeeded",
     "requestPathMeasuring": "Measuring requests · {{count}} samples",
     "optimizeRoute": "Optimize route",
     "optimizingRoute": "Optimizing...",

@@ -1130,6 +1130,7 @@
     "connectorPath": "连接器 · {{protocol}} · {{connections}}/4 · 往返 {{rtt}}",
     "rttUnavailable": "不可用",
     "requestPath": "远程请求 · P95 {{p95}} · P99 {{p99}} · {{slow}}% 超过 1 秒",
+    "requestPathUnavailable": "远程请求不可用 · {{success}}/{{count}} 成功",
     "requestPathMeasuring": "正在测量远程请求 · {{count}} 个样本",
     "optimizeRoute": "优化线路",
     "optimizingRoute": "优化中...",
