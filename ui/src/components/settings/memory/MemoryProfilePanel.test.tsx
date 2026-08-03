@@ -1,11 +1,12 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { MemoryProfile, MemoryProfilePageDescriptor } from '../../../context/ApiContext';
 import {
   ProfilePageOutput,
   ProfileReportAction,
   StructuredMemoryProfile,
+  openMemoryProfilePage,
   structuredProfileFromItems,
 } from './MemoryProfilePanel';
 
@@ -42,6 +43,10 @@ const PAGE: MemoryProfilePageDescriptor = {
   content_sha256: `sha256:${'c'.repeat(64)}`,
   view_url: `/api/memory/profile/report/view/en/${'a'.repeat(32)}/index.html`,
 };
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('MemoryProfilePanel deterministic content', () => {
   it('renders structured sections and keeps basis distinct from evidence', () => {
@@ -113,5 +118,14 @@ describe('MemoryProfilePanel deterministic content', () => {
     expect(disabled).toContain('memory.profile.generatePage');
     expect(generating).toContain('disabled=""');
     expect(generating).toContain('memory.profile.generatingPage');
+  });
+
+  it('opens a page with opener isolation while preserving same-origin referrer evidence', () => {
+    const open = vi.fn();
+    vi.stubGlobal('window', { open });
+
+    openMemoryProfilePage(PAGE.view_url);
+
+    expect(open).toHaveBeenCalledWith(PAGE.view_url, '_blank', 'noopener');
   });
 });

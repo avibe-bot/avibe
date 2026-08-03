@@ -238,6 +238,34 @@ def test_profile_page_accepts_an_absent_source_timestamp(tmp_path: Path) -> None
     assert published.source_profile_updated_at is None
 
 
+def test_profile_page_accepts_a_normalized_fractional_source_timestamp(tmp_path: Path) -> None:
+    source_updated_at = "2026-08-02T10:30:00.678000Z"
+    source = _source()
+    store = MemoryProfilePageStore(tmp_path / "profile-pages")
+
+    published = store.publish(
+        scope_key=b"s" * 32,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        language="en",
+        source=MemoryProfilePageSource(
+            index_html=source.index_html.replace(SOURCE_UPDATED_AT, source_updated_at),
+            styles_css=source.styles_css,
+        ),
+        generated_at=GENERATED_AT,
+        source_profile_updated_at=source_updated_at,
+        source_profile_snapshot_id=SOURCE_SNAPSHOT,
+    )
+
+    assert published.source_profile_updated_at == source_updated_at
+    assert store.current(
+        scope_key=b"s" * 32,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        language="en",
+    ) == published
+
+
 @pytest.mark.parametrize(
     "source",
     (

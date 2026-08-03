@@ -46,6 +46,11 @@ const emptyProfilePageState = (language: 'en' | 'zh', loading = false): ProfileP
 export const structuredProfileFromItems = (items: readonly MemoryItem[] | null): MemoryProfile | null =>
   items?.find((item) => item.kind === 'profile' && item.profile)?.profile ?? null;
 
+/** Open the private page without retaining an opener, while preserving same-origin auth evidence. */
+export const openMemoryProfilePage = (viewUrl: string): void => {
+  window.open(viewUrl, '_blank', 'noopener');
+};
+
 const ProfileDetail: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <p className="mt-1 whitespace-pre-wrap text-[12px] leading-relaxed text-muted">
     <span className="font-medium text-foreground">{label}: </span>
@@ -316,7 +321,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
 
   const openPage = useCallback(() => {
     if (!visiblePage.page) return;
-    window.open(visiblePage.page.view_url, '_blank', 'noopener,noreferrer');
+    openMemoryProfilePage(visiblePage.page.view_url);
   }, [visiblePage.page]);
 
   if (!enabled) {

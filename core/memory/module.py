@@ -511,6 +511,8 @@ class MemoryModule:
     ) -> MemoryProfileReportResult:
         """Restore the current page descriptor without invoking the provider."""
 
+        if not self._is_enabled():
+            return OperationFailed(error="memory_disabled")
         if not is_principal_id(principal_id) or not is_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
         if language not in {"en", "zh"}:
@@ -519,6 +521,8 @@ class MemoryModule:
         if recovery is not None:
             return recovery
         async with self._lifecycle_lock:
+            if not self._is_enabled():
+                return OperationFailed(error="memory_disabled")
             try:
                 meta = await self._store_call(self._store.ensure_meta)
                 page = await asyncio.to_thread(
@@ -545,6 +549,8 @@ class MemoryModule:
     ) -> bytes | None | OperationFailed:
         """Read one admitted fixed asset without exposing artifact paths."""
 
+        if not self._is_enabled():
+            return OperationFailed(error="memory_disabled")
         if not is_principal_id(principal_id) or not is_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
         if language not in {"en", "zh"}:
@@ -553,6 +559,8 @@ class MemoryModule:
         if recovery is not None:
             return recovery
         async with self._lifecycle_lock:
+            if not self._is_enabled():
+                return OperationFailed(error="memory_disabled")
             try:
                 meta = await self._store_call(self._store.ensure_meta)
                 return await asyncio.to_thread(

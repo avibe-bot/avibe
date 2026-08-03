@@ -893,6 +893,41 @@ async def test_profile_report_reuses_same_key_task_and_keeps_waiters_isolated(tm
     assert module._profile_report_tasks == {}
 
 
+async def test_disabling_memory_revokes_saved_page_reads_without_deleting_pages(tmp_path: Path) -> None:
+    enabled = True
+    principal_id = "u-11111111111111111111111111111111"
+    profile = MemoryProfile(summary="Known profile.", updated_at="2026-08-02T10:30:00Z")
+    provider = FakeMemoryProvider(
+        profile_items=(MemoryItem(kind="profile", text="{}", profile=profile),),
+    )
+    page_store = MemoryProfilePageStore(tmp_path / "profile-pages")
+    module, store, _provider = _module(
+        tmp_path,
+        provider=provider,
+        enabled=lambda: enabled,
+        profile_page_store=page_store,
+    )
+    request = {"principal_id": principal_id, "project_id": PROJECT, "language": "en"}
+
+    generated = await module.profile_report(**request)
+    assert isinstance(generated, MemoryProfileReport) and generated.page is not None
+
+    enabled = False
+    assert await module.profile_page_current(**request) == OperationFailed(error="memory_disabled")
+    assert await module.profile_page_asset(
+        **request,
+        artifact_id=generated.page.artifact_id,
+        asset_name="index.html",
+    ) == OperationFailed(error="memory_disabled")
+
+    meta = store.get_meta()
+    assert meta is not None
+    assert page_store.current(
+        scope_key=meta.scope_key,
+        **request,
+    ) == generated.page
+
+
 async def test_profile_report_keeps_different_languages_in_separate_tasks(tmp_path: Path) -> None:
     entered: set[str] = set()
     both_started = asyncio.Event()
