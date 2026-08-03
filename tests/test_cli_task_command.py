@@ -4346,6 +4346,64 @@ def test_task_add_escalating_command_task_binds_caller_session(
     assert payload["session_default_notice"]["code"] == "session_defaulted_to_caller"
 
 
+def test_task_add_per_run_command_records_the_directory_it_was_described_in(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-047 -- a command whose Session does not exist yet still runs somewhere.
+
+    ``--create-session-per-run`` stores no ``cwd``, on purpose: that Session is created
+    at escalation, and its workdir is resolved then from the Scope or the runtime
+    default. The COMMAND cannot wait for it. It fires on the next tick out of the
+    definition's ``cwd``, and with nothing there it fell through to the ``~/.avibe``
+    fallback -- so the documented ``--shell './scripts/sync.sh'`` ran from the product
+    state directory, where the script does not exist and a relative write lands in
+    persisted state.
+
+    The Session's half of the answer must stay unanswered: recording the invocation
+    directory as the definition's ``cwd`` must not also pin the Session that escalation
+    creates, or a scope-bound definition would stop following its Scope's workdir.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    store = _command_task_store(tmp_path)
+    invoke_dir = tmp_path / "repo"
+    invoke_dir.mkdir()
+    args = _parse_task_add(
+        [
+            "--agent",
+            "worker",
+            "--create-session-per-run",
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--on-failure",
+            "agent",
+        ]
+    )
+
+    with (
+        patch("os.getcwd", return_value=str(invoke_dir)),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["session_policy"] == "create_per_run"
+    assert definition["cwd"] == str(invoke_dir), (
+        "the command was recorded with no directory of its own, so it fires from the "
+        f"product state directory instead of where it was described: {definition['cwd']!r}"
+    )
+    assert "session_workdir" not in definition["metadata"], (
+        "recording the command's directory also pinned the Session escalation creates"
+    )
+
+
 # --- persisted shape ------------------------------------------------------
 
 

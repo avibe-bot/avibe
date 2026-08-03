@@ -14865,6 +14865,55 @@ def test_an_escalating_command_runs_in_its_bound_sessions_workdir(
     )
 
 
+def test_a_command_with_nothing_to_inherit_runs_where_agent_work_runs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-048 -- the product state directory is the wrong last resort.
+
+    SCT-008 gave a Session-bound command its binding's workdir. A definition can still
+    reach the fire with neither: a per-run binding whose Session does not exist yet
+    (created before the CLI recorded the invocation directory for it), or one written
+    straight through the API. Those fell through to ``paths.get_vibe_remote_dir()`` --
+    ``~/.avibe`` -- so a relative command ran against persisted product state, where its
+    files are missing and its writes land among the store's.
+
+    ``runtime.default_cwd`` is where this install's Agent turns already run, so it is
+    both a real directory and the same answer the escalation Session would get.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    work = tmp_path / "agent-work"
+    work.mkdir()
+    (work / "marker").write_text("runtime-default-workdir\n", encoding="utf-8")
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        # The shape ``--create-session-per-run`` stores: no cwd, and no Session to read
+        # one from until escalation creates it.
+        session_policy="create_per_run",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        cwd=None,
+        shell_command="cat marker",
+        metadata={"origin": "cli", "on_failure": "agent"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    service.controller.config = SimpleNamespace(
+        language="en", runtime=SimpleNamespace(default_cwd=str(work))
+    )
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded", (
+        "the command could not read a file sitting in the configured runtime workdir, "
+        f"so it ran in the product state directory instead: {run['error']!r}"
+    )
+    assert "runtime-default-workdir" in (run["stdout"] or "")
+
+
 def test_the_run_snapshot_names_the_command_the_fire_actually_ran(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -15983,6 +16032,72 @@ def test_a_recovered_fire_is_settled_when_its_worker_is_finally_shown_gone(
         "the definition still shows no failure for a fire that was interrupted, so the "
         "Harness lists it as healthy and the user never learns the command was cut off"
     )
+
+
+def test_a_recovered_fire_is_settled_on_the_file_store_too(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-046 -- the legacy store must not release a fire it never closed.
+
+    SCT-044 settles the released fire through the guarded per-run writer, which only
+    SQLite has. On the file store that check answered "unsupported" and the method
+    returned having done nothing but clear the worker record: the definition was
+    released, the next fire ran, and the interrupted run's file sat in ``processing``
+    reading ``running`` until some later restart -- the exact leak SCT-044 removed,
+    still open one backend over.
+
+    Both backends are asked the same question here because both are read the same way:
+    ``vibe runs`` and the Harness show whatever the store says, and a run that says
+    ``running`` describes a backup that is still going.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _binding_service(tmp_path, store, [])
+    assert service.request_store.supports_guarded_settlement() is False, (
+        "this test is about the store WITHOUT the guarded writer"
+    )
+
+    marker = "file-store-worker-that-died-while-the-service-was-down"
+    dead = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.exit(0)"],
+        env=process_identity_subprocess_env(marker),
+        **isolated_subprocess_kwargs(),
+    )
+    identity = capture_spawned_process_identity(dead.pid, marker)
+    dead.wait()
+    assert identity is not None
+
+    orphan = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert orphan is not None
+    assert service.request_store.mark_execution_started(orphan.id)
+    assert service.request_store.record_command_worker(
+        orphan.id, serialize_process_identity(identity)
+    )
+
+    assert service._command_definition_has_live_worker(task.id) is False
+
+    row = service.request_store.get_run(orphan.id)
+    assert row is not None
+    assert row["status"] == "failed", (
+        "the file-backed fire was released but never closed, so it still reads as "
+        f"running a command that ended before the service came back: {row['status']!r}"
+    )
+    assert row["error"], "the interrupted fire settled with no explanation"
+    assert (row["metadata"] or {}).get("interrupt_reason") == "restarted"
+    assert not (tmp_path / "task_requests" / "processing" / f"{orphan.id}.json").exists(), (
+        "the run was reported terminal while its processing file still claimed it"
+    )
+    assert not [
+        worker
+        for worker in service.request_store.list_running_command_workers()
+        if worker["run_id"] == orphan.id
+    ], "the dead worker's record outlived the run it named"
 
 
 def test_an_interrupted_command_fire_clears_the_previous_exit_code(

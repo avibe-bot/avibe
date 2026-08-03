@@ -1916,35 +1916,102 @@ class TaskExecutionStore:
             if not isinstance(payload, dict) or not payload.get("pid"):
                 path.replace(pending_path)
                 continue
-            now = _utc_now_iso()
-            metadata = payload.get("metadata")
-            canceled = bool(payload.get("cancel_requested"))
-            effective_error = cancellation_error if canceled else interruption_error
-            effective_reason = SETTLED_BY_STOPPED if canceled else interrupt_reason
-            payload.update(
-                {
-                    "status": "canceled" if canceled else "failed",
-                    "ok": False,
-                    "error": effective_error,
-                    "completed_at": now,
-                    "updated_at": now,
-                    "metadata": {
-                        **(metadata if isinstance(metadata, dict) else {}),
-                        "interrupt_reason": effective_reason,
-                    },
-                }
+            self._settle_processing_file(
+                path,
+                payload,
+                interruption_error=interruption_error,
+                cancellation_error=cancellation_error,
+                interrupt_reason=interrupt_reason,
             )
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=self.completed_dir,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, indent=2)
-                tmp_path = Path(handle.name)
-            tmp_path.replace(completed_path)
-            path.unlink(missing_ok=True)
+
+    def _settle_processing_file(
+        self,
+        path: Path,
+        payload: dict[str, Any],
+        *,
+        interruption_error: str,
+        cancellation_error: str,
+        interrupt_reason: str,
+    ) -> str:
+        """Write one processing file out to ``completed`` as a result-less terminal.
+
+        The file store's only settlement primitive, shared by the startup pass above and
+        the per-run settle below so that both write the same row. A cancel the user
+        already requested wins the status and the reason: they asked before the service
+        could answer, and the answer never came.
+        """
+
+        now = _utc_now_iso()
+        metadata = payload.get("metadata")
+        canceled = bool(payload.get("cancel_requested"))
+        status = "canceled" if canceled else "failed"
+        payload.update(
+            {
+                "status": status,
+                "ok": False,
+                "error": cancellation_error if canceled else interruption_error,
+                "completed_at": now,
+                "updated_at": now,
+                "metadata": {
+                    **(metadata if isinstance(metadata, dict) else {}),
+                    "interrupt_reason": SETTLED_BY_STOPPED if canceled else interrupt_reason,
+                },
+            }
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=self.completed_dir,
+            suffix=".tmp",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            json.dump(payload, handle, indent=2)
+            tmp_path = Path(handle.name)
+        tmp_path.replace(self.completed_dir / path.name)
+        path.unlink(missing_ok=True)
+        return status
+
+    def settle_recovered_run(
+        self,
+        run_id: str,
+        *,
+        interruption_error: str,
+        cancellation_error: str,
+        interrupt_reason: str = SETTLED_BY_RESTARTED,
+    ) -> Optional[str]:
+        """Terminalize the ONE run whose retained worker has just been proven dead.
+
+        ``recover_processing`` settles a whole start's worth of rows and deliberately
+        steps over any row that still names a worker; this settles the single row whose
+        worker was proven dead later, mid-life, once closing it can no longer orphan
+        anything. Both backends answer, because the leak is the same on both: a run left
+        ``running`` for a command that is long over, until some later start notices.
+
+        Returns the status written, or ``None`` when nothing was: the SQLite write is
+        status-scoped, and on the file store the processing file may already be gone.
+        """
+
+        if self._sqlite is not None:
+            return self.settle_without_result(
+                run_id,
+                terminal_status=SETTLEMENT_TERMINAL_STATUS.get(interrupt_reason, "failed"),
+                error=interruption_error,
+                metadata={"interrupt_reason": interrupt_reason},
+            )
+        processing_path = self._request_path(run_id, state="processing")
+        try:
+            payload = json.loads(processing_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return self._settle_processing_file(
+            processing_path,
+            payload,
+            interruption_error=interruption_error,
+            cancellation_error=cancellation_error,
+            interrupt_reason=interrupt_reason,
+        )
 
     def mark_execution_started(self, request_id: str) -> bool:
         """Persist the boundary between a bare claim and executing its coroutine."""
@@ -3536,23 +3603,40 @@ class ScheduledTaskService:
         settle owes the notice, hence the drain nudge -- the user hears that the fire was
         interrupted, rather than only seeing the next one succeed.
 
+        Settled through ``settle_recovered_run`` rather than the guarded writer directly,
+        because the leak is not SQLite's alone: the legacy file store has no guarded
+        per-run write, and skipping it here would release the definition while its
+        processing file still read ``running``. The store owns that difference, so this
+        method has one path instead of a supported-store branch that silently does
+        nothing.
+
         Best-effort by construction: the caller is a fire's own admission check, and a
         store hiccup while closing the PREVIOUS run must not stop this one. Nothing is
         lost by deferring -- the record is already gone, so the next start's
-        ``recover_processing`` settles the row it left behind (the same path the file
-        backend, which has no guarded per-run writer, relies on).
+        ``recover_processing`` settles the row it left behind.
         """
 
         self._clear_command_worker(run_id)
         settled_by = SETTLED_BY_RESTARTED
         try:
-            supported, settled = self._settle_agent_run_without_result(
+            settled = self.request_store.settle_recovered_run(
                 run_id,
-                settled_by=settled_by,
-                error=self._t(SETTLEMENT_I18N_KEYS[settled_by]),
+                interruption_error=self._t(SETTLEMENT_I18N_KEYS[settled_by]),
+                cancellation_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
+                interrupt_reason=settled_by,
             )
-            if not supported or settled is None:
+            if settled is None:
+                logger.info(
+                    "Interrupted command fire %s was already settled elsewhere",
+                    run_id,
+                )
                 return
+            logger.warning(
+                "Command fire %s settled %s after its worker was shown gone (%s)",
+                run_id,
+                settled,
+                settled_by,
+            )
             self._project_terminal_definition_result(
                 self.request_store.get_run(run_id),
                 execution_id=run_id,
@@ -6451,6 +6535,28 @@ class ScheduledTaskService:
                             session_id,
                         )
 
+    def _runtime_default_workdir(self) -> Optional[str]:
+        """The configured directory Agent work runs in, when nothing closer answered.
+
+        Last stop before the ``~/.avibe`` fallback, and the reason that fallback is now
+        nearly unreachable: a definition can legitimately carry no ``cwd`` and no
+        readable Session -- a per-run binding created before
+        ``_command_definition_spawn_cwd`` recorded one, or a definition written straight
+        through the API -- and the product state directory is the worst possible place to
+        run a user's command. ``runtime.default_cwd`` is where this install's Agent turns
+        already run, so it is the same answer the escalation Session would get.
+
+        Validated here rather than trusted: an unset or deleted ``default_cwd`` must fall
+        through to the fallback below, not fail the fire with ``workdirMissing``.
+        """
+
+        config = getattr(self.controller, "config", None)
+        candidate = getattr(getattr(config, "runtime", None), "default_cwd", None)
+        if not isinstance(candidate, str) or not candidate.strip():
+            return None
+        resolved = os.path.abspath(os.path.expanduser(candidate.strip()))
+        return resolved if os.path.isdir(resolved) else None
+
     def _bound_session_workdir(self, task: ScheduledTask) -> Optional[str]:
         """Where a command with no stored ``cwd`` should run: its binding's directory.
 
@@ -6539,7 +6645,11 @@ class ScheduledTaskService:
         # definition after claiming. This is the copy that will actually run.
         self._record_executed_command(execution_id, task)
 
-        spawn_cwd = task.cwd or self._bound_session_workdir(task)
+        spawn_cwd = (
+            task.cwd
+            or self._bound_session_workdir(task)
+            or self._runtime_default_workdir()
+        )
         if not spawn_cwd:
             stable_cwd = paths.get_vibe_remote_dir()
             stable_cwd.mkdir(parents=True, exist_ok=True)

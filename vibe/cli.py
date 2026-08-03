@@ -3264,6 +3264,7 @@ def cmd_task_add(args):
                 if raw_cwd
                 else os.getcwd()
             )
+            session_workdir = None
         else:
             session_default_notice = _apply_caller_session_default(
                 args,
@@ -3300,6 +3301,10 @@ def cmd_task_add(args):
                 scoped_session=_has_modern_scope_target(args),
                 help_command="vibe task add --help",
             )
+            session_workdir = cwd
+            cwd = _command_definition_spawn_cwd(
+                cwd, has_command=has_command, session_policy=session_policy
+            )
             agent_resolution = _resolve_agent_target(
                 agent_name=getattr(args, "agent", None),
                 session_id=session_id,
@@ -3334,9 +3339,12 @@ def cmd_task_add(args):
         metadata = _definition_metadata_with_scope(
             caller_context,
             scope_id=scope_key,
-            # ``session_workdir`` describes a Session this definition will create; a pure
-            # command task creates none, and stores its working directory in ``cwd``.
-            session_workdir=None if is_pure_command else cwd,
+            # ``session_workdir`` describes a Session this definition will create, which
+            # is a different question from ``cwd`` -- where its command runs. A pure
+            # command task creates no Session at all, and a per-run one lets its Session
+            # keep whatever workdir creation resolves (see
+            # ``_command_definition_spawn_cwd``, which answers only the command's half).
+            session_workdir=session_workdir,
         )
         if has_command:
             metadata["on_failure"] = effective_on_failure
@@ -3956,6 +3964,10 @@ def cmd_task_update(args):
             )
         else:
             cwd = task.cwd
+        session_workdir = cwd
+        cwd = _command_definition_spawn_cwd(
+            cwd, has_command=task.has_command, session_policy=session_policy
+        )
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
         if session_policy == "create_once" and not scope_key:
             raise TaskCliError(
@@ -4010,8 +4022,11 @@ def cmd_task_update(args):
             session_key = ""
         if session_policy == "existing":
             metadata.pop("session_workdir", None)
-        elif cwd:
-            metadata["session_workdir"] = cwd
+        elif session_workdir:
+            # The Session's half of the answer, not the command's: a per-run command
+            # records the invocation directory in ``cwd`` above without pinning the
+            # Session that escalation creates.
+            metadata["session_workdir"] = session_workdir
         else:
             metadata.pop("session_workdir", None)
         session_target, delivery_target = _validate_definition_update_delivery_target(
@@ -5090,6 +5105,35 @@ def _resolve_definition_session_cwd(
         return None
     if session_policy == "create_per_run":
         return None
+    return os.getcwd()
+
+
+def _command_definition_spawn_cwd(
+    session_cwd: Optional[str],
+    *,
+    has_command: bool,
+    session_policy: str,
+) -> Optional[str]:
+    """Where this definition's COMMAND runs, given where its Session would run.
+
+    ``_resolve_definition_session_cwd`` answers a Session question, and declines to
+    answer it for ``create_per_run``: that Session does not exist yet, so creation
+    resolves its workdir later from the Scope or the runtime default. A command cannot
+    wait for that. It runs on the next tick from the definition's ``cwd``, and with
+    nothing recorded there it fell through to the ``~/.avibe`` fallback -- so
+    ``--shell './scripts/sync.sh'`` ran from the product state directory, where the
+    relative path is missing and a relative write lands in persisted state.
+
+    The invocation directory is the answer, for the same reason a pure command task
+    already records it: it is where the user was standing when they described the
+    command. Returned only for the policy that leaves the command with no other source
+    -- an ``existing`` binding is read live from its Session at fire time, and
+    ``create_once`` reserves its Session immediately -- and never over an explicit
+    ``--cwd``.
+    """
+
+    if not has_command or session_cwd or session_policy != "create_per_run":
+        return session_cwd
     return os.getcwd()
 
 

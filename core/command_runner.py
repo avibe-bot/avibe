@@ -228,6 +228,44 @@ async def _timed_out_keeping_retained_output(
     )
 
 
+async def _reap_or_kill(process: asyncio.subprocess.Process, label: str) -> tuple[bytes, bytes]:
+    """Reap the tree, and kill it anyway if the orderly teardown itself fails.
+
+    ``terminate_and_communicate`` is the ORDERLY form: signal, then drain the pipes so
+    the caller can still report what the command managed to say. It can also fail --
+    an ``OSError`` draining a pipe, a ``RuntimeError`` from a loop already closing, a
+    re-delivered ``CancelledError`` while a service stop unwinds -- and every caller
+    below is itself an ``except`` clause, so an exception raised out of one is NOT
+    caught by the catch-all clause beside it. It leaves this frame carrying a live
+    supervisor whose only durable name the scheduled-task caller then clears in its own
+    ``finally`` (``_execute_command_task``), on the documented assumption that the
+    runner has already reaped the tree: a backup or deployment still running, that
+    nothing can ever find again.
+
+    So the tree dies here whatever the drain does. ``signal_process_tree`` is
+    SYNCHRONOUS and takes the process group first, which is what makes it usable as the
+    fallback: it needs no await, so there is nothing left for a cancellation to
+    interrupt, in the very frames where a cancellation is what brought us here. The
+    retained output is lost in that case; the orphan is not.
+
+    An ordinary failure is swallowed, because each caller already has the outcome it
+    means to report -- the cancellation it re-raises, or the timeout it returns -- and a
+    teardown that could not finish must not replace it. A ``BaseException`` propagates
+    once the kill is done, because a cancellation or a ``KeyboardInterrupt`` is not this
+    frame's to discard.
+    """
+
+    try:
+        return await terminate_and_communicate(process, logger, label)
+    except BaseException as exc:
+        if process.returncode is None:
+            signal_process_tree(process, KILL_SIGNAL, logger, label)
+        if not isinstance(exc, Exception):
+            raise
+        logger.debug("failed to drain %s while tearing it down", label, exc_info=True)
+        return b"", b""
+
+
 async def run_supervised_command(
     *,
     command: Optional[list[str]] = None,
@@ -325,11 +363,11 @@ async def run_supervised_command(
                 stdout, stderr, stdout_truncated, stderr_truncated = await _collect()
     except asyncio.CancelledError:
         await _cancel_readers(reader_tasks)
-        await terminate_and_communicate(process, logger, label)
+        await _reap_or_kill(process, label)
         raise
     except asyncio.TimeoutError:
         await _cancel_readers(reader_tasks)
-        stdout, stderr = await terminate_and_communicate(process, logger, label)
+        stdout, stderr = await _reap_or_kill(process, label)
         return SupervisedCommandResult(
             exit_code=TIMEOUT_EXIT_CODE,
             stdout="",
@@ -353,10 +391,11 @@ async def run_supervised_command(
             # paths above ``communicate()`` first, and a second consumer on those
             # streams is exactly what ``_timed_out_keeping_retained_output`` warns of.
             try:
-                await terminate_and_communicate(process, logger, label)
-            except Exception:
+                await _reap_or_kill(process, label)
+            except BaseException:
                 # The original failure is the one worth propagating; a teardown that
-                # cannot complete must not replace it.
+                # cannot complete must not replace it. The tree is already dead by
+                # here -- ``_reap_or_kill`` kills before it re-raises.
                 logger.debug(
                     "failed to reap %s after an unexpected runner error", label, exc_info=True
                 )

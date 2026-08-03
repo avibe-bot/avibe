@@ -426,3 +426,61 @@ observations:
       - show the routing fields only when something in them is actually bound
       - state in the test which bindings must keep them visible, not only which hide them
       - treat a "sensible default" label on an absent binding as a fabricated fact
+  - id: OBS-HARNESS-COMMAND-TASK-025
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-045
+    summary: >-
+      A catch-all clause does not catch its own siblings, so the specialized handlers were
+      left with no backstop at all.
+    previous_assumption: >-
+      Adding a final ``except BaseException`` that reaps the tree covers every way out of the
+      block, including the cancellation and timeout clauses above it.
+    observed_behavior: >-
+      An exception raised inside an ``except`` clause propagates past its siblings. The
+      teardown those two clauses run drains pipes and can itself fail, so the two paths that
+      were supposed to be the safe ones were the only ones with no backstop -- and the
+      caller clears the worker record the moment they raise.
+    required_updates:
+      - make teardown failure-tolerant rather than adding another handler that can also fail
+      - fall back to a synchronous group kill, since a cancellation leaves nothing awaitable
+      - never let a failed teardown replace the outcome its handler owes the caller
+  - id: OBS-HARNESS-COMMAND-TASK-026
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-046
+    summary: >-
+      A capability probe used as a guard turns "this store cannot do it" into "this store
+      does not need it".
+    previous_assumption: >-
+      Asking ``supports_guarded_settlement()`` and returning early is the safe way to use a
+      writer only one backend has.
+    observed_behavior: >-
+      The early return skipped the settle entirely on the file store, while the surrounding
+      work -- clearing the worker record, releasing the definition, starting the next fire --
+      went ahead. The backend that could not settle was the backend that leaked a ``running``
+      run for a command that was over.
+    required_updates:
+      - put the per-run settle behind one store method that both backends answer
+      - share the file store's terminal write between the startup pass and the per-run settle
+      - reserve capability probes for callers that have a real alternative, not for skipping work
+  - id: OBS-HARNESS-COMMAND-TASK-027
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-047
+      - SCT-048
+    summary: >-
+      One ``cwd`` field answered two different questions, and declining to answer the Session's
+      half silently unanswered the command's.
+    previous_assumption: >-
+      A definition's ``cwd`` describes the Session it will create, so a policy whose Session
+      does not exist yet correctly stores nothing.
+    observed_behavior: >-
+      A command fires on the next tick and has no Agent turn to inherit a directory from, so
+      the stored ``None`` fell through to the ``~/.avibe`` fallback: relative commands failed
+      and relative writes landed in persisted product state. The invocation directory was
+      available at creation time and thrown away.
+    required_updates:
+      - record the command's directory at creation without pinning the Session escalation creates
+      - resolve the runtime default workdir at fire time for definitions creation cannot reach
+      - keep the product state directory as a last resort nothing normally reaches

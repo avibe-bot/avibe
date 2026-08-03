@@ -64,6 +64,34 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _pid_exited(pid: int) -> bool:
+    """Dead as far as these tests care: exited, whether or not it has been waited on.
+
+    The kill fallback in ``_reap_or_kill`` deliberately does NOT await
+    ``communicate()`` -- a failed drain is exactly what put it there -- so the exited
+    supervisor can sit as a zombie for the moment it takes asyncio's child watcher to
+    reap it, and ``os.kill(pid, 0)`` succeeds for a zombie. Where ``/proc`` is
+    unavailable this degrades to the liveness check alone.
+    """
+
+    if not _pid_alive(pid):
+        return True
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            fields = handle.read().rsplit(b")", 1)[-1].split()
+    except OSError:
+        return False
+    return bool(fields) and fields[0] == b"Z"
+
+
+async def _wait_until_exited(pid: int, *, attempts: int = 100) -> bool:
+    for _ in range(attempts):
+        if _pid_exited(pid):
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
 async def test_argv_command_success_reports_streams_and_exit_code(tmp_path: Path) -> None:
     result = await run_supervised_command(
         command=[
@@ -248,6 +276,70 @@ async def test_an_unexpected_error_after_the_spawn_still_reaps_the_command(
     assert not _pid_alive(pid), (
         "an unexpected runner error left the supervisor and its command running while "
         "the caller was clearing the only record of them"
+    )
+
+
+async def test_a_teardown_that_cannot_drain_still_kills_the_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-045 -- the two specialized handlers survive their OWN teardown failing.
+
+    Cancellation and timeout each reap the tree by draining it, and a drain can fail:
+    an ``OSError`` on a pipe, a ``RuntimeError`` from a loop already closing. Both
+    handlers are ``except`` clauses, so an exception raised out of one is not caught by
+    the catch-all clause beside it -- the fix in SCT-035 does not cover them. The frame
+    then left with the supervisor still running, while the scheduled-task caller cleared
+    the worker record in its own ``finally``: the same orphan-with-no-name as SCT-035,
+    reached through the paths that were supposed to be the safe ones.
+
+    Both handlers are driven here because they fail differently: cancellation owes the
+    caller a ``CancelledError``, a timeout owes it a 124 result, and neither may be
+    replaced by the teardown's own error.
+    """
+
+    async def _explode(*_args, **_kwargs):
+        raise OSError("the pipe went away")
+
+    monkeypatch.setattr(command_runner, "terminate_and_communicate", _explode)
+
+    timed_out_spawns: list[int] = []
+    result = await run_supervised_command(
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=str(tmp_path),
+        timeout_seconds=1,
+        label="test timeout teardown failure",
+        on_spawn=lambda pid, _identity: timed_out_spawns.append(pid),
+    )
+
+    assert result.timed_out is True
+    assert result.exit_code == 124
+    assert timed_out_spawns, "the supervisor never spawned"
+    assert await _wait_until_exited(timed_out_spawns[0]), (
+        "a timeout whose drain failed left the supervisor and its command running"
+    )
+
+    canceled_spawns: list[int] = []
+    task = asyncio.ensure_future(
+        run_supervised_command(
+            command=[sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=str(tmp_path),
+            timeout_seconds=0,
+            label="test cancel teardown failure",
+            on_spawn=lambda pid, _identity: canceled_spawns.append(pid),
+        )
+    )
+    for _ in range(200):
+        if canceled_spawns:
+            break
+        await asyncio.sleep(0.02)
+    assert canceled_spawns, "the supervisor never spawned"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert await _wait_until_exited(canceled_spawns[0]), (
+        "a cancellation whose drain failed left the supervisor and its command running"
     )
 
 
