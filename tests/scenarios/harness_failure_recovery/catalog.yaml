@@ -2415,12 +2415,12 @@ scenarios:
     backend: shared
     test: tests/test_runtime_ownership.py::test_hfr_136_watch_runtime_never_pins_but_execution_run_does
   - id: HFR-137
-    name: ownership admitted between reclamation passes wins the locked recheck
+    name: exact-generation owner commits and reclamation serialize in both orderings
     status: covered
     kind: concurrency
     layer: contract
-    backend: codex
-    test: tests/test_runtime_ownership.py::test_hfr_137_new_pin_between_reclaimer_passes_wins_locked_check
+    backend: shared
+    test: tests/test_runtime_activation.py::test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid
   - id: HFR-138
     name: ownership handoffs stay visible in one SQLite generation
     status: covered

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 import pytest
 
 from core.runtime_activation import RuntimeActivationCommit, RuntimeActivationRegistry
+from core.scheduled_tasks import ScheduledTaskService, TaskExecutionRequest
 from core.session_activities import SessionActivityRegistry
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AGENT_RUNTIME_TURN_TOKEN
 from modules.agents.claude_agent import ClaudeAgent
@@ -161,7 +163,7 @@ def test_activity_registry_remains_compatible_without_activation_registry() -> N
 
 
 @pytest.mark.parametrize("session_id", [None, "ses-1"])
-def test_stale_activity_progress_cannot_rebuild_active_owner(
+def test_hfr_137_stale_activity_progress_cannot_rebuild_active_owner(
     session_id: str | None,
 ) -> None:
     activation_registry = RuntimeActivationRegistry()
@@ -268,7 +270,7 @@ def _native_start_service(
     return service, manager, context
 
 
-def test_native_start_admission_first_blocks_retirement_until_durable_commit() -> None:
+def test_hfr_137_native_start_admission_first_blocks_retirement_until_durable_commit() -> None:
     registry = RuntimeActivationRegistry()
     identity = registry.attach("claude", "resource-1")
     service, manager, context = _native_start_service(registry)
@@ -301,7 +303,7 @@ def test_native_start_admission_first_blocks_retirement_until_durable_commit() -
     assert service._get_turn_gate("runtime-1").runtime_started is True
 
 
-def test_native_start_cleanup_first_rejects_old_generation_commit() -> None:
+def test_hfr_137_native_start_cleanup_first_rejects_old_generation_commit() -> None:
     registry = RuntimeActivationRegistry()
     identity = registry.attach("claude", "resource-1")
     service, manager, context = _native_start_service(registry)
@@ -337,7 +339,7 @@ def test_native_start_cleanup_first_rejects_old_generation_commit() -> None:
 
 
 @pytest.mark.parametrize("session_id", [None, "ses-1"])
-def test_claude_receiver_forwards_generation_to_activity_admission(
+def test_hfr_137_claude_receiver_forwards_generation_to_activity_admission(
     session_id: str | None,
 ) -> None:
     activation_registry = RuntimeActivationRegistry()
@@ -384,3 +386,256 @@ def test_claude_receiver_forwards_generation_to_activity_admission(
     assert handled is True
     assert activities.has_active("claude", "runtime-1") is False
     assert store.upserts == []
+
+
+def _fallback_service(
+    registry: RuntimeActivationRegistry,
+    request_store: Any,
+    identity: Any,
+    *,
+    wait_backend_ready: Any = None,
+) -> ScheduledTaskService:
+    if wait_backend_ready is None:
+
+        async def wait_backend_ready(_backend: str) -> None:
+            return None
+
+    agent_service = SimpleNamespace(
+        activation_registry=registry,
+        agents={"claude": object()},
+        wait_backend_ready=wait_backend_ready,
+        runtime_activation_identity_for_request=lambda backend, request: (
+            identity if backend == "claude" else None
+        ),
+    )
+    service = object.__new__(ScheduledTaskService)
+    service.controller = SimpleNamespace(
+        agent_service=agent_service,
+        runtime_activation=registry,
+    )
+    service.request_store = request_store
+    return service
+
+
+def test_hfr_137_cleanup_first_rejects_fallback_claim() -> None:
+    """HFR-137: a retired generation cannot turn its queued Run into a claim."""
+
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    predicate_entered = threading.Event()
+    allow_retirement = threading.Event()
+    admission_started = threading.Event()
+    claim_calls: list[str] = []
+    claims: list[TaskExecutionRequest | None] = []
+    pending = TaskExecutionRequest(
+        id="run-1",
+        request_type="agent_run",
+        agent_backend="claude",
+    )
+    request_store = SimpleNamespace(
+        claim=lambda request_id: claim_calls.append(request_id) or pending,
+    )
+    service = _fallback_service(registry, request_store, identity)
+
+    def retire() -> None:
+        def final_predicate() -> bool:
+            predicate_entered.set()
+            assert allow_retirement.wait(timeout=2)
+            return True
+
+        assert registry.retire_if_current(identity, final_predicate)
+
+    def claim() -> None:
+        admission_started.set()
+        claims.append(service._claim_pending_request(pending))
+
+    retirement_thread = threading.Thread(target=retire)
+    claim_thread = threading.Thread(target=claim)
+    retirement_thread.start()
+    assert predicate_entered.wait(timeout=2)
+    claim_thread.start()
+    assert admission_started.wait(timeout=2)
+    allow_retirement.set()
+
+    _join(retirement_thread)
+    _join(claim_thread)
+
+    assert claims == [None]
+    assert claim_calls == []
+
+
+def test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid() -> None:
+    """HFR-137: a pre-PID claim survives cleanup through exact Run requeue."""
+
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    claim_entered = threading.Event()
+    allow_claim = threading.Event()
+    retirement_started = threading.Event()
+    pending = TaskExecutionRequest(
+        id="run-1",
+        request_type="agent_run",
+        agent_backend="claude",
+    )
+    claimed_request = TaskExecutionRequest(
+        id=pending.id,
+        request_type=pending.request_type,
+        agent_backend=pending.agent_backend,
+    )
+    mark_calls: list[str] = []
+    requeued: list[str] = []
+
+    def claim(_request_id: str) -> TaskExecutionRequest:
+        claim_entered.set()
+        assert allow_claim.wait(timeout=2)
+        return claimed_request
+
+    request_store = SimpleNamespace(
+        claim=claim,
+        refresh_claimed_request=lambda request: request,
+        mark_execution_started=lambda request_id: mark_calls.append(request_id) or True,
+        requeue=lambda request_id: requeued.append(request_id),
+    )
+    service = _fallback_service(registry, request_store, identity)
+    claims: list[TaskExecutionRequest | None] = []
+    retired: list[bool] = []
+
+    claim_thread = threading.Thread(
+        target=lambda: claims.append(service._claim_pending_request(pending))
+    )
+
+    def retire() -> None:
+        retirement_started.set()
+        retired.append(registry.retire_if_current(identity, lambda: True))
+
+    retirement_thread = threading.Thread(target=retire)
+    claim_thread.start()
+    assert claim_entered.wait(timeout=2)
+    retirement_thread.start()
+    assert retirement_started.wait(timeout=2)
+    allow_claim.set()
+
+    _join(claim_thread)
+    _join(retirement_thread)
+
+    assert claims == [claimed_request]
+    assert claimed_request.observed_activation_identity == identity
+    assert retired == [True]
+
+    request, started = asyncio.run(
+        service._mark_execution_started_for_claimed_request(claimed_request)
+    )
+
+    assert request is claimed_request
+    assert started is False
+    assert mark_calls == []
+    assert requeued == [pending.id]
+
+
+def test_hfr_137_backend_ready_precedes_fallback_pid_marker() -> None:
+    """HFR-137: a claimed Run writes no PID while its backend is draining."""
+
+    async def exercise() -> None:
+        registry = RuntimeActivationRegistry()
+        identity = registry.attach("claude", "runtime-1")
+        wait_entered = asyncio.Event()
+        allow_ready = asyncio.Event()
+        mark_calls: list[str] = []
+        request = TaskExecutionRequest(
+            id="run-1",
+            request_type="agent_run",
+            agent_backend="claude",
+            observed_activation_identity=identity,
+        )
+
+        async def wait_backend_ready(_backend: str) -> None:
+            wait_entered.set()
+            await allow_ready.wait()
+
+        request_store = SimpleNamespace(
+            refresh_claimed_request=lambda current: current,
+            mark_execution_started=lambda request_id: mark_calls.append(request_id) or True,
+            requeue=lambda _request_id: pytest.fail("current generation was requeued"),
+        )
+        service = _fallback_service(
+            registry,
+            request_store,
+            identity,
+            wait_backend_ready=wait_backend_ready,
+        )
+
+        marker = asyncio.create_task(
+            service._mark_execution_started_for_claimed_request(request)
+        )
+        await wait_entered.wait()
+        assert mark_calls == []
+        allow_ready.set()
+        marked_request, started = await marker
+
+        assert marked_request is request
+        assert started is True
+        assert mark_calls == [request.id]
+
+    asyncio.run(exercise())
+
+
+def test_hfr_137_fallback_pid_marker_first_blocks_retirement_until_commit() -> None:
+    """HFR-137: PID admission completes before a competing cleanup can retire."""
+
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    marker_entered = threading.Event()
+    allow_marker = threading.Event()
+    retirement_started = threading.Event()
+    order: list[str] = []
+    request = TaskExecutionRequest(
+        id="run-1",
+        request_type="agent_run",
+        agent_backend="claude",
+        observed_activation_identity=identity,
+    )
+
+    def mark_execution_started(_request_id: str) -> bool:
+        order.append("marker-entered")
+        marker_entered.set()
+        assert allow_marker.wait(timeout=2)
+        order.append("marker-finished")
+        return True
+
+    request_store = SimpleNamespace(
+        refresh_claimed_request=lambda current: current,
+        mark_execution_started=mark_execution_started,
+        requeue=lambda _request_id: pytest.fail("admitted marker was requeued"),
+    )
+    service = _fallback_service(registry, request_store, identity)
+    marked: list[tuple[TaskExecutionRequest, bool]] = []
+    retired: list[bool] = []
+
+    marker_thread = threading.Thread(
+        target=lambda: marked.append(
+            asyncio.run(service._mark_execution_started_for_claimed_request(request))
+        )
+    )
+
+    def retire() -> None:
+        retirement_started.set()
+
+        def final_predicate() -> bool:
+            order.append("retire-predicate")
+            return True
+
+        retired.append(registry.retire_if_current(identity, final_predicate))
+
+    retirement_thread = threading.Thread(target=retire)
+    marker_thread.start()
+    assert marker_entered.wait(timeout=2)
+    retirement_thread.start()
+    assert retirement_started.wait(timeout=2)
+    allow_marker.set()
+
+    _join(marker_thread)
+    _join(retirement_thread)
+
+    assert marked == [(request, True)]
+    assert retired == [True]
+    assert order == ["marker-entered", "marker-finished", "retire-predicate"]

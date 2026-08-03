@@ -11,7 +11,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Dict, Mapping, NamedTuple, Optional, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -38,6 +38,7 @@ from core.message_context import (
 )
 from core.origin_links import origin_link
 from core.reply_enhancer import strip_silent_blocks
+from core.runtime_activation import RuntimeActivationIdentity
 from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     RUN_INTERRUPTION_REASONS,
@@ -909,9 +910,16 @@ class TaskExecutionRequest:
     callback_status: Optional[str] = None
     delivery_id: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    observed_activation_identity: RuntimeActivationIdentity | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload.pop("observed_activation_identity", None)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "TaskExecutionRequest":
@@ -3339,7 +3347,7 @@ class ScheduledTaskService:
         if not self._transport_ready_for_request(queued):
             self._drain_dirty = True
             return
-        request = self.request_store.claim(queued.id)
+        request = self._claim_pending_request(queued)
         if request is None:
             return
         lock_key = self._execution_lock_key(request)
@@ -3388,7 +3396,7 @@ class ScheduledTaskService:
                 # making progress and must not look sweepable.
                 self.request_store.record_skip_reason(pending.id, reason=SKIP_REASON_SESSION_BUSY)
                 continue
-            request = self.request_store.claim(pending.id)
+            request = self._claim_pending_request(pending)
             if request is None:
                 continue
             self._spawn_execution(request, lock_key)
@@ -5094,13 +5102,136 @@ class ScheduledTaskService:
         if exc is not None:
             logger.error("Claimed request %s crashed: %r", request_id, exc, exc_info=exc)
 
+    def _claimed_request_backend(self, request: TaskExecutionRequest) -> str:
+        observed = request.observed_activation_identity
+        if observed is not None:
+            return observed.backend
+        backend = str(request.agent_backend or "").strip()
+        if backend:
+            return backend
+        session_id = str(request.session_id or "").strip()
+        if session_id:
+            try:
+                backend = str(resolve_session_id_target(session_id).agent_backend or "").strip()
+            except ValueError:
+                backend = ""
+            if backend:
+                return backend
+        service = getattr(self.controller, "agent_service", None)
+        agent_name = str(request.agent_name or "").strip()
+        agents = getattr(service, "agents", None)
+        if isinstance(agents, dict) and agent_name in agents:
+            return agent_name
+        return ""
+
+    def _activation_identity_for_request(
+        self,
+        request: TaskExecutionRequest,
+        *,
+        backend: str = "",
+    ) -> RuntimeActivationIdentity | None:
+        service = getattr(self.controller, "agent_service", None)
+        identity_for_request = getattr(
+            service,
+            "runtime_activation_identity_for_request",
+            None,
+        )
+        if not callable(identity_for_request):
+            return None
+
+        request_view: Any = request
+        session_id = str(request.session_id or "").strip()
+        if session_id:
+            try:
+                target = resolve_session_id_target(session_id)
+            except ValueError:
+                target = None
+            if target is not None and target.workdir:
+                request_payload = vars(request).copy()
+                request_payload["working_path"] = target.workdir
+                request_view = SimpleNamespace(**request_payload)
+
+        candidates: list[RuntimeActivationIdentity] = []
+        backends = [backend] if backend else list(getattr(service, "agents", {}) or {})
+        for candidate_backend in backends:
+            identity = identity_for_request(candidate_backend, request_view)
+            if isinstance(identity, RuntimeActivationIdentity) and identity not in candidates:
+                candidates.append(identity)
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _runtime_activation_registry(self) -> Any:
+        service = getattr(self.controller, "agent_service", None)
+        registry = getattr(service, "activation_registry", None)
+        if registry is None:
+            registry = getattr(self.controller, "runtime_activation", None)
+        return registry
+
+    def _claim_pending_request(
+        self,
+        pending: TaskExecutionRequest,
+    ) -> TaskExecutionRequest | None:
+        backend = self._claimed_request_backend(pending)
+        identity = self._activation_identity_for_request(pending, backend=backend)
+        registry = self._runtime_activation_registry()
+        if registry is None or identity is None:
+            return self.request_store.claim(pending.id)
+
+        committed = registry.commit_if_current(
+            identity,
+            lambda: self.request_store.claim(pending.id),
+        )
+        request = committed.value if committed.admitted else None
+        if request is not None:
+            request.observed_activation_identity = identity
+        return request
+
+    async def _mark_execution_started_for_claimed_request(
+        self,
+        request: TaskExecutionRequest,
+    ) -> tuple[TaskExecutionRequest, bool]:
+        observed_identity = request.observed_activation_identity
+        request = self.request_store.refresh_claimed_request(request)
+        if request.observed_activation_identity is None:
+            request.observed_activation_identity = observed_identity
+        backend = self._claimed_request_backend(request)
+        service = getattr(self.controller, "agent_service", None)
+        activation_identity = request.observed_activation_identity
+        if activation_identity is None:
+            activation_identity = self._activation_identity_for_request(
+                request,
+                backend=backend,
+            )
+        if not backend and activation_identity is not None:
+            backend = activation_identity.backend
+        if backend and service is not None:
+            wait_backend_ready = getattr(service, "wait_backend_ready", None)
+            if callable(wait_backend_ready):
+                await wait_backend_ready(backend)
+
+        def commit_start() -> bool:
+            return self.request_store.mark_execution_started(request.id)
+
+        activation_registry = self._runtime_activation_registry()
+        if activation_registry is not None and activation_identity is not None:
+            committed = activation_registry.commit_if_current(
+                activation_identity,
+                commit_start,
+            )
+            if not committed.admitted:
+                self.request_store.requeue(request.id)
+                return request, False
+            return request, bool(committed.value)
+        return request, bool(commit_start())
+
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
-        if not self.request_store.mark_execution_started(request.id):
+        request, execution_started = (
+            await self._mark_execution_started_for_claimed_request(request)
+        )
+        if not execution_started:
             # A terminal result or explicit cancellation won after claim but before
             # this coroutine entered. Do not dispatch work whose Run no longer owns
             # the execution boundary.
             return
-        request = self.request_store.refresh_claimed_request(request)
         error: Optional[str] = None
         #: The structured CLASS of this run's failure, when the failure has one. Kept
         #: beside ``error`` rather than parsed back out of it: the text is a sentence

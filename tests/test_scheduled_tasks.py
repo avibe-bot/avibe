@@ -38,6 +38,7 @@ from core.run_settlement import (
     TEARDOWN_SETTLEMENT_MATRIX,
     TEARDOWN_SETTLEMENT_SURFACES,
 )
+from core.runtime_activation import RuntimeActivationRegistry
 from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
@@ -3081,6 +3082,87 @@ def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypat
     assert settled is not None
     assert settled["status"] == "failed"
     assert settled["metadata"]["interrupt_reason"] == "restarted"
+
+
+def test_execute_claimed_request_waits_for_backend_before_marking_started(
+    tmp_path: Path,
+) -> None:
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    wait_observations: list[object] = []
+
+    async def wait_backend_ready(_backend: str) -> None:
+        wait_observations.append(request_store.get_run(claimed.id).get("pid"))
+
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            wait_backend_ready=AsyncMock(side_effect=wait_backend_ready),
+            runtime_activation_identity_for_request=Mock(return_value=None),
+            activation_registry=None,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    claimed = request_store.enqueue_agent_run(
+        message="run",
+        agent_backend="codex",
+        session_id="ses-runtime",
+    )
+    claimed = request_store.claim(claimed.id)
+    assert claimed is not None
+
+    async def fake_execute_agent_run(**_kwargs):
+        assert request_store.get_run(claimed.id).get("pid") is not None
+        return scheduled_tasks.AgentRunExecutionResult(
+            error=None,
+            complete_on_return=False,
+        )
+
+    service._execute_agent_run = AsyncMock(side_effect=fake_execute_agent_run)  # type: ignore[assignment]
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert wait_observations == [None]
+    service._execute_agent_run.assert_awaited_once()
+    assert request_store.get_run(claimed.id)["pid"] is not None
+
+
+def test_execute_claimed_request_skips_retired_runtime_generation(
+    tmp_path: Path,
+) -> None:
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("codex", "/repo")
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            wait_backend_ready=AsyncMock(),
+            runtime_activation_identity_for_request=Mock(return_value=identity),
+            activation_registry=registry,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    claimed = request_store.enqueue_agent_run(
+        message="run",
+        agent_backend="codex",
+        session_id="ses-runtime",
+    )
+    claimed = request_store.claim(claimed.id)
+    assert claimed is not None
+    assert registry.retire_if_current(identity, lambda: True) is True
+    service._execute_agent_run = AsyncMock()  # type: ignore[assignment]
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    service._execute_agent_run.assert_not_awaited()
+    row = request_store.get_run(claimed.id)
+    assert row["status"] == "queued"
+    assert row.get("pid") is None
 
 
 def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypatch) -> None:
