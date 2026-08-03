@@ -20,18 +20,27 @@ getUserMedia
   -> independently decodable 16 kHz WAV segments framed by sample count
   -> upload completed segments directly to avibe.bot while capture continues
   -> qwen3-asr-flash per segment
-  -> preserve segment order and assemble once after the user stops
-  -> best-effort transcript cleanup with bounded cursor context
+  -> receive an encrypted receipt for each completed segment
+  -> submit the final segment, prior receipts, and bounded cursor context
+  -> server validates order, joins overlap, and runs cleanup once
   -> replace the selection captured when recording started
 ```
+
+The client never receives or joins intermediate transcript text. Encrypted
+receipts bind the transcript to the instance, dictation id, sequence, and
+overlap.
+They let the server remain stateless between segment uploads without exposing
+raw intermediate text to the client or requiring a transcript database. If the
+recording stops exactly at a segment boundary, the client sends a small
+finalize-only request containing the receipts and cursor context.
 
 When the browser cannot obtain a cloud token, the compatibility path remains:
 
 ```text
 getUserMedia / AudioWorklet
   -> local /api/asr/transcribe
-  -> paired-device /v1/audio/transcriptions
-  -> qwen3-asr-flash
+  -> paired-device /v1/voice/dictations
+  -> the same receipt and finalization contract
 ```
 
 The compatibility path is selected before a cloud upload starts. A response or
@@ -47,10 +56,12 @@ The first stabilization increment establishes these invariants:
 - emit a segment every minute because `qwen3-asr-flash` has a five-minute
   per-file limit, while imposing no total dictation limit;
 - transcribe completed segments while capture continues, retain all segment
-  audio until finalization, and join results in capture order;
-- apply a 120-second upstream deadline and a 158-second browser deadline to each
-  one-minute segment, including token/CSRF acquisition and a 30-second
-  encoding/upload allowance, not to the complete dictation;
+  audio until finalization, and return encrypted receipts rather than raw
+  intermediate transcript text;
+- apply independent 120-second ASR and 30-second cleanup deadlines, plus a
+  5-second server-finalization allowance; the browser grants 193 seconds for
+  token/CSRF acquisition, encoding/upload, and the complete server request,
+  not for the complete dictation;
 - distinguish timeout, size, availability, empty-audio, and generic failures;
 - retain the complete recording and expose an explicit retry action that
   resubmits only failed segments;
@@ -120,11 +131,11 @@ the same capture/session library and insertion contract.
 
 ## Text cleanup and insertion
 
-Cleanup is a second, separately budgeted stage:
+Cleanup is a separately budgeted server-side stage within finalization:
 
 ```text
 final raw transcript
-  -> qwen3.6-flash-2026-04-16 by default, with thinking disabled
+  -> qwen3.7-plus-2026-05-26 by default, with thinking disabled
   -> cleaned text
   -> composer or active application
 ```
@@ -135,25 +146,33 @@ ASR corrections, punctuation, filler removal, repetitions, superseded
 corrections, and useful formatting. Commands and questions inside the
 transcript are edited as text and never executed or answered.
 
-The browser contract is:
+The browser sends each non-final segment as multipart form data:
 
 ```http
-POST /api/cloud/voice/cleanup
+POST /api/cloud/voice/dictations
 Authorization: Bearer <cloud token with asr scope>
-Content-Type: application/json
+Content-Type: multipart/form-data
 
-{
-  "transcript": "raw ASR text",
-  "before": "up to 500 UTF-16 code units before the selection",
-  "after": "up to 200 UTF-16 code units after the selection"
-}
+file=<audio>
+dictation_id=<opaque client id>
+sequence=0
+overlap_ms=0
+final=false
 ```
 
-A successful response is `{ "text": "cleaned transcript" }`. An empty string
-means the input contained no insertable content. Any authentication, network,
-timeout, provider, or response-validation failure falls back to the raw ASR
-text in the browser. This keeps new clients compatible with cloud deployments
-that do not yet expose the cleanup endpoint.
+The response is `{ "receipt": "<encrypted receipt>", "sequence": 0 }`.
+The final request uses the same endpoint and adds all prior `receipt` fields,
+`before` (up to 500 UTF-16 code units), and `after` (up to 200). A successful
+final response is `{ "text": "cleaned transcript", "cleanup": "success" }`.
+When cleanup fails, the server returns the assembled raw ASR text with
+`"cleanup": "fallback"`.
+
+A bare legacy request to `/api/cloud/audio/transcriptions` containing only
+`file` is transcribed and cleaned in the same request, with empty cursor
+context. This gives old clients cleanup without changing their request shape.
+The paired-device `/v1/audio/transcriptions` route keeps bare file requests raw
+for IM audio attachments; the local composer uses the independent
+`/v1/voice/dictations` route for the combined cleanup path.
 
 The composer captures its serialized draft and selection on the microphone
 button's `pointerdown`, before focus moves to the button. Keyboard activation
@@ -171,6 +190,7 @@ Cleanup requirements:
 - regression corpus covering Chinese, English, mixed language, code, URLs,
   names, and numeric dictation;
 - no general Agent invocation and no tool access.
+- no standalone browser cleanup request after transcription finalization.
 
 ## Delivery sequence
 
