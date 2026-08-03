@@ -51,8 +51,10 @@ from core.memory.types import (
     MemoryItem,
     MemoryItems,
     MemoryProfile,
+    MemoryProfilePageDescriptor,
     MemoryProfileReport,
     OperationFailed,
+    memory_profile_snapshot_id,
 )
 from config.v2_config import (
     AgentsConfig,
@@ -2384,6 +2386,29 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
     assert "profile_warning" not in payload
 
 
+def test_profile_payload_exposes_a_stable_structured_snapshot_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = create_memory_runtime(MemoryConfig(enabled=True), artifact_manager=_installed_artifact())
+    profile = MemoryProfile(
+        summary="Prefers concise updates.",
+        updated_at="2026-08-02T10:30:00Z",
+    )
+
+    class _Module:
+        async def profile(self, *, principal_id: str, project_id: str) -> MemoryItems:
+            assert principal_id.startswith("u-") and project_id == PROJECT
+            return MemoryItems(items=(MemoryItem(kind="profile", text="{}", profile=profile),))
+
+    runtime._module = _Module()
+    payload = asyncio.run(runtime.profile_payload("u-" + "a" * 32, PROJECT))
+
+    assert payload["profile_snapshot_id"] == memory_profile_snapshot_id(profile)
+    assert payload["profile_snapshot_id"].startswith("sha256:")
+
+
 def test_memory_item_projection_omits_empty_profile_and_preserves_structured_fields() -> None:
     legacy = memory_runtime._result_payload(
         MemoryItems(items=(MemoryItem(kind="fact", text="Uses Python."),))
@@ -2422,32 +2447,50 @@ def test_profile_report_payload_keeps_empty_warnings_and_closed_errors_distinct(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = create_memory_runtime(MemoryConfig(enabled=True), artifact_manager=_installed_artifact())
+    page = MemoryProfilePageDescriptor(
+        artifact_id="a" * 32,
+        language="en",
+        generated_at="2026-08-03T05:12:30Z",
+        published_at="2026-08-03T05:12:31Z",
+        source_profile_updated_at="2026-08-02T10:30:00Z",
+        source_profile_snapshot_id="sha256:" + "b" * 64,
+        prompt_contract_version=2,
+        content_sha256="sha256:" + "c" * 64,
+    )
 
     class _Module:
         async def profile_report(self, *, principal_id: str, project_id: str, language: str):
             assert principal_id.startswith("u-")
             assert project_id == PROJECT
             if language == "zh":
-                return MemoryProfileReport(report=None, report_warning="empty")
+                return MemoryProfileReport(page=None, report_warning="empty")
             if language == "failed":
                 return OperationFailed(error="memory_sidecar_unavailable")
-            return MemoryProfileReport(
-                report="Overview\n\nGenerated report.",
-                source_profile_updated_at="2026-08-02T10:30:00Z",
-            )
+            return MemoryProfileReport(page=page)
 
     runtime._module = _Module()
     principal = "u-" + "a" * 32
 
     assert asyncio.run(runtime.profile_report_payload(principal, PROJECT, "zh")) == {
         "status": "ok",
-        "report": None,
+        "page": None,
         "report_warning": "empty",
     }
     assert asyncio.run(runtime.profile_report_payload(principal, PROJECT, "en")) == {
         "status": "ok",
-        "report": "Overview\n\nGenerated report.",
-        "source_profile_updated_at": "2026-08-02T10:30:00Z",
+        "page": {
+            "artifact_id": "a" * 32,
+            "language": "en",
+            "generated_at": "2026-08-03T05:12:30Z",
+            "published_at": "2026-08-03T05:12:31Z",
+            "source_profile_updated_at": "2026-08-02T10:30:00Z",
+            "source_profile_snapshot_id": "sha256:" + "b" * 64,
+            "prompt_contract_version": 2,
+            "content_sha256": "sha256:" + "c" * 64,
+            "view_url": "/api/memory/profile/report/view/en/"
+            + "a" * 32
+            + "/index.html",
+        },
     }
     assert asyncio.run(runtime.profile_report_payload(principal, PROJECT, "failed")) == {
         "status": "failed",
@@ -2479,8 +2522,8 @@ def test_reconcile_cancels_report_before_replacing_sidecar(
                 )
             )
 
-        async def generate_profile_report(self, profile, language):
-            del profile, language
+        async def generate_profile_page(self, profile, language, generated_at):
+            del profile, language, generated_at
             entered.set()
             try:
                 await asyncio.Event().wait()
@@ -2549,8 +2592,8 @@ def test_shutdown_cancels_report_before_stopping_the_sidecar(
                 )
             )
 
-        async def generate_profile_report(self, profile, language):
-            del profile, language
+        async def generate_profile_page(self, profile, language, generated_at):
+            del profile, language, generated_at
             entered.set()
             try:
                 await asyncio.Event().wait()

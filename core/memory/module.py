@@ -18,6 +18,11 @@ from typing import Any, Literal
 from config import paths
 from core.memory.artifact import PROVIDER_ROOT_CONTROL_FILES
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
+from core.memory.profile_page import (
+    MemoryProfilePageStore,
+    ProfilePageStoreError,
+    ProfilePageValidationError,
+)
 from core.memory.presentation import memory_status_buckets
 from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
@@ -51,6 +56,7 @@ from core.memory.types import (
     encode_capture_attachments,
     is_memory_error_code,
     memory_profile_payload,
+    memory_profile_snapshot_id,
 )
 from core.memory.worker import MemoryWorker, ProcessingEvent
 
@@ -110,6 +116,7 @@ class MemoryModule:
         clear_drain_timeout_seconds: float = CLEAR_DRAIN_TIMEOUT_SECONDS,
         clear_cleanup_timeout_seconds: float = CLEAR_CLEANUP_TIMEOUT_SECONDS,
         processing_event: ProcessingEvent | None = None,
+        profile_page_store: MemoryProfilePageStore | None = None,
         worker: MemoryWorker | None = None,
     ) -> None:
         self._store = store
@@ -142,6 +149,9 @@ class MemoryModule:
         self._clear_provider_data = clear_provider_data
         self._clear_drain_timeout_seconds = _positive_timeout(clear_drain_timeout_seconds)
         self._clear_cleanup_timeout_seconds = _positive_timeout(clear_cleanup_timeout_seconds)
+        self._profile_page_store = profile_page_store or MemoryProfilePageStore(
+            paths.get_state_dir() / "memory" / "profile-pages"
+        )
         self._lifecycle_lock = asyncio.Lock()
         self._profile_report_tasks: dict[
             tuple[str, str, Literal["en", "zh"]],
@@ -363,7 +373,7 @@ class MemoryModule:
         project_id: str,
         language: str,
     ) -> MemoryProfileReportResult:
-        """Generate one transient narrative from a bounded, frozen profile snapshot."""
+        """Generate and atomically publish one page from a frozen profile."""
 
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
@@ -401,11 +411,20 @@ class MemoryModule:
                     return bounded
                 profile_item = next((item for item in bounded.items if item.kind == "profile"), None)
                 if profile_item is None:
-                    return MemoryProfileReport(report=None, report_warning="empty")
+                    return MemoryProfileReport(page=None, report_warning="empty")
                 if profile_item.profile is None:
-                    return MemoryProfileReport(report=None, report_warning="unstructured")
+                    return MemoryProfileReport(page=None, report_warning="unstructured")
                 profile = profile_item.profile
-                input_bytes = self._profile_report_input_bytes(profile, typed_language)
+                generated_at = _utc_now_iso()
+                try:
+                    snapshot_id = memory_profile_snapshot_id(profile)
+                except (TypeError, ValueError, UnicodeError):
+                    return OperationFailed(error="memory_provider_response_invalid")
+                input_bytes = self._profile_report_input_bytes(
+                    profile,
+                    typed_language,
+                    generated_at,
+                )
                 if input_bytes is None:
                     return OperationFailed(error="memory_provider_response_invalid")
                 if input_bytes > PROFILE_REPORT_MAX_INPUT_BYTES:
@@ -415,6 +434,11 @@ class MemoryModule:
                         provider,
                         profile,
                         typed_language,
+                        generated_at,
+                        snapshot_id,
+                        meta.scope_key,
+                        principal_id,
+                        project_id,
                         self._profile_report_lifecycle_generation,
                     ),
                     name="memory-profile-report",
@@ -438,27 +462,112 @@ class MemoryModule:
         provider: MemoryProviderPort,
         profile: MemoryProfile,
         language: Literal["en", "zh"],
+        generated_at: str,
+        snapshot_id: str,
+        scope_key: bytes,
+        principal_id: str,
+        project_id: str,
         lifecycle_generation: int,
     ) -> MemoryProfileReportResult:
         try:
-            report = await asyncio.wait_for(
-                provider.generate_profile_report(profile, language),
+            source = await asyncio.wait_for(
+                provider.generate_profile_page(profile, language, generated_at),
                 timeout=PROFILE_REPORT_OPERATION_TIMEOUT_SECONDS,
             )
+            async with self._lifecycle_lock:
+                if lifecycle_generation != self._profile_report_lifecycle_generation:
+                    return OperationFailed(error="memory_sidecar_unavailable")
+                page = await _run_owned_thread_to_completion(
+                    self._profile_page_store.publish,
+                    scope_key=scope_key,
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    language=language,
+                    source=source,
+                    generated_at=generated_at,
+                    source_profile_updated_at=profile.updated_at,
+                    source_profile_snapshot_id=snapshot_id,
+                )
         except asyncio.CancelledError:
             return OperationFailed(error="memory_sidecar_unavailable")
         except asyncio.TimeoutError:
             return OperationFailed(error="memory_provider_timeout")
         except MemoryProviderFailure as failure:
             return OperationFailed(error=_provider_error_code(failure, "memory_processing_failed"))
+        except ProfilePageValidationError:
+            return OperationFailed(error="memory_provider_response_invalid")
+        except ProfilePageStoreError:
+            return OperationFailed(error="memory_store_unavailable")
         except Exception:
             return OperationFailed(error="memory_processing_failed")
+        return MemoryProfileReport(page=page)
 
-        if lifecycle_generation != self._profile_report_lifecycle_generation:
-            return OperationFailed(error="memory_sidecar_unavailable")
-        if _profile_text_bytes(report) is None:
-            return OperationFailed(error="memory_provider_response_invalid")
-        return MemoryProfileReport(report=report, source_profile_updated_at=profile.updated_at)
+    async def profile_page_current(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        language: str,
+    ) -> MemoryProfileReportResult:
+        """Restore the current page descriptor without invoking the provider."""
+
+        if not is_principal_id(principal_id) or not is_project_id(project_id):
+            return OperationFailed(error="memory_access_denied")
+        if language not in {"en", "zh"}:
+            return OperationFailed(error="memory_invalid_input")
+        recovery = await self._recover_interrupted_clear()
+        if recovery is not None:
+            return recovery
+        async with self._lifecycle_lock:
+            try:
+                meta = await self._store_call(self._store.ensure_meta)
+                page = await asyncio.to_thread(
+                    self._profile_page_store.current,
+                    scope_key=meta.scope_key,
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    language=language,
+                )
+            except (ProfilePageStoreError, OSError):
+                return OperationFailed(error="memory_store_unavailable")
+            except Exception:
+                return OperationFailed(error="memory_store_unavailable")
+        return MemoryProfileReport(page=page)
+
+    async def profile_page_asset(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        language: str,
+        artifact_id: str,
+        asset_name: str,
+    ) -> bytes | None | OperationFailed:
+        """Read one admitted fixed asset without exposing artifact paths."""
+
+        if not is_principal_id(principal_id) or not is_project_id(project_id):
+            return OperationFailed(error="memory_access_denied")
+        if language not in {"en", "zh"}:
+            return OperationFailed(error="memory_invalid_input")
+        recovery = await self._recover_interrupted_clear()
+        if recovery is not None:
+            return recovery
+        async with self._lifecycle_lock:
+            try:
+                meta = await self._store_call(self._store.ensure_meta)
+                return await asyncio.to_thread(
+                    self._profile_page_store.read,
+                    scope_key=meta.scope_key,
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    language=language,
+                    artifact_id=artifact_id,
+                    asset_name=asset_name,
+                )
+            except (ProfilePageStoreError, OSError):
+                return OperationFailed(error="memory_store_unavailable")
+            except Exception:
+                return OperationFailed(error="memory_store_unavailable")
 
     def _remove_profile_report_task(
         self,
@@ -484,12 +593,17 @@ class MemoryModule:
         return not pending
 
     @staticmethod
-    def _profile_report_input_bytes(profile: MemoryProfile, language: Literal["en", "zh"]) -> int | None:
+    def _profile_report_input_bytes(
+        profile: MemoryProfile,
+        language: Literal["en", "zh"],
+        generated_at: str,
+    ) -> int | None:
         try:
             payload = json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "language": language,
+                    "generated_at": generated_at,
                     "source_profile_updated_at": profile.updated_at,
                     "profile": memory_profile_payload(profile),
                 },
@@ -593,6 +707,7 @@ class MemoryModule:
                     ):
                         raise _ClearStepFailure("worker drain did not stop in time")
                     await self._clear_provider_data_or_fail(started)
+                    await asyncio.to_thread(self._profile_page_store.clear_all)
                     completed = await self._store_call(self._store.finish_clear)
                 except Exception:
                     await self._record_clear_failure()
@@ -628,6 +743,7 @@ class MemoryModule:
                     ):
                         raise _ClearStepFailure("worker drain did not stop in time")
                     await self._clear_provider_data_or_fail(meta)
+                    await asyncio.to_thread(self._profile_page_store.clear_all)
                     await self._store_call(self._store.finish_clear)
                 except Exception:
                     await self._record_clear_failure()
@@ -1304,6 +1420,36 @@ def _utf8_bytes(value: str) -> bytes | None:
         return value.encode("utf-8")
     except UnicodeError:
         return None
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+async def _run_owned_thread_to_completion(
+    method: Callable[..., Any],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Drain owned file mutation before propagating task cancellation."""
+
+    operation = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
+    cancellation: asyncio.CancelledError | None = None
+    while not operation.done():
+        try:
+            await asyncio.shield(operation)
+        except asyncio.CancelledError as error:
+            cancellation = cancellation or error
+        except Exception:
+            if cancellation is None:
+                raise
+            break
+    if cancellation is not None:
+        if not operation.cancelled():
+            operation.exception()
+        raise cancellation
+    return operation.result()
 
 
 def _positive_timeout(value: float) -> float:

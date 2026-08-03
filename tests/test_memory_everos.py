@@ -21,6 +21,7 @@ from core.memory.everos import (
 from core.memory.types import (
     MemoryProfile,
     MemoryProfileExplicitInfo,
+    MemoryProfilePageSource,
     MemoryProfileTrait,
 )
 
@@ -489,16 +490,35 @@ def test_profile_report_uses_only_the_private_sidecar_route_and_closed_errors() 
     def handler(request: httpx.Request) -> httpx.Response:
         received["path"] = request.url.path
         received["payload"] = json.loads(request.content)
-        return httpx.Response(200, json={"status": "ok", "report": "A concise report."})
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "source": {
+                    "index_html": "<!doctype html><html><head></head><body></body></html>",
+                    "styles_css": "body { margin: 0; }",
+                },
+            },
+        )
 
     with _sidecar_transport(handler):
-        report = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).generate_profile_report(profile, "zh"))
+        source = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).generate_profile_page(
+                profile,
+                "zh",
+                "2026-08-03T05:12:30Z",
+            )
+        )
 
-    assert report == "A concise report."
+    assert source == MemoryProfilePageSource(
+        index_html="<!doctype html><html><head></head><body></body></html>",
+        styles_css="body { margin: 0; }",
+    )
     assert received == {
         "path": "/avibe/v1/profile-report",
         "payload": {
             "language": "zh",
+            "generated_at": "2026-08-03T05:12:30Z",
             "profile": {
                 "summary": "Prefers concise technical updates.",
                 "explicit_info": [
@@ -516,7 +536,11 @@ def test_profile_report_uses_only_the_private_sidecar_route_and_closed_errors() 
 
     async def _expect_unavailable() -> None:
         with pytest.raises(MemoryProviderFailure) as raised:
-            await EverOSPort(Path("/tmp/everos.sock")).generate_profile_report(profile, "en")
+            await EverOSPort(Path("/tmp/everos.sock")).generate_profile_page(
+                profile,
+                "en",
+                "2026-08-03T05:12:30Z",
+            )
         assert raised.value.error == "memory_sidecar_unavailable"
 
     with _sidecar_transport(unavailable):

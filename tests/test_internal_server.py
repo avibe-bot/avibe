@@ -355,7 +355,12 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/memory/status", ("GET",)) in routes
     assert ("/internal/memory/failures", ("GET",)) in routes
     assert ("/internal/memory/profile", ("GET",)) in routes
+    assert ("/internal/memory/profile/report", ("GET",)) in routes
     assert ("/internal/memory/profile/report", ("POST",)) in routes
+    assert (
+        "/internal/memory/profile/report/view/{language}/{artifact_id}/{asset_name}",
+        ("GET",),
+    ) in routes
     assert ("/internal/memory/search", ("POST",)) in routes
     assert ("/internal/memory/remember", ("POST",)) in routes
     assert ("/internal/memory/clear", ("POST",)) in routes
@@ -728,6 +733,63 @@ def test_memory_profile_report_requires_its_own_ui_proof_and_a_closed_language()
     assert accepted.status_code == 200
     assert accepted.json() == {"status": "failed", "error": "memory_sidecar_unavailable"}
     runtime.profile_report_payload.assert_awaited_once_with(principal_id, PROJECT, "zh")
+
+
+def test_memory_profile_page_current_and_asset_reads_require_exact_ui_proofs() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    principal_id = "u-11111111111111111111111111111111"
+    artifact_id = "a" * 32
+    current_path = "/internal/memory/profile/report"
+    asset_path = f"/internal/memory/profile/report/view/en/{artifact_id}/index.html"
+    runtime = types.SimpleNamespace(
+        principal_for_user_key=Mock(return_value=principal_id),
+        profile_page_current_payload=AsyncMock(return_value={"status": "ok", "page": None}),
+        profile_page_asset=AsyncMock(return_value=b"<!doctype html><title>Profile</title>"),
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    secret = "test-ui-controller-secret"
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    def headers(path: str) -> dict[str, str]:
+        return {
+            MEMORY_USER_KEY_HEADER: "avibe:local",
+            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                secret,
+                method="GET",
+                path=path,
+                user_key="avibe:local",
+            ),
+        }
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (
+                await client.get(f"{current_path}?language=en"),
+                await client.get(f"{current_path}?language=en", headers=headers(current_path)),
+                await client.get(asset_path, headers=headers(current_path)),
+                await client.get(asset_path, headers=headers(asset_path)),
+            )
+
+    current_missing, current, asset_mismatched, asset = asyncio.run(_go())
+
+    assert [current_missing.status_code, asset_mismatched.status_code] == [403, 403]
+    assert current.status_code == 200
+    assert current.json() == {"status": "ok", "page": None}
+    assert asset.status_code == 200
+    assert asset.content.startswith(b"<!doctype html>")
+    assert asset.headers["content-type"].startswith("text/html")
+    runtime.profile_page_current_payload.assert_awaited_once_with(principal_id, PROJECT, "en")
+    runtime.profile_page_asset.assert_awaited_once_with(
+        principal_id,
+        PROJECT,
+        "en",
+        artifact_id,
+        "index.html",
+    )
 
 
 def test_memory_internal_reads_reject_an_unassociated_agent_session():

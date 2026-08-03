@@ -3551,14 +3551,24 @@
       "implicitTraits": "Preferences and patterns",
       "basis": "Basis",
       "evidence": "Evidence",
-      "generateReport": "Generate profile report",
-      "generatingReport": "Generating report…",
-      "reportTitle": "Profile report",
-      "reportFailed": "Couldn't generate your profile report.",
-      "reportStale": "Your profile changed while the report was generated. Refresh and try again.",
+      "generatePage": "Generate profile page",
+      "generatingPage": "Generating page…",
+      "pageTitle": "Profile page",
+      "pageLoadFailed": "Couldn't restore your saved profile page.",
+      "pageGenerationFailed": "Couldn't generate your profile page.",
+      "noPage": "No generated profile page yet.",
+      "openPage": "Open profile page",
+      "loadingPage": "Loading saved profile page…",
+      "generatedAt": "Generated",
+      "sourceUpdatedAt": "Profile source",
+      "pageFreshness": {
+        "current": "Current",
+        "stale": "Profile updated",
+        "unknown": "Freshness unknown"
+      },
       "reportWarning": {
-        "empty": "There is no profile available to turn into a report yet.",
-        "unstructured": "This provider profile can't be turned into a report yet."
+        "empty": "There is no profile available to turn into a page yet.",
+        "unstructured": "This provider profile can't be turned into a page yet."
       },
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
@@ -3615,10 +3625,11 @@
     "clear": {
       "button": "Clear all",
       "confirmTitle": "Clear all local Memory data?",
-      "confirmDescription": "This removes your distilled profile, episodes, facts, and any pending queued text on this install.",
+      "confirmDescription": "This removes your distilled profile, generated profile pages, episodes, facts, and any pending queued text on this install.",
       "removesTitle": "This removes:",
       "removes": [
         "Your visible distilled profile",
+        "Generated Memory profile pages",
         "Hidden local buffers and indexes used to build it",
         "Pending and finished items in the local processing queue"
       ],

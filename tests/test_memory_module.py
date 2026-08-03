@@ -29,6 +29,7 @@ from core.memory.module import (
     MIN_FREE_DISK_BYTES,
     MemoryModule,
 )
+from core.memory.profile_page import MemoryProfilePageStore
 from core.memory.store import Delivered, MemoryStore, TERMINAL_TOMBSTONE_RETENTION
 
 
@@ -51,6 +52,7 @@ from core.memory.types import (
     MemoryItems,
     MemoryProfile,
     MemoryProfileExplicitInfo,
+    MemoryProfilePageSource,
     MemoryProfileReport,
     MemoryProfileTrait,
     OperationFailed,
@@ -59,6 +61,23 @@ from core.memory.worker import BREAKER_RETRY_SECONDS, MemoryWorker, SYSTEM_PAUSE
 
 
 ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
+
+
+def _page_source(
+    generated_at: str,
+    source_updated_at: str | None,
+    *,
+    title: str = "How you work",
+) -> MemoryProfilePageSource:
+    source_time = (
+        ""
+        if source_updated_at is None
+        else f'<time data-avibe-source-updated-at datetime="{source_updated_at}">{source_updated_at}</time>'
+    )
+    return MemoryProfilePageSource(
+        index_html=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title><link rel="stylesheet" href="./styles.css"></head><body><main data-avibe-memory-profile-page="1"><time data-avibe-generated-at datetime="{generated_at}">{generated_at}</time>{source_time}<h1>{title}</h1></main></body></html>""",
+        styles_css="body { margin: 0; overflow-wrap: anywhere; } @media (max-width: 40rem) { body { padding: 1rem; } }",
+    )
 
 
 def _store_path(scope: Path) -> Path:
@@ -125,11 +144,16 @@ def _module(
         _write_owned_provider_root(provider_root, store)
         kwargs["provider_root"] = provider_root
     fake = provider or FakeMemoryProvider()
+    profile_page_store = kwargs.pop(
+        "profile_page_store",
+        MemoryProfilePageStore(tmp_path / "profile-pages"),
+    )
     module = MemoryModule(
         store,
         fake,
         enabled=enabled,
         disk_free_bytes=disk_free_bytes or (lambda: MIN_FREE_DISK_BYTES),
+        profile_page_store=profile_page_store,
         **kwargs,
     )
     return module, store, fake
@@ -818,7 +842,7 @@ async def test_profile_report_reuses_same_key_task_and_keeps_waiters_isolated(tm
             )
             self.report_calls = 0
 
-        async def generate_profile_report(self, profile, language):
+        async def generate_profile_page(self, profile, language, generated_at):
             assert language == "en"
             assert profile.updated_at == "2026-08-02T10:30:00Z"
             self.report_calls += 1
@@ -828,7 +852,7 @@ async def test_profile_report_reuses_same_key_task_and_keeps_waiters_isolated(tm
             except asyncio.CancelledError:
                 cancelled.set()
                 raise
-            return "Overview\n\nGenerated report."
+            return _page_source(generated_at, profile.updated_at)
 
     provider = BlockingReportProvider()
     module, _store, _provider = _module(tmp_path, provider=provider)
@@ -856,10 +880,16 @@ async def test_profile_report_reuses_same_key_task_and_keeps_waiters_isolated(tm
     assert cancelled.is_set() is False
 
     release.set()
-    assert await second == MemoryProfileReport(
-        report="Overview\n\nGenerated report.",
-        source_profile_updated_at="2026-08-02T10:30:00Z",
-    )
+    generated = await second
+    assert isinstance(generated, MemoryProfileReport)
+    assert generated.page is not None
+    assert generated.page.language == "en"
+    assert generated.page.source_profile_updated_at == "2026-08-02T10:30:00Z"
+    assert await module.profile_page_current(
+        principal_id="u-11111111111111111111111111111111",
+        project_id=PROJECT,
+        language="en",
+    ) == generated
     assert module._profile_report_tasks == {}
 
 
@@ -880,13 +910,13 @@ async def test_profile_report_keeps_different_languages_in_separate_tasks(tmp_pa
                 )
             )
 
-        async def generate_profile_report(self, profile, language):
+        async def generate_profile_page(self, profile, language, generated_at):
             del profile
             entered.add(language)
             if entered == {"en", "zh"}:
                 both_started.set()
             await release.wait()
-            return f"{language} report"
+            return _page_source(generated_at, None, title=f"{language} profile")
 
     provider = LanguageReportProvider()
     module, _store, _provider = _module(tmp_path, provider=provider)
@@ -904,8 +934,13 @@ async def test_profile_report_keeps_different_languages_in_separate_tasks(tmp_pa
     }
 
     release.set()
-    assert await english == MemoryProfileReport(report="en report")
-    assert await chinese == MemoryProfileReport(report="zh report")
+    english_result = await english
+    chinese_result = await chinese
+    assert isinstance(english_result, MemoryProfileReport) and english_result.page is not None
+    assert isinstance(chinese_result, MemoryProfileReport) and chinese_result.page is not None
+    assert english_result.page.language == "en"
+    assert chinese_result.page.language == "zh"
+    assert english_result.page.artifact_id != chinese_result.page.artifact_id
     assert module._profile_report_tasks == {}
 
 
@@ -927,8 +962,8 @@ async def test_profile_report_retries_after_failure_and_clear_cancels_before_cle
             )
             self.calls = 0
 
-        async def generate_profile_report(self, profile, language):
-            del profile, language
+        async def generate_profile_page(self, profile, language, generated_at):
+            del language
             self.calls += 1
             if self.calls == 1:
                 raise MemoryProviderFailure("memory_processing_failed")
@@ -939,7 +974,7 @@ async def test_profile_report_retries_after_failure_and_clear_cancels_before_cle
                 except asyncio.CancelledError:
                     cancelled.set()
                     raise
-            return "Retry succeeded."
+            return _page_source(generated_at, profile.updated_at)
 
     provider = ReportProvider()
 
@@ -967,7 +1002,8 @@ async def test_profile_report_retries_after_failure_and_clear_cancels_before_cle
     assert cleanup_observed_cancellation.is_set()
     assert await report_task == OperationFailed(error="memory_sidecar_unavailable")
     assert module._profile_report_tasks == {}
-    assert await module.profile_report(**request) == MemoryProfileReport(report="Retry succeeded.")
+    retry = await module.profile_report(**request)
+    assert isinstance(retry, MemoryProfileReport) and retry.page is not None
     assert module._profile_report_tasks == {}
 
 
@@ -992,15 +1028,15 @@ async def test_clear_stops_after_the_bounded_report_cancellation_drain(
                 )
             )
 
-        async def generate_profile_report(self, profile, language):
-            del profile, language
+        async def generate_profile_page(self, profile, language, generated_at):
+            del language
             entered.set()
             try:
                 await release.wait()
             except asyncio.CancelledError:
                 cancellation_seen.set()
                 await release.wait()
-            return "Too late."
+            return _page_source(generated_at, profile.updated_at)
 
     module, _store, _provider = _module(tmp_path, provider=CancellationIgnoringProvider())
     report = asyncio.create_task(
@@ -1022,6 +1058,50 @@ async def test_clear_stops_after_the_bounded_report_cancellation_drain(
     assert module._profile_report_tasks == {}
 
 
+async def test_profile_page_publication_drains_its_owned_thread_before_cancellation_completes(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingPublishStore(MemoryProfilePageStore):
+        def publish(self, **kwargs):
+            entered.set()
+            assert release.wait(timeout=5)
+            return super().publish(**kwargs)
+
+    provider = FakeMemoryProvider(
+        profile_items=(
+            MemoryItem(
+                kind="profile",
+                text="{}",
+                profile=MemoryProfile(summary="Known profile."),
+            ),
+        )
+    )
+    module, _store, _provider = _module(
+        tmp_path,
+        provider=provider,
+        profile_page_store=BlockingPublishStore(tmp_path / "profile-pages"),
+    )
+    report = asyncio.create_task(
+        module.profile_report(
+            principal_id="u-11111111111111111111111111111111",
+            project_id=PROJECT,
+            language="en",
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 2)
+
+    cancellation = asyncio.create_task(module._cancel_profile_reports())
+    await asyncio.sleep(0.05)
+    assert cancellation.done() is False
+
+    release.set()
+    assert await cancellation is True
+    assert await report == OperationFailed(error="memory_sidecar_unavailable")
+
+
 async def test_profile_report_returns_empty_unstructured_and_input_bound_results(tmp_path: Path) -> None:
     module, _store, provider = _module(tmp_path)
     request = {
@@ -1030,13 +1110,13 @@ async def test_profile_report_returns_empty_unstructured_and_input_bound_results
         "language": "zh",
     }
     assert await module.profile_report(**request) == MemoryProfileReport(
-        report=None,
+        page=None,
         report_warning="empty",
     )
 
     provider.profile_items = (MemoryItem(kind="profile", text='{"legacy":true}'),)
     assert await module.profile_report(**request) == MemoryProfileReport(
-        report=None,
+        page=None,
         report_warning="unstructured",
     )
 
@@ -1053,6 +1133,42 @@ async def test_profile_report_returns_empty_unstructured_and_input_bound_results
         project_id=PROJECT,
         language="en",
     ) == OperationFailed(error="memory_access_denied")
+
+
+async def test_clear_removes_published_profile_pages_and_retries_cleanup_failures(tmp_path: Path) -> None:
+    principal_id = "u-11111111111111111111111111111111"
+    profile = MemoryProfile(summary="Known profile.", updated_at="2026-08-02T10:30:00Z")
+    provider = FakeMemoryProvider(
+        profile_items=(MemoryItem(kind="profile", text="{}", profile=profile),),
+    )
+    module, store, _provider = _module(
+        tmp_path,
+        provider=provider,
+        owned_provider_root=True,
+        clear_provider_data=lambda: None,
+    )
+    request = {"principal_id": principal_id, "project_id": PROJECT, "language": "en"}
+
+    generated = await module.profile_report(**request)
+    assert isinstance(generated, MemoryProfileReport) and generated.page is not None
+    assert await module.clear() == ClearCompleted(epoch=1)
+    assert await module.profile_page_current(**request) == MemoryProfileReport(page=None)
+    assert store.get_meta().clear_in_progress is False
+
+    class FailingStore(MemoryProfilePageStore):
+        def clear_all(self) -> None:
+            raise OSError("page-cleanup-canary")
+
+    failed_module, failed_store, _provider = _module(
+        tmp_path / "failed",
+        provider=provider,
+        owned_provider_root=True,
+        clear_provider_data=lambda: None,
+        profile_page_store=FailingStore(tmp_path / "failed-pages"),
+    )
+
+    assert await failed_module.clear() == OperationFailed(error="memory_clear_failed")
+    assert failed_store.get_meta().clear_in_progress is True
 
 
 async def test_clear_is_idempotent_and_interrupted_clear_recovers_on_next_module(tmp_path: Path) -> None:

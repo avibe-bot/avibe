@@ -60,14 +60,14 @@ def serve(uds: Path) -> None:
                 {"status": "failed", "error": "memory_provider_response_invalid"},
                 status_code=200,
             )
-        profile, language = parsed
+        profile, language, generated_at = parsed
         generator = ProfileReportGenerator(
             base_url=os.environ.get("EVEROS_LLM__BASE_URL"),
             model=os.environ.get("EVEROS_LLM__MODEL"),
             api_key=os.environ.get("EVEROS_LLM__API_KEY"),
         )
         try:
-            report = await generator.generate(profile, language)
+            source = await generator.generate(profile, language, generated_at)
         except MemoryProviderFailure as failure:
             return JSONResponse({"status": "failed", "error": failure.error}, status_code=200)
         except Exception:
@@ -75,7 +75,16 @@ def serve(uds: Path) -> None:
                 {"status": "failed", "error": "memory_processing_failed"},
                 status_code=200,
             )
-        return JSONResponse({"status": "ok", "report": report}, status_code=200)
+        return JSONResponse(
+            {
+                "status": "ok",
+                "source": {
+                    "index_html": source.index_html,
+                    "styles_css": source.styles_css,
+                },
+            },
+            status_code=200,
+        )
 
     @app.middleware("http")
     async def guard(request: Any, call_next: Any) -> Any:
@@ -265,13 +274,19 @@ def _validate_get(payload: dict[str, Any]) -> str | None:
 
 def _profile_report_payload(
     payload: object,
-) -> tuple[MemoryProfile, Literal["en", "zh"]] | None:
+) -> tuple[MemoryProfile, Literal["en", "zh"], str] | None:
     """Parse the exact Avibe-owned profile-report body, never credentials."""
 
-    if not isinstance(payload, dict) or not _exact_keys(payload, {"language", "profile"}):
+    if not isinstance(payload, dict) or not _exact_keys(
+        payload,
+        {"language", "generated_at", "profile"},
+    ):
         return None
     language = payload.get("language")
     if language not in {"en", "zh"}:
+        return None
+    generated_at = _optional_profile_timestamp(payload.get("generated_at"))
+    if generated_at is None:
         return None
     profile_payload = payload.get("profile")
     if not isinstance(profile_payload, dict) or not _exact_keys(
@@ -300,6 +315,7 @@ def _profile_report_payload(
             updated_at=updated_at,
         ),
         language,
+        generated_at,
     )
 
 

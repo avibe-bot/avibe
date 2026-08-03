@@ -388,6 +388,57 @@ async def memory_profile_report(
     )
 
 
+async def memory_profile_report_current(
+    language: str,
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/profile/report"
+    return await _memory_request(
+        "GET",
+        f"{path}?language={language}",
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_profile_report_asset(
+    language: str,
+    artifact_id: str,
+    asset_name: str,
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = (
+        "/internal/memory/profile/report/view/"
+        f"{language}/{artifact_id}/{asset_name}"
+    )
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
+        ) as client:
+            response = await client.get(
+                path,
+                headers=_memory_user_key_headers("GET", path, user_key),
+            )
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {
+        "status_code": response.status_code,
+        "body": response.content,
+        "content_type": response.headers.get("content-type"),
+    }
+
+
 async def memory_search(
     query: str,
     limit: int,

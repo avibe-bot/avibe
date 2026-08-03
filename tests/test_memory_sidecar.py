@@ -9,6 +9,7 @@ import httpx
 from core.memory import everos
 from core.memory import sidecar
 from core.memory.sidecar import _processing_healthy_from_child_environment, _request_rejection
+from core.memory.types import MemoryProfilePageSource
 
 
 PROJECT = "p-22222222222222222222222222222222"
@@ -103,6 +104,7 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
 def test_sidecar_guard_allows_only_exact_profile_report_schema() -> None:
     payload = {
         "language": "en",
+        "generated_at": "2026-08-03T05:12:30Z",
         "profile": {
             "summary": "Prefers concise updates.",
             "explicit_info": [
@@ -193,15 +195,20 @@ def test_sidecar_report_route_builds_generator_from_child_environment_only(monke
         def __init__(self, **kwargs) -> None:
             received.update(kwargs)
 
-        async def generate(self, profile, language) -> str:
+        async def generate(self, profile, language, generated_at) -> MemoryProfilePageSource:
             received["profile"] = profile
             received["language"] = language
-            return "Overview\n\nReport."
+            received["generated_at"] = generated_at
+            return MemoryProfilePageSource(
+                index_html="<!doctype html><html><head></head><body></body></html>",
+                styles_css="body { margin: 0; }",
+            )
 
     class _Request:
         async def json(self):
             return {
                 "language": "zh",
+                "generated_at": "2026-08-03T05:12:30Z",
                 "profile": {
                     "summary": "喜欢简洁更新。",
                     "explicit_info": [],
@@ -224,17 +231,25 @@ def test_sidecar_report_route_builds_generator_from_child_environment_only(monke
     sidecar.serve(tmp_path / "everos.sock")
     response = asyncio.run(handlers["/avibe/v1/profile-report"](_Request()))
 
-    assert json.loads(response.body) == {"status": "ok", "report": "Overview\n\nReport."}
+    assert json.loads(response.body) == {
+        "status": "ok",
+        "source": {
+            "index_html": "<!doctype html><html><head></head><body></body></html>",
+            "styles_css": "body { margin: 0; }",
+        },
+    }
     assert {
         "base_url": received["base_url"],
         "model": received["model"],
         "api_key": received["api_key"],
         "language": received["language"],
+        "generated_at": received["generated_at"],
     } == {
         "base_url": "https://llm.example.test/v1",
         "model": "chat-model",
         "api_key": "llm-secret",
         "language": "zh",
+        "generated_at": "2026-08-03T05:12:30Z",
     }
     assert received["profile"].summary == "喜欢简洁更新。"
 
@@ -265,8 +280,11 @@ def test_sidecar_report_route_accepts_json_through_real_fastapi(monkeypatch, tmp
         def __init__(self, **_kwargs) -> None:
             return None
 
-        async def generate(self, _profile, _language) -> str:
-            return "Overview\n\nReport."
+        async def generate(self, _profile, _language, _generated_at) -> MemoryProfilePageSource:
+            return MemoryProfilePageSource(
+                index_html="<!doctype html><html><head></head><body></body></html>",
+                styles_css="body { margin: 0; }",
+            )
 
     monkeypatch.setattr(sidecar, "ProfileReportGenerator", _Generator)
     monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.1")
@@ -285,6 +303,7 @@ def test_sidecar_report_route_accepts_json_through_real_fastapi(monkeypatch, tmp
                 "/avibe/v1/profile-report",
                 json={
                     "language": "en",
+                    "generated_at": "2026-08-03T05:12:30Z",
                     "profile": {
                         "summary": "Prefers concise updates.",
                         "explicit_info": [],
@@ -297,7 +316,13 @@ def test_sidecar_report_route_accepts_json_through_real_fastapi(monkeypatch, tmp
     response = asyncio.run(request_report())
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "report": "Overview\n\nReport."}
+    assert response.json() == {
+        "status": "ok",
+        "source": {
+            "index_html": "<!doctype html><html><head></head><body></body></html>",
+            "styles_css": "body { margin: 0; }",
+        },
+    }
 
 
 def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path) -> None:

@@ -1,10 +1,10 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import type { MemoryProfile } from '../../../context/ApiContext';
+import type { MemoryProfile, MemoryProfilePageDescriptor } from '../../../context/ApiContext';
 import {
+  ProfilePageOutput,
   ProfileReportAction,
-  ProfileReportOutput,
   StructuredMemoryProfile,
   structuredProfileFromItems,
 } from './MemoryProfilePanel';
@@ -29,6 +29,18 @@ const PROFILE: MemoryProfile = {
     },
   ],
   updated_at: '2026-08-02T10:30:00Z',
+};
+
+const PAGE: MemoryProfilePageDescriptor = {
+  artifact_id: 'a'.repeat(32),
+  language: 'en',
+  generated_at: '2026-08-03T05:12:30Z',
+  published_at: '2026-08-03T05:12:31Z',
+  source_profile_updated_at: '2026-08-02T10:30:00Z',
+  source_profile_snapshot_id: `sha256:${'b'.repeat(64)}`,
+  prompt_contract_version: 2,
+  content_sha256: `sha256:${'c'.repeat(64)}`,
+  view_url: `/api/memory/profile/report/view/en/${'a'.repeat(32)}/index.html`,
 };
 
 describe('MemoryProfilePanel deterministic content', () => {
@@ -56,7 +68,7 @@ describe('MemoryProfilePanel deterministic content', () => {
     ).toBe(PROFILE);
   });
 
-  it('keeps hostile profile and report values inert while showing a report error separately', () => {
+  it('keeps hostile profile values inert and isolates a durable page in a sandboxed iframe', () => {
     const hostile: MemoryProfile = {
       ...PROFILE,
       summary: '<img src=x onerror=alert(1)>',
@@ -64,27 +76,29 @@ describe('MemoryProfilePanel deterministic content', () => {
     const html = renderToStaticMarkup(
       <>
         <StructuredMemoryProfile profile={hostile} t={t} />
-        <ProfileReportOutput
-          report={null}
+        <ProfilePageOutput
+          page={PAGE}
+          freshness="stale"
+          loading={false}
+          generating={true}
           warning={null}
           error="memory_sidecar_unavailable"
-          t={t}
-        />
-        <ProfileReportOutput
-          report={'Overview\n\n<script>alert(1)</script>'}
-          warning={null}
-          error={null}
+          onOpen={() => undefined}
           t={t}
         />
       </>,
     );
 
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
-    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).not.toContain('<img src=x');
-    expect(html).not.toContain('<script>alert(1)</script>');
     expect(html).toContain('memory_sidecar_unavailable');
-    expect(html).toContain('memory.profile.reportTitle');
+    expect(html).toContain('memory.profile.pageTitle');
+    expect(html).toContain('memory.profile.pageFreshness.stale');
+    expect(html).toContain('memory.profile.generatingPage');
+    expect(html).toContain('sandbox=""');
+    expect(html).toContain(PAGE.view_url);
+    expect(html).toContain(PAGE.generated_at);
+    expect(html).toContain(PAGE.source_profile_updated_at);
   });
 
   it('disables report generation until a structured profile is ready and shows the in-flight state', () => {
@@ -96,8 +110,8 @@ describe('MemoryProfilePanel deterministic content', () => {
     );
 
     expect(disabled).toContain('disabled=""');
-    expect(disabled).toContain('memory.profile.generateReport');
+    expect(disabled).toContain('memory.profile.generatePage');
     expect(generating).toContain('disabled=""');
-    expect(generating).toContain('memory.profile.generatingReport');
+    expect(generating).toContain('memory.profile.generatingPage');
   });
 });

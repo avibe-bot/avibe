@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FileText, Loader2, RefreshCw } from 'lucide-react';
+import { ExternalLink, FileText, Loader2, RefreshCw } from 'lucide-react';
 
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
@@ -9,14 +9,14 @@ import type {
   MemoryItem,
   MemoryItemsResult,
   MemoryProfile,
+  MemoryProfilePageDescriptor,
   MemoryProfileReportResult,
 } from '../../../context/ApiContext';
 import { classifyMemoryResult, memoryErrorMessage } from '../../../lib/memoryRead';
 import {
-  acceptsProfileReportCompletion,
-  acceptsProfileReportSnapshot,
+  acceptsProfilePageCompletion,
+  profilePageFreshness,
   profileReportLanguage,
-  profileReportRequestKey,
 } from './profileReportState';
 import { useMemoryResource } from './useMemoryResource';
 
@@ -24,18 +24,20 @@ type MemoryItemsOk = Extract<MemoryItemsResult, { status: 'ok' }>;
 type MemoryProfileReportOk = Extract<MemoryProfileReportResult, { status: 'ok' }>;
 type Translate = (key: string) => string;
 
-type ProfileReportViewState = {
-  key: string | null;
+type ProfilePageViewState = {
+  language: 'en' | 'zh';
   loading: boolean;
-  report: string | null;
+  generating: boolean;
+  page: MemoryProfilePageDescriptor | null;
   warning: 'empty' | 'unstructured' | null;
   error: string | null;
 };
 
-const emptyProfileReportState = (key: string): ProfileReportViewState => ({
-  key,
-  loading: false,
-  report: null,
+const emptyProfilePageState = (language: 'en' | 'zh', loading = false): ProfilePageViewState => ({
+  language,
+  loading,
+  generating: false,
+  page: null,
   warning: null,
   error: null,
 });
@@ -100,32 +102,83 @@ export const ProfileReportAction: React.FC<{
 }> = ({ enabled, generating, onGenerate, t }) => (
   <Button variant="secondary" size="sm" onClick={onGenerate} disabled={!enabled || generating}>
     {generating ? <Loader2 className="size-3.5 animate-spin" /> : <FileText className="size-3.5" />}
-    {generating ? t('memory.profile.generatingReport') : t('memory.profile.generateReport')}
+    {generating ? t('memory.profile.generatingPage') : t('memory.profile.generatePage')}
   </Button>
 );
 
-export const ProfileReportOutput: React.FC<{
-  report: string | null;
+export const ProfilePageOutput: React.FC<{
+  page: MemoryProfilePageDescriptor | null;
+  freshness: 'current' | 'stale' | 'unknown';
+  loading: boolean;
+  generating: boolean;
   warning: 'empty' | 'unstructured' | null;
   error: string | null;
+  onOpen: () => void;
   t: Translate;
-}> = ({ report, warning, error, t }) => {
-  if (error) {
-    return <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>;
-  }
-  if (report) {
-    return (
-      <section className="border-t border-border pt-4">
-        <h3 className="text-[12px] font-semibold text-foreground">{t('memory.profile.reportTitle')}</h3>
-        <pre className="mt-2 whitespace-pre-wrap break-words font-sans text-[13px] leading-relaxed text-foreground">{report}</pre>
-      </section>
-    );
-  }
-  if (warning) {
-    return <p className="text-[12px] text-muted">{t(`memory.profile.reportWarning.${warning}`)}</p>;
-  }
-  return null;
-};
+}> = ({ page, freshness, loading, generating, warning, error, onOpen, t }) => (
+  <section className="border-t border-border pt-4">
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <h3 className="text-[12px] font-semibold text-foreground">{t('memory.profile.pageTitle')}</h3>
+        {page ? (
+          <Badge variant={freshness === 'current' ? 'success' : freshness === 'stale' ? 'warning' : 'secondary'}>
+            {t(`memory.profile.pageFreshness.${freshness}`)}
+          </Badge>
+        ) : null}
+        {generating ? <Badge variant="info">{t('memory.profile.generatingPage')}</Badge> : null}
+      </div>
+      {page ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onOpen}
+          aria-label={t('memory.profile.openPage')}
+          title={t('memory.profile.openPage')}
+        >
+          <ExternalLink className="size-4" />
+        </Button>
+      ) : null}
+    </div>
+    {error ? (
+      <div className="mt-3 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+        {error}
+      </div>
+    ) : null}
+    {warning ? (
+      <p className="mt-3 text-[12px] text-muted">{t(`memory.profile.reportWarning.${warning}`)}</p>
+    ) : null}
+    {page ? (
+      <>
+        <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-muted">
+          <div className="flex min-w-0 gap-1.5">
+            <dt>{t('memory.profile.generatedAt')}</dt>
+            <dd className="break-all font-mono text-foreground">{page.generated_at}</dd>
+          </div>
+          {page.source_profile_updated_at ? (
+            <div className="flex min-w-0 gap-1.5">
+              <dt>{t('memory.profile.sourceUpdatedAt')}</dt>
+              <dd className="break-all font-mono text-foreground">{page.source_profile_updated_at}</dd>
+            </div>
+          ) : null}
+        </dl>
+        <iframe
+          key={page.artifact_id}
+          src={page.view_url}
+          title={t('memory.profile.pageTitle')}
+          sandbox=""
+          className="mt-3 h-[560px] min-h-[360px] w-full border border-border bg-white"
+        />
+      </>
+    ) : loading || generating ? (
+      <div className="mt-3 flex h-24 items-center justify-center gap-2 text-sm text-muted">
+        <Loader2 className="size-4 animate-spin" />
+        {t('memory.profile.loadingPage')}
+      </div>
+    ) : (
+      <p className="mt-3 text-[12px] text-muted">{t('memory.profile.noPage')}</p>
+    )}
+  </section>
+);
 
 export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
   const { t, i18n } = useTranslation();
@@ -134,7 +187,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
   // (or simply zero items) renders as the graceful "not available"/empty copy. A closed
   // failure — sidecar down, provider outage, timeout, etc. — is a real error and the
   // resource surfaces it distinctly per its code.
-  const { data, error, loading, reload, revision: profileRevision } = useMemoryResource<MemoryItemsOk>({
+  const { data, error, loading, reload } = useMemoryResource<MemoryItemsOk>({
     read: api.getMemoryProfile,
     failureMessageKey: 'memory.profile.loadFailed',
     enabled,
@@ -143,76 +196,128 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
     resetDataOnError: true,
   });
   const reportLanguage = profileReportLanguage(i18n.language);
-  const reportKey = profileReportRequestKey(profileRevision, reportLanguage);
-  const reportKeyRef = useRef(reportKey);
-  reportKeyRef.current = reportKey;
-  const [reportState, setReportState] = useState<ProfileReportViewState>(() => emptyProfileReportState(reportKey));
+  const pageLanguageRef = useRef(reportLanguage);
+  pageLanguageRef.current = reportLanguage;
+  const [pageState, setPageState] = useState<ProfilePageViewState>(() =>
+    emptyProfilePageState(reportLanguage, true),
+  );
 
   useEffect(() => {
     void reload();
   }, [reload]);
 
-  // A successful deterministic refresh or a language switch immediately hides
-  // the prior transient report. The request-key guard below discards any late
-  // completion from that older snapshot.
   useEffect(() => {
-    setReportState((current) => (current.key === reportKey ? current : emptyProfileReportState(reportKey)));
-  }, [reportKey]);
-
-  const items = data?.items ?? null;
-  const structuredProfile = structuredProfileFromItems(items);
-  const visibleReport = reportState.key === reportKey ? reportState : emptyProfileReportState(reportKey);
-
-  const generateReport = useCallback(async () => {
-    if (!structuredProfile) return;
-    const requestKey = reportKey;
-    setReportState({ key: requestKey, loading: true, report: null, warning: null, error: null });
-    try {
-      const outcome = classifyMemoryResult<MemoryProfileReportOk>(
-        await api.generateMemoryProfileReport(reportLanguage),
-      );
-      if (!acceptsProfileReportCompletion(requestKey, reportKeyRef.current)) return;
-      if (outcome.kind === 'ok') {
+    if (!enabled) {
+      setPageState(emptyProfilePageState(reportLanguage));
+      return;
+    }
+    let active = true;
+    const requestedLanguage = reportLanguage;
+    setPageState(emptyProfilePageState(requestedLanguage, true));
+    void (async () => {
+      try {
+        const outcome = classifyMemoryResult<MemoryProfileReportOk>(
+          await api.getMemoryProfilePage(requestedLanguage),
+        );
         if (
-          outcome.value.report !== null &&
-          !acceptsProfileReportSnapshot(structuredProfile.updated_at, outcome.value.source_profile_updated_at)
-        ) {
-          setReportState({
-            key: requestKey,
+          !active ||
+          !acceptsProfilePageCompletion(requestedLanguage, pageLanguageRef.current)
+        ) return;
+        if (outcome.kind === 'ok') {
+          setPageState({
+            language: requestedLanguage,
             loading: false,
-            report: null,
-            warning: null,
-            error: t('memory.profile.reportStale'),
+            generating: false,
+            page: outcome.value.page,
+            warning: outcome.value.report_warning ?? null,
+            error: null,
           });
           return;
         }
-        setReportState({
-          key: requestKey,
+        setPageState({
+          ...emptyProfilePageState(requestedLanguage),
+          error: memoryErrorMessage(t, outcome.code),
+        });
+      } catch {
+        if (
+          !active ||
+          !acceptsProfilePageCompletion(requestedLanguage, pageLanguageRef.current)
+        ) return;
+        setPageState({
+          ...emptyProfilePageState(requestedLanguage),
+          error: t('memory.profile.pageLoadFailed'),
+        });
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [api, enabled, reportLanguage, t]);
+
+  const items = data?.items ?? null;
+  const structuredProfile = structuredProfileFromItems(items);
+  const visiblePage = pageState.language === reportLanguage
+    ? pageState
+    : emptyProfilePageState(reportLanguage, true);
+  const freshness = profilePageFreshness(
+    data?.profile_snapshot_id,
+    visiblePage.page?.source_profile_snapshot_id,
+  );
+
+  const generateReport = useCallback(async () => {
+    if (!structuredProfile) return;
+    const requestedLanguage = reportLanguage;
+    setPageState((current) => ({
+      ...(current.language === requestedLanguage
+        ? current
+        : emptyProfilePageState(requestedLanguage)),
+      generating: true,
+      warning: null,
+      error: null,
+    }));
+    try {
+      const outcome = classifyMemoryResult<MemoryProfileReportOk>(
+        await api.generateMemoryProfilePage(requestedLanguage),
+      );
+      if (!acceptsProfilePageCompletion(requestedLanguage, pageLanguageRef.current)) return;
+      if (outcome.kind === 'ok') {
+        setPageState((current) => ({
+          ...(current.language === requestedLanguage
+            ? current
+            : emptyProfilePageState(requestedLanguage)),
           loading: false,
-          report: outcome.value.report,
+          generating: false,
+          page:
+            outcome.value.page ??
+            (current.language === requestedLanguage ? current.page : null),
           warning: outcome.value.report_warning ?? null,
           error: null,
-        });
+        }));
         return;
       }
-      setReportState({
-        key: requestKey,
-        loading: false,
-        report: null,
-        warning: null,
+      setPageState((current) => ({
+        ...(current.language === requestedLanguage
+          ? current
+          : emptyProfilePageState(requestedLanguage)),
+        generating: false,
         error: memoryErrorMessage(t, outcome.code),
-      });
+      }));
     } catch {
-      if (!acceptsProfileReportCompletion(requestKey, reportKeyRef.current)) return;
-      setReportState({
-        key: requestKey,
-        loading: false,
-        report: null,
-        warning: null,
-        error: t('memory.profile.reportFailed'),
-      });
+      if (!acceptsProfilePageCompletion(requestedLanguage, pageLanguageRef.current)) return;
+      setPageState((current) => ({
+        ...(current.language === requestedLanguage
+          ? current
+          : emptyProfilePageState(requestedLanguage)),
+        generating: false,
+        error: t('memory.profile.pageGenerationFailed'),
+      }));
     }
-  }, [api, reportKey, reportLanguage, structuredProfile, t]);
+  }, [api, reportLanguage, structuredProfile, t]);
+
+  const openPage = useCallback(() => {
+    if (!visiblePage.page) return;
+    window.open(visiblePage.page.view_url, '_blank', 'noopener,noreferrer');
+  }, [visiblePage.page]);
 
   if (!enabled) {
     return <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">{t('memory.profile.disabledHint')}</div>;
@@ -225,7 +330,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
         <div className="flex items-center gap-2">
           <ProfileReportAction
             enabled={Boolean(structuredProfile) && !loading}
-            generating={visibleReport.loading}
+            generating={visiblePage.generating}
             onGenerate={() => void generateReport()}
             t={t}
           />
@@ -265,17 +370,21 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
               )}
             </div>
           ))}
-          {structuredProfile ? (
-            <ProfileReportOutput
-              report={visibleReport.report}
-              warning={visibleReport.warning}
-              error={visibleReport.error}
-              t={t}
-            />
-          ) : null}
-          <p className="px-1 text-[11px] text-muted">{t('memory.profile.sourceNote')}</p>
         </div>
       )}
+      <ProfilePageOutput
+        page={visiblePage.page}
+        freshness={freshness}
+        loading={visiblePage.loading}
+        generating={visiblePage.generating}
+        warning={visiblePage.warning}
+        error={visiblePage.error}
+        onOpen={openPage}
+        t={t}
+      />
+      {items && items.length > 0 ? (
+        <p className="px-1 text-[11px] text-muted">{t('memory.profile.sourceNote')}</p>
+      ) : null}
     </div>
   );
 };

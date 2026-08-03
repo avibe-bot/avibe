@@ -27,6 +27,7 @@ from core.memory.artifact import (
 )
 from core.memory.everos import EverOSPort
 from core.memory.module import MemoryModule
+from core.memory.profile_page import MemoryProfilePageStore
 from core.memory.process import (
     EverOSProcess,
     EverOSProcessFactory,
@@ -45,6 +46,8 @@ from core.memory.types import (
     MemoryStatus,
     OperationFailed,
     memory_item_payload,
+    memory_profile_page_payload,
+    memory_profile_snapshot_id,
 )
 from core.memory.worker import ProcessingEvent
 
@@ -159,6 +162,9 @@ class MemoryRuntime:
                 artifact_fingerprint=self._artifact_manager.artifact_fingerprint() or "memory-runtime-unavailable",
                 compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
                 processing_event=self._processing_event,
+                profile_page_store=MemoryProfilePageStore(
+                    self._effective_home / "state" / "memory" / "profile-pages"
+                ),
             )
         except Exception as exc:
             self._store_error = exc
@@ -469,10 +475,18 @@ class MemoryRuntime:
         # provider let a concurrent read for another principal decide what this
         # caller was told.
         empty = isinstance(result, MemoryItems) and not result.items
-        return {
+        payload = {
             **_result_payload(result),
             "profile_warning": "empty" if empty else None,
         }
+        if isinstance(result, MemoryItems):
+            structured = next(
+                (item.profile for item in result.items if item.kind == "profile" and item.profile is not None),
+                None,
+            )
+            if structured is not None:
+                payload["profile_snapshot_id"] = memory_profile_snapshot_id(structured)
+        return payload
 
     async def profile_report_payload(
         self,
@@ -488,6 +502,40 @@ class MemoryRuntime:
                 project_id=project_id,
                 language=language,
             )
+        )
+
+    async def profile_page_current_payload(
+        self,
+        principal_id: str,
+        project_id: str,
+        language: str,
+    ) -> dict[str, Any]:
+        if not self.available:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        return _profile_report_payload(
+            await self.module.profile_page_current(
+                principal_id=principal_id,
+                project_id=project_id,
+                language=language,
+            )
+        )
+
+    async def profile_page_asset(
+        self,
+        principal_id: str,
+        project_id: str,
+        language: str,
+        artifact_id: str,
+        asset_name: str,
+    ) -> bytes | None | OperationFailed:
+        if not self.available:
+            return OperationFailed(error="memory_store_unavailable")
+        return await self.module.profile_page_asset(
+            principal_id=principal_id,
+            project_id=project_id,
+            language=language,
+            artifact_id=artifact_id,
+            asset_name=asset_name,
         )
 
     async def search_payload(
@@ -992,13 +1040,21 @@ def _profile_report_payload(result: MemoryProfileReportResult) -> dict[str, Any]
         if result.report_warning is not None:
             return {
                 "status": result.status,
-                "report": None,
+                "page": None,
                 "report_warning": result.report_warning,
             }
+        if result.page is None:
+            return {"status": result.status, "page": None}
+        page = memory_profile_page_payload(result.page)
         return {
             "status": result.status,
-            "report": result.report,
-            "source_profile_updated_at": result.source_profile_updated_at,
+            "page": {
+                **page,
+                "view_url": (
+                    "/api/memory/profile/report/view/"
+                    f"{result.page.language}/{result.page.artifact_id}/index.html"
+                ),
+            },
         }
     return {"status": "failed", "error": "memory_processing_failed"}
 

@@ -304,6 +304,73 @@ def test_memory_profile_report_requires_csrf_and_only_forwards_closed_language(m
     assert calls == [("zh", "avibe:local")]
 
 
+def test_memory_profile_page_restores_and_serves_sandboxable_private_assets(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    artifact_id = "a" * 32
+    calls: list[tuple[str, str]] = []
+
+    async def current(language: str, *, user_key: str):
+        calls.append(("current", f"{language}:{user_key}"))
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "page": {
+                    "artifact_id": artifact_id,
+                    "language": language,
+                    "view_url": f"/api/memory/profile/report/view/{language}/{artifact_id}/index.html",
+                },
+            },
+        }
+
+    async def asset(language: str, selected_id: str, asset_name: str, *, user_key: str):
+        calls.append(("asset", f"{language}:{selected_id}:{asset_name}:{user_key}"))
+        body = b"<!doctype html><title>Profile</title>" if asset_name == "index.html" else b"body{}"
+        return {"status_code": 200, "body": body, "content_type": "text/plain"}
+
+    monkeypatch.setattr(internal_client, "memory_profile_report_current", current)
+    monkeypatch.setattr(internal_client, "memory_profile_report_asset", asset)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = _local_headers()
+    environ = {"REMOTE_ADDR": "127.0.0.1"}
+
+    descriptor = client.get(
+        "/api/memory/profile/report?language=en",
+        headers=headers,
+        base_url=base_url,
+        environ_base=environ,
+    )
+    html = client.get(
+        f"/api/memory/profile/report/view/en/{artifact_id}/index.html",
+        headers=headers,
+        base_url=base_url,
+        environ_base=environ,
+    )
+    css = client.get(
+        f"/api/memory/profile/report/view/en/{artifact_id}/styles.css",
+        headers=headers,
+        base_url=base_url,
+        environ_base=environ,
+    )
+
+    assert descriptor.status_code == 200
+    assert descriptor.get_json()["page"]["artifact_id"] == artifact_id
+    assert html.status_code == 200
+    assert html.headers["content-type"].startswith("text/html")
+    assert html.headers["cache-control"] == "no-store, private"
+    assert html.headers["x-content-type-options"] == "nosniff"
+    assert "sandbox" in html.headers["content-security-policy"]
+    assert "script-src 'none'" in html.headers["content-security-policy"]
+    assert css.headers["content-type"].startswith("text/css")
+    assert calls == [
+        ("current", "en:avibe:local"),
+        ("asset", f"en:{artifact_id}:index.html:avibe:local"),
+        ("asset", f"en:{artifact_id}:styles.css:avibe:local"),
+    ]
+
+
 def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

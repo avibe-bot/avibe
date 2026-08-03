@@ -410,6 +410,57 @@ def test_memory_profile_report_signs_the_selected_ui_owner(monkeypatch, socket_p
     )
 
 
+def test_memory_profile_page_reads_sign_paths_and_keep_asset_bytes(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    requests: list[httpx.Request] = []
+    artifact_id = "a" * 32
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("index.html"):
+            return httpx.Response(200, content=b"<!doctype html><title>Profile</title>", headers={"content-type": "text/html"})
+        return httpx.Response(200, json={"status": "ok", "page": None})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            current = await internal_client.memory_profile_report_current(
+                "en",
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+            asset = await internal_client.memory_profile_report_asset(
+                "en",
+                artifact_id,
+                "index.html",
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+            return current, asset
+
+    current, asset = asyncio.run(_go())
+
+    assert current == {"status_code": 200, "body": {"status": "ok", "page": None}}
+    assert asset["body"].startswith(b"<!doctype html>")
+    assert [request.url.path for request in requests] == [
+        "/internal/memory/profile/report",
+        f"/internal/memory/profile/report/view/en/{artifact_id}/index.html",
+    ]
+    assert requests[0].url.query == b"language=en"
+    for request in requests:
+        expected_path = request.url.path
+        assert request.headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+            "test-ui-controller-secret",
+            method="GET",
+            path=expected_path,
+            user_key="avibe:remote:user-1",
+        )
+
+
 def test_memory_sync_read_helper_sends_agent_session_header(socket_path):
     captured: dict[str, str] = {}
 

@@ -22,6 +22,7 @@ from core.memory.types import (
     MemoryItem,
     MemoryProfile,
     MemoryProfileExplicitInfo,
+    MemoryProfilePageSource,
     MemoryProfileTrait,
     memory_profile_payload,
     is_memory_error_code,
@@ -50,7 +51,8 @@ _PROFILE_QUERY = "profile"
 _MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
 _PROFILE_REPORT_SIDECAR_TIMEOUT_SECONDS = 65.0
 _MAX_PROFILE_REPORT_REQUEST_BYTES = 64 * 1024
-_MAX_PROFILE_REPORT_OUTPUT_BYTES = 64 * 1024
+_MAX_PROFILE_PAGE_HTML_BYTES = 128 * 1024
+_MAX_PROFILE_PAGE_CSS_BYTES = 64 * 1024
 
 ProviderAttachment = CaptureAttachment
 
@@ -300,13 +302,24 @@ class EverOSPort:
         # principal, and a field here is whichever concurrent read finished last.
         return () if profile is None else (profile,)
 
-    async def generate_profile_report(self, profile: MemoryProfile, language: Literal["en", "zh"]) -> str:
-        """Ask the child-owned LLM route to narrate one validated profile snapshot."""
+    async def generate_profile_page(
+        self,
+        profile: MemoryProfile,
+        language: Literal["en", "zh"],
+        generated_at: str,
+    ) -> MemoryProfilePageSource:
+        """Ask the child-owned LLM route to author one static source package."""
 
-        if not isinstance(profile, MemoryProfile) or language not in {"en", "zh"}:
+        if (
+            not isinstance(profile, MemoryProfile)
+            or language not in {"en", "zh"}
+            or not isinstance(generated_at, str)
+            or not generated_at
+        ):
             raise MemoryProviderFailure("memory_provider_response_invalid")
         payload = {
             "language": language,
+            "generated_at": generated_at,
             "profile": memory_profile_payload(profile),
         }
         try:
@@ -328,12 +341,12 @@ class EverOSPort:
         if set(body) == {"status", "error"} and body.get("status") == "failed":
             error = body.get("error")
             raise MemoryProviderFailure(error if is_memory_error_code(error) else "memory_provider_response_invalid")
-        if set(body) != {"status", "report"} or body.get("status") != "ok":
+        if set(body) != {"status", "source"} or body.get("status") != "ok":
             raise MemoryProviderFailure("memory_provider_response_invalid")
-        report = _safe_profile_report(body.get("report"))
-        if report is None:
+        source = _safe_profile_page_source(body.get("source"))
+        if source is None:
             raise MemoryProviderFailure("memory_provider_response_invalid")
-        return report
+        return source
 
     async def health(self) -> bool:
         try:
@@ -735,19 +748,28 @@ def _safe_text(value: Any) -> str | None:
     return text
 
 
-def _safe_profile_report(value: Any) -> str | None:
+def _safe_profile_page_source(value: Any) -> MemoryProfilePageSource | None:
+    if not isinstance(value, dict) or set(value) != {"index_html", "styles_css"}:
+        return None
+    index_html = _safe_profile_page_asset(value.get("index_html"), _MAX_PROFILE_PAGE_HTML_BYTES)
+    styles_css = _safe_profile_page_asset(value.get("styles_css"), _MAX_PROFILE_PAGE_CSS_BYTES)
+    if index_html is None or styles_css is None:
+        return None
+    return MemoryProfilePageSource(index_html=index_html, styles_css=styles_css)
+
+
+def _safe_profile_page_asset(value: Any, maximum: int) -> str | None:
     if not isinstance(value, str):
         return None
-    text = value.strip()
     try:
-        encoded = text.encode("utf-8")
+        encoded = value.encode("utf-8")
     except UnicodeError:
         return None
-    if not text or len(encoded) > _MAX_PROFILE_REPORT_OUTPUT_BYTES:
+    if not value.strip() or len(encoded) > maximum:
         return None
-    if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in text):
+    if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
         return None
-    return text
+    return value
 
 
 def _record_date(*records: dict[str, Any]) -> str | None:
@@ -889,7 +911,12 @@ class MemoryProviderPort(Protocol):
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]: ...
 
-    async def generate_profile_report(self, profile: MemoryProfile, language: Literal["en", "zh"]) -> str: ...
+    async def generate_profile_page(
+        self,
+        profile: MemoryProfile,
+        language: Literal["en", "zh"],
+        generated_at: str,
+    ) -> MemoryProfilePageSource: ...
 
     async def health(self) -> bool: ...
 
@@ -909,13 +936,13 @@ class FakeMemoryProvider:
     flush_projects: list[str] = field(default_factory=list)
     search_scopes: list[tuple[str, str]] = field(default_factory=list)
     profile_scopes: list[tuple[str, str]] = field(default_factory=list)
-    profile_report_calls: list[tuple[MemoryProfile, Literal["en", "zh"]]] = field(default_factory=list)
+    profile_report_calls: list[tuple[MemoryProfile, Literal["en", "zh"], str]] = field(default_factory=list)
     ingest_failures: Deque[BaseException] = field(default_factory=deque)
     flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
     profile_failure: BaseException | None = None
     profile_report_failure: BaseException | None = None
-    profile_report_result: str = "Generated profile report."
+    profile_report_result: MemoryProfilePageSource | None = None
     health_failure: BaseException | None = None
     processing_health_failure: BaseException | None = None
 
@@ -951,11 +978,39 @@ class FakeMemoryProvider:
             raise self.profile_failure
         return self.profile_items
 
-    async def generate_profile_report(self, profile: MemoryProfile, language: Literal["en", "zh"]) -> str:
-        self.profile_report_calls.append((profile, language))
+    async def generate_profile_page(
+        self,
+        profile: MemoryProfile,
+        language: Literal["en", "zh"],
+        generated_at: str,
+    ) -> MemoryProfilePageSource:
+        self.profile_report_calls.append((profile, language, generated_at))
         if self.profile_report_failure is not None:
             raise self.profile_report_failure
-        return self.profile_report_result
+        if self.profile_report_result is not None:
+            return self.profile_report_result
+        source_time = (
+            ""
+            if profile.updated_at is None
+            else (
+                '<time data-avibe-source-updated-at '
+                f'datetime="{profile.updated_at}">{profile.updated_at}</time>'
+            )
+        )
+        return MemoryProfilePageSource(
+            index_html=(
+                '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                '<title>Profile</title><link rel="stylesheet" href="./styles.css">'
+                '</head><body><main data-avibe-memory-profile-page="1">'
+                f'<time data-avibe-generated-at datetime="{generated_at}">{generated_at}</time>'
+                f"{source_time}<h1>Profile</h1></main></body></html>"
+            ),
+            styles_css=(
+                "body { margin: 0; overflow-wrap: anywhere; } "
+                "@media (max-width: 40rem) { body { padding: 1rem; } }"
+            ),
+        )
 
     async def health(self) -> bool:
         if self.health_failure is not None:
