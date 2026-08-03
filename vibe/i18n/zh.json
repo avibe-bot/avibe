@@ -36,6 +36,7 @@
     "command": {
       "workdirMissing": "\u5de5\u4f5c\u76ee\u5f55\u4e0d\u5b58\u5728\uff1a{cwd}",
       "supervisorExitedDuringStartup": "\u547d\u4ee4\u76d1\u63a7\u8fdb\u7a0b\u5728\u542f\u52a8\u671f\u95f4\u9000\u51fa\u3002",
+      "workerNotRecorded": "\u672a\u542f\u52a8\u547d\u4ee4\uff1a\u65e0\u6cd5\u8bb0\u5f55\u5176\u76d1\u63a7\u8fdb\u7a0b\u3002",
       "supervisorFailed": "\u547d\u4ee4\u76d1\u63a7\u8fdb\u7a0b\u5931\u8d25\uff1a{detail}",
       "unknownSupervisorFailure": "\u672a\u77e5\u7684\u76d1\u63a7\u8fdb\u7a0b\u9519\u8bef\u3002",
       "protocolErrors": {

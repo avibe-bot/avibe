@@ -321,3 +321,17 @@ scenarios:
     # unname every live worker on the host at once. The settle pass now reads the record
     # off the row it is about to settle instead of trusting a set handed to it, and the
     # negative half of the same test keeps a fire with no record settling normally.
+  - id: SCT-037
+    name: a command whose worker cannot be recorded is never started
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_command_whose_worker_cannot_be_recorded_is_never_started
+    # The record's birth, which every other guard in this family presupposes. If the
+    # stamp does not land the fire runs unnamed, and the handshake is the one moment
+    # refusing is nearly free: the supervisor is still blocked on its spec, so nothing
+    # the user asked for has started. The negative half is the same judgement inverted --
+    # an identity that could not be CAPTURED does not refuse, because the usual cause is
+    # a supervisor that already exited and an uncapturable identity cannot be made
+    # trustworthy by persisting it.

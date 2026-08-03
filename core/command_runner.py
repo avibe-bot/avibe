@@ -258,11 +258,17 @@ async def run_supervised_command(
         **isolated_subprocess_kwargs(),
     )
     identity = capture_spawned_process_identity(process.pid, worker_marker)
-    if on_spawn is not None:
-        on_spawn(process.pid, identity)
 
     reader_tasks: list[asyncio.Task] = []
     try:
+        if on_spawn is not None:
+            # INSIDE the protected block, because the callback is allowed to REFUSE:
+            # the scheduled-task lane will not run a command whose worker it could not
+            # durably name, and a callback that raises must reap the tree like every
+            # other failure here rather than leaking the very orphan it is protecting
+            # against. Still before the spec is written, so the supervisor is blocked
+            # on stdin and nothing the user asked for has started yet.
+            on_spawn(process.pid, identity)
         if process.stdin is None:
             await terminate_and_communicate(process, logger, label)
             raise RuntimeError("watch worker supervisor stdin is unavailable")

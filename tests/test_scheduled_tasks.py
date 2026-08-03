@@ -21,6 +21,7 @@ from sqlalchemy import select, update
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.scheduled_tasks as scheduled_tasks
+from core import command_runner
 from config import paths
 from config.v2_settings import make_thread_native_id
 from core.controller import Controller
@@ -13551,10 +13552,21 @@ def test_canceling_a_command_fire_propagates_and_stamps_nothing(
 
     monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _tracking_runner)
 
+    # A real claimed run, because the execution id is not decoration: the fire records
+    # its worker onto that ``running`` row before it will run the user's command
+    # (SCT-037), and a fabricated id would be refused at the spawn -- leaving this test
+    # cancelling a fire that had already failed.
+    request = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert request is not None
+
     async def _exercise() -> None:
         fire = asyncio.ensure_future(
             service._execute_command_task(
-                task, execution_id="exec-cancel", disable_one_shot=False
+                task, execution_id=request.id, disable_one_shot=False
             )
         )
         # Cancel only once the child is genuinely being awaited: a cancel that landed
@@ -15390,6 +15402,108 @@ def test_a_probe_that_cannot_read_the_process_keeps_its_identity(
     row = service.request_store.get_run(request.id)
     assert row is not None and row["status"] != "running", (
         "the spent run was left ``running`` with nothing tracking it"
+    )
+
+
+def test_a_command_whose_worker_cannot_be_recorded_is_never_started(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-037 -- the handshake is the one moment a nameless worker can be refused.
+
+    Every other guard in this family protects a record that already exists. If the
+    stamp itself does not land, the fire runs a backup or deployment with nothing on
+    disk naming it, and a crash mid-command leaves the same unfindable orphan
+    SCT-023/029/031/032 exist to prevent -- reached before the record was ever written.
+
+    Refusing costs almost nothing HERE and only here: the supervisor is blocked reading
+    its spec off stdin, so the user's command has not started, and the runner reaps the
+    tree on the way out. So a captured identity that cannot be persisted fails the fire.
+
+    The negative half is the same judgement from the other side: an identity that could
+    not be CAPTURED does not refuse. Its dominant cause is a supervisor that already
+    exited, where there is no process to name, and no amount of persisting makes an
+    uncapturable identity trustworthy -- every kill path refuses a record it cannot
+    vouch for. Turning that into a refusal would stop honest commands from running.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    ran = tmp_path / "command-ran"
+    task = _add_command_task(
+        store, shell_command=f"touch {ran.name}", cwd=str(tmp_path)
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    supervisors: list[int] = []
+    real_capture = command_runner.capture_spawned_process_identity
+
+    def _remember_the_supervisor(pid, marker):
+        supervisors.append(pid)
+        return real_capture(pid, marker)
+
+    monkeypatch.setattr(
+        command_runner, "capture_spawned_process_identity", _remember_the_supervisor
+    )
+
+    real_record = type(service.request_store).record_command_worker
+
+    def _cannot_write(self, run_id, identity):
+        if identity is not None:
+            raise RuntimeError("database is locked")
+        return real_record(self, run_id, identity)
+
+    monkeypatch.setattr(
+        type(service.request_store), "record_command_worker", _cannot_write
+    )
+
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert not ran.exists(), (
+        "the command ran with nothing on disk naming the process running it; a crash "
+        "here leaves an orphan no later start can find"
+    )
+    run = service.request_store.get_run(queued.id)
+    assert run is not None and run["status"] == "failed", (
+        f"the refusal was not reported as a failed fire: {run and run['status']!r}"
+    )
+    assert "could not be recorded" in (run["error"] or ""), (
+        f"the user is not told why the command did not run: {run and run['error']!r}"
+    )
+    assert supervisors, "the supervisor never spawned, so nothing was refused"
+    for _ in range(100):
+        if process_isolation.probe_process_liveness(supervisors[0]) == "gone":
+            break
+        time.sleep(0.05)
+    assert process_isolation.probe_process_liveness(supervisors[0]) == "gone", (
+        "the refusal left the supervisor running -- the very leak it exists to prevent"
+    )
+
+    # The negative half: nothing to name is not the same as failing to name it.
+    monkeypatch.setattr(
+        type(service.request_store), "record_command_worker", real_record
+    )
+    monkeypatch.setattr(
+        command_runner, "capture_spawned_process_identity", lambda _pid, _marker: None
+    )
+    second = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    claimed = service.request_store.claim(second.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert ran.exists(), (
+        "a command whose identity could not be captured was refused; the usual cause "
+        "is a supervisor that already exited, and the honest ones must still run"
+    )
+    run = service.request_store.get_run(second.id)
+    assert run is not None and run["status"] == "succeeded", (
+        f"the uncaptured identity failed an otherwise fine fire: {run and run['status']!r}"
     )
 
 

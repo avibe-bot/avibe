@@ -3171,28 +3171,64 @@ class ScheduledTaskService:
             stderr or "", self._t, namespace="harness.command"
         )
 
-    def _record_command_worker(
+    def _require_command_worker_record(
         self,
         execution_id: str,
         identity: Optional[PersistedProcessIdentity],
     ) -> None:
-        """Stamp (or clear) the command worker on a fire, never failing the fire.
+        """Refuse to run a command whose worker could not be durably named.
 
-        Best-effort on purpose: this is bookkeeping for a crash that may never
-        happen, and a store hiccup here must not turn a command that ran fine into
-        a reported failure. It is also called from ``on_spawn``, whose exception
-        would abort the runner between the spawn and the handshake and leave behind
-        the very orphan it exists to prevent.
+        THE ONE MOMENT THIS CAN BE REFUSED FOR FREE. The supervisor is blocked reading
+        its spec off stdin, so the backup, deployment or migration has not started: an
+        exception here costs the user a reported failure, while continuing costs the
+        ability to ever find the process again if this service dies mid-command -- the
+        unrecoverable side of the same trade SCT-029/031/032 keep landing on. The runner
+        reaps the tree on the way out (the callback runs inside its protected block).
+
+        An UNCAPTURED identity is not that case and does not refuse. Its dominant cause
+        is a supervisor that has already exited -- ``psutil.NoSuchProcess`` -- where there
+        is no process to name and the handshake is about to report the worker's own,
+        better error; and an identity that could not be captured cannot be made
+        trustworthy by persisting it, because every kill path refuses a record it cannot
+        fully vouch for (``process_identity_from_payload``).
+
+        A refused stamp (``False``) means the row is no longer ``running``: the fire was
+        stopped or already settled, so nothing would ever read the record anyway. Failing
+        is right there too, and costs the user nothing -- a stop normalizes this fire to
+        ``canceled``, which owes no notice (SCT-027).
+        """
+
+        if identity is None:
+            logger.warning(
+                "command fire %s has no durable worker identity; a crash during this "
+                "command would leave it unfindable",
+                execution_id,
+            )
+            return
+        try:
+            stamped = self.request_store.record_command_worker(
+                execution_id, serialize_process_identity(identity)
+            )
+        except Exception as exc:
+            raise RuntimeError(self._t("harness.command.workerNotRecorded")) from exc
+        if not stamped:
+            raise RuntimeError(self._t("harness.command.workerNotRecorded"))
+
+    def _clear_command_worker(self, execution_id: str) -> None:
+        """Drop a fire's worker record, never failing the fire.
+
+        Best-effort on purpose, and the opposite trade from the stamp: this runs when
+        the process is gone or proven dead, so the record it removes protects nothing,
+        and a store hiccup must not turn a command that ran fine into a reported
+        failure. A record left behind by such a hiccup is harmless -- the next start
+        finds a pid it cannot vouch for and drops it.
         """
 
         try:
-            self.request_store.record_command_worker(
-                execution_id,
-                serialize_process_identity(identity) if identity is not None else None,
-            )
+            self.request_store.record_command_worker(execution_id, None)
         except Exception:
             logger.debug(
-                "failed to record command worker for %s", execution_id, exc_info=True
+                "failed to clear command worker for %s", execution_id, exc_info=True
             )
 
     def _record_executed_command(self, execution_id: str, task: ScheduledTask) -> None:
@@ -3297,7 +3333,7 @@ class ScheduledTaskService:
             if outcome == "unconfirmed" and run_id and self._retain_unreaped_command_worker(run_id, payload):
                 continue
             if run_id:
-                self._record_command_worker(run_id, None)
+                self._clear_command_worker(run_id)
 
     def _retain_unreaped_command_worker(
         self,
@@ -3334,7 +3370,7 @@ class ScheduledTaskService:
         )
         try:
             # The already-serialized payload, re-stamped with its attempt count:
-            # ``_record_command_worker`` takes a live identity and this record's
+            # ``_require_command_worker_record`` takes a live identity and this record's
             # process is precisely the one we could not inspect our way back to.
             return bool(self.request_store.record_command_worker(run_id, identity))
         except Exception:
@@ -6320,7 +6356,7 @@ class ScheduledTaskService:
                     cwd=spawn_cwd,
                     timeout_seconds=effective_timeout,
                     label=f"scheduled task {task.id}",
-                    on_spawn=lambda pid, identity: self._record_command_worker(
+                    on_spawn=lambda pid, identity: self._require_command_worker_record(
                         execution_id, identity
                     ),
                     max_output_bytes=COMMAND_TASK_OUTPUT_CAP_BYTES,
@@ -6374,7 +6410,7 @@ class ScheduledTaskService:
                 # stop raises: by the time control is here the runner has reaped
                 # the tree, so the stored identity now names a dead pid that the
                 # OS is free to hand to something else.
-                self._record_command_worker(execution_id, None)
+                self._clear_command_worker(execution_id)
 
         # THE ESCALATION IS COMPOSED BEFORE THE STAMP AND QUEUED BY IT. A definition
         # carrying ``on_failure == "agent"`` owes the user ONE Agent turn per failed

@@ -36,6 +36,7 @@
     "command": {
       "workdirMissing": "Working directory does not exist: {cwd}",
       "supervisorExitedDuringStartup": "Command supervisor exited during startup.",
+      "workerNotRecorded": "The command was not started because its worker could not be recorded.",
       "supervisorFailed": "Command supervisor failed: {detail}",
       "unknownSupervisorFailure": "Unknown supervisor failure.",
       "protocolErrors": {

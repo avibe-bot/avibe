@@ -258,3 +258,24 @@ observations:
       - add a catch-all that cancels the readers and reaps the tree before re-raising, so no exit from the post-spawn block leaves the tree alive
       - skip the reap when the supervisor is already collected, because a second consumer on those streams is its own defect
       - never let a failing teardown replace the original exception, which is the failure worth reporting
+  - id: OBS-HARNESS-COMMAND-TASK-017
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-037
+    summary: >-
+      The worker stamp was best-effort at the one moment it could be enforced for free.
+    previous_assumption: >-
+      Recording the worker is bookkeeping for a crash that may never happen, so a store
+      hiccup must never turn a command that ran fine into a reported failure.
+    observed_behavior: >-
+      That reasoning holds for CLEARING the record and fails for writing it. A stamp that
+      does not land leaves the fire running a backup or deployment with nothing on disk
+      naming it, which is the unfindable-orphan state the rest of this family exists to
+      prevent, reached before any record existed. And the cost of refusing is almost
+      nothing at that point: the supervisor is blocked reading its spec off stdin, so the
+      user's command has not started.
+    required_updates:
+      - fail the fire when a captured identity cannot be persisted, including when the stamp returns False because the row is no longer running
+      - do NOT refuse when the identity could not be captured, since the dominant cause is a supervisor that already exited and no persisted record can be trusted for a process that could not be inspected
+      - call on_spawn inside the runner's protected block, so a refusing callback reaps the tree instead of leaking the orphan it is protecting against
+      - keep the clear path best-effort, because the record it removes protects nothing and a leftover record is dropped by the next start anyway
