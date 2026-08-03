@@ -127,3 +127,24 @@ observations:
       - resolve that name to the catalog's durable agent id so the next rename cannot reopen the window
       - hold the write lock, because this transaction now reads the Agent catalog a concurrent rename rewrites
       - leave a removed Agent's spelling alone rather than inventing an identity, and apply the same fix to the watch lane's completion hook
+  - id: OBS-HARNESS-COMMAND-TASK-011
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-031
+    summary: >-
+      The liveness check in front of the reap read "I could not look" as "nothing is
+      there".
+    previous_assumption: >-
+      inspect_process_identity returning None means the pid is empty, so the record
+      naming that process is spent.
+    observed_behavior: >-
+      It returns None for an unreadable process too -- an exhausted fd table, a /proc
+      read losing a race, a platform refusing create_time. Startup is exactly when
+      those are likeliest, and the answer skipped the kill AND cleared the record, so
+      the fix for OBS-009 never engaged: the surviving backup became unfindable by
+      every later start, and the next fire could run beside it.
+    required_updates:
+      - split the probe into three answers at the primitive, beside the group-level status that already has them
+      - let only an empty pid retire the record, before the kill and after an unconfirmed one
+      - never signal a pid whose identity could not be read, since that is the coin flip the identity check exists to refuse
+      - keep the bounded retry as the cap, so a probe that never recovers cannot hold a run running for the life of the install

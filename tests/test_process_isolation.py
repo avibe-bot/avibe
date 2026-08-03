@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from core import watch_worker
@@ -24,6 +25,7 @@ from core.process_isolation import (
     process_group_identity_status,
     process_identity_matches,
     process_identity_subprocess_env,
+    probe_process_liveness,
     signal_process_tree,
     terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
@@ -76,6 +78,50 @@ def test_process_identity_reads_inherited_worker_marker(monkeypatch: pytest.Monk
     identity = inspect_process_identity(12345)
 
     assert identity == _live_identity()
+
+
+def test_probe_tells_an_empty_pid_apart_from_one_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three answers must stay three, because callers act oppositely on two of them.
+
+    ``inspect_process_identity`` folds "gone" and "could not look" into ``None``,
+    which is right for deciding whether to signal and wrong for deciding whether to
+    DISCARD the record that names the process: only an empty pid means there is
+    nothing left to keep a handle for.
+    """
+
+    assert probe_process_liveness(os.getpid()) == "alive"
+    assert probe_process_liveness(0) == "gone"
+    assert probe_process_liveness(-1) == "gone"
+
+    def _raise(exc: BaseException):
+        def _factory(_pid: int):
+            raise exc
+
+        return _factory
+
+    monkeypatch.setattr(
+        "core.process_isolation.psutil.Process", _raise(psutil.NoSuchProcess(12345))
+    )
+    assert probe_process_liveness(12345) == "gone"
+
+    monkeypatch.setattr(
+        "core.process_isolation.psutil.Process", _raise(ProcessLookupError())
+    )
+    assert probe_process_liveness(12345) == "gone"
+
+    # A process that is there but unreadable: an exhausted fd table on the way into
+    # ``/proc``, or a platform refusing ``create_time``.
+    monkeypatch.setattr(
+        "core.process_isolation.psutil.Process", _raise(OSError(24, "Too many open files"))
+    )
+    assert probe_process_liveness(12345) == "unknown"
+
+    monkeypatch.setattr(
+        "core.process_isolation.psutil.Process", _raise(psutil.AccessDenied(12345))
+    )
+    assert probe_process_liveness(12345) == "unknown"
 
 
 def test_process_identity_survives_exec_transition() -> None:

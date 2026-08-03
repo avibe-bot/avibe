@@ -251,3 +251,13 @@ scenarios:
     # definition's own spelling, because inventing an identity would bind the report to
     # a different Agent than the definition asks for:
     # tests/test_scheduled_tasks.py::test_an_archived_agent_keeps_the_escalations_own_spelling
+  - id: SCT-031
+    name: a liveness probe that cannot read the process keeps the worker's identity
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_probe_that_cannot_read_the_process_keeps_its_identity
+    # The primitive underneath, which is where the two answers are actually told
+    # apart -- an empty pid is "gone", an unreadable one is "unknown":
+    # tests/test_process_isolation.py::test_probe_tells_an_empty_pid_apart_from_one_it_cannot_read

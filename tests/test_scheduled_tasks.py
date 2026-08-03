@@ -24,6 +24,7 @@ from core.controller import Controller
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_mirror import mirror_harness_inbound
 from core.message_output import MessageOutput, stop_output_for
+from core.process_isolation import fingerprint_process_marker
 from core.run_settlement import (
     RUN_INTERRUPTION_REASONS,
     SETTLED_BY_BACKEND_REFRESH,
@@ -15034,6 +15035,97 @@ def test_a_worker_that_survives_the_reap_is_kept_for_the_next_start(
         asyncio.run(_restart_until_it_gives_up())
     except asyncio.TimeoutError:  # pragma: no cover - cleanup only
         pytest.fail("the cancelled command was left running")
+
+
+def test_a_probe_that_cannot_read_the_process_keeps_its_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-031 -- "I could not look" is not "it is gone", and only gone retires a record.
+
+    SCT-029 keeps the handle when the KILL comes back unconfirmed. The liveness
+    question in front of that kill had the same two answers folded into one:
+    ``inspect_process_identity`` returns ``None`` both for an empty pid and for a
+    probe that could not read the process table at all -- an exhausted fd table, a
+    ``/proc`` read losing a race, a platform refusing ``create_time``. Treating the
+    second as absence skipped the kill AND cleared the record, so a backup still
+    writing became unfindable by every later start too, and the next fire could run
+    beside it.
+
+    Reads as a restart, because that is the only caller: the reap runs from
+    ``__init__``, before ``recover_processing`` settles the row the identity lives on.
+    The cap applies here as well -- a probe that never recovers must not hold a run
+    ``running`` for the life of the install.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    request = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert request is not None
+
+    # A worker record for a process that is never spawned: the probe is what is
+    # under test, so the pid only has to survive ``process_identity_from_payload``.
+    assert service.request_store.record_command_worker(
+        request.id,
+        {
+            "pid": 424242,
+            "create_time": 1.0,
+            "worker_fingerprint": fingerprint_process_marker("orphaned-worker"),
+        },
+    )
+    assert service.request_store.list_running_command_workers(), (
+        "the fixture did not leave the run in the state the startup reap scans"
+    )
+
+    signalled: list[int] = []
+
+    def _record_kill(pid, *_args, **_kwargs) -> bool:
+        signalled.append(pid)
+        return True
+
+    monkeypatch.setattr(scheduled_tasks, "probe_process_liveness", lambda _pid: "unknown")
+    monkeypatch.setattr(
+        scheduled_tasks, "terminate_process_tree_by_pid", _record_kill
+    )
+
+    def _worker_record() -> Optional[dict[str, Any]]:
+        workers = service.request_store.list_running_command_workers()
+        return workers[0]["identity"] if workers else None
+
+    cap = ScheduledTaskService._MAX_COMMAND_WORKER_REAP_ATTEMPTS
+    for attempt in range(1, cap):
+        _scheduled_service_with_ledger(tmp_path, store, [])
+        identity = _worker_record()
+        assert identity is not None, (
+            f"start {attempt} read the process as gone because it could not read it at "
+            "all, and threw away the only handle on it"
+        )
+        assert identity.get("reap_attempts") == attempt, (
+            f"the attempt count did not advance: {identity!r}"
+        )
+        row = service.request_store.get_run(request.id)
+        assert row is not None and row["status"] == "running", (
+            "the run was settled while its worker was unaccounted for; "
+            "``list_running_command_workers`` will not see it again"
+        )
+
+    assert signalled == [], (
+        "the reap signalled a pid whose identity it could not read; that is the "
+        "coin flip on an unrelated process the identity check exists to refuse"
+    )
+
+    # The cap. Still unreadable, but the run stops being held open on its behalf.
+    _scheduled_service_with_ledger(tmp_path, store, [])
+    assert _worker_record() is None, "the reap never gave up; this run stays running forever"
+    row = service.request_store.get_run(request.id)
+    assert row is not None and row["status"] != "running", (
+        "the spent run was left ``running`` with nothing tracking it"
+    )
 
 
 def test_an_interrupted_command_fire_clears_the_previous_exit_code(

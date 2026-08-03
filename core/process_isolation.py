@@ -13,13 +13,18 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import psutil
 
 KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 PROCESS_IDENTITY_ENV = "AVIBE_PROCESS_IDENTITY"
 DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS = 3.0
+
+#: What a liveness probe could actually establish about a pid: a process is there,
+#: nothing is there, or this pass could not tell. Only the middle answer means a
+#: durable handle on that process has stopped being worth keeping.
+ProcessLivenessStatus = Literal["alive", "gone", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -166,6 +171,35 @@ def inspect_process_identity(pid: int) -> ProcessIdentity | None:
     except (psutil.Error, OSError, ValueError):
         return None
     return identity
+
+
+def probe_process_liveness(pid: int) -> ProcessLivenessStatus:
+    """Say whether a pid is occupied, free, or unanswerable right now.
+
+    ``inspect_process_identity`` collapses the third answer into ``None``, and for
+    its own callers that is correct: they are deciding whether they may still
+    *steer* a process, and a pid they cannot read is one they must not signal
+    either way. A caller deciding whether to DISCARD the only durable handle on
+    that process needs the answers apart. "Gone" retires the record because there
+    is nothing left to kill; "unanswerable" -- an exhausted fd table, a
+    ``/proc`` read losing a race, a platform refusing ``create_time`` -- says
+    only that this pass could not look, and throwing the record away then makes a
+    still-running backup unkillable by every pass after it too.
+
+    Mirrors ``process_group_identity_status``: the same three-way verdict, at the
+    granularity of a single pid rather than a group.
+    """
+
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        # Not a pid at all, so there is no process to preserve a handle for.
+        return "gone"
+    try:
+        _open_process_identity(pid)
+    except (psutil.NoSuchProcess, ProcessLookupError):
+        return "gone"
+    except (psutil.Error, OSError, ValueError):
+        return "unknown"
+    return "alive"
 
 
 def isolated_subprocess_kwargs() -> dict[str, Any]:

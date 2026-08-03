@@ -74,7 +74,7 @@ from core.delivery_evidence import (
 )
 from core.process_isolation import (
     PersistedProcessIdentity,
-    inspect_process_identity,
+    probe_process_liveness,
     process_identity_from_payload,
     serialize_process_identity,
     terminate_process_tree_by_pid,
@@ -3205,11 +3205,17 @@ class ScheduledTaskService:
         The tree, not the leaf: the worker is a supervisor, and the backup or
         migration doing the side effects is its child.
 
-        RETURNS THE RUNS WHOSE WORKER IS STILL ALIVE, and that is the whole reason
-        this returns anything. A kill can come back unconfirmed -- a process wedged
-        in uninterruptible I/O outlives even ``SIGKILL``, and a group whose leader
-        moved cannot be signalled at all -- and clearing the record then would throw
-        away the ONLY durable handle on a backup or deployment that is still writing.
+        RETURNS THE RUNS THIS PASS COULD NOT PROVE DEAD, and that is the whole reason
+        this returns anything. Only one answer retires the record: an empty pid.
+        Every other answer is a maybe, and a maybe must keep the handle -- a kill can
+        come back unconfirmed (a process wedged in uninterruptible I/O outlives even
+        ``SIGKILL``, and a group whose leader moved cannot be signalled at all), and
+        the probe itself can fail to read the process table at all, which says
+        nothing about the process. Clearing the record on a maybe throws away the
+        ONLY durable handle on a backup or deployment that is still writing, and it
+        is unrecoverable: this row is where the identity lives, so no later start can
+        find that process even in principle.
+
         ``list_running_command_workers`` reads ``running`` rows, so the caller leaves
         these unsettled: the record survives, the next start tries again, and
         ``_MAX_COMMAND_WORKER_REAP_ATTEMPTS`` stops that from becoming a run that is
@@ -3231,8 +3237,16 @@ class ScheduledTaskService:
                 if isinstance(pid, int) and not isinstance(pid, bool)
                 else None
             )
-            alive = expected is not None and inspect_process_identity(expected.pid) is not None
-            if alive:
+            # An untrusted payload counts as gone: ``terminate_process_tree_by_pid``
+            # would refuse it on every future pass too, so keeping it would pin the
+            # run ``running`` without ever buying a kill.
+            liveness = (
+                probe_process_liveness(expected.pid)
+                if expected is not None
+                else "gone"
+            )
+            reaped = liveness == "gone"
+            if liveness == "alive":
                 logger.warning(
                     "reaping orphaned command worker pid=%s from run %s",
                     expected.pid,
@@ -3257,12 +3271,20 @@ class ScheduledTaskService:
                 if not reaped:
                     # The kill said "not confirmed", which is not the same as "still
                     # there": a recycled pid and a changed worker marker both answer
-                    # that way, and in both cases OUR worker is already gone. Only a
-                    # process still answering to the identity we hold is an orphan.
-                    reaped = inspect_process_identity(expected.pid) is None
-                if not reaped and run_id and self._retain_unreaped_command_worker(run_id, payload):
-                    unreaped.add(run_id)
-                    continue
+                    # that way, and in both cases OUR worker is already gone. Only an
+                    # empty pid retires the record -- a probe that cannot read the
+                    # process table proves nothing and must not.
+                    reaped = probe_process_liveness(expected.pid) == "gone"
+            elif liveness == "unknown":
+                logger.warning(
+                    "could not inspect command worker pid=%s from run %s; keeping its "
+                    "identity so a later start can still reach it",
+                    expected.pid,
+                    run_id,
+                )
+            if not reaped and run_id and self._retain_unreaped_command_worker(run_id, payload):
+                unreaped.add(run_id)
+                continue
             if run_id:
                 self._record_command_worker(run_id, None)
         return frozenset(unreaped)
