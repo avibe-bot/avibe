@@ -23,6 +23,7 @@ import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
 import type { DependencyItem } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { errorMessage } from '@/lib/errorMessage';
 
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
 // required local runtime (icon tile + name/REQUIRED + detail + status pill +
@@ -73,8 +74,8 @@ export const SettingsDependenciesPage: React.FC = () => {
         res.ok ? 'success' : 'error'
       );
       await refresh();
-    } catch (e: any) {
-      showToast(e?.message || t('settings.dependencies.installFailed'), 'error');
+    } catch (e) {
+      showToast(errorMessage(e) || t('settings.dependencies.installFailed'), 'error');
     } finally {
       setBusy(null);
     }

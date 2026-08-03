@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { scanMigrationWhenEnabled } from './MigrationBanner';
+import { scanMigrationWhenEnabled } from './migrationScan';
 
 describe('scanMigrationWhenEnabled', () => {
   it('does not issue a migration scan while Model Hub is disabled', async () => {

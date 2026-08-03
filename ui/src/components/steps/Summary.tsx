@@ -22,6 +22,7 @@ import { withoutConfiguredSecretMarker, withSecretDraft, withSecretDrafts } from
 import { EyebrowBadge, WizardCard } from '../visual';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
+import { errorMessage } from '@/lib/errorMessage';
 
 interface SummaryProps {
   data: any;
@@ -161,8 +162,8 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
       setTimeout(() => {
         navigate('/');
       }, 1000);
-    } catch (exc: any) {
-      const message = exc && exc.message ? exc.message : 'Failed to save configuration';
+    } catch (exc) {
+      const message = errorMessage(exc) || 'Failed to save configuration';
       setError(message);
     } finally {
       setSaving(false);

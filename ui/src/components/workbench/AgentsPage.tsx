@@ -49,6 +49,7 @@ import {
   BACKEND_TEXT as BACKEND_ICON_CLASS,
   type Backend,
 } from '../../lib/backendAccent';
+import { errorMessage } from '@/lib/errorMessage';
 
 type AgentsTabKey = 'definitions' | 'running';
 const AGENTS_TAB_ORDER: AgentsTabKey[] = ['definitions', 'running'];
@@ -90,8 +91,8 @@ export const AgentsPage: React.FC = () => {
         const fresh = result.agents.find((a) => a.name === selected.name);
         if (!fresh) setSelected(null);
       }
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
     } finally {
       setLoading(false);
     }
@@ -224,8 +225,8 @@ export const AgentsPage: React.FC = () => {
           // never optimistically, or a failed fetch hides the list with no panel.
           if (openDetail) setDetailOpen(true);
         }
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
       }
     },
     [api],
@@ -268,8 +269,8 @@ export const AgentsPage: React.FC = () => {
         setSelected(result.agent);
         refresh();
       }
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
     }
   };
 
@@ -301,8 +302,8 @@ export const AgentsPage: React.FC = () => {
       } else if (result.message) {
         setError(result.message);
       }
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
     }
   };
 
@@ -330,8 +331,8 @@ export const AgentsPage: React.FC = () => {
           'error',
         );
       }
-    } catch (err: any) {
-      showToast(t('agents.importFailed', { error: err?.message ?? String(err) }), 'error');
+    } catch (err) {
+      showToast(t('agents.importFailed', { error: errorMessage(err) ?? String(err) }), 'error');
     } finally {
       setImporting(null);
     }
@@ -740,8 +741,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
       await api.updateVibeAgent(agent.name, { name: trimmed });
       showToast(t('agents.renameSuccess'), 'success');
       onRenamed(trimmed);
-    } catch (err: any) {
-      showToast(err?.message ?? String(err), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) ?? String(err), 'error');
       setName(agent.name);
     } finally {
       setRenaming(false);
@@ -754,8 +755,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
     try {
       await onSetDefault();
       showToast(t('agents.detail.defaultSet', { name: agent.name }), 'success');
-    } catch (err: any) {
-      showToast(err?.message ?? String(err), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) ?? String(err), 'error');
     } finally {
       setSettingDefault(false);
     }

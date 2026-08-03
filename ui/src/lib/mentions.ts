@@ -57,7 +57,7 @@ export function dedupeReferences(refs: MentionReference[]): MentionReference[] {
 }
 
 function escapeMarkdownLabel(value: string): string {
-  return value.replace(/[\\\[\]]/g, (m) => `\\${m}`).replace(/\s*\n\s*/g, ' ');
+  return value.replace(/[\\[\]]/g, (m) => `\\${m}`).replace(/\s*\n\s*/g, ' ');
 }
 
 /**

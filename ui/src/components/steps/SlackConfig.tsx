@@ -11,6 +11,7 @@ import { ProxyUrlField } from '../shared/ProxyUrlField';
 import { StepHeader, StepShell } from '../shared/WizardStep';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { errorMessage } from '@/lib/errorMessage';
 
 interface SlackConfigProps {
   data: any;
@@ -110,8 +111,8 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
     try {
       const result = await api.slackAuthTest(botToken, proxyUrl);
       setAuthResult(result);
-    } catch (err: any) {
-      setAuthResult({ ok: false, error: err?.message || 'Request failed' });
+    } catch (err) {
+      setAuthResult({ ok: false, error: errorMessage(err) || 'Request failed' });
     } finally {
       setChecking(false);
     }

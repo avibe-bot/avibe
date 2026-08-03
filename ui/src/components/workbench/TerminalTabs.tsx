@@ -9,6 +9,7 @@ import { apiFetch } from '../../lib/apiFetch';
 import { acquireTerminalSlot, releaseTerminalSlot } from '../../lib/terminalSlots';
 import { MAX_RESTORED_TERMINAL_TABS, WINDOW_RESTORE_PARAM } from '../../lib/workbenchPersistence';
 import type { TerminalStatus } from './TerminalView';
+import { useLatestRef } from '@/lib/useLatestRef';
 
 // Lazy so xterm.js stays out of the main bundle until a terminal opens.
 const TerminalView = lazy(() => import('./TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -70,16 +71,19 @@ export const TerminalTabs: React.FC<{
   const { t } = useTranslation();
   const { getAuthSession } = useApi();
   const [identity, setIdentity] = useState<string | null | undefined>(undefined); // undefined = resolving
-  const tabSeq = useRef(0);
   // Restore the tab layout (count + custom titles) on reload for a windowed terminal, over fresh
   // slots/shells — the ephemeral session ids are never persisted (a deliberate security property).
+  // The initializer numbers its tabs 1..n from a local counter rather than from `tabSeq`, so it
+  // touches no ref during render; `tabSeq` picks up at n below and every later tab counts on from
+  // there, which is what keeps the keys unique.
   const [tabs, setTabs] = useState<Tab[]>(() => {
+    let seq = 0;
     const restore = windowed ? (params?.[WINDOW_RESTORE_PARAM] as TerminalRestore | undefined) : undefined;
     if (restore && Array.isArray(restore.tabs) && restore.tabs.length > 0) {
       // Cap at the backend session capacity before acquiring slots, so a corrupt/oversized array
       // can't open a flood of shells the terminal service can't admit.
       return restore.tabs.slice(0, MAX_RESTORED_TERMINAL_TABS).map((rt) => ({
-        key: ++tabSeq.current,
+        key: ++seq,
         slot: acquireTerminalSlot(),
         title: typeof rt?.title === 'string' ? rt.title : undefined,
       }));
@@ -88,8 +92,11 @@ export const TerminalTabs: React.FC<{
     // directory. The route terminal's first tab stays the persistent reattach (slot null); its cwd
     // tab is appended by the launch effect below instead.
     const firstCwd = windowed && typeof params?.cwd === 'string' ? (params.cwd as string) : undefined;
-    return [{ key: ++tabSeq.current, slot: windowed ? acquireTerminalSlot() : null, cwd: firstCwd }];
+    return [{ key: ++seq, slot: windowed ? acquireTerminalSlot() : null, cwd: firstCwd }];
   });
+  // Highest key handed out so far. Seeded from the initial tabs (keyed 1..n above); `useRef` keeps
+  // that first value, so later renders never reset it.
+  const tabSeq = useRef(tabs.length);
   const [active, setActive] = useState<number>(() => tabs[0]?.key ?? 0);
   // Whether sessions actually persist (tmux available) — reported by TerminalView's ready frame.
   // Drives the tab-bar badge so it never falsely promises persistence for a plain-shell fallback.
@@ -176,8 +183,7 @@ export const TerminalTabs: React.FC<{
 
   // Dispose every ephemeral session on unmount (window close) + on tab/page unload, reading
   // the live tabs from a ref so the listeners don't churn as tabs change.
-  const liveRef = useRef<{ tabs: Tab[]; resolve: (t: Tab) => string | null }>({ tabs, resolve: sessionIdFor });
-  liveRef.current = { tabs, resolve: sessionIdFor };
+  const liveRef = useLatestRef({ tabs, resolve: sessionIdFor });
   useEffect(() => {
     const onHide = () => {
       for (const tab of liveRef.current.tabs) {

@@ -29,6 +29,7 @@ import clsx from 'clsx';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { useApi } from '../../context/ApiContext';
+import { DEFAULT_TAB, harnessEmptyStateKey, harnessTabFromParam, TAB_ORDER, type TabKey } from './harnessTabs';
 import type {
   HarnessDefinitionCounts,
   HarnessDefinitionStatus,
@@ -79,10 +80,11 @@ import type {
   HarnessLifecycleState,
   HarnessRowAlert,
 } from './harnessLifecycle';
-import { loadHarnessAgentCatalog } from './harnessAgents';
+import { agentDisplayName, loadHarnessAgentCatalog } from './harnessAgents';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
+import { errorMessage } from '@/lib/errorMessage';
 
 // Detail-panel schedule, in words. The literal it was derived from is printed
 // beside it by the caller — humanizing must never be the only copy of a value
@@ -102,8 +104,6 @@ function formatSchedule(task: HarnessTask, t: (k: string, opts?: any) => string)
   return task.schedule_type || t('harness.unknownSchedule');
 }
 
-type TabKey = 'tasks' | 'watches' | 'runs';
-
 // Status segments per tab. Definitions filter by what they are doing; runs by
 // execution outcome. One control renders whichever set the tab needs.
 const RUN_STATUS_FILTERS = ['all', 'queued', 'running', 'succeeded', 'failed', 'canceled'] as const;
@@ -115,27 +115,6 @@ const RUN_STATUS_FILTERS = ['all', 'queued', 'running', 'succeeded', 'failed', '
 // selector also offers types read back from the ledger that the UI has no
 // built-in name for, and those are just as selectable.
 type RunTypeFilter = string;
-
-const TAB_ORDER: TabKey[] = ['tasks', 'watches', 'runs'];
-const DEFAULT_TAB: TabKey = 'tasks';
-
-// Which tab a ``?tab=`` param opens. Anything that is not a tab opens the
-// default rather than selecting nothing — ``?tab=webhooks`` still arrives from
-// links and bookmarks made before the Webhooks tab was removed, and must land
-// on Tasks, not on an empty page with no tab lit.
-//
-// One function rather than a guard here and a ``useState`` initializer three
-// hundred lines away, so removing a tab later cannot strand its old links.
-export function harnessTabFromParam(param: string | null | undefined): TabKey {
-  return (TAB_ORDER as string[]).includes(param ?? '') ? (param as TabKey) : DEFAULT_TAB;
-}
-
-export function harnessEmptyStateKey(kind: TabKey, hasStoredRows: boolean): string {
-  if (!hasStoredRows) {
-    return kind === 'tasks' ? 'harness.emptyTasks' : kind === 'watches' ? 'harness.emptyWatches' : 'harness.emptyRuns';
-  }
-  return kind === 'tasks' ? 'harness.noTaskMatches' : kind === 'watches' ? 'harness.noWatchMatches' : 'harness.noRunMatches';
-}
 
 const PAGE_LIMIT = 30;
 const EMPTY_DEFINITION_COUNTS: HarnessDefinitionCounts = {
@@ -365,9 +344,9 @@ export const HarnessPage: React.FC = () => {
         setRunsHasMore(page.has_more);
         if (page.run_types) setPresentRunTypes(page.run_types);
       }
-    } catch (err: any) {
+    } catch (err) {
       if (!isCurrent()) return;
-      setError(err?.message ?? String(err));
+      setError(errorMessage(err) ?? String(err));
     } finally {
       if (isCurrent()) setLoading(false);
     }
@@ -436,8 +415,8 @@ export const HarnessPage: React.FC = () => {
           setSelection((prev) => (prev?.kind === 'task' && prev.id === task.id ? null : prev));
         }
         await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
         setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, enabled: task.enabled } : t)));
       } finally {
         markPending(task.id, false);
@@ -458,8 +437,8 @@ export const HarnessPage: React.FC = () => {
         setSelection((prev) => (prev?.kind === 'task' && prev.id === task.id ? null : prev));
         if (tasks.length === 1 && tasksPage > 1) setTasksPage((page) => Math.max(1, page - 1));
         else await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
       } finally {
         markPending(task.id, false);
       }
@@ -478,8 +457,8 @@ export const HarnessPage: React.FC = () => {
           setSelection((prev) => (prev?.kind === 'watch' && prev.id === watch.id ? null : prev));
         }
         await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
         setWatches((prev) => prev.map((w) => (w.id === watch.id ? { ...w, enabled: watch.enabled } : w)));
       } finally {
         markPending(watch.id, false);
@@ -500,8 +479,8 @@ export const HarnessPage: React.FC = () => {
         setSelection((prev) => (prev?.kind === 'watch' && prev.id === watch.id ? null : prev));
         if (watches.length === 1 && watchesPage > 1) setWatchesPage((page) => Math.max(1, page - 1));
         else await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
       } finally {
         markPending(watch.id, false);
       }
@@ -1567,13 +1546,6 @@ const RunSessionLabel: React.FC<{ run: HarnessRun }> = ({ run }) => {
 interface RunDetailProps {
   run: HarnessRun;
   agent?: VibeAgentBrief;
-}
-
-export function agentDisplayName(
-  agentName: string | null | undefined,
-  agent?: Pick<VibeAgentBrief, 'display_name'>,
-): string {
-  return agent?.display_name || agentName || '—';
 }
 
 export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {

@@ -247,9 +247,9 @@ describe('shouldShowRunningCard', () => {
 });
 
 describe('isActivityMessageType', () => {
-  it('recognizes only Message-backed assistant activity', () => {
+  it('recognizes Message-backed assistant rows and synthetic tool events', () => {
     expect(isActivityMessageType('assistant')).toBe(true);
-    expect(isActivityMessageType('tool_call')).toBe(false);
+    expect(isActivityMessageType('tool_call')).toBe(true);
     expect(isActivityMessageType('result')).toBe(false);
     expect(isActivityMessageType('user')).toBe(false);
   });

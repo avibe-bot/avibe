@@ -5,7 +5,7 @@ import { Download, X, RefreshCw, Check, AlertCircle, GitCommitHorizontal } from 
 import clsx from 'clsx';
 import { ToggleSwitch } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
-import { badgeVariants } from './ui/badge';
+import { badgeVariants } from './ui/badge-variants';
 import { cn } from '@/lib/utils';
 import { scheduleUpgradeReload } from '../lib/upgradeReload';
 

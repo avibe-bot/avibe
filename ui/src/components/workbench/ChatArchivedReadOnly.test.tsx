@@ -7,11 +7,12 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
-import { selectApiErrorFields } from '../../context/ApiContext';
+import { selectApiErrorFields } from '../../context/apiErrorParse';
 import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
-import { ToastProvider } from '../../context/ToastContext';
+import { ToastProvider } from '../../context/ToastProvider';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
-import { ChatHeaderBar, MessageRow, ThinkingBubble, sessionAgentDisplayName } from './ChatPage';
+import { ChatHeaderBar, MessageRow, ThinkingBubble } from './ChatPage';
+import { sessionAgentDisplayName } from './sessionAgentName';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
 import {
