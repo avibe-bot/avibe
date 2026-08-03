@@ -1655,8 +1655,11 @@ class SessionHandler(BaseHandler):
         The in-memory ``active`` flag is not the only owner of a session. Durable
         queued or in-flight work (a nonterminal Delivery, Turn, or
         execution-bearing Run) owns the session before the flag is ever set, so
-        both passes consult ``core/session_ownership.py`` and skip a session a
-        durable owner still holds. That pin is bounded by the same stuck-active
+        the selection pass consults ``core/session_ownership.py`` and the acting
+        pass re-resolves it immediately before each teardown — tearing one
+        candidate down awaits, and admission during that await is invisible to
+        both the clock and the flag. Either way a session a durable owner still
+        holds is skipped. That pin is bounded by the same stuck-active
         threshold and never refreshes ``last_activity``: repeated queued
         followers cannot extend it, so an interlocked session cannot become
         immortal. When the ownership union cannot be resolved the whole cycle is
@@ -1702,11 +1705,6 @@ class SessionHandler(BaseHandler):
         if not expired:
             return 0
 
-        # Recompute: work admitted between the two passes must pin the session.
-        ownership = await self._resolve_session_ownership()
-        if ownership.failed:
-            return 0
-
         evicted = 0
         for composite_key, idle_for in expired:
             current_last_activity = self.session_last_activity.get(composite_key)
@@ -1721,9 +1719,21 @@ class SessionHandler(BaseHandler):
             # touched or (de)activated between the two passes.
             recheck_idle = time.monotonic() - current_last_activity
             is_active = composite_key in self.active_sessions
-            pinned = False if is_active else self._ownership_pin(ownership, composite_key)
-            if pinned and self._pin_within_bound(recheck_idle, stuck_threshold):
-                continue
+            pinned = False
+            if not is_active:
+                if recheck_idle < idle_timeout:
+                    continue
+                # Re-resolve per candidate, not once per pass: tearing down an
+                # earlier candidate awaits, and work admitted during that await
+                # touches neither ``last_activity`` nor ``active_sessions``, so a
+                # snapshot taken before the loop would classify a later runtime
+                # from state that is already stale.
+                ownership = await self._resolve_session_ownership()
+                if ownership.failed:
+                    return evicted
+                pinned = self._ownership_pin(ownership, composite_key)
+                if pinned and self._pin_within_bound(recheck_idle, stuck_threshold):
+                    continue
             if is_active:
                 if stuck_threshold is None or recheck_idle < stuck_threshold:
                     continue
@@ -1738,8 +1748,6 @@ class SessionHandler(BaseHandler):
                     idle_timeout,
                 )
             else:
-                if recheck_idle < idle_timeout:
-                    continue
                 if pinned:
                     logger.warning(
                         "Force-evicting durably-owned Claude session %s after %.1fs idle "

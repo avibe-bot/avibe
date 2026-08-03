@@ -2593,6 +2593,26 @@ scenarios:
     # otherwise ship with no interlock and no one noticing -- this test fails until the
     # new path is classified here.
     test: tests/test_session_eviction_interlock.py::test_every_backend_eviction_consumer_is_inventoried
+  - id: HFR-147
+    name: ownership admitted during an earlier teardown vetoes the later eviction
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # Found by review on PR #1150's first head. HFR-135's per-pass re-read is
+    # necessary but not sufficient: the acting pass walks a LIST of candidates and
+    # every teardown awaits, so a Delivery committed while an earlier candidate is
+    # being cleaned up lands after a once-per-pass snapshot was taken. Queued work
+    # deliberately touches neither session_last_activity nor active_sessions -- the
+    # two things the per-candidate recheck already re-derives -- so nothing else in
+    # the loop can notice it, and the later runtime is destroyed with input already
+    # accepted. FIX: the acting pass re-resolves the union immediately before each
+    # teardown (only for candidates that are not stuck-active, which ignore the pin
+    # anyway), so the read is bounded by the number of sessions actually evicted.
+    # The regression drives the real interleaving -- the first candidate's own
+    # disconnect commits the follower -- and asserts the teardown and the commit
+    # both really happened, so it cannot pass by failing to race.
+    test: tests/test_session_eviction_interlock.py::test_ownership_admitted_during_an_earlier_teardown_vetoes_the_later_eviction
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

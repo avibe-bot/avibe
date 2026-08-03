@@ -13,7 +13,7 @@ These tests drive the two real eviction entry points --
 -- against REAL durable rows in the isolated state database, so what is asserted
 is the join between the two keyspaces, not a stub's opinion of it.
 
-Scenarios: HFR-130 … HFR-146 (tests/scenarios/harness_failure_recovery/catalog.yaml).
+Scenarios: HFR-130 … HFR-147 (tests/scenarios/harness_failure_recovery/catalog.yaml).
 """
 
 from __future__ import annotations
@@ -397,7 +397,7 @@ def _sweep(handler, idle_timeout: float = IDLE_TIMEOUT) -> int:
 
 
 # ---------------------------------------------------------------------------
-# HFR-130 … HFR-141: the Claude interlock
+# HFR-130 … HFR-141 + HFR-147: the Claude interlock
 # ---------------------------------------------------------------------------
 
 
@@ -590,6 +590,52 @@ def test_work_admitted_between_the_two_passes_wins(monkeypatch, tmp_path: Path) 
     assert evicted == 0, "work admitted between the passes must defeat the decided eviction"
     assert composite_key in controller.claude_sessions
     assert captured["disconnects"] == 0
+
+
+def test_ownership_admitted_during_an_earlier_teardown_vetoes_the_later_eviction(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """HFR-147: the acting pass re-resolves per candidate, not once per pass.
+
+    HFR-135's re-read is necessary but not sufficient. The acting pass walks a
+    LIST of candidates and every teardown awaits, so a Delivery committed while
+    an earlier candidate is being cleaned up lands after a once-per-pass
+    snapshot was taken. Queued work deliberately touches neither
+    ``session_last_activity`` nor ``active_sessions`` -- the two things the
+    per-candidate recheck already re-derives -- so nothing else in the loop can
+    notice it, and the later runtime is torn down with input already accepted.
+    """
+
+    _state_db()
+    handler, controller, first_key, captured = _claude_handler(monkeypatch, tmp_path)
+    _seed_session(BASE_SESSION_ID, anchor=ANCHOR, workdir=str(tmp_path))
+
+    second_anchor = "slack_C999"
+    second_base = "sesinterlock02"
+    _seed_session(second_base, anchor=second_anchor, workdir=str(tmp_path))
+    second_key = f"{second_anchor}:{tmp_path}"
+    _add_second_runtime(handler, second_key, captured)
+
+    class _AdmitsDuringTeardown:
+        """The first candidate's disconnect is when the follower is accepted."""
+
+        async def disconnect(self) -> None:
+            captured["disconnects"] += 1
+            _seed_delivery(second_base, "queued", delivery_id="dlv-admitted-mid-teardown")
+
+    handler.claude_sessions[first_key] = _AdmitsDuringTeardown()
+
+    evicted = _sweep(handler)
+
+    assert captured["disconnects"] == 1, "the first candidate must really have been torn down"
+    with _engine().connect() as conn:
+        admitted = conn.execute(
+            sa_text("SELECT state FROM message_deliveries WHERE id = 'dlv-admitted-mid-teardown'")
+        ).fetchone()
+    assert admitted is not None and admitted[0] == "queued", "the race must really have happened"
+    assert evicted == 1, "only the first candidate may be evicted"
+    assert second_key in handler.claude_sessions
+    assert captured.get(second_key, 0) == 0, "the newly owned runtime must survive"
 
 
 def test_unresolved_ownership_skips_the_whole_cycle(monkeypatch, tmp_path: Path) -> None:
