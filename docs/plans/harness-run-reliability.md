@@ -267,7 +267,10 @@ that owner and fix only the remaining shared-loop and transport-attempt gaps.
   Avibe synthetic id with no persisted row remains unacknowledged;
 - cancellation during or after the transport call remains ambiguous unless
   structured evidence or the stable receipt proves an outcome;
-- a crash between send and persistence resumes from the durable attempt record;
+- if the current-master reproducer proves a durable attempt record is necessary,
+  a crash between send and persistence resumes from that record; otherwise an
+  equivalent crash/restart test must prove the existing Activity receipt and
+  local-settlement-only marker close the window without adding one;
 - ambiguous post-send state has a bounded retry and durable terminal outcome;
 - work with no Run row still reaches an Activity-owned terminal outcome visible
   from its session;
@@ -410,6 +413,10 @@ determine what remains.
    measures inactivity, not duration.
    Thread the scheduled-task override through add/update CLI and API payloads and
    the Web task form, without changing the existing watch lifetime semantics.
+   In the same delivery, update every maintained surface that enumerates task
+   options: the English and Chinese command/CLI guides, matching English and
+   Chinese AVIBE Docs pages, and agent-facing `skills/use-avibe/SKILL.md` plus
+   its compatibility copy where still shipped.
 6. Cover unset, zero, shorter, and longer overrides; irregular cron schedules and
    a DST boundary; a one-shot `at` Run; progress from another Run in the same
    session; multiple fires during one productive Turn; add/update round trips;
@@ -470,6 +477,8 @@ For every PR:
 
 - add unit and contract tests first against the real owner boundary;
 - add/update `tests/scenarios/harness_failure_recovery/catalog.yaml`;
+- name the assigned HFR scenario ID in every affected automated test and list
+  all affected scenario IDs in the implementation PR description;
 - assert both the durable state and the user-visible notice where failure is
   expected;
 - use guarded writers and test the losing race, not only the happy winner;
