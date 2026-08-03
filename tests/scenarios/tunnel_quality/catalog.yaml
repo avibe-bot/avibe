@@ -143,3 +143,15 @@ scenarios:
     kind: network_policy
     layer: unit
     test: tests/test_tunnel_recovery.py::test_ra_tq_022_public_probe_session_honors_host_network_environment
+  - id: RA-TQ-023
+    name: Status cleanup preserves rollback after a promoted process exits
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_023_status_preserves_rollback_after_promoted_process_exit
+  - id: RA-TQ-024
+    name: Pinned transport rejects stale comparison evidence from another protocol
+    status: covered
+    kind: contract
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_024_pinned_protocol_rejects_stale_tail_evidence

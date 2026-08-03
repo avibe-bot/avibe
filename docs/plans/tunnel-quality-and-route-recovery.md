@@ -185,6 +185,8 @@ rolling deployment.
 | RA-TQ-020 | A candidate that materially eliminates request failures is accepted | candidate-policy contract test |
 | RA-TQ-021 | A rollback replacement that loses readiness remains pending for reconciliation | supervisor rollback test |
 | RA-TQ-022 | Public probes honor the host proxy and CA environment | network-policy test |
+| RA-TQ-023 | Status cleanup preserves rollback after a promoted process exits | supervisor lifecycle test |
+| RA-TQ-024 | Pinned transport rejects comparison evidence from another protocol | protocol-evidence contract test |
 
 ## Product Decisions
 
@@ -673,7 +675,11 @@ independently:
 - validation failures are rate-limited in logs/Sentry without echoing payloads.
 
 V2 validation also preserves the producer's correlated semantics rather than
-accepting each field independently. Confidence is derived from `sample_count`;
+accepting each field independently. A non-null request path contains at least
+one probe attempt; zero attempts are represented by `request_path: null`.
+Failure and slow-request rates must be four-decimal rounded ratios of integer
+counts in that sample window, and the slow counts must agree with every reported
+nearest-rank percentile and maximum. Confidence is derived from `sample_count`;
 low confidence is `insufficient`; a successful medium-confidence path is
 `healthy`; and high-confidence `healthy`/`degraded` status is derived from the
 documented recovery thresholds. At medium/high confidence, `grade` is derived
@@ -808,4 +814,4 @@ changes must update the schema first.
   console is visible.
 - No secret or sensitive request data appears in local snapshots, logs, Doctor,
   status APIs, or cloud payloads.
-- RA-TQ-001 through RA-TQ-022 pass in their required evidence layers.
+- RA-TQ-001 through RA-TQ-024 pass in their required evidence layers.

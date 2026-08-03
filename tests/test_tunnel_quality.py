@@ -392,7 +392,7 @@ def test_ra_tq_020_request_path_candidate_accepts_material_failure_reduction() -
         [
             tunnel_quality.RequestPathSample(
                 sampled_at=1,
-                latency_ms=tuple([180.0] * 100),
+                latency_ms=tuple([100.0] * 100),
                 successes=tuple([True] * 90 + [False] * 10),
             )
         ]
@@ -401,7 +401,7 @@ def test_ra_tq_020_request_path_candidate_accepts_material_failure_reduction() -
         [
             tunnel_quality.RequestPathSample(
                 sampled_at=2,
-                latency_ms=tuple([180.0] * 100),
+                latency_ms=tuple([500.0] * 100),
                 successes=tuple([True] * 100),
             )
         ]

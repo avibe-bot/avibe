@@ -74,7 +74,7 @@
             "status": { "type": "string", "enum": ["healthy", "degraded", "unavailable", "insufficient"] },
             "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
             "window_seconds": { "type": "integer", "minimum": 30, "maximum": 600 },
-            "sample_count": { "type": "integer", "minimum": 0, "maximum": 100 },
+            "sample_count": { "type": "integer", "minimum": 1, "maximum": 100 },
             "success_count": { "type": "integer", "minimum": 0, "maximum": 100 },
             "latency_ms": { "$ref": "#/$defs/requestLatency" },
             "failure_rate": { "$ref": "#/$defs/rate" },

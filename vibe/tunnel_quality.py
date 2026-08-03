@@ -304,15 +304,15 @@ def request_path_is_better(active: dict[str, Any], candidate: dict[str, Any]) ->
     active_p99 = float(active_latency.get("p99") or 0)
     candidate_p95 = float(candidate_latency.get("p95") or 0)
     candidate_p99 = float(candidate_latency.get("p99") or 0)
-    if active_p95 <= 0 or candidate_p95 > active_p95 * 1.25:
-        return False
     active_slow = float((active.get("slow_request_rate") or {}).get("over_1000_ms") or 0)
     candidate_slow = float((candidate.get("slow_request_rate") or {}).get("over_1000_ms") or 0)
     active_failure = float(active.get("failure_rate") or 0)
     candidate_failure = float(candidate.get("failure_rate") or 0)
-    p95_improved = candidate_p95 <= active_p95 * 0.80
+    p95_improved = active_p95 > 0 and candidate_p95 <= active_p95 * 0.80
     tail_improved = (
-        active_p99 > 0
+        active_p95 > 0
+        and candidate_p95 <= active_p95 * 1.25
+        and active_p99 > 0
         and candidate_p99 <= active_p99 * 0.60
     )
     slow_rate_improved = (

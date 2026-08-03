@@ -562,7 +562,10 @@ def status(config: V2Config | None = None) -> dict[str, Any]:
         _pid_path().unlink(missing_ok=True)
         candidate = _state_connector("candidate") or {}
         candidate_state = _cloudflared_pid_state(candidate.get("pid"))
-        if candidate_state not in {"cloudflared", "unknown"}:
+        if (
+            candidate_state not in {"cloudflared", "unknown"}
+            and _pending_tail_rollback() is None
+        ):
             _state_path().unlink(missing_ok=True)
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None) if config else None
     binary = _resolve_binary(config)
@@ -946,6 +949,22 @@ def _set_preferred_protocol(protocol: str | None) -> None:
         _persist_quality_snapshot(snapshot, publish=False)
 
 
+def _tail_snapshot_matches_active_protocol(
+    current: dict[str, Any],
+    quality: dict[str, Any],
+) -> bool:
+    observed = quality.get("protocol")
+    if observed not in {"quic", "http2"}:
+        return False
+    configured = current.get("transport_protocol")
+    requested = (_state_connector("active") or {}).get("requested_protocol")
+    if configured in {"quic", "http2"}:
+        return requested == configured and observed == configured
+    if requested in {"quic", "http2"}:
+        return observed == requested
+    return True
+
+
 def _fresh_active_comparison_snapshot(
     current: dict[str, Any],
     *,
@@ -957,16 +976,21 @@ def _fresh_active_comparison_snapshot(
         sampled_at = _parse_timestamp(quality.get("sampled_at"))
         age = now - sampled_at if sampled_at is not None else None
         rtt = quality.get("rtt_ms")
+        tail_evidence_valid = (
+            trigger != "tail_latency"
+            or (
+                isinstance(quality.get("request_path"), dict)
+                and _tail_snapshot_matches_active_protocol(current, quality)
+            )
+        )
         if (
             age is not None
             and -5 <= age <= QUALITY_COMPARISON_MAX_AGE_SECONDS
+            and tail_evidence_valid
             and (
                 trigger in {"availability", "errors", "manual"}
                 or isinstance(rtt, dict)
-                or (
-                    trigger == "tail_latency"
-                    and isinstance(quality.get("request_path"), dict)
-                )
+                or trigger == "tail_latency"
             )
         ):
             return json.loads(json.dumps(quality))
@@ -985,6 +1009,8 @@ def _fresh_active_comparison_snapshot(
         connector_count=1,
         recovery=_recovery_payload(),
     )
+    if trigger == "tail_latency":
+        return None
     if trigger not in {"availability", "errors", "manual"} and not isinstance(snapshot.get("rtt_ms"), dict):
         return None
     return snapshot
@@ -1239,6 +1265,22 @@ def _run_tail_protocol_recovery(
     previous_protocol = str(previous.get("protocol") or "unknown")
     if not isinstance(previous_path, dict) or previous_protocol not in {"quic", "http2"}:
         raise RuntimeError("request_path_comparison_unavailable")
+    configured_protocol = _configured_protocol(config)
+    active_requested_protocol = str(
+        (_state_connector("active") or {}).get("requested_protocol") or "auto"
+    )
+    if configured_protocol in {"quic", "http2"}:
+        if (
+            active_requested_protocol != configured_protocol
+            or previous_protocol != configured_protocol
+        ):
+            raise RuntimeError("request_path_comparison_unavailable")
+        previous_protocol = configured_protocol
+    elif (
+        active_requested_protocol in {"quic", "http2"}
+        and previous_protocol != active_requested_protocol
+    ):
+        raise RuntimeError("request_path_comparison_unavailable")
 
     def activate_and_measure(
         protocol: str,
@@ -1257,6 +1299,11 @@ def _run_tail_protocol_recovery(
                 if (
                     not live_config.remote_access.vibe_cloud.enabled
                     or not live_config.remote_access.vibe_cloud.tunnel_token
+                    or _configured_protocol(live_config) != configured_protocol
+                    or (
+                        configured_protocol in {"quic", "http2"}
+                        and protocol != configured_protocol
+                    )
                 ):
                     raise RuntimeError("route_optimization_cancelled")
                 candidate_pid, metrics_url = _start_candidate_connector(
@@ -1300,7 +1347,7 @@ def _run_tail_protocol_recovery(
                 _discard_candidate_connector(candidate_pid)
 
     candidate_protocols = [previous_protocol]
-    if _configured_protocol(config) == "auto":
+    if configured_protocol == "auto":
         candidate_protocols.append(_tail_candidate_protocol(config, previous_protocol))
     for candidate_protocol in candidate_protocols:
         candidate_path, candidate_connector = activate_and_measure(candidate_protocol)
@@ -1318,13 +1365,13 @@ def _run_tail_protocol_recovery(
             )
         ):
             _clear_pending_tail_rollback()
-            if _configured_protocol(config) == "auto":
+            if configured_protocol == "auto":
                 _set_preferred_protocol(candidate_protocol)
             return "improved", candidate_protocol, candidate_path
 
     rollback_path, _rollback_connector = activate_and_measure(previous_protocol)
     _clear_pending_tail_rollback()
-    if _configured_protocol(config) == "auto":
+    if configured_protocol == "auto":
         _set_preferred_protocol(previous_protocol)
     return "no_improvement", previous_protocol, rollback_path or previous_path
 

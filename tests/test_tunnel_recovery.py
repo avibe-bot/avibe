@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from tests.test_remote_access_vibe_cloud import _config
 from vibe import remote_access, runtime
 
@@ -301,6 +303,13 @@ def test_ra_tq_018_tail_candidate_must_pass_connector_error_gates(monkeypatch, t
     )
     config.remote_access.vibe_cloud.transport_protocol = "quic"
     config.save()
+    remote_access._write_state(
+        active_pid,
+        config,
+        "/usr/local/bin/cloudflared",
+        "http://127.0.0.1:29001",
+        requested_protocol="quic",
+    )
     rollback_pid = 333
     alive.add(rollback_pid)
     previous_path = _request_path(202, 900, 1840, slow_rate=0.08)
@@ -847,6 +856,100 @@ def test_ra_tq_019_live_tail_recovery_owns_pending_rollback(monkeypatch, tmp_pat
     assert current["pending_tail_rollback"]["active_pid"] == candidate_pid
     assert previous_pid != candidate_pid
     assert calls == []
+
+
+def test_ra_tq_023_status_preserves_rollback_after_promoted_process_exit(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    config, _previous_pid, promoted_pid, alive = _setup_recovery(
+        monkeypatch,
+        tmp_path,
+        _quality(180),
+    )
+    state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    state["active"] = remote_access._connector_record(
+        promoted_pid,
+        "http://127.0.0.1:29002",
+        stdout_path=remote_access._candidate_cloudflared_stdout_path(),
+        stderr_path=remote_access._candidate_cloudflared_stderr_path(),
+        requested_protocol="http2",
+    )
+    state["candidate"] = None
+    state["draining"] = None
+    state["pending_tail_rollback"] = {
+        "active_pid": promoted_pid,
+        "previous_protocol": "quic",
+    }
+    state["pid"] = promoted_pid
+    runtime.write_json(remote_access._state_path(), state)
+    remote_access._pid_path().write_text(str(promoted_pid), encoding="utf-8")
+    alive.discard(promoted_pid)
+    rollback_attempts = []
+    monkeypatch.setattr(
+        remote_access,
+        "_start_rollback_replacement",
+        lambda pending: rollback_attempts.append(pending) or False,
+    )
+
+    current = remote_access.status(config)
+    remote_access._reconcile_pending_tail_rollback()
+
+    preserved = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert current["running"] is False
+    assert current["pid"] is None
+    assert preserved["active"]["pid"] == promoted_pid
+    assert preserved["pending_tail_rollback"] == {
+        "active_pid": promoted_pid,
+        "previous_protocol": "quic",
+    }
+    assert rollback_attempts == [preserved["pending_tail_rollback"]]
+
+
+def test_ra_tq_024_pinned_protocol_rejects_stale_tail_evidence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    config, active_pid, _candidate_pid, _alive = _setup_recovery(
+        monkeypatch,
+        tmp_path,
+        _quality(180),
+    )
+    config.remote_access.vibe_cloud.transport_protocol = "http2"
+    config.save()
+    remote_access._write_state(
+        active_pid,
+        config,
+        "/usr/local/bin/cloudflared",
+        "http://127.0.0.1:29001",
+        requested_protocol="http2",
+    )
+    now = time.time()
+    stale = {
+        **_quality(80),
+        "protocol": "quic",
+        "sampled_at": remote_access.tunnel_quality.utc_timestamp(now),
+        "request_path": _request_path(202, 900, 1840, slow_rate=0.08),
+    }
+    current = {
+        "transport_protocol": "http2",
+        "tunnel_quality": stale,
+    }
+
+    assert (
+        remote_access._fresh_active_comparison_snapshot(
+            current,
+            trigger="tail_latency",
+            now=now,
+        )
+        is None
+    )
+    with pytest.raises(RuntimeError, match="request_path_comparison_unavailable"):
+        remote_access._run_tail_protocol_recovery(
+            config,
+            "/usr/local/bin/cloudflared",
+            stale,
+        )
 
 
 def test_restart_removes_candidate_recorded_only_in_pid_file(monkeypatch, tmp_path) -> None:
