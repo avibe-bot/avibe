@@ -1212,6 +1212,7 @@ RUN_INTERRUPTION_REASONS = frozenset(
     {
         "stopped",
         "backend_refresh",
+        "interrupted",
         "evicted",
         "restarted",
         "lifetime_timeout",
@@ -3147,7 +3148,12 @@ class SQLiteBackgroundTaskStore:
                     update(agent_runs)
                     .where(agent_runs.c.id == run_id)
                     .where(agent_runs.c.status.in_(_status_query_values("queued")))
-                    .values(status="running", started_at=started_at, updated_at=started_at)
+                    .values(
+                        status="running",
+                        started_at=started_at,
+                        pid=None,
+                        updated_at=started_at,
+                    )
                 )
                 if not result.rowcount:
                     return None
@@ -3157,6 +3163,36 @@ class SQLiteBackgroundTaskStore:
                     payload = self._run_from_row(row)
         _publish_run_rows_updated([row_to_publish])
         return payload
+
+    def mark_run_execution_started(
+        self,
+        run_id: str,
+        *,
+        pid: int,
+        updated_at: Optional[str] = None,
+    ) -> bool:
+        """Fence startup recovery once the claimed request coroutine has entered."""
+
+        now = updated_at or _utc_now_iso()
+        row_to_publish = None
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status.in_(_status_query_values("running")))
+                .where(agent_runs.c.pid.is_(None))
+                .values(pid=pid, updated_at=now)
+            )
+            if result.rowcount:
+                row_to_publish = dict(
+                    conn.execute(
+                        select(agent_runs)
+                        .where(agent_runs.c.id == run_id)
+                        .limit(1)
+                    ).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
+        return row_to_publish is not None
 
     def update_run_status(
         self,
@@ -3414,6 +3450,7 @@ class SQLiteBackgroundTaskStore:
         values: dict[str, Any] = {
             "status": "queued",
             "started_at": None,
+            "pid": None,
             "updated_at": now,
         }
         if metadata is not None:
@@ -4015,32 +4052,151 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             return self._run_from_row(row) if row else None
 
-    def recover_processing_runs(self) -> None:
+    def recover_processing_runs(
+        self,
+        *,
+        interruption_error: str,
+        interrupt_reason: str,
+        cancellation_error: str,
+    ) -> None:
         with run_update_event_transaction(self.engine) as conn:
             now = _utc_now_iso()
             rows = list(
                 conn.execute(
-                    select(agent_runs.c.id, agent_runs.c.result_payload_json)
+                    select(agent_runs)
                     .where(agent_runs.c.status.in_(_status_query_values("running")))
                     .where(agent_runs.c.run_type != "watch_runtime")
                     .where(agent_runs.c.delivery_id.is_(None))
                 ).mappings()
             )
-            recovered_ids = []
+            requeued_ids: list[str] = []
+            terminal_ids: list[str] = []
             for row in rows:
                 result_payload = _json_loads(row["result_payload_json"], {})
                 if isinstance(result_payload, dict) and result_payload.get(
                     "deferred_terminal_status"
                 ):
                     continue
-                recovered_ids.append(str(row["id"]))
-            if recovered_ids:
+                run_id = str(row["id"])
+                if row["pid"] is None:
+                    requeued_ids.append(run_id)
+                    continue
+                status, guards = _cancel_aware_terminal_status(row, "failed")
+                effective_error = (
+                    cancellation_error if status == "canceled" else interruption_error
+                )
+                effective_reason = (
+                    "stopped" if status == "canceled" else interrupt_reason
+                )
+                values: dict[str, Any] = {
+                    "status": status,
+                    "completed_at": now,
+                    "updated_at": now,
+                    "error": effective_error,
+                    "pid": None,
+                }
+                _merge_owed_failure_notice(
+                    values,
+                    conn=conn,
+                    run_id=run_id,
+                    status=status,
+                    source_kind=row["source_kind"],
+                    parent_run_id=row["parent_run_id"],
+                    row_metadata_json=row["metadata_json"],
+                    extra_metadata={
+                        "ok": False,
+                        "interrupt_reason": effective_reason,
+                    },
+                    now=now,
+                )
+                transition = conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .where(agent_runs.c.pid == row["pid"])
+                    .where(*guards)
+                    .values(**values)
+                )
+                if not transition.rowcount:
+                    continue
+                terminal_ids.append(run_id)
+
+                definition_id = str(row["definition_id"] or "").strip()
+                if not definition_id:
+                    continue
+                definition = conn.execute(
+                    select(run_definitions)
+                    .where(run_definitions.c.id == definition_id)
+                    .where(run_definitions.c.deleted_at.is_(None))
+                    .limit(1)
+                ).mappings().first()
+                if definition is None:
+                    continue
+                run_session_id = str(row["session_id"] or "").strip() or None
+                definition_session_id = (
+                    str(definition["session_id"] or "").strip() or None
+                )
+                run_session_key = (
+                    str(row["legacy_session_key"] or "").strip() or None
+                )
+                definition_session_key = (
+                    str(definition["legacy_session_key"] or "").strip() or None
+                )
+                if (
+                    definition_session_id != run_session_id
+                    or definition_session_key != run_session_key
+                ):
+                    continue
+                expectation = DefinitionWriteExpectation.from_read(
+                    session_id=definition["session_id"],
+                    enabled=definition["enabled"],
+                    deleted_at=definition["deleted_at"],
+                    metadata=_json_loads(definition["metadata_json"], {}),
+                )
+                definition_values: dict[str, Any] = {
+                    "last_run_at": now,
+                    "last_error": effective_error,
+                    "updated_at": now,
+                }
+                if (
+                    str(definition["definition_type"] or "") == "scheduled"
+                    and str(definition["schedule_type"] or "") == "at"
+                    and str(row["source_kind"] or "") == "scheduler"
+                ):
+                    definition_values["enabled"] = 0
+                conn.execute(
+                    update(run_definitions)
+                    .where(run_definitions.c.id == definition_id)
+                    .where(*definition_state_unchanged(expectation))
+                    .where(
+                        unchanged_text(
+                            run_definitions.c.legacy_session_key,
+                            definition_session_key,
+                        )
+                    )
+                    .where(
+                        run_definitions.c.definition_type
+                        == definition["definition_type"]
+                    )
+                    .where(
+                        unchanged_text(
+                            run_definitions.c.schedule_type,
+                            definition["schedule_type"],
+                        )
+                    )
+                    .values(**definition_values)
+                )
+            if requeued_ids:
                 conn.execute(
                     update(agent_runs)
-                    .where(agent_runs.c.id.in_(recovered_ids))
+                    .where(agent_runs.c.id.in_(requeued_ids))
+                    .where(agent_runs.c.status.in_(_status_query_values("running")))
+                    .where(agent_runs.c.pid.is_(None))
                     .values(status="queued", started_at=None, pid=None, updated_at=now)
                 )
-            _defer_run_ids_updated_from_connection(conn, recovered_ids)
+            _defer_run_ids_updated_from_connection(
+                conn,
+                terminal_ids + requeued_ids,
+            )
 
     def record_run_skip_reason(self, run_id: str, *, reason: str, at: Optional[str] = None) -> bool:
         """Record WHY the drain deferred a queued run — only when it changes.

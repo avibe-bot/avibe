@@ -33,6 +33,7 @@ from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_REFUSED_CONCURRENT_TURN,
+    SETTLED_BY_RESTARTED,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
@@ -2882,6 +2883,7 @@ class SessionTurnManager:
         replay_unknown_start: bool = False,
         abandon_unaccepted_start: bool = False,
         retire_unwritten_delivery_ids: set[str] | None = None,
+        resume_successors: bool = True,
     ) -> dict[str, Any]:
         if not self._durable_schema_available():
             return {
@@ -3163,7 +3165,7 @@ class SessionTurnManager:
                                 )
                                 if retired is None:
                                     raise RuntimeError("archived P0 successor retirement lost")
-                            else:
+                            elif resume_successors:
                                 started = delivery_store.activate_waiting_successor(
                                     conn,
                                     turn=successor,
@@ -3174,8 +3176,40 @@ class SessionTurnManager:
                                         "P0 successor claim lost after terminal proof"
                                     )
                                 claimed_successor = successor_turn_id
+                            else:
+                                deferred = self._write_terminal_snapshot(
+                                    conn,
+                                    successor_turn_id,
+                                    outcome="not_written",
+                                    settled_by=settled_by,
+                                    evidence_kind="service_shutdown_deferred_successor",
+                                    evidence={"reason": "service_shutdown"},
+                                )
+                                queued = delivery_store.cas_delivery(
+                                    conn,
+                                    successor_delivery_id,
+                                    expected_version=int(successor_delivery["version"]),
+                                    expected_states=("interrupt_waiting",),
+                                    values={
+                                        "state": "queued",
+                                        "priority": "p3",
+                                        "turn_id": None,
+                                        "turn_role": None,
+                                        "turn_position": None,
+                                    },
+                                    history_event={
+                                        "kind": "interrupt_join",
+                                        "turn_id": turn_id,
+                                        "outcome": "service_shutdown_deferred",
+                                    },
+                                )
+                                if not deferred.get("changed") or queued is None:
+                                    raise RuntimeError(
+                                        "service shutdown lost its deferred successor"
+                                    )
                     if (
                         claimed_successor is None
+                        and resume_successors
                         and replayed_unknown_start
                         and session_status == "active"
                     ):
@@ -3201,6 +3235,7 @@ class SessionTurnManager:
                         )
                     if (
                         claimed_successor is None
+                        and resume_successors
                         and outcome == "completed"
                         and session_status == "active"
                     ):
@@ -3328,11 +3363,22 @@ class SessionTurnManager:
 
         try:
             if cancelled:
+                interruption = settled_by or SETTLED_BY_STOPPED
                 return self._terminalize_durable_turn(
                     turn_id,
-                    "canceled",
-                    settled_by=settled_by or SETTLED_BY_STOPPED,
-                    evidence_kind="runner_release",
+                    "canceled" if interruption == SETTLED_BY_STOPPED else "failed",
+                    settled_by=interruption,
+                    evidence_kind=(
+                        "service_shutdown"
+                        if interruption == SETTLED_BY_RESTARTED
+                        else "runner_release"
+                    ),
+                    evidence=(
+                        {"reason": "scheduled_service_shutdown"}
+                        if interruption == SETTLED_BY_RESTARTED
+                        else None
+                    ),
+                    resume_successors=interruption != SETTLED_BY_RESTARTED,
                 )
             if failed:
                 # Dispatch may have written before raising. Preserve starting work
@@ -4420,7 +4466,10 @@ class SessionTurnManager:
                             await self._resume_post_terminal(session_id)
                         else:
                             await self.flush_queue(session_id)
-                    elif durable_turn_registered:
+                    elif (
+                        durable_turn_registered
+                        and settled_by != SETTLED_BY_RESTARTED
+                    ):
                         # Stop may persist the old Turn's terminal snapshot before
                         # releasing this runner. In that ordering the terminal CAS
                         # already activated the linked P0 successor, so this runner
@@ -4748,6 +4797,109 @@ class SessionTurnManager:
         if owner is not None:
             result["owner"] = owner
         return result
+
+    async def release_for_service_shutdown(self) -> int:
+        """Fail exact accepted Run owners without draining replacement work."""
+
+        if not self._durable_schema_available():
+            return 0
+
+        def live_owners() -> dict[str, dict[str, Any]]:
+            with self._sqlite_engine().connect() as conn:
+                rows = conn.execute(
+                    select(
+                        session_turn_rows.c.id.label("turn_id"),
+                        session_turn_rows.c.session_id,
+                        session_turn_rows.c.control_mode,
+                        agent_runs.c.cancel_requested,
+                    )
+                    .join(
+                        delivery_rows,
+                        delivery_rows.c.turn_id == session_turn_rows.c.id,
+                    )
+                    .join(
+                        agent_runs,
+                        agent_runs.c.delivery_id == delivery_rows.c.id,
+                    )
+                    .where(
+                        session_turn_rows.c.state.in_(
+                            delivery_store.TURN_OWNER_STATES
+                        )
+                    )
+                    .where(delivery_rows.c.state == "accepted")
+                    .where(
+                        agent_runs.c.status.in_(
+                            ["queued", "pending", "running", "processing"]
+                        )
+                    )
+                ).mappings()
+                owners: dict[str, dict[str, Any]] = {}
+                for row in rows:
+                    turn_id = str(row["turn_id"])
+                    owner = owners.setdefault(
+                        turn_id,
+                        {
+                            "turn_id": turn_id,
+                            "session_id": str(row["session_id"]),
+                            "control_mode": row["control_mode"],
+                            "cancel_requested": False,
+                        },
+                    )
+                    owner["cancel_requested"] = bool(
+                        owner["cancel_requested"] or row["cancel_requested"]
+                    )
+                return owners
+
+        owners = live_owners()
+        done_tasks: list[asyncio.Task] = []
+        for owner in owners.values():
+            projected = self.in_flight.get(str(owner["session_id"]))
+            if (
+                projected is not None
+                and projected.logical_turn_id == owner["turn_id"]
+                and projected.task.done()
+            ):
+                done_tasks.append(projected.task)
+        if done_tasks:
+            await asyncio.gather(*done_tasks, return_exceptions=True)
+
+        owners = live_owners()
+        tasks_to_cancel: list[asyncio.Task] = []
+        released_sessions: set[str] = set()
+        for owner in owners.values():
+            session_id = str(owner["session_id"])
+            turn_id = str(owner["turn_id"])
+            projected = self.in_flight.get(session_id)
+            if projected is None or projected.logical_turn_id != turn_id:
+                continue
+            user_stopped = bool(
+                owner["control_mode"] == "stop_only"
+                or owner["cancel_requested"]
+                or projected.cancel_settled_by == SETTLED_BY_STOPPED
+            )
+            settled_by = SETTLED_BY_STOPPED if user_stopped else SETTLED_BY_RESTARTED
+            terminal = self._terminalize_durable_turn(
+                turn_id,
+                "canceled" if user_stopped else "failed",
+                settled_by=settled_by,
+                evidence_kind=(
+                    "service_shutdown_after_user_stop"
+                    if user_stopped
+                    else "service_shutdown"
+                ),
+                evidence={"reason": "scheduled_service_shutdown"},
+                resume_successors=False,
+            )
+            if terminal.get("changed"):
+                released_sessions.add(session_id)
+            if not projected.task.done():
+                projected.cancel_settled_by = settled_by
+                projected.task.cancel()
+                tasks_to_cancel.append(projected.task)
+
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        return len(released_sessions)
 
     async def release_for_backend_refresh(
         self,
@@ -5396,13 +5548,21 @@ class SessionTurnManager:
             finally:
                 sink = self.get_turn_sink(session_key)
                 settled_by = str((sink or {}).get("settled_by") or "")
+                current = self.in_flight.get(session_id)
+                turn = (
+                    current
+                    if current is not None
+                    and current.task is asyncio.current_task()
+                    else None
+                )
                 effective_settled_by = (
-                    SETTLED_BY_STOPPED if cancelled else settled_by
+                    (turn.cancel_settled_by if turn is not None else None)
+                    or SETTLED_BY_STOPPED
+                    if cancelled
+                    else settled_by
                 )
                 terminal_evidence = (sink or {}).get("terminal_evidence")
                 self.pop_turn_sink(session_key, done)
-                current = self.in_flight.get(session_id)
-                turn = current if current is not None and current.task is asyncio.current_task() else None
                 terminal_is_error = bool(
                     turn is not None and turn.terminal_is_error
                 )
@@ -5417,14 +5577,22 @@ class SessionTurnManager:
                     try:
                         durable_terminal_result = self._terminalize_durable_turn(
                             turn_token,
-                            self._durable_terminal_outcome(
-                                is_error=terminal_is_error,
-                                settled_by=effective_settled_by or None,
+                            (
+                                "failed"
+                                if effective_settled_by == SETTLED_BY_RESTARTED
+                                else self._durable_terminal_outcome(
+                                    is_error=terminal_is_error,
+                                    settled_by=effective_settled_by or None,
+                                )
                             ),
                             settled_by=(
                                 effective_settled_by or SETTLED_BY_TERMINAL_RESULT
                             ),
-                            evidence_kind="agent_initiated_terminal",
+                            evidence_kind=(
+                                "service_shutdown"
+                                if effective_settled_by == SETTLED_BY_RESTARTED
+                                else "agent_initiated_terminal"
+                            ),
                             evidence=(
                                 dict(terminal_evidence)
                                 if isinstance(terminal_evidence, dict)
@@ -5450,7 +5618,10 @@ class SessionTurnManager:
                             await self.flush_queue(session_id)
                     except Exception:
                         logger.debug("agent-initiated turn: queue resume failed", exc_info=True)
-                elif durable_turn_registered:
+                elif (
+                    durable_turn_registered
+                    and effective_settled_by != SETTLED_BY_RESTARTED
+                ):
                     await self._resume_linked_control_successor(
                         session_id,
                         turn_token,

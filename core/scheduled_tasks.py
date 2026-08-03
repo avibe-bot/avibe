@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
@@ -41,7 +42,10 @@ from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     RUN_INTERRUPTION_REASONS,
     SETTLEMENTS_WITHOUT_RESULT,
+    SETTLED_BY_INTERRUPTED,
     SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_RESTARTED,
+    SETTLED_BY_STOPPED,
     SETTLEMENT_I18N_KEYS,
     SETTLEMENT_TERMINAL_STATUS,
     SWEEP_I18N_KEYS,
@@ -1474,10 +1478,23 @@ class ScheduledTaskStore:
         task.updated_at = _utc_now_iso()
         return self._write_task(task, expect)
 
-    def mark_task_result(self, task_id: str, *, error: Optional[str], disable_one_shot: bool = True) -> bool:
+    def mark_task_result(
+        self,
+        task_id: str,
+        *,
+        error: Optional[str],
+        disable_one_shot: bool = True,
+        expected_binding: Optional[tuple[Optional[str], str, str]] = None,
+    ) -> bool:
         self.maybe_reload()
         task = self._tasks.get(task_id)
         if task is None:
+            return False
+        if expected_binding is not None and (
+            task.session_id,
+            task.session_key,
+            task.schedule_type,
+        ) != expected_binding:
             return False
         expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
@@ -1547,9 +1564,27 @@ class TaskExecutionStore:
         }[state]
         return directory / f"{request_id}.json"
 
-    def recover_processing(self) -> None:
+    def recover_processing(
+        self,
+        *,
+        interruption_error: Optional[str] = None,
+        interrupt_reason: str = SETTLED_BY_RESTARTED,
+        cancellation_error: Optional[str] = None,
+    ) -> None:
+        interruption_error = interruption_error or i18n_t(
+            SETTLEMENT_I18N_KEYS[interrupt_reason],
+            "en",
+        )
+        cancellation_error = cancellation_error or i18n_t(
+            SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED],
+            "en",
+        )
         if self._sqlite is not None:
-            self._sqlite.recover_processing_runs()
+            self._sqlite.recover_processing_runs(
+                interruption_error=interruption_error,
+                interrupt_reason=interrupt_reason,
+                cancellation_error=cancellation_error,
+            )
             return
         self._ensure_dirs()
         for path in self.processing_dir.glob("*.json"):
@@ -1561,7 +1596,74 @@ class TaskExecutionStore:
             if completed_path.exists():
                 path.unlink(missing_ok=True)
                 continue
-            path.replace(pending_path)
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict) or not payload.get("pid"):
+                path.replace(pending_path)
+                continue
+            now = _utc_now_iso()
+            metadata = payload.get("metadata")
+            canceled = bool(payload.get("cancel_requested"))
+            effective_error = cancellation_error if canceled else interruption_error
+            effective_reason = SETTLED_BY_STOPPED if canceled else interrupt_reason
+            payload.update(
+                {
+                    "status": "canceled" if canceled else "failed",
+                    "ok": False,
+                    "error": effective_error,
+                    "completed_at": now,
+                    "updated_at": now,
+                    "metadata": {
+                        **(metadata if isinstance(metadata, dict) else {}),
+                        "interrupt_reason": effective_reason,
+                    },
+                }
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self.completed_dir,
+                suffix=".tmp",
+                delete=False,
+                encoding="utf-8",
+            ) as handle:
+                json.dump(payload, handle, indent=2)
+                tmp_path = Path(handle.name)
+            tmp_path.replace(completed_path)
+            path.unlink(missing_ok=True)
+
+    def mark_execution_started(self, request_id: str) -> bool:
+        """Persist the boundary between a bare claim and executing its coroutine."""
+
+        now = _utc_now_iso()
+        if self._sqlite is not None:
+            return self._sqlite.mark_run_execution_started(
+                request_id,
+                pid=os.getpid(),
+                updated_at=now,
+            )
+        processing_path = self._request_path(request_id, state="processing")
+        if not processing_path.exists():
+            return False
+        try:
+            payload = json.loads(processing_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        payload.update({"pid": os.getpid(), "started_at": now, "updated_at": now})
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=self.processing_dir,
+            suffix=".tmp",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            json.dump(payload, handle, indent=2)
+            tmp_path = Path(handle.name)
+        tmp_path.replace(processing_path)
+        return True
 
     @staticmethod
     def queued_run_payload(request: TaskExecutionRequest) -> dict[str, Any]:
@@ -2358,10 +2460,11 @@ class TaskExecutionStore:
 
     def requeue(self, request_id: str, *, metadata: Optional[dict[str, Any]] = None) -> None:
         if self._sqlite is not None:
-            if metadata is not None:
-                self._sqlite.mark_run_queued_from_running(request_id, updated_at=_utc_now_iso(), metadata=metadata)
-            else:
-                self._sqlite.update_run_status(request_id, status="queued", updated_at=_utc_now_iso())
+            self._sqlite.mark_run_queued_from_running(
+                request_id,
+                updated_at=_utc_now_iso(),
+                metadata=metadata,
+            )
             return
         processing_path = self._request_path(request_id, state="processing")
         pending_path = self._request_path(request_id, state="pending")
@@ -2383,11 +2486,11 @@ class TaskExecutionStore:
         session_id: Optional[str] = None,
         interrupt_reason: Optional[str] = None,
         failure_code: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Settle one claimed request.
 
         ``interrupt_reason`` is the caller's structured CLASS for a failure that has
-        one — today only ``delivery_target_missing`` (see ``_execute_claimed_request``).
+        one, such as ``delivery_target_missing`` or an infrastructure teardown cause.
         It rides the SAME statement as the terminal transition, because that statement
         is also the one that stamps the owed failure notice: ``_merge_owed_failure_notice``
         applies ``extra_metadata`` to the run's ``metadata_json`` BEFORE
@@ -2401,6 +2504,9 @@ class TaskExecutionStore:
         arguments are merged verbatim into a run's metadata, and a wide-open
         passthrough at a completion site is how an unrelated key comes to overwrite
         ``interrupt_reason``, ``failure_code`` or the notice blob itself.
+
+        Returns the exact terminal status this call wrote, or ``None`` when another
+        terminal owner already won.
         """
 
         extra_metadata: dict[str, Any] = {"ok": ok}
@@ -2415,7 +2521,7 @@ class TaskExecutionStore:
             # whenever the claimed-request layer finished with an error. The identity
             # columns are still written either way (see ``settle_run_terminal``), so
             # routing through the guard costs nothing a caller depended on.
-            self._sqlite.settle_run_terminal(
+            return self._sqlite.settle_run_terminal(
                 request.id,
                 terminal_status="succeeded" if ok else "failed",
                 error=error,
@@ -2425,9 +2531,11 @@ class TaskExecutionStore:
                 session_id=session_id if session_id is not None else request.session_id,
                 metadata=extra_metadata,
             )
-            return
         processing_path = self._request_path(request.id, state="processing")
         completed_path = self._request_path(request.id, state="completed")
+        if not processing_path.exists():
+            return None
+        terminal_status = "succeeded" if ok else "failed"
         payload = request.to_dict()
         payload.update(
             {
@@ -2462,6 +2570,7 @@ class TaskExecutionStore:
             tmp_path = Path(handle.name)
         tmp_path.replace(completed_path)
         processing_path.unlink(missing_ok=True)
+        return terminal_status
 
     def settle_turn_participants(
         self,
@@ -2508,6 +2617,7 @@ class ScheduledTaskService:
         self.request_store = request_store or TaskExecutionStore()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._reconcile_task: Optional[asyncio.Task] = None
+        self._service_teardown_task: Optional["asyncio.Task[None]"] = None
         # The owed-notice drain pass currently in flight, if any. It runs OUTSIDE the
         # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
         # be torn down by name: cancelling the watch no longer stops it.
@@ -2518,6 +2628,13 @@ class ScheduledTaskService:
         # Claimed requests currently executing, keyed by request id, so a
         # single slow/hung turn can't stall delivery of every other request.
         self._inflight_executions: Dict[str, "asyncio.Task[Any]"] = {}
+        # The exact claims behind those tasks. The done callback uses this as a
+        # terminalization backstop when asyncio cancels a task before its coroutine
+        # executes even one line.
+        self._inflight_requests: Dict[str, TaskExecutionRequest] = {}
+        # request id -> infrastructure cause chosen before cancellation. A raw
+        # cancellation falls back to ``interrupted`` in the execution wrapper.
+        self._inflight_cancellation_causes: Dict[str, str] = {}
         # Canonical conversation keys with an execution in flight. Used to
         # serialize turns per session (never two at once for the same
         # conversation) while still running different sessions concurrently.
@@ -2538,7 +2655,10 @@ class ScheduledTaskService:
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._drain_dirty = True
         self._recover_activity_lifecycle()
-        self.request_store.recover_processing()
+        self.request_store.recover_processing(
+            interruption_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_RESTARTED]),
+            cancellation_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
+        )
 
     def _t(self, key: str, **kwargs: Any) -> str:
         """Translate a user-visible string in the configured language.
@@ -2551,6 +2671,12 @@ class ScheduledTaskService:
         config = getattr(self.controller, "config", None)
         lang = str(getattr(config, "language", "en") or "en")
         return i18n_t(key, lang, **kwargs)
+
+    def _execution_interruption(self, execution_id: str) -> str:
+        return self._inflight_cancellation_causes.get(
+            execution_id,
+            SETTLED_BY_INTERRUPTED,
+        )
 
     @staticmethod
     def _activity_run_ids(activity: Any) -> list[str]:
@@ -2794,6 +2920,43 @@ class ScheduledTaskService:
         except RuntimeError:
             return None
 
+    async def _settle_service_teardown_owners(self) -> None:
+        manager = getattr(self.controller, "session_turns", None)
+        release_durable = getattr(manager, "release_for_service_shutdown", None)
+        if not callable(release_durable):
+            return
+        try:
+            await release_durable()
+        except Exception:
+            logger.exception(
+                "Failed to settle durable Session Turns during service shutdown",
+            )
+
+    def _ensure_service_teardown_task(self) -> Optional["asyncio.Task[None]"]:
+        if self._service_teardown_task is not None:
+            return self._service_teardown_task
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        self._service_teardown_task = loop.create_task(
+            self._settle_service_teardown_owners()
+        )
+        return self._service_teardown_task
+
+    def _shutdown_interruption_for(self, request_id: str) -> str:
+        try:
+            run = self.request_store.get_run(request_id)
+        except Exception:
+            logger.exception(
+                "Failed to read Run %s before service shutdown cancellation",
+                request_id,
+            )
+            return SETTLED_BY_RESTARTED
+        if run is not None and bool(run.get("cancel_requested")):
+            return SETTLED_BY_STOPPED
+        return SETTLED_BY_RESTARTED
+
     def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
         self._running = False
         current_task = self._current_asyncio_task()
@@ -2805,13 +2968,17 @@ class ScheduledTaskService:
         # outlives shutdown. The identity check is the only exemption it needs.
         if self._notice_drain_task and self._notice_drain_task is not current_task:
             self._notice_drain_task.cancel()
-        for task in list(self._inflight_executions.values()):
+        for request_id, task in list(self._inflight_executions.items()):
             if task is not current_task:
+                self._inflight_cancellation_causes[request_id] = (
+                    self._shutdown_interruption_for(request_id)
+                )
                 task.cancel()
         try:
             self.scheduler.shutdown(wait=False)
         except Exception:
             logger.debug("Failed to shut down scheduler", exc_info=True)
+        self._ensure_service_teardown_task()
 
     def _owns_service_instance(self) -> bool:
         if not self._requires_service_lease:
@@ -2842,17 +3009,21 @@ class ScheduledTaskService:
             except (asyncio.CancelledError, Exception):
                 pass
             self._notice_drain_task = None
-        # Cancel any in-flight executions so shutdown is clean. Cancellation is
-        # caught by ``_execute_claimed_request``, which requeues the run, so it
-        # is picked up again on the next start (and ``recover_processing`` on
-        # init backstops anything left ``running`` after a hard crash).
+        # Await each exact in-flight execution so its guarded terminal write lands
+        # before shutdown returns. Queued requests were never claimed and remain
+        # queued for the next start.
         inflight = list(self._inflight_executions.values())
         for task in inflight:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+        teardown = self._ensure_service_teardown_task()
+        if teardown is not None:
+            await teardown
         self._inflight_executions.clear()
+        self._inflight_requests.clear()
+        self._inflight_cancellation_causes.clear()
         self._inflight_sessions.clear()
         self._session_lock_owners.clear()
 
@@ -4861,6 +5032,7 @@ class ScheduledTaskService:
             self._session_lock_owners[lock_key] = request.id
         task = asyncio.create_task(self._execute_claimed_request(request))
         self._inflight_executions[request.id] = task
+        self._inflight_requests[request.id] = request
         task.add_done_callback(
             lambda finished, rid=request.id, key=lock_key: self._on_execution_done(rid, key, finished)
         )
@@ -4869,6 +5041,11 @@ class ScheduledTaskService:
         self, request_id: str, lock_key: Optional[str], task: "asyncio.Task[Any]"
     ) -> None:
         self._inflight_executions.pop(request_id, None)
+        request = self._inflight_requests.pop(request_id, None)
+        interruption = self._inflight_cancellation_causes.pop(
+            request_id,
+            SETTLED_BY_INTERRUPTED,
+        )
         if lock_key is not None:
             self._inflight_sessions.discard(lock_key)
             # Only if it is still OURS: a later execution may already have taken the
@@ -4877,15 +5054,52 @@ class ScheduledTaskService:
             if self._session_lock_owners.get(lock_key) == request_id:
                 self._session_lock_owners.pop(lock_key, None)
         self._drain_dirty = True
-        # ``_execute_claimed_request`` already records failures and requeues on
-        # cancellation; this only surfaces unexpected crashes in the wrapper.
+        # ``_execute_claimed_request`` already terminalizes cancellations and
+        # records ordinary failures. A task cancelled before its coroutine enters
+        # has no execution to settle; put that bare claim back in the queue.
         if task.cancelled():
+            if request is not None:
+                try:
+                    current = self.request_store.get_run(request.id)
+                    if not current or current.get("status") in TERMINAL_RUN_STATUSES:
+                        return
+                    if (
+                        current.get("pid") is None
+                    ):
+                        self.request_store.requeue(request.id)
+                        return
+                    written_status = self.request_store.complete(
+                        request,
+                        ok=False,
+                        error=self._t(SETTLEMENT_I18N_KEYS[interruption]),
+                        interrupt_reason=interruption,
+                    )
+                    if written_status is not None and request.task_id and request.request_type in {
+                        "task_run",
+                        "scheduled",
+                    }:
+                        self._project_terminal_definition_result(
+                            self.request_store.get_run(request.id),
+                            execution_id=request.id,
+                            expected_status=written_status,
+                        )
+                        self.reconcile_jobs()
+                except Exception:
+                    logger.exception(
+                        "Failed to terminalize canceled claimed request %s",
+                        request_id,
+                    )
             return
         exc = task.exception()
         if exc is not None:
             logger.error("Claimed request %s crashed: %r", request_id, exc, exc_info=exc)
 
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
+        if not self.request_store.mark_execution_started(request.id):
+            # A terminal result or explicit cancellation won after claim but before
+            # this coroutine entered. Do not dispatch work whose Run no longer owns
+            # the execution boundary.
+            return
         request = self.request_store.refresh_claimed_request(request)
         error: Optional[str] = None
         #: The structured CLASS of this run's failure, when the failure has one. Kept
@@ -4897,6 +5111,7 @@ class ScheduledTaskService:
         settled_out_of_band = False
         recover_queue_on_return = False
         reconcile_delivery_on_return = False
+        project_terminal_definition_on_cancel = False
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
@@ -4999,8 +5214,15 @@ class ScheduledTaskService:
             else:
                 raise ValueError(f"unknown task request type: {request.request_type}")
         except asyncio.CancelledError:
-            self.request_store.requeue(request.id)
-            should_complete = False
+            interrupt_reason = self._execution_interruption(request.id)
+            error = self._t(SETTLEMENT_I18N_KEYS[interrupt_reason])
+            should_complete = True
+            settled_out_of_band = False
+            recover_queue_on_return = False
+            project_terminal_definition_on_cancel = request.request_type in {
+                "task_run",
+                "scheduled",
+            }
             raise
         except UnresolvableSessionTarget as exc:
             # THE RUN'S DELIVERY TARGET IS GONE, and that is a CLASS of failure rather
@@ -5057,7 +5279,7 @@ class ScheduledTaskService:
             settled_out_of_band = False
         finally:
             if should_complete:
-                self.request_store.complete(
+                written_status = self.request_store.complete(
                     request,
                     ok=not error,
                     error=error,
@@ -5067,6 +5289,13 @@ class ScheduledTaskService:
                     interrupt_reason=interrupt_reason,
                     failure_code=failure_code,
                 )
+                if project_terminal_definition_on_cancel and written_status is not None:
+                    self._project_terminal_definition_result(
+                        self.request_store.get_run(request.id),
+                        execution_id=request.id,
+                        expected_status=written_status,
+                    )
+                    self.reconcile_jobs()
             if reconcile_delivery_on_return and session_id:
                 manager = getattr(self.controller, "session_turns", None)
                 reconcile_delivery = getattr(
@@ -5095,6 +5324,7 @@ class ScheduledTaskService:
                     or settled_out_of_band
                     or recover_queue_on_return
                 )
+                and interrupt_reason is None
             ):
                 manager = getattr(self.controller, "session_turns", None)
                 recover_queue = getattr(
@@ -5160,9 +5390,6 @@ class ScheduledTaskService:
                 complete_on_return = dispatch_result.complete_on_return
             else:
                 error = dispatch_result
-        except asyncio.CancelledError:
-            self.reconcile_jobs()
-            raise
         except UnresolvableSessionTarget as exc:
             # The pinned session no longer resolves. Left alone this definition
             # re-fires and re-fails on every schedule with nobody told, so classify
@@ -5203,9 +5430,6 @@ class ScheduledTaskService:
                         complete_on_return = dispatch_result.complete_on_return
                     else:
                         error = dispatch_result
-                except asyncio.CancelledError:
-                    self.reconcile_jobs()
-                    raise
                 except Exception as retry_exc:
                     error = str(retry_exc)
                     logger.error(
@@ -5439,7 +5663,12 @@ class ScheduledTaskService:
         error_text = self._t(
             SETTLEMENT_I18N_KEYS.get(settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT])
         )
-        if not self._settle_agent_run_without_result(execution_id, settled_by=settled_by, error=error_text):
+        supported, _settled = self._settle_agent_run_without_result(
+            execution_id,
+            settled_by=settled_by,
+            error=error_text,
+        )
+        if not supported:
             # Legacy file store: no guarded writer exists, so fall back to the
             # ``finally`` completion path rather than leave the run open.
             return AgentRunExecutionResult(error=error_text, complete_on_return=True)
@@ -5475,10 +5704,19 @@ class ScheduledTaskService:
             execution_id = str(raw_execution_id or "").strip()
             if not execution_id:
                 continue
-            if self._settle_agent_run_without_result(
-                execution_id, settled_by=settled_by, error=error_text
-            ):
-                settled_any = True
+            _supported, settled = self._settle_agent_run_without_result(
+                execution_id,
+                settled_by=settled_by,
+                error=error_text,
+            )
+            if settled is None:
+                continue
+            settled_any = True
+            self._project_terminal_definition_result(
+                self.request_store.get_run(execution_id),
+                execution_id=execution_id,
+                expected_status=settled,
+            )
         if settled_any:
             self._drain_dirty = True
 
@@ -5575,13 +5813,110 @@ class ScheduledTaskService:
         if settled_any:
             self._drain_dirty = True
 
+    def _project_terminal_definition_result(
+        self,
+        run: Optional[dict[str, Any]],
+        *,
+        execution_id: str,
+        expected_status: str,
+    ) -> None:
+        """Project only the exact terminal transition the caller actually won."""
+
+        if run is None:
+            return
+        status = str(run.get("status") or "").strip()
+        if status != expected_status or status not in TERMINAL_RUN_STATUSES:
+            return
+        definition_id = str(
+            run.get("definition_id") or run.get("task_id") or ""
+        ).strip()
+        if not definition_id:
+            return
+        self.store.maybe_reload()
+        task = self.store.get_task(definition_id)
+        if task is None:
+            return
+        run_session_id = str(run.get("session_id") or "").strip()
+        task_session_id = str(task.session_id or "").strip()
+        run_session_key = str(
+            run.get("legacy_session_key") or run.get("session_key") or ""
+        ).strip()
+        task_session_key = str(task.session_key or "").strip()
+        if (
+            run_session_id != task_session_id
+            or run_session_key != task_session_key
+        ):
+            logger.warning(
+                "Run %s no longer matches scheduled definition %s; skipping result projection",
+                execution_id,
+                definition_id,
+            )
+            return
+        error = None if status == "succeeded" else str(run.get("error") or "").strip()
+        if status != "succeeded" and not error:
+            metadata = run.get("metadata")
+            interruption = (
+                str(metadata.get("interrupt_reason") or "").strip()
+                if isinstance(metadata, dict)
+                else ""
+            )
+            key = SETTLEMENT_I18N_KEYS.get(interruption)
+            if key is not None:
+                error = self._t(key)
+        if status != "succeeded" and not error:
+            logger.warning(
+                "Terminal Run %s has no failure detail; skipping definition %s projection",
+                execution_id,
+                definition_id,
+            )
+            return
+        retire_one_shot = (
+            str(run.get("source_kind") or "") == "scheduler"
+            and task.schedule_type == "at"
+        )
+        try:
+            recorded = self.store.mark_task_result(
+                task.id,
+                error=error,
+                disable_one_shot=retire_one_shot,
+                expected_binding=(
+                    task.session_id,
+                    task.session_key,
+                    task.schedule_type,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to project terminal Run %s to definition %s",
+                execution_id,
+                definition_id,
+            )
+            return
+        if not recorded:
+            logger.warning(
+                "Definition %s changed before terminal Run %s could be projected",
+                definition_id,
+                execution_id,
+            )
+            return
+        if retire_one_shot:
+            try:
+                if self.scheduler.get_job(task.id) is not None:
+                    self.scheduler.remove_job(task.id)
+                self._job_signatures.pop(task.id, None)
+            except Exception:
+                logger.exception(
+                    "Failed to retire scheduler job for terminal definition %s",
+                    definition_id,
+                )
+
     def _settle_agent_run_without_result(
         self,
         execution_id: str,
         *,
         settled_by: str,
         error: str,
-    ) -> bool:
+    ) -> tuple[bool, Optional[str]]:
         """Terminalize a run whose turn ended without a terminal result.
 
         Deliberately NOT routed through ``_execute_claimed_request``'s ``finally``:
@@ -5593,13 +5928,13 @@ class ScheduledTaskService:
         The terminal status comes from ``SETTLEMENT_TERMINAL_STATUS``: an explicit
         user stop is ``canceled``, an infrastructure fault is ``failed``.
 
-        Returns ``True`` when this store owns the terminal write (whether or not this
-        call is the one that performed it — an already-terminal row is settled too),
-        and ``False`` only when the store has no guarded writer at all.
+        Returns whether the guarded writer exists and the status written by this
+        exact terminal compare-and-set. An already-terminal row returns a supported
+        writer with no status, so callers cannot project a result they did not settle.
         """
 
         if not self.request_store.supports_guarded_settlement():
-            return False
+            return False, None
         settled = self.request_store.settle_without_result(
             execution_id,
             terminal_status=SETTLEMENT_TERMINAL_STATUS.get(settled_by, "failed"),
@@ -5619,7 +5954,7 @@ class ScheduledTaskService:
                 settled,
                 settled_by,
             )
-        return True
+        return True, settled
 
     # --- pinned session binding recovery -------------------------------------
     #

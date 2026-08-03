@@ -1,13 +1,13 @@
-"""Shared vocabulary for how a turn's dispatch waiter was settled.
+"""Shared vocabulary for how an active execution ended without a backend result.
 
 Two layers need to agree on these strings and neither owns the other:
 
 * ``core/services/dispatch.py`` records WHY a streaming turn's waiter was
   released (``TurnDispatchOutcome.settled_by``), which is stamped on the live
   turn sink by the three release sites.
-* ``core/scheduled_tasks.py`` turns that into an ``agent_runs`` terminal state
-  plus ``metadata.interrupt_reason`` for a run whose backend never emitted a
-  terminal result.
+* ``core/scheduled_tasks.py`` turns a waiter settlement or an execution-level
+  teardown into an ``agent_runs`` terminal state plus
+  ``metadata.interrupt_reason``.
 
 Keeping the strings here (rather than inline at each site) is what stops the
 values in ``docs/plans/agent-run-zombie-settlement.md`` from drifting apart from
@@ -59,11 +59,18 @@ SETTLED_BY_TURN_ONLY_RESULT: Final = "turn_only_result"
 #: a cancelled task — nobody asked for this run to end, so it must not be
 #: reported as ``canceled`` with the user-stop explanation.
 #:
-#: Spelled ``backend_refresh`` rather than reusing ``harness-run-reliability``'s
-#: ``restarted``: that value is reserved for the *service* restarting around a
-#: run, which recovery retries, while this one interrupts a live turn inside a
-#: healthy process and does not.
+#: Spelled ``backend_refresh`` rather than ``restarted`` because it identifies a
+#: different infrastructure boundary: a live Agent runtime inside an otherwise
+#: healthy service, rather than the service itself shutting down.
 SETTLED_BY_BACKEND_REFRESH: Final = "backend_refresh"
+
+#: The scheduled service shut down while its exact claimed request was executing.
+#: The interrupted attempt is terminal; a later process must not replay it.
+SETTLED_BY_RESTARTED: Final = "restarted"
+
+#: An in-flight claimed request was cancelled without a more specific teardown
+#: cause. This is still an infrastructure interruption, never a requeue signal.
+SETTLED_BY_INTERRUPTED: Final = "interrupted"
 
 #: Settlements that mean "no terminal result will ever arrive for this run" — the
 #: ONLY ones a caller may terminalize a row from. Both settlement lanes test
@@ -75,6 +82,8 @@ SETTLEMENTS_WITHOUT_RESULT: Final = frozenset(
         SETTLED_BY_STOPPED,
         SETTLED_BY_REFUSED_CONCURRENT_TURN,
         SETTLED_BY_BACKEND_REFRESH,
+        SETTLED_BY_RESTARTED,
+        SETTLED_BY_INTERRUPTED,
     }
 )
 
@@ -88,12 +97,13 @@ INTERRUPT_REASON_NO_TERMINAL_RESULT: Final = SETTLED_BY_NO_TERMINAL_RESULT
 INTERRUPT_REASON_STOPPED: Final = SETTLED_BY_STOPPED
 INTERRUPT_REASON_REFUSED_CONCURRENT_TURN: Final = SETTLED_BY_REFUSED_CONCURRENT_TURN
 INTERRUPT_REASON_BACKEND_REFRESH: Final = SETTLED_BY_BACKEND_REFRESH
+INTERRUPT_REASON_RESTARTED: Final = SETTLED_BY_RESTARTED
+INTERRUPT_REASON_INTERRUPTED: Final = SETTLED_BY_INTERRUPTED
 
 #: Reserved for ``docs/plans/harness-run-reliability.md`` (PR2 / PR4 / PR7). Named
 #: here now because the classification below has to be closed over them before
 #: they are written, or each PR would have to remember to widen it.
 INTERRUPT_REASON_EVICTED: Final = "evicted"
-INTERRUPT_REASON_RESTARTED: Final = "restarted"
 INTERRUPT_REASON_LIFETIME_TIMEOUT: Final = "lifetime_timeout"
 
 #: The run could not be dispatched at all because the session it delivers to no
@@ -171,6 +181,7 @@ RUN_INTERRUPTION_REASONS: Final = frozenset(
     {
         SETTLED_BY_STOPPED,
         SETTLED_BY_BACKEND_REFRESH,
+        SETTLED_BY_INTERRUPTED,
         INTERRUPT_REASON_EVICTED,
         INTERRUPT_REASON_RESTARTED,
         INTERRUPT_REASON_LIFETIME_TIMEOUT,
@@ -193,6 +204,8 @@ SETTLEMENT_I18N_KEYS: Final = {
     SETTLED_BY_STOPPED: "harness.run.interrupted.stopped",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "harness.run.interrupted.refusedConcurrentTurn",
     SETTLED_BY_BACKEND_REFRESH: "harness.run.interrupted.backendRefresh",
+    SETTLED_BY_RESTARTED: "harness.run.interrupted.restarted",
+    SETTLED_BY_INTERRUPTED: "harness.run.interrupted.interrupted",
 }
 
 
@@ -214,6 +227,291 @@ SETTLEMENT_TERMINAL_STATUS: Final = {
     SETTLED_BY_STOPPED: "canceled",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "failed",
     SETTLED_BY_BACKEND_REFRESH: "failed",
+    SETTLED_BY_RESTARTED: "failed",
+    SETTLED_BY_INTERRUPTED: "failed",
+}
+
+def covered(test_node: str) -> tuple[str, str]:
+    """Declare the consuming test that proves one teardown matrix cell."""
+
+    return "covered", test_node
+
+
+def not_applicable(reason: str) -> tuple[str, str]:
+    """Declare why an entry point cannot own one teardown matrix surface."""
+
+    return "N/A", reason
+
+
+TEARDOWN_SETTLEMENT_ENTRY_POINTS: Final = (
+    "direct_executor_cancellation",
+    "graceful_service_stop",
+    "service_lease_loss",
+    "startup_recovery",
+    "user_stop_racing_teardown",
+    "running_agents_end",
+    "idle_stuck_eviction",
+    "backend_refresh",
+    "backend_runtime_cleanup",
+    "orphan_sweep",
+    "workbench_control_archive",
+    "watch_service_teardown",
+)
+
+TEARDOWN_SETTLEMENT_SURFACES: Final = (
+    "run_row",
+    "definition_projection",
+    "durable_turn",
+    "delivery_binding",
+    "session_projection_and_queue",
+    "scheduler_runtime_ownership",
+    "backend_runtime",
+    "callback_and_failure_notice",
+    "restart_recovery",
+    "runtime_registries",
+)
+
+_HFR_082 = (
+    "tests/test_harness_failure_visibility.py::"
+    "test_an_interruption_keeps_an_identity_distinct_from_an_ordinary_failure"
+)
+_HFR_100 = (
+    "tests/test_scheduled_tasks.py::"
+    "test_direct_inflight_cancellation_terminalizes_the_exact_run"
+)
+_HFR_101 = (
+    "tests/test_scheduled_tasks.py::"
+    "test_service_stop_terminalizes_inflight_run_without_replay"
+)
+_HFR_102 = (
+    "tests/test_scheduled_tasks.py::"
+    "test_canceled_task_execution_projects_every_result_and_only_retires_scheduler_one_shots"
+)
+_HFR_102_CAS = (
+    "tests/test_scheduled_tasks.py::"
+    "test_task_definition_projection_follows_the_exact_terminal_cas_winner"
+)
+_HFR_103 = (
+    "tests/test_scheduled_tasks.py::"
+    "test_service_teardown_terminalizes_transferred_durable_turn_without_draining_held_queue"
+)
+_HFR_104 = (
+    "tests/test_scheduled_tasks.py::"
+    "test_restart_recovery_terminalizes_started_rows_and_preserves_other_owners"
+)
+_HFR_106 = (
+    "tests/test_scheduled_tasks.py::"
+    "test_service_stop_preserves_non_durable_user_stop_cause"
+)
+_CANCELED_NOTICE = (
+    "tests/test_harness_failure_visibility.py::"
+    "test_a_succeeded_or_canceled_transition_owes_no_notice"
+)
+_RESTART_TURN = (
+    "tests/test_session_delivery_fsm.py::"
+    "test_restart_settles_agent_run_after_late_acceptance_commit"
+)
+_END_TURN = (
+    "tests/test_running_agents_service.py::test_end_active_workbench_turn_settles_via_manager"
+)
+_END_RUN = (
+    "tests/test_running_agents_service.py::"
+    "test_end_active_agent_run_binds_stop_context_to_matching_turn_sink"
+)
+_END_RUNTIME = (
+    "tests/test_running_agents_service.py::test_end_active_codex_frees_runtime_after_stop"
+)
+_EVICT_CODEX = (
+    "tests/test_codex_agent.py::CodexAgentStopTests::"
+    "test_evict_idle_transports_force_evicts_stuck_active_transport"
+)
+_EVICT_CLAUDE = (
+    "tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::"
+    "test_force_cleanup_stuck_active_session_retires_pending_turn"
+)
+_TURN_WITHOUT_RESULT = (
+    "tests/test_scheduled_tasks.py::"
+    "test_workbench_turn_settles_its_agent_run_when_no_result_arrives"
+)
+_REFRESH_RUN = (
+    "tests/test_scheduled_tasks.py::"
+    "test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop"
+)
+_REFRESH_TURN = (
+    "tests/test_internal_server.py::test_release_for_backend_refresh_cancels_matching_turn_and_sets_idle"
+)
+_EOF_TURN = (
+    "tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::"
+    "test_handle_message_receiver_eof_without_result_settles_current_turn"
+)
+_EOF_RUNTIME = (
+    "tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::"
+    "test_receiver_eof_cleans_runtime_before_terminal_emit_releases_gate"
+)
+_SWEEP_RUN = "tests/test_scheduled_tasks.py::test_sweep_terminalizes_orphaned_running_run"
+_SWEEP_TURN = (
+    "tests/test_session_delivery_fsm.py::"
+    "test_owned_run_sweep_retries_terminal_turn_settlement_before_orphaning"
+)
+_SEND_NOW = (
+    "tests/test_internal_server.py::"
+    "test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head"
+)
+_SEND_NOW_RESTART = (
+    "tests/test_internal_server.py::"
+    "test_agent_run_send_now_restart_preserves_refused_queue_behind_durable_owner"
+)
+_WATCH_STOP = "tests/test_watches.py::test_managed_watch_service_stop_terminates_running_waiter"
+
+#: Entry point x surface closure for teardown settlement. This is evidence
+#: metadata, never a lifecycle writer. Every row spells all surfaces explicitly:
+#: adding either dimension makes HFR-105 fail until the new cells name a consuming
+#: test or a precise ownership reason.
+TEARDOWN_SETTLEMENT_MATRIX: Final = {
+    "direct_executor_cancellation": {
+        "run_row": covered(_HFR_102_CAS),
+        "definition_projection": covered(_HFR_102_CAS),
+        "durable_turn": not_applicable("ownership already transferred to SessionTurnManager"),
+        "delivery_binding": not_applicable("no durable Delivery on the drain-owned lane"),
+        "session_projection_and_queue": not_applicable("no durable Session owner on this lane"),
+        "scheduler_runtime_ownership": covered(_HFR_102_CAS),
+        "backend_runtime": not_applicable("executor cancellation does not dismantle a backend runtime"),
+        "callback_and_failure_notice": covered(_HFR_082),
+        "restart_recovery": not_applicable("the process remains live"),
+        "runtime_registries": covered(_HFR_100),
+    },
+    "graceful_service_stop": {
+        "run_row": covered(_HFR_102_CAS),
+        "definition_projection": covered(_HFR_102_CAS),
+        "durable_turn": covered(_HFR_103),
+        "delivery_binding": covered(_HFR_103),
+        "session_projection_and_queue": covered(_HFR_103),
+        "scheduler_runtime_ownership": covered(_HFR_102_CAS),
+        "backend_runtime": not_applicable("controller backend cleanup is a later entry point"),
+        "callback_and_failure_notice": covered(_HFR_082),
+        "restart_recovery": covered(_HFR_101),
+        "runtime_registries": covered(_HFR_103),
+    },
+    "service_lease_loss": {
+        "run_row": covered(_HFR_102_CAS),
+        "definition_projection": covered(_HFR_102_CAS),
+        "durable_turn": covered(_HFR_103),
+        "delivery_binding": covered(_HFR_103),
+        "session_projection_and_queue": covered(_HFR_103),
+        "scheduler_runtime_ownership": covered(_HFR_102_CAS),
+        "backend_runtime": not_applicable("the scheduler lease does not own backend processes"),
+        "callback_and_failure_notice": covered(_HFR_082),
+        "restart_recovery": not_applicable("lease loss settles while the process is live"),
+        "runtime_registries": covered(_HFR_103),
+    },
+    "startup_recovery": {
+        "run_row": covered(_HFR_104),
+        "definition_projection": covered(_HFR_104),
+        "durable_turn": covered(_RESTART_TURN),
+        "delivery_binding": covered(_RESTART_TURN),
+        "session_projection_and_queue": covered(_RESTART_TURN),
+        "scheduler_runtime_ownership": covered(_HFR_104),
+        "backend_runtime": not_applicable("the previous backend process is already gone"),
+        "callback_and_failure_notice": covered(_HFR_082),
+        "restart_recovery": covered(_HFR_104),
+        "runtime_registries": covered(_HFR_104),
+    },
+    "user_stop_racing_teardown": {
+        "run_row": covered(_HFR_106),
+        "definition_projection": covered(_HFR_106),
+        "durable_turn": covered(_HFR_103),
+        "delivery_binding": covered(_HFR_103),
+        "session_projection_and_queue": covered(_HFR_103),
+        "scheduler_runtime_ownership": covered(_HFR_106),
+        "backend_runtime": not_applicable("Stop precedence does not choose backend cleanup"),
+        "callback_and_failure_notice": covered(_CANCELED_NOTICE),
+        "restart_recovery": covered(_HFR_104),
+        "runtime_registries": covered(_HFR_103),
+    },
+    "running_agents_end": {
+        "run_row": covered(_END_RUN),
+        "definition_projection": covered(_HFR_103),
+        "durable_turn": covered(_END_TURN),
+        "delivery_binding": covered(_END_RUN),
+        "session_projection_and_queue": covered(_END_TURN),
+        "scheduler_runtime_ownership": not_applicable("End does not stop the scheduler"),
+        "backend_runtime": covered(_END_RUNTIME),
+        "callback_and_failure_notice": covered(_CANCELED_NOTICE),
+        "restart_recovery": not_applicable("End is a live user action"),
+        "runtime_registries": covered(_END_RUNTIME),
+    },
+    "idle_stuck_eviction": {
+        "run_row": covered(_TURN_WITHOUT_RESULT),
+        "definition_projection": covered(_HFR_103),
+        "durable_turn": covered(_EVICT_CLAUDE),
+        "delivery_binding": covered(_TURN_WITHOUT_RESULT),
+        "session_projection_and_queue": covered(_TURN_WITHOUT_RESULT),
+        "scheduler_runtime_ownership": not_applicable("runtime eviction does not stop the scheduler"),
+        "backend_runtime": covered(_EVICT_CODEX),
+        "callback_and_failure_notice": covered(_HFR_082),
+        "restart_recovery": not_applicable("eviction settles while the process is live"),
+        "runtime_registries": covered(_EVICT_CODEX),
+    },
+    "backend_refresh": {
+        "run_row": covered(_REFRESH_RUN),
+        "definition_projection": covered(_HFR_103),
+        "durable_turn": covered(_REFRESH_TURN),
+        "delivery_binding": covered(_REFRESH_TURN),
+        "session_projection_and_queue": covered(_REFRESH_TURN),
+        "scheduler_runtime_ownership": covered(_HFR_102),
+        "backend_runtime": covered(_REFRESH_TURN),
+        "callback_and_failure_notice": covered(_HFR_082),
+        "restart_recovery": not_applicable("rolling refresh has a live Turn owner"),
+        "runtime_registries": covered(_REFRESH_TURN),
+    },
+    "backend_runtime_cleanup": {
+        "run_row": covered(_EOF_TURN),
+        "definition_projection": covered(_HFR_103),
+        "durable_turn": covered(_EOF_TURN),
+        "delivery_binding": covered(_TURN_WITHOUT_RESULT),
+        "session_projection_and_queue": covered(_TURN_WITHOUT_RESULT),
+        "scheduler_runtime_ownership": not_applicable("backend cleanup does not stop the scheduler"),
+        "backend_runtime": covered(_EOF_RUNTIME),
+        "callback_and_failure_notice": covered(_HFR_082),
+        "restart_recovery": not_applicable("runtime EOF is settled by the live terminal boundary"),
+        "runtime_registries": covered(_EOF_RUNTIME),
+    },
+    "orphan_sweep": {
+        "run_row": covered(_SWEEP_RUN),
+        "definition_projection": not_applicable("the sweep excludes scheduled and watch Run rows"),
+        "durable_turn": covered(_SWEEP_TURN),
+        "delivery_binding": covered(_SWEEP_TURN),
+        "session_projection_and_queue": not_applicable("live Session owners are sweep exemptions"),
+        "scheduler_runtime_ownership": not_applicable("the sweep never owns scheduler jobs"),
+        "backend_runtime": not_applicable("the sweep observes vanished owners only"),
+        "callback_and_failure_notice": covered(_HFR_082),
+        "restart_recovery": not_applicable("the sweep is a live fallback, not startup recovery"),
+        "runtime_registries": covered(_SWEEP_TURN),
+    },
+    "workbench_control_archive": {
+        "run_row": covered(_SEND_NOW),
+        "definition_projection": covered(_HFR_103),
+        "durable_turn": covered(_SEND_NOW),
+        "delivery_binding": covered(_SEND_NOW),
+        "session_projection_and_queue": covered(_SEND_NOW),
+        "scheduler_runtime_ownership": not_applicable("Workbench control does not stop the scheduler"),
+        "backend_runtime": not_applicable("replacement reuses the existing backend runtime"),
+        "callback_and_failure_notice": covered(_CANCELED_NOTICE),
+        "restart_recovery": covered(_SEND_NOW_RESTART),
+        "runtime_registries": covered(_SEND_NOW),
+    },
+    "watch_service_teardown": {
+        "run_row": not_applicable("enqueued work transfers to ScheduledTaskService or Delivery"),
+        "definition_projection": not_applicable("Watch service owns waiter state, not fire results"),
+        "durable_turn": not_applicable("accepted Turns are already owned by SessionTurnManager"),
+        "delivery_binding": not_applicable("accepted Deliveries are already owned by SessionTurnManager"),
+        "session_projection_and_queue": not_applicable("Watch service cannot drain Session queues"),
+        "scheduler_runtime_ownership": not_applicable("Watch service has its own waiter scheduler"),
+        "backend_runtime": not_applicable("Watch service never owns an agent backend process"),
+        "callback_and_failure_notice": not_applicable("terminal Run projection begins after enqueue"),
+        "restart_recovery": not_applicable("watch_runtime rows are explicit recovery exemptions"),
+        "runtime_registries": covered(_WATCH_STOP),
+    },
 }
 
 
