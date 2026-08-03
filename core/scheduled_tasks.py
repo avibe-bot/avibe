@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -5286,7 +5287,9 @@ class ScheduledTaskService:
         if backend and service is not None:
             wait_backend_ready = getattr(service, "wait_backend_ready", None)
             if callable(wait_backend_ready):
-                await wait_backend_ready(backend)
+                readiness = wait_backend_ready(backend)
+                if inspect.isawaitable(readiness):
+                    await readiness
 
         def commit_start() -> bool:
             return self.request_store.mark_execution_started(request.id)

@@ -63,6 +63,7 @@ from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
 from core.runtime_activation import (
     RuntimeActivationIdentity,
+    RuntimeActivationRegistry,
     RuntimeActivationResolution,
 )
 from vibe.i18n import t as i18n_t
@@ -1004,6 +1005,8 @@ class SessionTurnManager:
             "runtime_activation",
             None,
         )
+        if not isinstance(registry, RuntimeActivationRegistry):
+            registry = None
         resolve = getattr(
             service,
             "runtime_activation_identity_for_session_binding",
