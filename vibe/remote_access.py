@@ -1163,6 +1163,12 @@ def _drain_tracked_connector(connector: dict[str, Any]) -> bool:
     return True
 
 
+def _public_probe_session() -> requests.Session:
+    """Use the host's effective proxy and CA environment for public probes."""
+
+    return requests.Session()
+
+
 def _measure_promoted_route(
     config: V2Config,
     protocol: str,
@@ -1171,8 +1177,7 @@ def _measure_promoted_route(
     url = _public_health_url(config)
     if url is None:
         return None, None
-    session = requests.Session()
-    session.trust_env = False
+    session = _public_probe_session()
     request_samples: list[tunnel_quality.RequestPathSample] = []
     connector_evaluator = tunnel_quality.QualityEvaluator()
     connector_snapshots: list[dict[str, Any]] = []
@@ -1288,7 +1293,7 @@ def _run_tail_protocol_recovery(
                 candidate_pid,
                 active_metrics_url,
             ):
-                return None, None
+                raise RuntimeError("promoted_connector_no_longer_ready")
             return candidate_path, candidate_connector
         finally:
             if candidate_pid is not None and not promoted:
@@ -1542,8 +1547,7 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
     last_report_at = 0.0
     last_active_pid: int | None = None
     last_effective_protocol = "unknown"
-    request_session = requests.Session()
-    request_session.trust_env = False
+    request_session = _public_probe_session()
     try:
         while quality_path == _quality_state_path() and quality_path.parent.exists():
             started_at = time.monotonic()

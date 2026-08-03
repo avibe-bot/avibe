@@ -78,7 +78,9 @@ The quality monitor performs three sequential `/health` requests during each
 15-second connector sample. Requests share a session so the metric models the
 steady-state API path rather than repeated DNS/TLS setup. Each request has a
 3.5-second timeout. The rolling window is 180 seconds and retains at most 48
-samples.
+samples. Public probes use Requests' normal host environment, including
+`HTTPS_PROXY`, `NO_PROXY`, `REQUESTS_CA_BUNDLE`, and `CURL_CA_BUNDLE`, so the
+monitor measures the same network policy that ordinary host traffic uses.
 
 The V2 aggregate contains sample and success counts, P50/P95/P99/maximum,
 failure rate, rates above 500/1000/2000 ms, confidence, and the protocol-local
@@ -181,6 +183,8 @@ rolling deployment.
 | RA-TQ-018 | A faster tail candidate is rejected when connector error gates fail | supervisor candidate-policy test |
 | RA-TQ-019 | A live tail recovery retains ownership of its pending rollback marker | supervisor ownership test |
 | RA-TQ-020 | A candidate that materially eliminates request failures is accepted | candidate-policy contract test |
+| RA-TQ-021 | A rollback replacement that loses readiness remains pending for reconciliation | supervisor rollback test |
+| RA-TQ-022 | Public probes honor the host proxy and CA environment | network-policy test |
 
 ## Product Decisions
 
@@ -598,8 +602,10 @@ The current endpoint remains additive and backward compatible:
 POST /api/v1/instances/{instance_id}/runtime-status
 ```
 
-Avibe adds an optional `tunnel_quality` property whose exact schema is
-`contracts/tunnel-quality-runtime-status-v1.schema.json`. Example:
+Avibe adds an optional `tunnel_quality` property. Its supported exact shapes
+are `contracts/tunnel-quality-runtime-status-v1.schema.json` and
+`contracts/tunnel-quality-runtime-status-v2.schema.json`. V1 remains valid
+during rolling deployment. Example V1 payload:
 
 ```json
 {
@@ -647,9 +653,9 @@ All runtime-status sends go through one serialized, coalescing reporter. A
 scheduled heartbeat must not race a newer recovery event and overwrite it with
 an older snapshot.
 
-The backend validates the nested V1 object, stores it as an additive JSONB
-column on the existing latest-status row, and returns it in serialized instance
-status. It does not create a time-series table in V1.
+The backend validates each supported nested object, stores it as an additive
+JSONB column on the existing latest-status row, and returns it in serialized
+instance status. It does not create a time-series table.
 
 ### avibe.bot receiving behavior
 
@@ -658,13 +664,21 @@ parses the required core heartbeat first, then handles `tunnel_quality`
 independently:
 
 - missing quality means an older Avibe and remains valid;
-- a supported, valid V1 object is stored;
+- a supported, valid V1 or V2 object is stored;
 - malformed or oversized quality is discarded while the core heartbeat still
   returns `200` and updates last-seen state;
 - an unsupported future `schema_version` is ignored, not rejected; and
-- a V1 sample more than five minutes ahead of backend time is discarded as
+- a supported sample more than five minutes ahead of backend time is discarded as
   unreasonable clock skew;
 - validation failures are rate-limited in logs/Sentry without echoing payloads.
+
+V2 validation also preserves the producer's correlated semantics rather than
+accepting each field independently. Confidence is derived from `sample_count`;
+low confidence is `insufficient`; a successful medium-confidence path is
+`healthy`; and high-confidence `healthy`/`degraded` status is derived from the
+documented recovery thresholds. At medium/high confidence, `grade` is derived
+from the request-path grading table. A high-confidence degraded or unavailable
+path requires the aggregate state to be `degraded` or `recovering`.
 
 The backend rejects an older quality sample when its `sampled_at` predates the
 stored sample, while still accepting the core heartbeat. The comparison and
@@ -794,4 +808,4 @@ changes must update the schema first.
   console is visible.
 - No secret or sensitive request data appears in local snapshots, logs, Doctor,
   status APIs, or cloud payloads.
-- RA-TQ-001 through RA-TQ-009 pass in their required evidence layers.
+- RA-TQ-001 through RA-TQ-022 pass in their required evidence layers.

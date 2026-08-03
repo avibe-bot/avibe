@@ -131,3 +131,15 @@ scenarios:
     kind: contract
     layer: unit
     test: tests/test_tunnel_quality.py::test_ra_tq_020_request_path_candidate_accepts_material_failure_reduction
+  - id: RA-TQ-021
+    name: A rollback replacement that loses readiness remains pending for reconciliation
+    status: covered
+    kind: rollback
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_021_tail_rollback_stays_pending_if_replacement_loses_readiness
+  - id: RA-TQ-022
+    name: Public probes honor the host proxy and CA environment
+    status: covered
+    kind: network_policy
+    layer: unit
+    test: tests/test_tunnel_recovery.py::test_ra_tq_022_public_probe_session_honors_host_network_environment

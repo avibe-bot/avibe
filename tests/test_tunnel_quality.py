@@ -272,6 +272,45 @@ def test_ra_tq_010_request_path_tail_overrides_good_connector_rtt() -> None:
     assert evaluator.recovery_trigger(snapshot) == "tail_latency"
 
 
+def test_request_path_twofold_baseline_regression_has_no_absolute_floor() -> None:
+    request_path = tunnel_quality.summarize_request_path_samples(
+        [
+            tunnel_quality.RequestPathSample(
+                sampled_at=1,
+                latency_ms=tuple([220.0] * 30),
+                successes=tuple([True] * 30),
+            )
+        ],
+        baseline_p95_ms=100.0,
+    )
+
+    assert request_path is not None
+    assert request_path["latency_ms"]["p95"] == 220.0
+    assert request_path["status"] == "degraded"
+
+
+def test_request_path_degradation_controls_state_when_connector_metrics_are_missing() -> None:
+    evaluator = tunnel_quality.QualityEvaluator()
+    snapshot = None
+
+    for index in range(10):
+        snapshot = evaluator.update(
+            None,
+            effective_protocol="quic",
+            request_path_sample=tunnel_quality.RequestPathSample(
+                sampled_at=1_000 + index * 15,
+                latency_ms=(120, 140, 1600),
+                successes=(True, True, True),
+            ),
+            now=1_000 + index * 15,
+        )
+
+    assert snapshot is not None
+    assert snapshot["request_path"]["confidence"] == "high"
+    assert snapshot["request_path"]["status"] == "degraded"
+    assert snapshot["state"] == "degraded"
+
+
 def test_ra_tq_015_sustained_request_failures_trigger_recovery() -> None:
     evaluator = tunnel_quality.QualityEvaluator()
     snapshot = None
@@ -323,12 +362,12 @@ def test_ra_tq_011_http2_uses_request_path_grade_without_rtt() -> None:
     assert snapshot["state"] == "healthy"
 
 
-def test_request_path_candidate_accepts_material_tail_improvement_with_bounded_p95_regression() -> None:
+def test_request_path_candidate_accepts_tail_improvement_despite_p50_regression() -> None:
     active = tunnel_quality.summarize_request_path_samples(
         [
             tunnel_quality.RequestPathSample(
                 sampled_at=1,
-                latency_ms=tuple([202.0] * 93 + [324.0] * 5 + [1840.0] * 2),
+                latency_ms=tuple([100.0] * 93 + [324.0] * 5 + [1840.0] * 2),
                 successes=tuple([True] * 100),
             )
         ]

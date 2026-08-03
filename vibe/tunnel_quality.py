@@ -215,7 +215,7 @@ def request_path_is_degraded(request_path: dict[str, Any] | None) -> bool:
     over_one_second = float(slow.get("over_1000_ms") or 0)
     failure_rate = float(request_path.get("failure_rate") or 0)
     baseline = request_path.get("baseline_p95_ms")
-    baseline_regression = baseline is not None and p95 >= max(350.0, 2 * float(baseline))
+    baseline_regression = baseline is not None and p95 >= 2 * float(baseline)
     return (
         failure_rate >= 0.10
         or p95 >= 750
@@ -300,10 +300,8 @@ def request_path_is_better(active: dict[str, Any], candidate: dict[str, Any]) ->
     candidate_success = int(candidate.get("success_count") or 0)
     if candidate_count < REQUEST_PATH_MIN_SAMPLES or candidate_success / candidate_count < 0.95:
         return False
-    active_p50 = float(active_latency.get("p50") or 0)
     active_p95 = float(active_latency.get("p95") or 0)
     active_p99 = float(active_latency.get("p99") or 0)
-    candidate_p50 = float(candidate_latency.get("p50") or 0)
     candidate_p95 = float(candidate_latency.get("p95") or 0)
     candidate_p99 = float(candidate_latency.get("p99") or 0)
     if active_p95 <= 0 or candidate_p95 > active_p95 * 1.25:
@@ -316,7 +314,6 @@ def request_path_is_better(active: dict[str, Any], candidate: dict[str, Any]) ->
     tail_improved = (
         active_p99 > 0
         and candidate_p99 <= active_p99 * 0.60
-        and (active_p50 <= 0 or candidate_p50 <= active_p50 * 1.25)
     )
     slow_rate_improved = (
         active_slow >= 0.03
@@ -526,6 +523,8 @@ class QualityEvaluator:
             previous_connections = int((self._last_snapshot or {}).get("ha_connections") or 0)
             previous_locations = list((self._last_snapshot or {}).get("edge_locations") or [])
             request_grade = request_path_grade(request_path)
+            if request_path_is_degraded(request_path):
+                state = "degraded"
             snapshot = {
                 "schema_version": 2,
                 "state": "recovering" if recovery_payload["state"] in {"evaluating", "draining"} else state,

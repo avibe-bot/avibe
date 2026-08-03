@@ -239,6 +239,60 @@ def test_ra_tq_013_tail_recovery_rolls_back_protocol(monkeypatch, tmp_path) -> N
     assert results[0]["result_protocol"] == "quic"
 
 
+def test_ra_tq_021_tail_rollback_stays_pending_if_replacement_loses_readiness(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    config, _active_pid, first_candidate_pid, alive = _setup_recovery(
+        monkeypatch,
+        tmp_path,
+        _quality(180),
+    )
+    alternate_pid = 333
+    rollback_pid = 444
+    alive.update({alternate_pid, rollback_pid})
+    previous_path = _request_path(202, 900, 1840, slow_rate=0.08)
+    previous = {**_quality(80), "protocol": "quic", "request_path": previous_path}
+    worse_path = _request_path(300, 1200, 2400, slow_rate=0.12)
+    spawned_pids = iter([first_candidate_pid, alternate_pid, rollback_pid])
+    measurement_count = 0
+    rollback_lost_readiness = False
+    results = []
+
+    def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
+        pid = next(spawned_pids)
+        pid_path.write_text(str(pid), encoding="utf-8")
+        return pid
+
+    def measure_promoted_route(cfg, protocol, metrics_url):
+        nonlocal measurement_count, rollback_lost_readiness
+        measurement_count += 1
+        if measurement_count == 3:
+            rollback_lost_readiness = True
+        return worse_path, _quality(80)
+
+    monkeypatch.setattr(runtime, "spawn_background", spawn_background)
+    monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=8: alive.discard(pid) is None)
+    monkeypatch.setattr(remote_access, "_measure_promoted_route", measure_promoted_route)
+    monkeypatch.setattr(
+        remote_access,
+        "_connector_ready_now",
+        lambda pid, url: not (pid == rollback_pid and rollback_lost_readiness),
+    )
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))
+
+    remote_access._run_route_optimization(config, "tail_latency", previous)
+
+    state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert remote_access._read_pid() == rollback_pid
+    assert state["active"]["requested_protocol"] == "quic"
+    assert state["pending_tail_rollback"] == {
+        "active_pid": rollback_pid,
+        "previous_protocol": "quic",
+    }
+    assert results[0]["result"] == "failed"
+
+
 def test_ra_tq_018_tail_candidate_must_pass_connector_error_gates(monkeypatch, tmp_path) -> None:
     config, active_pid, first_candidate_pid, alive = _setup_recovery(
         monkeypatch,
@@ -435,6 +489,35 @@ def test_candidate_readiness_requires_four_ha_connections(monkeypatch) -> None:
     monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", lambda url: _metrics_sample(connections=4))
 
     assert remote_access._connector_ready_now(222, "http://127.0.0.1:29002") is True
+
+
+def test_ra_tq_022_public_probe_session_honors_host_network_environment(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    ca_bundle = tmp_path / "host-ca.pem"
+    ca_bundle.write_text("test CA", encoding="utf-8")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:8080")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(ca_bundle))
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+
+    session = remote_access._public_probe_session()
+    try:
+        settings = session.merge_environment_settings(
+            "https://alex.avibe.bot/health",
+            {},
+            None,
+            None,
+            None,
+        )
+    finally:
+        session.close()
+
+    assert session.trust_env is True
+    assert settings["proxies"]["https"] == "http://proxy.test:8080"
+    assert settings["verify"] == str(ca_bundle)
 
 
 def test_manual_optimization_uses_active_availability_trigger(monkeypatch) -> None:
