@@ -146,22 +146,27 @@ timed out, and the interlock cannot make a stuck session immortal.
 
 ### Goal
 
-One hung post-turn delivery or vault callback pass must not block `_watch_store`
-or every other Harness tenant. This is the direct fix for the observed 65-minute
-stall and the same unbounded critical-path shape in `_drain_vault_callbacks`.
+One hung or unbounded request, Run-callback, vault-callback, or post-turn-output
+pass must not block `_watch_store` or every other Harness tenant. This is the
+direct fix for the observed 65-minute stall and the same critical-path shape in
+the other inline drains.
 
 ### Required behavior
 
-1. Move `_drain_recovered_activity_outputs` and `_drain_vault_callbacks` off the
-   `_watch_store` critical path, or bound each there. Process vault callbacks in
-   bounded pages rather than calling `list_pending_request_callbacks` without a
-   limit, and re-arm when a page leaves work. A detached drain must still be
-   tracked, single-flight, time-bounded, and canceled/awaited during service
-   stop. Merely wrapping synchronous vault storage in `create_task` is not
-   isolation: use an async-compatible store path or a bounded worker so a stalled
-   database operation cannot block the event loop.
-2. Bound post-turn delivery and vault callback work, not Agent execution. The
-   no-turn-duration-timeout invariant remains unchanged.
+1. Apply one invariant to every drain invoked by `_watch_store`:
+   `_drain_requests`, `_drain_callbacks`, `_drain_vault_callbacks`, and
+   `_drain_recovered_activity_outputs` must each run as a bounded page or as a
+   separately tracked task outside the critical path. Re-arm when a page leaves
+   work; in particular, do not call `list_pending_request_callbacks` without a
+   limit or scan an unbounded skipped-request backlog. A detached drain must be
+   single-flight, time-bounded, and canceled/awaited during service stop. Keep
+   the cheap indexed reload and stale-run probes inline, but do not put callback
+   enqueue/storage work back in front of the sweep. Merely wrapping synchronous
+   storage in `create_task` is not isolation: use an async-compatible store path
+   or a bounded worker so a stalled database operation cannot block the event
+   loop.
+2. Bound drain work, not Agent execution. The no-turn-duration-timeout invariant
+   remains unchanged.
 3. Add one durable, Activity-owned output-attempt record keyed by the stable
    `MessageOutput.idempotency_key`. It must survive restart without a Run row and
    carry guarded `pending` / `sending` / `delivered` / `failed` / `acknowledged` /
@@ -188,17 +193,24 @@ stall and the same unbounded critical-path shape in `_drain_vault_callbacks`.
 6. Re-arm `_drain_dirty` for every temporary request/callback skip. Persist retry
    timing and apply backoff to unrunnable work so a retry cannot hot-spin on the
    two-second tick.
-7. Add a heartbeat plus a separately tracked supervisor task that is not awaited
-   by `_watch_store`. It must identify the overdue drain in a loud log; a watchdog
-   running inside the blocked loop cannot diagnose that loop.
+7. Add a heartbeat plus one separately tracked supervisor task per service
+   instance that is not awaited by `_watch_store`. It must identify the overdue
+   drain in a loud log; a watchdog running inside the blocked loop cannot diagnose
+   that loop. Cancel and await the supervisor alongside the owned drain tasks in
+   both stop and restart paths so repeated starts cannot accumulate stale
+   watchdogs or false overdue-drain logs.
 
 ### Required evidence
 
-- a hung recovered-output send or vault callback storage/dispatch operation does
-  not delay Harness request draining or stale-run sweeps;
-- a large vault callback backlog drains in bounded pages and reliably re-arms;
+- a hung request-admission store call, Run-callback lookup/enqueue,
+  vault-callback storage/dispatch operation, or recovered-output send does not
+  delay the other drains or stale-run sweeps;
+- large request, Run-callback, and vault-callback backlogs drain in bounded pages
+  and reliably re-arm;
 - only one instance of each drain can run;
-- service stop cancels and joins owned drain tasks;
+- service stop/restart cancels and joins owned drain tasks and the supervisor;
+- repeated start/stop cycles leave exactly one current supervisor and no stale
+  overdue-drain logs;
 - a definitive failure before transport invocation retries safely;
 - timeout after confirmed delivery does not resend;
 - a real IM id with no persisted row acknowledges without resending, while an
@@ -212,9 +224,9 @@ stall and the same unbounded critical-path shape in `_drain_vault_callbacks`.
 - every skip re-arms with backoff;
 - the independent watchdog reports which owned drain is overdue.
 
-Exit criterion: the watch loop continues to make progress under a hung transport
-or vault callback operation, every claimed output reaches acknowledged, safely
-retryable, or explicit terminal state, and callback backlog cannot monopolize a
+Exit criterion: the watch loop continues to make progress under a hung drain
+operation, every claimed output reaches acknowledged, safely retryable, or
+explicit terminal state, and no request or callback backlog can monopolize a
 pass.
 
 ## 6. PR7 — Re-baseline terminal-time truth; then split
