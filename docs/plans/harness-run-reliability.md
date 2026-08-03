@@ -200,10 +200,20 @@ evidence, and restart recovery. First determine what remains.
    for the duration of an Agent turn.
 2. Honor a per-run **inactivity** limit for scheduled runs. Queued or stalled work
    ages; observable assistant/tool progress re-arms the clock.
-3. On expiry, record `lifetime_timeout` before cause-aware cancellation. Retire a
-   still-queued Delivery directly; cancel an accepted Turn through its current
-   owner. Both settle visibly through the existing notice path.
-4. Default any automatic inactivity limit below the cron interval, but do not
+3. On expiry, record `lifetime_timeout` before cancellation and consume
+   `DELIVERY_STATE_MATRIX` for **every** Delivery state; do not branch only on
+   queued versus accepted. A `run_cancel=retire` state may retire only work the
+   policy proves unwritten. A `run_cancel=turn_owner` state routes through its
+   linked Turn's cause-aware cancellation/reconciliation; if no Turn exists,
+   preserve the Delivery's possible/unknown native-effect evidence and reconcile
+   it as an infrastructure failure without replay or an “unwritten” claim.
+   Terminal `run_cancel=complete` states are left to their existing terminal
+   owner. Every resulting failure settles visibly through the notice path.
+4. Cover the intermediate `claimed`, `pending_steer`, `steering`,
+   `interrupt_waiting`, and `reconciling_steer` states: each must either reach
+   its exact Turn owner or a durable terminal ambiguity outcome, release its
+   ordering fence, and never replay work with possible/unknown native effects.
+5. Default any automatic inactivity limit below the cron interval, but do not
    turn short cron periods into absolute turn-duration caps.
 
 The old D7 blocker is retired, not carried forward. Its premise was that a
