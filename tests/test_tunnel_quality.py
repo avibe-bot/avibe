@@ -272,6 +272,31 @@ def test_ra_tq_010_request_path_tail_overrides_good_connector_rtt() -> None:
     assert evaluator.recovery_trigger(snapshot) == "tail_latency"
 
 
+def test_ra_tq_015_sustained_request_failures_trigger_recovery() -> None:
+    evaluator = tunnel_quality.QualityEvaluator()
+    snapshot = None
+
+    for index in range(10):
+        sampled_at = 15_000 + index * 15
+        snapshot = evaluator.update(
+            _sample(sampled_at, (70, 75, 80, 85)),
+            configured_protocol="auto",
+            effective_protocol="quic",
+            request_path_sample=tunnel_quality.RequestPathSample(
+                sampled_at=sampled_at,
+                latency_ms=(80, 90, 100),
+                successes=(True, True, index % 3 != 0),
+            ),
+        )
+
+    assert snapshot is not None
+    assert snapshot["request_path"]["confidence"] == "high"
+    assert snapshot["request_path"]["failure_rate"] >= 0.10
+    assert snapshot["request_path"]["status"] == "degraded"
+    assert snapshot["state"] == "degraded"
+    assert evaluator.recovery_trigger(snapshot) == "tail_latency"
+
+
 def test_ra_tq_011_http2_uses_request_path_grade_without_rtt() -> None:
     evaluator = tunnel_quality.QualityEvaluator()
     snapshot = None

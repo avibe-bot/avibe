@@ -213,10 +213,12 @@ def request_path_is_degraded(request_path: dict[str, Any] | None) -> bool:
     p99 = float(latency.get("p99") or 0)
     slow = request_path.get("slow_request_rate") or {}
     over_one_second = float(slow.get("over_1000_ms") or 0)
+    failure_rate = float(request_path.get("failure_rate") or 0)
     baseline = request_path.get("baseline_p95_ms")
     baseline_regression = baseline is not None and p95 >= max(350.0, 2 * float(baseline))
     return (
-        p95 >= 750
+        failure_rate >= 0.10
+        or p95 >= 750
         or baseline_regression
         or over_one_second >= 0.05
         or (p99 >= 1500 and over_one_second >= 0.03)

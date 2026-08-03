@@ -409,6 +409,7 @@ def _write_state(
             ),
             "candidate": None,
             "draining": None,
+            "pending_tail_rollback": None,
         },
     )
 
@@ -442,6 +443,36 @@ def _state_connector(name: str) -> dict[str, Any] | None:
     if name == "active" and isinstance(state.get("pid"), int):
         return {"pid": state["pid"], "metrics_url": state.get("metrics_url")}
     return None
+
+
+def _pending_tail_rollback() -> dict[str, Any] | None:
+    state = _read_state() or {}
+    pending = state.get("pending_tail_rollback")
+    if not isinstance(pending, dict):
+        return None
+    active_pid = pending.get("active_pid")
+    previous_protocol = pending.get("previous_protocol")
+    if not isinstance(active_pid, int) or previous_protocol not in {"quic", "http2"}:
+        return None
+    return pending
+
+
+def _clear_pending_tail_rollback(*, force: bool = False) -> None:
+    with _CONNECTOR_LOCK:
+        state = _read_state() or {}
+        pending = state.get("pending_tail_rollback")
+        active = state.get("active")
+        if not isinstance(pending, dict):
+            return
+        if (
+            not force
+            and isinstance(active, dict)
+            and isinstance(pending.get("active_pid"), int)
+            and active.get("pid") != pending.get("active_pid")
+        ):
+            return
+        state["pending_tail_rollback"] = None
+        runtime.write_json(_state_path(), state)
 
 
 def _replace_state_connector(name: str, record: dict[str, Any] | None) -> None:
@@ -837,6 +868,7 @@ def _reserve_recovery(thread: threading.Thread, *, manual: bool, emergency: bool
             _RECOVERY_THREAD is not None
             or _state_connector("candidate") is not None
             or _state_connector("draining") is not None
+            or _pending_tail_rollback() is not None
             or _read_pid_file(_candidate_pid_path()) is not None
         ):
             return False
@@ -1084,7 +1116,11 @@ def _discard_candidate_connector(pid: int) -> None:
             _replace_state_connector("candidate", None)
 
 
-def _promote_candidate_connector(pid: int) -> dict[str, Any]:
+def _promote_candidate_connector(
+    pid: int,
+    *,
+    pending_tail_rollback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     with _CONNECTOR_LOCK:
         state = _read_state() or {}
         active = state.get("active") if isinstance(state.get("active"), dict) else {"pid": _read_pid()}
@@ -1098,6 +1134,7 @@ def _promote_candidate_connector(pid: int) -> dict[str, Any]:
         state["active"] = candidate
         state["candidate"] = None
         state["draining"] = active if isinstance(old_pid, int) and old_pid != pid else None
+        state["pending_tail_rollback"] = pending_tail_rollback
         state["pid"] = pid
         runtime.write_json(_state_path(), state)
         _pid_path().write_text(str(pid), encoding="utf-8")
@@ -1126,18 +1163,24 @@ def _drain_tracked_connector(connector: dict[str, Any]) -> bool:
     return True
 
 
-def _measure_request_path(config: V2Config, protocol: str) -> dict[str, Any] | None:
+def _measure_promoted_route(
+    config: V2Config,
+    protocol: str,
+    metrics_url: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     url = _public_health_url(config)
     if url is None:
-        return None
+        return None, None
     session = requests.Session()
     session.trust_env = False
-    samples: list[tunnel_quality.RequestPathSample] = []
+    request_samples: list[tunnel_quality.RequestPathSample] = []
+    connector_evaluator = tunnel_quality.QualityEvaluator()
+    connector_snapshots: list[dict[str, Any]] = []
     try:
         for index in range(PROTOCOL_EVALUATION_ATTEMPTS):
             if _RECOVERY_CANCEL_EVENT.is_set():
                 raise RuntimeError("route_optimization_cancelled")
-            samples.append(
+            request_samples.append(
                 tunnel_quality.probe_request_path(
                     session,
                     url,
@@ -1145,13 +1188,29 @@ def _measure_request_path(config: V2Config, protocol: str) -> dict[str, Any] | N
                     timeout=REQUEST_PATH_PROBE_TIMEOUT_SECONDS,
                 )
             )
+            try:
+                sample = tunnel_quality.scrape_metrics(metrics_url)
+            except Exception:
+                logger.debug("Tunnel candidate metrics scrape failed", exc_info=True)
+            else:
+                connector_snapshots.append(
+                    connector_evaluator.update(
+                        sample,
+                        connector_count=1,
+                        configured_protocol=_configured_protocol(config),
+                        effective_protocol=protocol,
+                    )
+                )
             if index + 1 < PROTOCOL_EVALUATION_ATTEMPTS:
                 time.sleep(PROTOCOL_EVALUATION_INTERVAL_SECONDS)
     finally:
         session.close()
-    return tunnel_quality.summarize_request_path_samples(
-        samples,
-        baseline_p95_ms=_QUALITY_EVALUATOR.request_baseline(protocol),
+    return (
+        tunnel_quality.summarize_request_path_samples(
+            request_samples,
+            baseline_p95_ms=_QUALITY_EVALUATOR.request_baseline(protocol),
+        ),
+        tunnel_quality.summarize_candidate_snapshots(connector_snapshots),
     )
 
 
@@ -1176,7 +1235,9 @@ def _run_tail_protocol_recovery(
     if not isinstance(previous_path, dict) or previous_protocol not in {"quic", "http2"}:
         raise RuntimeError("request_path_comparison_unavailable")
 
-    def activate_and_measure(protocol: str) -> dict[str, Any] | None:
+    def activate_and_measure(
+        protocol: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         candidate_pid: int | None = None
         promoted = False
         try:
@@ -1205,20 +1266,30 @@ def _run_tail_protocol_recovery(
                 previous_protocol=previous_protocol,
                 result_protocol=protocol,
             )
-            replaced = _promote_candidate_connector(candidate_pid)
+            replaced = _promote_candidate_connector(
+                candidate_pid,
+                pending_tail_rollback={
+                    "active_pid": candidate_pid,
+                    "previous_protocol": previous_protocol,
+                },
+            )
             promoted = True
             if not _drain_tracked_connector(replaced):
                 raise RuntimeError("old_connector_not_drained")
             _set_recovery_state(state="evaluating")
-            candidate_path = _measure_request_path(config, protocol)
+            candidate_path, candidate_connector = _measure_promoted_route(
+                config,
+                protocol,
+                metrics_url,
+            )
             active = _state_connector("active") or {}
             active_metrics_url = active.get("metrics_url")
             if not isinstance(active_metrics_url, str) or not _connector_ready_now(
                 candidate_pid,
                 active_metrics_url,
             ):
-                return None
-            return candidate_path
+                return None, None
+            return candidate_path, candidate_connector
         finally:
             if candidate_pid is not None and not promoted:
                 _discard_candidate_connector(candidate_pid)
@@ -1227,16 +1298,27 @@ def _run_tail_protocol_recovery(
     if _configured_protocol(config) == "auto":
         candidate_protocols.append(_tail_candidate_protocol(config, previous_protocol))
     for candidate_protocol in candidate_protocols:
-        candidate_path = activate_and_measure(candidate_protocol)
+        candidate_path, candidate_connector = activate_and_measure(candidate_protocol)
+        candidate_snapshot = (
+            {**candidate_connector, "request_path": candidate_path}
+            if isinstance(candidate_path, dict) and isinstance(candidate_connector, dict)
+            else None
+        )
         if (
-            isinstance(candidate_path, dict)
-            and tunnel_quality.request_path_is_better(previous_path, candidate_path)
+            isinstance(candidate_snapshot, dict)
+            and tunnel_quality.candidate_is_better(
+                previous,
+                candidate_snapshot,
+                trigger="tail_latency",
+            )
         ):
+            _clear_pending_tail_rollback()
             if _configured_protocol(config) == "auto":
                 _set_preferred_protocol(candidate_protocol)
             return "improved", candidate_protocol, candidate_path
 
-    rollback_path = activate_and_measure(previous_protocol)
+    rollback_path, _rollback_connector = activate_and_measure(previous_protocol)
+    _clear_pending_tail_rollback()
     if _configured_protocol(config) == "auto":
         _set_preferred_protocol(previous_protocol)
     return "no_improvement", previous_protocol, rollback_path or previous_path
@@ -1465,6 +1547,7 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
     try:
         while quality_path == _quality_state_path() and quality_path.parent.exists():
             started_at = time.monotonic()
+            _reconcile_connector_lifecycle()
             active_pid = _read_pid()
             running = _is_cloudflared_pid(active_pid)
             active = _state_connector("active") or {}
@@ -1508,6 +1591,7 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
                 and public_health_url is not None
                 and not _is_cloudflared_pid(candidate.get("pid"))
                 and not _is_cloudflared_pid(draining.get("pid"))
+                and _pending_tail_rollback() is None
                 and recovery_state not in {"evaluating", "draining"}
             ):
                 try:
@@ -1583,9 +1667,135 @@ def _reconcile_draining_connector() -> None:
     _replace_state_connector("draining", None)
 
 
-def _finish_reconciled_recovery(result: str) -> None:
+def _restore_tracked_rollback_connector(
+    pending: dict[str, Any],
+    draining: dict[str, Any],
+) -> bool:
+    rollback_pid = draining.get("pid")
+    metrics_url = draining.get("metrics_url")
+    if not isinstance(rollback_pid, int) or not isinstance(metrics_url, str):
+        return False
+    if draining.get("requested_protocol") != pending.get("previous_protocol"):
+        return False
+    if not _connector_ready_now(rollback_pid, metrics_url):
+        return False
+    with _CONNECTOR_LOCK:
+        state = _read_state() or {}
+        current_pending = state.get("pending_tail_rollback")
+        active = state.get("active")
+        current_draining = state.get("draining")
+        if (
+            current_pending != pending
+            or not isinstance(active, dict)
+            or active.get("pid") != pending.get("active_pid")
+            or not isinstance(current_draining, dict)
+            or current_draining.get("pid") != rollback_pid
+            or _RECOVERY_CANCEL_EVENT.is_set()
+        ):
+            return False
+        state["active"] = current_draining
+        state["draining"] = active
+        state["pending_tail_rollback"] = None
+        state["pid"] = rollback_pid
+        runtime.write_json(_state_path(), state)
+        _pid_path().write_text(str(rollback_pid), encoding="utf-8")
+    _drain_tracked_connector(active)
+    return True
+
+
+def _start_rollback_replacement(pending: dict[str, Any]) -> bool:
+    candidate_pid: int | None = None
+    promoted = False
+    try:
+        loaded = V2Config.load()
+        cloud = loaded.remote_access.vibe_cloud
+        binary = _resolve_binary(loaded)
+        if (
+            _RECOVERY_CANCEL_EVENT.is_set()
+            or not cloud.enabled
+            or not cloud.tunnel_token
+            or not binary
+        ):
+            return False
+        with _CONNECTOR_LOCK:
+            active = _state_connector("active") or {}
+            if (
+                active.get("pid") != pending.get("active_pid")
+                or _state_connector("draining") is not None
+                or _state_connector("candidate") is not None
+                or _RECOVERY_CANCEL_EVENT.is_set()
+            ):
+                return False
+            candidate_pid, metrics_url = _start_candidate_connector(
+                loaded,
+                binary,
+                str(pending["previous_protocol"]),
+            )
+        if not _wait_candidate_ready(candidate_pid, metrics_url):
+            return False
+        replaced = _promote_candidate_connector(candidate_pid)
+        promoted = True
+        _drain_tracked_connector(replaced)
+        return True
+    finally:
+        if candidate_pid is not None and not promoted:
+            _discard_candidate_connector(candidate_pid)
+
+
+def _reconcile_pending_tail_rollback() -> None:
+    state = _read_state() or {}
+    raw_pending = state.get("pending_tail_rollback")
+    pending = _pending_tail_rollback()
+    if pending is None:
+        if raw_pending is not None:
+            with _CONNECTOR_LOCK:
+                current = _read_state() or {}
+                if current.get("pending_tail_rollback") == raw_pending:
+                    current["pending_tail_rollback"] = None
+                    runtime.write_json(_state_path(), current)
+        return
+    active = _state_connector("active") or {}
+    if active.get("pid") != pending.get("active_pid"):
+        _clear_pending_tail_rollback(force=True)
+        return
+    draining = _state_connector("draining")
+    restored = isinstance(draining, dict) and _restore_tracked_rollback_connector(pending, draining)
+    if not restored and isinstance(draining, dict):
+        _reconcile_draining_connector()
+        if _state_connector("draining") is not None:
+            return
+    if not restored:
+        restored = _start_rollback_replacement(pending)
+    if not restored:
+        logger.warning(
+            "Could not yet roll back unverified Tunnel route pid=%s",
+            pending.get("active_pid"),
+        )
+        return
+    previous_protocol = str(pending["previous_protocol"])
+    _set_preferred_protocol(previous_protocol)
+    _finish_reconciled_recovery("failed", result_protocol=previous_protocol)
+
+
+def _reconcile_connector_lifecycle() -> None:
+    try:
+        _reconcile_pending_tail_rollback()
+        if _pending_tail_rollback() is None:
+            _reconcile_draining_connector()
+    except Exception:
+        logger.warning("Tunnel connector lifecycle reconciliation failed", exc_info=True)
+
+
+def _finish_reconciled_recovery(
+    result: str,
+    *,
+    result_protocol: str | None = None,
+) -> None:
     recovery = _recovery_payload()
     previous_median = recovery.get("previous_median_rtt_ms")
+    previous_protocol = recovery.get("previous_protocol")
+    previous_p95 = recovery.get("previous_p95_ms")
+    previous_p99 = recovery.get("previous_p99_ms")
     trigger = recovery.get("last_trigger")
     if trigger not in {"availability", "latency", "tail_latency", "errors", "manual"}:
         trigger = None
@@ -1594,6 +1804,12 @@ def _finish_reconciled_recovery(result: str) -> None:
         result=result,
         previous_median=float(previous_median) if isinstance(previous_median, (int, float)) else None,
         result_median=None,
+        previous_protocol=(
+            str(previous_protocol) if previous_protocol in {"quic", "http2"} else None
+        ),
+        result_protocol=result_protocol,
+        previous_p95=float(previous_p95) if isinstance(previous_p95, (int, float)) else None,
+        previous_p99=float(previous_p99) if isinstance(previous_p99, (int, float)) else None,
     )
 
 
@@ -1674,6 +1890,7 @@ def _normalize_orphaned_recovery_state() -> None:
     if (
         _state_connector("candidate") is not None
         or _state_connector("draining") is not None
+        or _pending_tail_rollback() is not None
         or _read_pid_file(_candidate_pid_path()) is not None
     ):
         return
@@ -1711,7 +1928,7 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
             preferred_protocol = persisted.get("preferred_protocol")
             _PREFERRED_PROTOCOL = str(preferred_protocol) if preferred_protocol in {"quic", "http2"} else None
         _reconcile_orphan_candidate()
-        _reconcile_draining_connector()
+        _reconcile_connector_lifecycle()
         _normalize_orphaned_recovery_state()
         quality_path = _quality_state_path()
         try:

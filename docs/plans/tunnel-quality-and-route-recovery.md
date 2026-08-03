@@ -95,6 +95,7 @@ does not replace the connector grade or trigger recovery.
 
 Automatic tail-latency recovery requires high confidence and one of:
 
+- request failure rate `>= 10%`;
 - P95 `>= 750 ms`, or P95 at least twice the protocol-local baseline;
 - at least 5 percent of requests above 1 second; or
 - P99 `>= 1500 ms` with at least 3 percent of requests above 1 second.
@@ -117,7 +118,9 @@ request-path comparison:
    eligible because Cloudflare cannot attribute them to one connector.
 4. Reset only the rolling request window, then collect 20 persistent public
    probes over at least 30 seconds.
-5. Accept when availability and error gates pass and either P95 improves by 20
+5. During the same evaluation window, collect both request-path probes and the
+   promoted connector's availability, request-error, and packet-loss metrics.
+   Accept only when those connector gates pass and either P95 improves by 20
    percent, P99 improves by 40 percent without P95 worsening by more than 25
    percent, or the over-one-second rate is materially reduced. Maximum latency
    is displayed but never decides a switch by itself.
@@ -129,6 +132,16 @@ request-path comparison:
 8. The existing cooldown and attempt budget apply to protocol attempts. A
    successful `auto` attempt persists the verified protocol preference; pinned
    modes never rewrite it.
+
+Promotion persists a local-only `pending_tail_rollback` transition before the
+old connector is drained. The marker is cleared only after the promoted route
+passes both request-path and connector gates, or after the previous protocol is
+restored. If Avibe restarts while the marker exists, the supervisor reuses a
+still-ready draining connector when possible; otherwise it starts a replacement
+with the previous explicit protocol and drains the unverified route. The monitor
+also retries any retained drain on every lifecycle reconciliation cycle, so a
+single failed stop cannot suppress public probes indefinitely. This transition
+state stays in the local connector aggregate and is never reported to avibe.bot.
 
 Recovery history adds previous/result protocol, P95, and P99. This makes a
 decision explainable when connector RTT is absent under HTTP/2 or unchanged
@@ -158,6 +171,10 @@ rolling deployment.
 | RA-TQ-012 | Auto mode evaluates the opposite protocol and keeps a material improvement | supervisor scenario test |
 | RA-TQ-013 | A non-improving protocol switch rolls back make-before-break | supervisor rollback test |
 | RA-TQ-014 | Avibe and avibe.bot exchange and display the bounded V2 aggregate | cross-repo contract and UI tests |
+| RA-TQ-015 | Sustained public request failures degrade the path and trigger recovery | evaluator contract test |
+| RA-TQ-016 | A failed old-connector drain is retried without disabling probes forever | supervisor lifecycle test |
+| RA-TQ-017 | Restart rolls back a promoted route that was never verified | crash-recovery scenario test |
+| RA-TQ-018 | A faster tail candidate is rejected when connector error gates fail | supervisor candidate-policy test |
 
 ## Product Decisions
 

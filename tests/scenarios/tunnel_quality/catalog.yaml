@@ -95,3 +95,27 @@ scenarios:
     kind: cross_repo_contract
     layer: contract
     test: tests/test_remote_access_vibe_cloud.py::test_ra_tq_014_runtime_status_payload_includes_v2_request_path
+  - id: RA-TQ-015
+    name: Sustained public request failures degrade the path and trigger recovery
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_tunnel_quality.py::test_ra_tq_015_sustained_request_failures_trigger_recovery
+  - id: RA-TQ-016
+    name: Failed old-connector drains are retried during monitor lifecycle reconciliation
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_016_monitor_lifecycle_retries_failed_drain
+  - id: RA-TQ-017
+    name: Restart rolls back a promoted tail route that was never verified
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_017_restart_rolls_back_unverified_tail_candidate
+  - id: RA-TQ-018
+    name: Tail candidates must pass connector availability and error gates
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_018_tail_candidate_must_pass_connector_error_gates
