@@ -42,6 +42,7 @@ from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
+from core.session_ownership import SessionOwnershipSnapshot, resolve_ownership_snapshot
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from vibe import backend_model_catalog
@@ -1597,6 +1598,36 @@ class SessionHandler(BaseHandler):
         if exc is not None:
             logger.warning("Claude receiver ended with error during cleanup: %s", exc)
 
+    async def _resolve_session_ownership(self) -> SessionOwnershipSnapshot:
+        """Read the durable owner union, failing closed for this sweep."""
+
+        return await resolve_ownership_snapshot(self.controller)
+
+    @staticmethod
+    def _ownership_pin(ownership: SessionOwnershipSnapshot, composite_key: str) -> bool:
+        """Whether a durable owner holds this runtime right now (unbounded)."""
+
+        if not ownership.pins_runtime_key(composite_key):
+            return False
+        logger.debug(
+            "Idle Claude session %s is pinned by durable owners: %s",
+            composite_key,
+            ", ".join(ownership.reasons_for_runtime_key(composite_key)) or "unknown",
+        )
+        return True
+
+    @staticmethod
+    def _pin_within_bound(idle_for: float, stuck_threshold: Optional[float]) -> bool:
+        """Whether a durable pin is still inside the inactivity bound.
+
+        The pin borrows the stuck-active threshold rather than its own clock, and
+        a new owner never refreshes ``last_activity``, so a stream of queued
+        followers cannot extend the bound. Past it the pin is spent and the
+        session is torn down through the settling path.
+        """
+
+        return stuck_threshold is None or idle_for < stuck_threshold
+
     async def evict_idle_sessions(
         self,
         idle_timeout: float,
@@ -1620,6 +1651,16 @@ class SessionHandler(BaseHandler):
         backstop. Caveat: a real turn whose single tool call runs silently for
         longer than the cap is indistinguishable from a stuck session and would
         be force-evicted — see ``DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER``.
+
+        The in-memory ``active`` flag is not the only owner of a session. Durable
+        queued or in-flight work (a nonterminal Delivery, Turn, or
+        execution-bearing Run) owns the session before the flag is ever set, so
+        both passes consult ``core/session_ownership.py`` and skip a session a
+        durable owner still holds. That pin is bounded by the same stuck-active
+        threshold and never refreshes ``last_activity``: repeated queued
+        followers cannot extend it, so an interlocked session cannot become
+        immortal. When the ownership union cannot be resolved the whole cycle is
+        skipped — missing safety data is not evidence that eviction is safe.
         """
         if idle_timeout <= 0:
             return 0
@@ -1630,6 +1671,10 @@ class SessionHandler(BaseHandler):
                 idle_timeout * stuck_active_multiplier,
                 max(0.0, stuck_active_floor_seconds),
             )
+
+        ownership = await self._resolve_session_ownership()
+        if ownership.failed:
+            return 0
 
         now = time.monotonic()
         expired: list[tuple[str, float]] = []
@@ -1646,8 +1691,21 @@ class SessionHandler(BaseHandler):
                 if stuck_threshold is not None and idle_for >= stuck_threshold:
                     expired.append((composite_key, idle_for))
                 continue
-            if idle_for >= idle_timeout:
-                expired.append((composite_key, idle_for))
+            if idle_for < idle_timeout:
+                continue
+            if self._ownership_pin(ownership, composite_key) and self._pin_within_bound(
+                idle_for, stuck_threshold
+            ):
+                continue
+            expired.append((composite_key, idle_for))
+
+        if not expired:
+            return 0
+
+        # Recompute: work admitted between the two passes must pin the session.
+        ownership = await self._resolve_session_ownership()
+        if ownership.failed:
+            return 0
 
         evicted = 0
         for composite_key, idle_for in expired:
@@ -1662,7 +1720,11 @@ class SessionHandler(BaseHandler):
             # Re-derive the decision from current state: a session may have been
             # touched or (de)activated between the two passes.
             recheck_idle = time.monotonic() - current_last_activity
-            if composite_key in self.active_sessions:
+            is_active = composite_key in self.active_sessions
+            pinned = False if is_active else self._ownership_pin(ownership, composite_key)
+            if pinned and self._pin_within_bound(recheck_idle, stuck_threshold):
+                continue
+            if is_active:
                 if stuck_threshold is None or recheck_idle < stuck_threshold:
                     continue
                 logger.warning(
@@ -1678,8 +1740,24 @@ class SessionHandler(BaseHandler):
             else:
                 if recheck_idle < idle_timeout:
                     continue
-                logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, recheck_idle)
-            if composite_key in self.active_sessions:
+                if pinned:
+                    logger.warning(
+                        "Force-evicting durably-owned Claude session %s after %.1fs idle "
+                        "(>= stuck-active threshold %.1fs; owners never settled: %s)",
+                        composite_key,
+                        recheck_idle,
+                        stuck_threshold,
+                        ", ".join(ownership.reasons_for_runtime_key(composite_key)) or "unknown",
+                    )
+                else:
+                    logger.info(
+                        "Evicting idle Claude session %s after %.1fs idle", composite_key, recheck_idle
+                    )
+            # A spent pin is torn down like a stuck-active turn, not like an idle
+            # session: its durable owner is still unsettled, so the settling path
+            # must retire the pending request and turn token before the runtime
+            # goes away, or a later result could adopt them.
+            if is_active or pinned:
                 agent_service = getattr(self.controller, "agent_service", None)
                 claude_agent = getattr(agent_service, "agents", {}).get("claude") if agent_service else None
                 force_cleanup = getattr(claude_agent, "force_cleanup_stuck_active_session", None)

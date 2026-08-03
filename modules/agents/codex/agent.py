@@ -34,6 +34,7 @@ from core.system_prompt_injection import (
     get_enabled_agents_for_prompt,
 )
 from core.resource_governance import governor_from_controller
+from core.session_ownership import SessionOwnershipSnapshot, resolve_ownership_snapshot
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -623,7 +624,15 @@ class CodexAgent(BaseAgent):
         logger.info("Stopped Codex runtime across %d transport(s)", len(transports))
 
     async def evict_idle_transports(self, idle_timeout: float) -> int:
-        """Stop idle Codex transports and invalidate stale thread mappings."""
+        """Stop idle Codex transports and invalidate stale thread mappings.
+
+        A transport is keyed by working directory, so the durable-ownership
+        interlock is consulted per cwd: while a nonterminal Delivery, Turn, or
+        execution-bearing Run still owns a session rooted there, the transport
+        stays up even though no in-memory turn is active yet. The pin is bounded
+        by the same stuck-active cap as an active turn, and an unresolved owner
+        union aborts the cycle rather than guessing.
+        """
         if idle_timeout <= 0:
             return 0
         if not hasattr(self, "_transport_last_activity"):
@@ -640,6 +649,10 @@ class CodexAgent(BaseAgent):
         # has been idle past this cap, force-evict it despite the active turn.
         stuck_active_cap = self._stuck_active_idle_eviction_cap(idle_timeout)
 
+        ownership = await resolve_ownership_snapshot(getattr(self, "controller", None))
+        if ownership.failed:
+            return 0
+
         now = time.monotonic()
         evicted = 0
 
@@ -655,6 +668,7 @@ class CodexAgent(BaseAgent):
                 idle_for=idle_for,
                 idle_timeout=idle_timeout,
                 stuck_active_cap=stuck_active_cap,
+                durably_owned=self._durably_owned_cwd(ownership, cwd),
             ):
                 continue
 
@@ -670,11 +684,19 @@ class CodexAgent(BaseAgent):
                 # active-turn flag) may have changed between the two passes.
                 idle_for = time.monotonic() - current_last_activity
                 has_active = self._has_active_turns_for_cwd(cwd)
+                # Re-read the durable owner union too: work accepted between the
+                # two passes owns this session and must defeat the eviction that
+                # the first pass already approved.
+                recheck_ownership = await resolve_ownership_snapshot(getattr(self, "controller", None))
+                if recheck_ownership.failed:
+                    return evicted
+                durably_owned = self._durably_owned_cwd(recheck_ownership, cwd)
                 if not self._is_transport_evictable(
                     has_active=has_active,
                     idle_for=idle_for,
                     idle_timeout=idle_timeout,
                     stuck_active_cap=stuck_active_cap,
+                    durably_owned=durably_owned,
                 ):
                     continue
 
@@ -685,6 +707,15 @@ class CodexAgent(BaseAgent):
                         cwd,
                         idle_for,
                         stuck_active_cap,
+                    )
+                elif durably_owned:
+                    logger.warning(
+                        "Force-evicting durably-owned Codex transport for cwd=%s after %.1fs idle "
+                        "(owners exceeded the stuck-active cap of %.1fs without settling: %s)",
+                        cwd,
+                        idle_for,
+                        stuck_active_cap,
+                        ", ".join(recheck_ownership.reasons_for_workdir(cwd)) or "unknown",
                     )
                 else:
                     logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
@@ -799,21 +830,38 @@ class CodexAgent(BaseAgent):
         idle_for: float,
         idle_timeout: float,
         stuck_active_cap: Optional[float],
+        durably_owned: bool = False,
     ) -> bool:
         """Decide whether an idle transport is eligible for eviction.
 
-        Pure decision (no lookups), so callers evaluate the active-turn flag
-        exactly once. An idle transport with no active turn is evictable once it
-        crosses the normal ``idle_timeout``. A transport with an active turn is
-        normally vetoed, but is force-evictable once it crosses
-        ``stuck_active_cap`` (the absolute-time backstop) — the only path that
-        reaps a wedged app-server whose ``turn/completed`` never arrived.
+        Pure decision (no lookups), so callers evaluate the active-turn flag and
+        the durable-ownership flag exactly once. An idle transport that nothing
+        owns is evictable once it crosses the normal ``idle_timeout``.
+
+        An active in-memory turn and a durable owner are the same kind of veto:
+        both mean real work holds the transport, and both are bounded by
+        ``stuck_active_cap`` (the absolute-time backstop) so a wedged app-server
+        or a permanently unsettled owner still gets reaped instead of leaking the
+        process until restart. ``durably_owned`` defaults to False so a caller
+        that has no owner union to consult keeps the pre-interlock behavior.
         """
-        if has_active:
+        if has_active or durably_owned:
             if stuck_active_cap is None:
                 return False
             return idle_for >= stuck_active_cap
         return idle_for >= idle_timeout
+
+    def _durably_owned_cwd(self, ownership: SessionOwnershipSnapshot, cwd: str) -> bool:
+        """Whether durable rows still own a session rooted at this cwd."""
+
+        if not ownership.pins_workdir(cwd):
+            return False
+        logger.debug(
+            "Codex transport for cwd=%s is pinned by durable owners: %s",
+            cwd,
+            ", ".join(ownership.reasons_for_workdir(cwd)) or "unknown",
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Transport management

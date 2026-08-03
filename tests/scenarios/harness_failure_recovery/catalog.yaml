@@ -2365,6 +2365,234 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_tasks.py::test_service_stop_preserves_non_durable_user_stop_cause
+  - id: HFR-130
+    name: durable queued input pins its own idle backend runtime and no other
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # The interlock's root scenario. Idle eviction is keyed by an in-memory runtime key
+    # and gated by an in-memory activity clock plus the `active` flag, which only exists
+    # once a turn has reached native start. Every durable owner predates that flag, so a
+    # `queued` Delivery -- input already accepted from the user, not yet dispatched --
+    # sits behind a runtime that looks perfectly idle. Eviction then destroys the SDK
+    # client the row is about to be dispatched into.
+    # FIX: one provider (core/session_ownership.py) resolves the current durable owners
+    # of every session from ONE SQLite read snapshot, and both passes of
+    # evict_idle_sessions consult it. The join between the two keyspaces is the
+    # authoritative session_turns.runtime_key where a turn reached native start, plus
+    # composition from (session_anchor, normalized workdir) for the window where it has
+    # not -- otherwise the pin would be missing exactly when it matters most.
+    # The regression asserts BOTH halves in one sweep: the owned runtime survives and
+    # an unrelated idle runtime sharing the same workdir is still evicted, so a pin
+    # cannot silently immunize the whole process. It also asserts the pin did not
+    # refresh session_last_activity -- waiting is not activity.
+    test: tests/test_session_eviction_interlock.py::test_queued_delivery_pins_its_own_idle_claude_session
+  - id: HFR-131
+    name: the eviction pin is read from the Delivery state policy, not a hard-coded list
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Which Delivery states own their input is already decided, once, by
+    # DELIVERY_STATE_MATRIX: `claimable`, `fence`, and `turn_owned` rows still own it,
+    # `terminal` rows are history. Restating that list inside the eviction path is how
+    # the two drift -- a new state would inherit whichever answer the copy happened to
+    # spell out. The provider derives the pinning set from the matrix and queries
+    # "NOT IN terminal", so an unrecognized state pins (fail closed) instead of being
+    # silently skipped. Asserted state by state across all nine, including that
+    # accepted/retired history cannot make a session immortal. Each row is seeded in
+    # its real constraint-satisfying shape (turn membership, steer attempt,
+    # materialized Message) so no assertion rests on a state production cannot produce.
+    test: tests/test_session_eviction_interlock.py::test_delivery_pin_follows_the_state_policy
+  - id: HFR-132
+    name: a Turn with no runtime_key yet still pins the runtime it is starting into
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # runtime_key is bound at bind_native_start, so a `waiting` or `starting` Turn
+    # carries NULL -- the same window in which the in-memory `active` flag is unset.
+    # A join that required the authoritative column would therefore fail open in
+    # precisely the pre-start window this PR exists to protect. Composition from
+    # (session_anchor, normalized workdir) covers it; the workdir is normalized the way
+    # agent_run_target stores it so both sides compare equal.
+    test: tests/test_session_eviction_interlock.py::test_nonterminal_turn_pins_through_anchor_and_workdir
+  - id: HFR-133
+    name: a watch supervisor heartbeat Run does not pin its session
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The opposite failure from HFR-130, and the reason run types are classified rather
+    # than treated uniformly: a `watch_runtime` Run stays `running` for the entire life
+    # of the waiter -- hours or days. Counting it as execution would make every watched
+    # session permanently unevictable and leak a backend process per watch until
+    # restart. Only supervisor types are exempted, by name.
+    test: tests/test_session_eviction_interlock.py::test_watch_runtime_heartbeat_run_does_not_pin
+  - id: HFR-134
+    name: execution-bearing Runs pin, and an unclassified run type fails closed
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The bare-Run window is durable ownership with no Delivery yet: a Run is created,
+    # resolves its target session, and only then reserves one. In between, the Run row
+    # is the only thing pointing at the session. A Run whose reserved Delivery is
+    # already in the same snapshot is not counted twice -- and because both reads share
+    # ONE snapshot, a Run can never be dropped as "represented" by a row the snapshot
+    # omitted. An unrecognized run_type pins and logs once, so a future run type cannot
+    # silently lose its interlock. Terminal Runs own nothing:
+    # tests/test_session_eviction_interlock.py::test_terminal_run_history_does_not_pin
+    test: tests/test_session_eviction_interlock.py::test_execution_bearing_and_unclassified_runs_pin
+  - id: HFR-135
+    name: work admitted between the two eviction passes defeats the decided eviction
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # The losing race. evict_idle_sessions decides in one pass and acts in another, and
+    # the second pass already re-derives activity and the active flag from current
+    # state -- durable ownership belongs in that same recheck. Input admitted in the
+    # window is durable and unstarted, so a first-pass verdict is stale by the time it
+    # is executed. The provider is re-read, not cached across the passes.
+    test: tests/test_session_eviction_interlock.py::test_work_admitted_between_the_two_passes_wins
+  - id: HFR-136
+    name: an unresolved owner union skips the whole eviction cycle
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # Missing safety data is not evidence that eviction is safe. A provider-wide failure
+    # -- an unreadable DB, a raising lookup -- says nothing about who owns what, so no
+    # session is evicted, including ones no owner would have pinned. The cost is one
+    # deferred sweep; the alternative is tearing down a runtime mid-dispatch on the
+    # strength of a failed read. Both failure shapes are pinned: an explicitly
+    # unresolved snapshot and a raising provider.
+    test: tests/test_session_eviction_interlock.py::test_unresolved_ownership_skips_the_whole_cycle
+  - id: HFR-137
+    name: a positively-dangling binding fails open for itself alone
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # The one place fail-closed is wrong. HFR-136's rule applies to a lookup that could
+    # not read; a binding whose session row is positively GONE is a read that succeeded,
+    # and treating it as unknown would veto eviction of an unrelated runtime forever.
+    # The two halves are asserted in one sweep -- the dangling row's runtime is evicted,
+    # the live owner's is not -- so neither rule can be widened into the other's
+    # territory. The dangling row is built by suspending foreign keys for one write,
+    # because enforcement is ON for every pooled connection.
+    test: tests/test_session_eviction_interlock.py::test_a_dangling_binding_fails_open_for_itself_alone
+  - id: HFR-138
+    name: the pin is bounded by the inactivity clock and settles through the teardown path
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # An interlock with no bound is a leak: an owner that never settles would pin its
+    # runtime until service restart. The pin borrows the EXISTING inactivity clock and
+    # stuck-active threshold rather than adding a second one, and a new owner never
+    # restarts that clock -- so a stream of queued followers cannot extend it.
+    # Past the bound the runtime is torn down through the #1140 settling path
+    # (force_cleanup_stuck_active_session), not the plain idle disconnect: the durable
+    # owner is still unsettled at that point, so the pending request and turn token must
+    # be retired first or a later result can adopt them.
+    test: tests/test_session_eviction_interlock.py::test_the_pin_is_bounded_by_the_stuck_active_threshold
+  - id: HFR-139
+    name: a live parent Turn pins its subagent runtime
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # A subagent's base session id is `{parent_anchor}:{agent_name}`, so its composite
+    # runtime key contains two colons and splits on the LAST one. The subagent runtime
+    # is a projection of the parent's session and has no durable rows of its own;
+    # matching the parent anchor as a prefix is what keeps a live parent turn from
+    # having its subagent evicted mid-flight underneath it.
+    test: tests/test_session_eviction_interlock.py::test_a_parent_turn_pins_its_subagent_runtime
+  - id: HFR-140
+    name: an ownership handoff committed mid-read cannot fall between two reads
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The failure mode is not a lost update, it is a lost OWNER. Read Deliveries (only
+    # terminal history), then a commit lands that settles the running Turn and admits a
+    # follower, then read Turns (now terminal): two independent reads see NO owner and
+    # evict a session with queued input. The union is therefore resolved inside one
+    # BEGIN DEFERRED snapshot -- all four tables live in the same DB and engine, so the
+    # handoff is either wholly before or wholly after it.
+    # The regression drives the real interleaving: an engine proxy lands the competing
+    # commit from another connection immediately after the Deliveries read is
+    # materialized, and asserts both that the snapshot's Turn still pins AND that the
+    # handoff really did commit -- so the test cannot pass by failing to race.
+    test: tests/test_session_eviction_interlock.py::test_a_handoff_committed_mid_read_cannot_fall_between_two_reads
+  - id: HFR-141
+    name: a settled Turn is history and does not veto eviction
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # The negative control for HFR-132. An interlock that pinned on any Turn row would
+    # read as "safe" while quietly disabling idle eviction for every session that ever
+    # ran a turn, leaking a backend process each time.
+    test: tests/test_session_eviction_interlock.py::test_terminal_turn_history_does_not_pin
+  - id: HFR-142
+    name: a Codex transport is pinned by a durable owner rooted at its working directory
+    status: covered
+    kind: safety
+    layer: contract
+    backend: codex
+    # Same defect, different keyspace: a Codex app-server transport is keyed by cwd,
+    # shared across the sessions rooted there, and reaped on the same idle clock with
+    # the same pre-`active` window. The interlock is consulted per cwd, so the fix lives
+    # at the owner boundary both backends share rather than in one adapter.
+    test: tests/test_session_eviction_interlock.py::test_codex_transport_is_pinned_by_a_durable_owner
+  - id: HFR-143
+    name: the Codex sweep fails closed on an unresolved owner union
+    status: covered
+    kind: safety
+    layer: contract
+    backend: codex
+    # HFR-136 for the second consumer. Fail-closed has to be a property of the shared
+    # provider boundary, not of whichever caller remembered to check.
+    test: tests/test_session_eviction_interlock.py::test_codex_unresolved_ownership_skips_the_cycle
+  - id: HFR-144
+    name: ownership admitted while the Codex sweep waited for the lock vetoes eviction
+    status: covered
+    kind: safety
+    layer: contract
+    backend: codex
+    # HFR-135 for the second consumer, and the window is wider here: the per-cwd
+    # transport lock serializes eviction against transport start-up, so the sweep can
+    # wait inside it. The recheck that lock guards already re-derived activity and the
+    # active-turn flag from current state; the owner union is re-read there too.
+    test: tests/test_session_eviction_interlock.py::test_codex_ownership_admitted_inside_the_lock_vetoes_eviction
+  - id: HFR-145
+    name: a spent Codex pin force-evicts the transport but keeps the resume mapping
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: codex
+    # HFR-138's bound for Codex, and the reason eviction past it is loss-free rather
+    # than destructive: invalidate_thread drops only the in-memory binding, so the
+    # PERSISTED thread mapping survives and the next dispatch resumes the same Codex
+    # conversation. That is what makes the bound safe to have at all.
+    test: tests/test_session_eviction_interlock.py::test_a_spent_codex_pin_force_evicts_but_keeps_the_thread_mapping
+  - id: HFR-146
+    name: every backend idle-eviction path is inventoried against the owner union
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The inventory is the contract, not a comment. Idle eviction lives in exactly two
+    # places today (SessionHandler.evict_idle_sessions, CodexAgent.evict_idle_transports)
+    # and both consult the provider; OpenCode has no idle-eviction consumer at all, so
+    # its runtime is restart-safe by construction. A third path added later would
+    # otherwise ship with no interlock and no one noticing -- this test fails until the
+    # new path is classified here.
+    test: tests/test_session_eviction_interlock.py::test_every_backend_eviction_consumer_is_inventoried
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
@@ -3417,3 +3645,4 @@ plan: docs/plans/harness-session-failure-recovery.md
 plans:
   - docs/plans/harness-session-failure-recovery.md
   - docs/plans/agent-run-zombie-settlement.md
+  - docs/plans/harness-run-reliability.md
