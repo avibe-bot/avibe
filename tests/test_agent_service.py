@@ -43,6 +43,12 @@ class _RuntimeAgent:
     async def handle_stop(self, _request):
         return False
 
+    def record_runtime_turn_start(self, *, runtime_key, request):
+        session_last_activity = getattr(self, "session_last_activity", None)
+        if isinstance(session_last_activity, dict):
+            previous = float(session_last_activity.get(runtime_key, 0.0) or 0.0)
+            session_last_activity[runtime_key] = previous + 1.0
+
 
 class _RaisingRuntimeAgent(_RuntimeAgent):
     async def handle_message(self, _request):
@@ -323,19 +329,25 @@ def test_hfr_142_gate_wait_does_not_refresh_backend_progress_clock() -> None:
         first_request = _request("first")
         first = asyncio.create_task(service.handle_message("claude", first_request))
         await asyncio.sleep(0)
+        second_request = _request("second")
         second = asyncio.create_task(
-            service.handle_message("claude", _request("second"))
+            service.handle_message("claude", second_request)
         )
         await asyncio.sleep(0.05)
 
         assert agent.started == ["first"]
         assert agent.session_last_activity == {"session:/repo": 17.0}
 
+        service.mark_runtime_turn_started(first_request.context)
+        assert agent.session_last_activity == {"session:/repo": 18.0}
+
         service.release_runtime_turn(first_request.context)
         release_first.set()
         await asyncio.wait_for(first, timeout=3)
         await asyncio.wait_for(second, timeout=3)
-        assert agent.session_last_activity == {"session:/repo": 17.0}
+        assert agent.session_last_activity == {"session:/repo": 18.0}
+        service.mark_runtime_turn_started(second_request.context)
+        assert agent.session_last_activity == {"session:/repo": 19.0}
 
     asyncio.run(_run())
 

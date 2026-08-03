@@ -776,7 +776,7 @@ class CodexAgent(BaseAgent):
         runtime_key: str,
         request: AgentRequest | None,
     ) -> None:
-        del runtime_key
+        self._touch_transport_activity(runtime_key)
         if request is not None:
             self._touch_session_activity(request.base_session_id)
 

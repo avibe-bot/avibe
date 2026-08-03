@@ -367,7 +367,11 @@ class ClaudeAgent(BaseAgent):
         request: AgentRequest | None,
     ) -> None:
         del request
-        self.session_handler.touch_session_activity(runtime_key)
+        mark_started = getattr(self.session_handler, "mark_session_turn_started", None)
+        if callable(mark_started):
+            mark_started(runtime_key)
+        else:
+            self.session_handler.touch_session_activity(runtime_key)
 
     @staticmethod
     def _runtime_key_matches_session_base(runtime_key: str, session_bases: set[str]) -> bool:

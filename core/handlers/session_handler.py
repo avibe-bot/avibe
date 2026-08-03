@@ -128,6 +128,16 @@ class SessionHandler(BaseHandler):
             self.session_turn_started[composite_key] = time.monotonic()
         self.active_sessions.add(composite_key)
 
+    def mark_session_turn_started(self, composite_key: str) -> None:
+        """Record exact native acceptance as the fresh progress baseline."""
+
+        if not composite_key:
+            return
+        now = time.monotonic()
+        self.active_sessions.add(composite_key)
+        self.session_turn_started[composite_key] = now
+        self.session_last_activity[composite_key] = now
+
     def mark_session_idle(self, composite_key: str) -> None:
         if not composite_key:
             return
@@ -325,7 +335,6 @@ class SessionHandler(BaseHandler):
             working_path=working_path,
             fallback_session_key=session_key,
         )
-        self.touch_session_activity(composite_key)
         return client
 
     async def _reuse_cached_claude_subagent_session_if_available(
@@ -398,7 +407,6 @@ class SessionHandler(BaseHandler):
             working_path=working_path,
             fallback_session_key=session_key,
         )
-        self.touch_session_activity(composite_key)
         return client
 
     async def _wait_for_claude_session_create(self, composite_key: str) -> ClaudeSDKClient | None:
@@ -1339,7 +1347,6 @@ class SessionHandler(BaseHandler):
             fallback_session_key=session_key,
         )
         self.claude_sessions[composite_key] = client
-        self.touch_session_activity(composite_key)
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")
 
         return client
