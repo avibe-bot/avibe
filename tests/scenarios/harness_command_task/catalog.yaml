@@ -273,3 +273,14 @@ scenarios:
     # that owns the walk, and its refusal to signal a group it cannot vouch for:
     # tests/test_process_isolation.py::test_reaping_an_orphan_follows_the_group_its_leader_left_behind
     # tests/test_process_isolation.py::test_reaping_an_orphan_keeps_a_group_it_cannot_identify
+  - id: SCT-033
+    name: a stop that lands after the stamp retracts the escalation it authorised
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_stop_that_lands_after_the_stamp_retracts_the_escalation
+    # SCT-026 one lane later: there the cancel is visible when the guarded stamp commits
+    # and the escalation rolls back with it; here the flag lands after that transaction
+    # returned, so the durable turn has to be withdrawn by whoever settles the fire
+    # ``canceled``. Neither report is owed -- a stopped fire owes no notice (SCT-027).

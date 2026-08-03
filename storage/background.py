@@ -4524,6 +4524,25 @@ class SQLiteBackgroundTaskStore:
         _publish_run_rows_updated([row_to_publish])
         return transitioned
 
+    def find_escalation_run(self, *, parent_run_id: str) -> Optional[dict[str, Any]]:
+        """Return the escalation Run one failed command fire queued.
+
+        ``run_type`` plus ``parent_run_id`` is the durable linkage: the escalation is
+        inserted by the stamp transaction carrying both, so it is findable from the fire
+        even by a caller that never saw the enqueue -- a settlement reached through a
+        ``CancelledError``, or a later pass entirely.
+        """
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.run_type == "task_escalation")
+                .where(agent_runs.c.parent_run_id == parent_run_id)
+                .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                .limit(1)
+            ).mappings().first()
+            return self._run_from_row(row) if row else None
+
     def find_callback_run(
         self,
         *,

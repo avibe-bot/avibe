@@ -171,3 +171,24 @@ observations:
       - own that walk (leader, then group) in core/process_isolation.py so both worker lanes answer it the same way, rather than copying the watch lane's inline logic
       - keep the record when the group exists but its members cannot be identified, since refusing to signal is not proof of absence
       - retire the record only for a mismatched group, which is a recycled pgid rather than the tracked tree
+  - id: OBS-HARNESS-COMMAND-TASK-013
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-033
+    summary: >-
+      The compare-and-set that refuses an escalation for a stopped fire could only see
+      the stops that existed when it committed.
+    previous_assumption: >-
+      Re-reading the cancellation server-side inside the stamp transaction settles the
+      question for the whole fire.
+    observed_behavior: >-
+      cancel_run on a running fire writes only a flag, and the flag can land after
+      mark_task_result has returned. settle_run_terminal then re-reads it and normalizes
+      the fire to canceled while the escalation that transaction committed sits queued
+      and claimable, so the user stops a job and the job answers by starting an Agent --
+      OBS-008's defect one lane further along.
+    required_updates:
+      - retract the queued escalation from whoever settles the fire canceled, found by run_type plus parent_run_id rather than from a local id a CancelledError can skip
+      - key it on the status ACTUALLY written, since a service shutdown cancels the same coroutine and settles interrupted, where the report is still owed
+      - owe neither report, because canceled means the user asked this fire to stop and a stopped fire owes no notice; the landed stamp still records the failure on the definition
+      - keep the enqueue in the stamp's transaction rather than merging it into the settlement, which would reopen the window OBS-008 closed

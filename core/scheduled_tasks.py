@@ -2444,6 +2444,24 @@ class TaskExecutionStore:
             not in TERMINAL_RUN_STATUSES
         ]
 
+    def find_escalation_run(self, *, parent_run_id: str) -> Optional[dict[str, Any]]:
+        """Return the escalation Run one command fire queued, whatever its status.
+
+        The status is the CALLER's decision to make -- retracting one is only valid
+        while it is still non-terminal -- so this reports the row rather than filtering
+        it out and answering "there is none".
+        """
+
+        if self._sqlite is not None:
+            return self._sqlite.find_escalation_run(parent_run_id=parent_run_id)
+        for run in self._list_file_runs():
+            if (
+                run.get("request_type") == "task_escalation"
+                and run.get("parent_run_id") == parent_run_id
+            ):
+                return run
+        return None
+
     def find_callback_run(
         self,
         *,
@@ -6089,20 +6107,28 @@ class ScheduledTaskService:
                     stderr=stderr,
                     escalation_run_id=escalation_run_id,
                 )
+                # A STOP THAT NEVER BECAME A ``CancelledError``. ``cancel_run`` can
+                # commit its flag after the work returned, so ``complete`` normalizes
+                # this run to ``canceled`` while the coroutine ran to the end without
+                # ever being interrupted -- and a command stamp refused by that same
+                # flag then left the definition still reporting the fire BEFORE this
+                # one. Read from the status ACTUALLY written rather than from
+                # ``project_terminal_definition_on_cancel``, which says only that the
+                # cancellation arrived the usual way: a service shutdown cancels the
+                # same coroutine and settles ``interrupted``, which is a stop of the
+                # SERVICE and not of this fire.
+                fire_was_stopped = written_status == "canceled" and request.request_type in {
+                    "task_run",
+                    "scheduled",
+                }
+                if fire_was_stopped:
+                    # BEFORE the projection, because the escalation is claimable the
+                    # whole time this coroutine is still finishing up.
+                    self._retract_escalation_of_stopped_fire(request.id)
                 if written_status is not None and (
+                    # The projection is the lane that settles a canceled fire.
                     project_terminal_definition_on_cancel
-                    # A STOP THAT NEVER BECAME A ``CancelledError``. ``cancel_run``
-                    # can commit its flag after the work returned, so ``complete``
-                    # normalizes this run to ``canceled`` while the coroutine ran to
-                    # the end without ever being interrupted -- and a command stamp
-                    # refused by that same flag then left the definition still
-                    # reporting the fire BEFORE this one. The projection is the lane
-                    # that settles a canceled fire; the flag above only says the
-                    # cancellation arrived the usual way.
-                    or (
-                        written_status == "canceled"
-                        and request.request_type in {"task_run", "scheduled"}
-                    )
+                    or fire_was_stopped
                 ):
                     self._project_terminal_definition_result(
                         self.request_store.get_run(request.id),
@@ -6962,6 +6988,75 @@ class ScheduledTaskService:
             )
         if settled_any:
             self._drain_dirty = True
+
+    def _retract_escalation_of_stopped_fire(self, execution_id: str) -> None:
+        """Take back the Agent turn a fire queued, once the user stops that fire.
+
+        A failed ``--on-failure agent`` fire commits its stamp and its escalation in ONE
+        transaction, guarded on the fire not being cancelled (HFR-269). That guard can
+        only see the cancels that exist WHEN IT COMMITS: ``cancel_run`` on a running fire
+        writes a flag, and the flag can land after the stamp has already returned --
+        ``settle_run_terminal`` then re-reads it and normalizes this fire to ``canceled``
+        while the durable escalation sits queued and claimable. The user stops a job and
+        the job answers by starting an Agent, which is the same defect the compare-and-set
+        was written for, one lane further along.
+
+        WHY RETRACTION AND NOT ONE BIGGER TRANSACTION. The enqueue has to commit with the
+        STAMP -- that is what authorises the turn, and splitting them is what HFR-269
+        closed -- while this settlement happens later, in another lane, after
+        ``reconcile_jobs``. There is no single transaction that holds both without
+        reopening the window it fixed. So the escalation is committed optimistically and
+        withdrawn by whoever settles the fire against it.
+
+        NEITHER REPORT IS OWED HERE, and that is deliberate. ``canceled`` is written only
+        when the user asked for this fire to stop (``_cancel_aware_terminal_status``), and
+        a stopped fire owes no failure notice -- the same rule SCT-027 relies on when a
+        teardown cancels the fire itself. Re-arming the notice instead would alert the
+        user about a job they had just stopped, which is this defect's mirror image. The
+        failure is not lost either way: the stamp landed, so the definition still reports
+        it.
+
+        Found by LINKAGE rather than from the local ``escalation_run_id``: a
+        ``CancelledError`` delivered anywhere after the stamp skips the assignment
+        entirely, and the escalation is durable by then regardless.
+        """
+
+        try:
+            escalation = self.request_store.find_escalation_run(parent_run_id=execution_id)
+        except Exception:
+            logger.exception(
+                "Failed to look for the escalation queued by stopped Run %s", execution_id
+            )
+            return
+        if escalation is None:
+            return
+        escalation_id = str(escalation.get("id") or "").strip()
+        status = str(
+            _normalize_requested_run_status(escalation.get("status"))
+            or escalation.get("status")
+            or ""
+        ).strip()
+        if not escalation_id or status in TERMINAL_RUN_STATUSES:
+            # Already settled -- including the narrow case this cannot undo: an
+            # escalation claimed and delivered in the moment between the stamp and this
+            # retraction. The window is now that moment rather than the whole life of
+            # the queued row.
+            return
+        try:
+            retracted = self.request_store.cancel_run(escalation_id)
+        except Exception:
+            logger.exception(
+                "Failed to retract escalation Run %s for stopped Run %s",
+                escalation_id,
+                execution_id,
+            )
+            return
+        if retracted:
+            logger.info(
+                "Retracted escalation Run %s: its command fire %s was stopped",
+                escalation_id,
+                execution_id,
+            )
 
     def _project_terminal_definition_result(
         self,

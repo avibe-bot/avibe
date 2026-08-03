@@ -14432,6 +14432,83 @@ def test_a_cancel_during_the_command_refuses_the_escalation_and_settles_canceled
     )
 
 
+def test_a_stop_that_lands_after_the_stamp_retracts_the_escalation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-033 -- a compare-and-set can only refuse the stops it can already see.
+
+    SCT-026 closes the window where the cancel is visible when the stamp commits: the
+    transaction re-reads it server-side and rolls the escalation back with the stamp.
+    One step further along the same coroutine the guard has already run. ``cancel_run``
+    on a running fire writes only a flag, so the flag can land AFTER
+    ``mark_task_result`` returns -- and ``settle_run_terminal`` then re-reads it and
+    normalizes this fire to ``canceled`` while the escalation it just committed sits
+    queued and claimable. The user stops a job and the job answers by starting an Agent,
+    which is SCT-026's defect surviving one lane later.
+
+    Retraction rather than a wider transaction: the enqueue must commit with the STAMP
+    (that is what authorises the turn), and this settlement happens afterwards in
+    another lane, so no single transaction holds both without reopening HFR-269.
+
+    NEITHER report is owed. ``canceled`` is written only for a stop the user asked for,
+    and a stopped fire owes no notice -- SCT-027's rule. Alerting instead would report a
+    failure for a job they had just stopped. The definition still describes the failure,
+    because this stamp -- unlike SCT-026's -- landed.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_late_stop")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    real_mark = service.store.mark_task_result
+
+    def _stop_it_after_the_stamp(*args, **kwargs):
+        stamped = real_mark(*args, **kwargs)
+        # THE window: the guarded transaction has committed, so the escalation is
+        # durable and no compare-and-set is left to consult.
+        service.request_store.cancel_run(queued.id)
+        return stamped
+
+    monkeypatch.setattr(service.store, "mark_task_result", _stop_it_after_the_stamp)
+
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "canceled", (
+        f"the premise: the stop won the settlement race ({run['status']!r})"
+    )
+    assert run["metadata"].get("escalation_run_id"), (
+        "the premise: this stamp LANDED, so the run names the turn it authorised"
+    )
+
+    escalation_id = str(run["metadata"]["escalation_run_id"])
+    escalation = service.request_store.get_run(escalation_id)
+    assert escalation is not None, "the escalation row vanished rather than settling"
+    assert escalation["status"] == "canceled", (
+        "the user stopped this command and the Agent turn it queued is still claimable: "
+        f"{escalation['status']!r}"
+    )
+    assert _escalation_runs(store) == [], (
+        "a queued escalation survived the stop of the fire that queued it"
+    )
+
+    # The failure itself is not lost: this stamp landed, unlike SCT-026's.
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code == 7
+
+
 def test_teardown_between_the_stamp_and_the_settle_cancels_the_fire_itself(
     tmp_path: Path, monkeypatch
 ) -> None:
