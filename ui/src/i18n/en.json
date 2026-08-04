@@ -1125,6 +1125,13 @@
     "qualityUnknown": "Measuring",
     "qualityRecovering": "Optimizing",
     "qualityDegraded": "Degraded",
+    "protocolAutomatic": "{{protocol}} (Auto)",
+    "protocolUnknown": "Detecting",
+    "connectorPath": "Connector · {{protocol}} · {{connections}}/4 · RTT {{rtt}}",
+    "rttUnavailable": "Unavailable",
+    "requestPath": "Requests · P95 {{p95}} · P99 {{p99}} · {{slow}}% > 1 s",
+    "requestPathUnavailable": "Requests unavailable · {{success}}/{{count}} succeeded",
+    "requestPathMeasuring": "Measuring requests · {{count}} samples",
     "optimizeRoute": "Optimize route",
     "optimizingRoute": "Optimizing...",
     "optimizeStarted": "A second Connector is evaluating a better route"
@@ -2872,7 +2879,20 @@
       "parentRun": "Parent run",
       "callback": "Callback",
       "effort": "effort {{value}}",
-      "waitingSince": "Waiting since"
+      "waitingSince": "Waiting since",
+      "onFailure": "On failure",
+      "timeout": "Timeout",
+      "timeoutSeconds": "{{seconds}}s",
+      "timeoutNone": "No timeout",
+      "timeoutDefault": "{{duration}} (default)",
+      "lastExitCode": "Last exit code"
+    },
+    "taskKind": {
+      "command": "Command"
+    },
+    "onFailure": {
+      "none": "Notice only (no Agent)",
+      "agent": "Escalate to an Agent"
     },
     "sessionPolicy": {
       "createPerRun": "New session each run",

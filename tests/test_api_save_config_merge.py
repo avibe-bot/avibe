@@ -5,6 +5,8 @@ import sys
 from dataclasses import fields
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_config import UiConfig, V2Config
@@ -168,6 +170,19 @@ def test_save_config_accepts_typing_ack_mode(monkeypatch, tmp_path):
     updated = api.save_config({**_full_config_payload(), "ack_mode": "typing"})
 
     assert updated.ack_mode == "typing"
+
+
+def test_remote_access_transport_protocol_is_normalized_and_validated() -> None:
+    payload = _full_config_payload()
+    payload["remote_access"] = {"vibe_cloud": {"transport_protocol": " HTTP2 "}}
+
+    config = V2Config.from_payload(payload)
+
+    assert config.remote_access.vibe_cloud.transport_protocol == "http2"
+
+    payload["remote_access"]["vibe_cloud"]["transport_protocol"] = "tcp"
+    with pytest.raises(ValueError, match="transport_protocol"):
+        V2Config.from_payload(payload)
 
 
 def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path):

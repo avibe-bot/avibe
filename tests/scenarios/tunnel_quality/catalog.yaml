@@ -1,4 +1,4 @@
-version: 1
+version: 2
 capability:
   id: tunnel_quality
   name: remote-access tunnel quality and smooth route recovery
@@ -65,3 +65,93 @@ scenarios:
     kind: crash_recovery
     layer: scenario
     test: tests/test_tunnel_recovery.py::test_ra_tq_009_restart_promotes_ready_candidate
+  - id: RA-TQ-010
+    name: Request-path tails override a healthy connector RTT grade
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_tunnel_quality.py::test_ra_tq_010_request_path_tail_overrides_good_connector_rtt
+  - id: RA-TQ-011
+    name: HTTP2 receives a request-path grade without QUIC RTT
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_tunnel_quality.py::test_ra_tq_011_http2_uses_request_path_grade_without_rtt
+  - id: RA-TQ-012
+    name: Auto mode keeps a materially better alternate protocol
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_012_tail_recovery_keeps_better_alternate_protocol
+  - id: RA-TQ-013
+    name: Non-improving protocol switch rolls back make-before-break
+    status: covered
+    kind: rollback
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_013_tail_recovery_rolls_back_protocol
+  - id: RA-TQ-014
+    name: Local and cloud surfaces consume the bounded V2 aggregate
+    status: partial
+    kind: cross_repo_contract
+    layer: contract
+    test: tests/test_remote_access_vibe_cloud.py::test_ra_tq_014_runtime_status_payload_includes_v2_request_path
+  - id: RA-TQ-015
+    name: Sustained public request failures degrade the path and trigger recovery
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_tunnel_quality.py::test_ra_tq_015_sustained_request_failures_trigger_recovery
+  - id: RA-TQ-016
+    name: Failed old-connector drains are retried during monitor lifecycle reconciliation
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_016_monitor_lifecycle_retries_failed_drain
+  - id: RA-TQ-017
+    name: Restart rolls back a promoted tail route that was never verified
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_017_restart_rolls_back_unverified_tail_candidate
+  - id: RA-TQ-018
+    name: Tail candidates must pass connector availability and error gates
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_018_tail_candidate_must_pass_connector_error_gates
+  - id: RA-TQ-019
+    name: Live tail recovery retains ownership of its pending rollback marker
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_019_live_tail_recovery_owns_pending_rollback
+  - id: RA-TQ-020
+    name: Material request-failure reduction can accept a healthy candidate
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_tunnel_quality.py::test_ra_tq_020_request_path_candidate_accepts_material_failure_reduction
+  - id: RA-TQ-021
+    name: A rollback replacement that loses readiness remains pending for reconciliation
+    status: covered
+    kind: rollback
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_021_tail_rollback_stays_pending_if_replacement_loses_readiness
+  - id: RA-TQ-022
+    name: Public probes honor the host proxy and CA environment
+    status: covered
+    kind: network_policy
+    layer: unit
+    test: tests/test_tunnel_recovery.py::test_ra_tq_022_public_probe_session_honors_host_network_environment
+  - id: RA-TQ-023
+    name: Status cleanup preserves rollback after a promoted process exits
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_023_status_preserves_rollback_after_promoted_process_exit
+  - id: RA-TQ-024
+    name: Pinned transport rejects stale comparison evidence from another protocol
+    status: covered
+    kind: contract
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_024_pinned_protocol_rejects_stale_tail_evidence

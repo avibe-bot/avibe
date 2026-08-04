@@ -180,6 +180,9 @@ class ClaudeAgent(BaseAgent):
                         request.working_path,
                         context,
                         composite_key=runtime_session_key,
+                        receiver_activation_identity=self._client_activation_identity(
+                            client
+                        ),
                     )
                 )
             self.mark_runtime_turn_started(
@@ -1083,12 +1086,15 @@ class ClaudeAgent(BaseAgent):
         context: MessageContext,
         *,
         composite_key: str | None = None,
+        receiver_activation_identity: RuntimeActivationIdentity | None = None,
     ):
         """Receive messages from Claude SDK client."""
         receiver_steering_lock = None
         try:
             session_key = self.controller._get_session_key(context)
             composite_key = composite_key or f"{base_session_id}:{working_path}"
+            if receiver_activation_identity is None:
+                receiver_activation_identity = self._client_activation_identity(client)
             receiver_steering_lock = self._steering_lock(composite_key)
             self._set_activity_connection(composite_key, context, "connected")
 
@@ -1197,6 +1203,7 @@ class ClaudeAgent(BaseAgent):
                             working_path,
                             session_key,
                             message_type=message_type,
+                            receiver_activation_identity=receiver_activation_identity,
                         )
 
                     if message_type == "assistant":
@@ -3025,6 +3032,7 @@ class ClaudeAgent(BaseAgent):
         session_key: str,
         *,
         message_type: str | None = None,
+        receiver_activation_identity: RuntimeActivationIdentity | None = None,
     ) -> str | None:
         """Open a turn for UNSOLICITED backend output (no Avibe query behind it).
 
@@ -3107,12 +3115,11 @@ class ClaudeAgent(BaseAgent):
             return None
         payload = getattr(context, "platform_specific", None) or {}
         runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip() or composite_key
-        client = self.claude_sessions.get(composite_key)
         token = await begin(
             self.name,
             context,
             runtime_key,
-            activation_identity=self._client_activation_identity(client),
+            activation_identity=receiver_activation_identity,
         )
         if not token:
             # The gate is CONTENDED — a user turn holds it, or one is queued on it

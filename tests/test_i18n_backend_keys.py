@@ -274,3 +274,27 @@ def test_the_origin_lines_keep_their_placeholders_in_both_languages() -> None:
             assert key in bundle, f"{key} missing from {lang}"
             missing = [name for name in placeholders if name not in bundle[key]]
             assert not missing, f"{lang} {key} dropped {missing}: {bundle[key]!r}"
+
+
+def test_the_command_fires_refusal_sentences_resolve_in_every_language() -> None:
+    """OBS-HARNESS-COMMAND-TASK-018 — the run's ``error`` column is product copy.
+
+    Both keys are sentences ``core/scheduled_tasks.py`` composes itself, and both land
+    in the run ledger's ``error``, which the Harness detail pane, ``vibe runs show`` and
+    the failure notice render verbatim — the same column the settlement reasons above
+    already fill through ``vibe/i18n``. ``str(exc)`` and a worker's own stderr stay
+    untranslated on that channel because nobody here wrote them; our own copy does not
+    get that exemption, and an unresolved key would print the dotted path to a user.
+    """
+
+    from core.scheduled_tasks import _TASK_RESULT_NOT_RECORDED_I18N_KEY
+
+    for key in (_TASK_RESULT_NOT_RECORDED_I18N_KEY, "harness.command.workerNotRecorded"):
+        for lang in get_supported_languages():
+            resolved = t(key, lang)
+            assert resolved != key, f"{key} is not translated in {lang}"
+            assert resolved.strip()
+        assert t(key, "zh") != t(key, "en"), (
+            f"{key} was added to zh.json as the English string; a Chinese install would "
+            "read a mixed-language failure"
+        )

@@ -38,6 +38,7 @@ from core.message_dispatcher import (
     ConsolidatedMessageDispatcher,
 )
 from core.session_activities import TERMINAL_SNAPSHOT_PHASE
+from core.runtime_activation import RuntimeActivationRegistry
 from modules.im import MessageContext
 
 
@@ -460,6 +461,34 @@ class BeginAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stale_receiver_generation_cannot_open_unsolicited_turn(self):
+        agent, service = _build_agent()
+        registry = RuntimeActivationRegistry()
+        old_identity = registry.attach("claude", "session-stale:/tmp/work")
+        new_identity = registry.attach("claude", "session-stale:/tmp/work")
+        service.activation_registry = registry
+        agent.claude_sessions["session-stale:/tmp/work"] = SimpleNamespace(
+            _vibe_runtime_activation_identity=new_identity,
+        )
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-stale"}
+        )
+
+        mode = await agent._maybe_begin_agent_initiated_turn(
+            context,
+            "session-stale:/tmp/work",
+            "session-stale",
+            "/tmp/work",
+            "session-key",
+            message_type="assistant",
+            receiver_activation_identity=old_identity,
+        )
+
+        gate = service._get_turn_gate("session-stale:/tmp/work")
+        self.assertEqual(mode, "detached")
+        self.assertFalse(gate.lock.locked())
+        self.assertEqual(gate.token, "")
+
     async def test_claude_query_waits_until_background_output_is_consumed(self):
         agent, service = _build_agent()
         composite_key = "session-serialized:/tmp/work"

@@ -110,6 +110,7 @@ def _check_schedule_wakeup(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
         "Use the durable Harness instead:\n"
         "  vibe task add --at <ISO-8601> --message ...   (one-shot)\n"
         '  vibe task add --cron "<expr>" --message ...   (recurring)\n'
+        '  vibe task add --cron "<expr>" --shell "<cmd>"   (command, no Agent turn)\n'
         "If you are waiting on an external signal rather than a clock, use "
         "`vibe watch add` instead.\n"
         f"{_HARNESS_HINT}"
@@ -124,6 +125,7 @@ def _check_cron_create(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
         "the agent process exits.\n"
         "Use the durable Harness instead:\n"
         '  vibe task add --cron "<expr>" --message ...\n'
+        '  vibe task add --cron "<expr>" --shell "<cmd>"   (command, no Agent turn)\n'
         f"{_HARNESS_HINT}"
     )
 

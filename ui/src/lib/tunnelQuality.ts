@@ -9,3 +9,17 @@ export const getTunnelQualityDisplayState = (
   if (quality.state === 'degraded') return 'degraded';
   return quality.grade;
 };
+
+export const getTunnelRequestPathDisplayState = (
+  requestPath: TunnelQualitySnapshot['request_path'],
+): 'absent' | 'measuring' | 'latency' | 'unavailable' => {
+  if (!requestPath) return 'absent';
+  if (
+    requestPath.confidence !== 'low'
+    && (requestPath.status === 'unavailable' || requestPath.success_count === 0)
+  ) {
+    return 'unavailable';
+  }
+  if (requestPath.confidence !== 'low' && requestPath.latency_ms) return 'latency';
+  return 'measuring';
+};

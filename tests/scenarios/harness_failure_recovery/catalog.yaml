@@ -3570,6 +3570,26 @@ scenarios:
     # the re-route answers SessionBackendLockedError. Same _commit_competing_bind_after
     # harness and the same real _archive_write payload as HFR-252.
     test: tests/test_sqlite_sessions_store.py::test_update_session_cannot_rename_a_session_archived_inside_its_window
+  - id: HFR-281
+    name: >-
+      a completion hook queued inside a stamp names an Agent the catalog still has
+    status: covered
+    kind: recovery
+    layer: scenario
+    backend: shared
+    # The watch half of SCT-030 (tests/scenarios/harness_command_task). HFR-269 made the
+    # stamp and the hook it authorises ONE transaction; what it did not change is WHEN the
+    # hook row is composed. ``_hook_request`` builds it from ``watch.agent_name`` as the
+    # cycle ends, and an Agent rename committed before the mirror absorbs the stamp
+    # rewrites the definition and every ACTIVE run -- but a row still being composed is
+    # neither, so the hook was inserted naming an Agent nobody can resolve and the only
+    # report a ``once`` watch ever produces could never be claimed.
+    # FIX (shared with the scheduled lane, since both writers had it): resolve the Agent
+    # from the definition values written in the SAME transaction and pin the row to the
+    # catalog's durable agent id, under the write lock the rename itself takes.
+    # A rename the mirror has NOT absorbed needs nothing: it bumps the agent binding
+    # revision and the compare-and-set refuses both halves.
+    test: tests/test_watches.py::test_a_hook_queued_after_a_rename_names_an_agent_that_still_exists
   - id: HFR-430
     name: an Agent Run can apply the Workbench send-now transition to a busy Session
     status: covered

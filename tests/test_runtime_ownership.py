@@ -327,7 +327,7 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
                 runtime_has_active_turns=Mock(return_value=False),
             )
         )
-        assert service.backend_runtime_active(backend)
+        assert asyncio.run(service.backend_runtime_active(backend))
         probe.assert_called_once_with()
 
     target_snapshots: list[RuntimeResourceTarget] = []
@@ -362,7 +362,7 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
     service = AgentService(controller)
     service.register(opencode)
 
-    assert not service.backend_runtime_active("opencode")
+    assert not asyncio.run(service.backend_runtime_active("opencode"))
     target = target_snapshots[0]
     assert target.resource_key == "http://127.0.0.1:4096"
     assert target.include_all_backend_sessions
@@ -373,6 +373,57 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
     assert target.known_fallback_route_keys == ("route:a",)
     opencode._session_manager.get_agent_session_id = lambda _base: None
     assert opencode.runtime_ownership_snapshots() is None
+
+
+def test_codex_ownership_probe_batches_off_the_event_loop() -> None:
+    main_thread = threading.get_ident()
+    worker_threads: list[int] = []
+    batch_sizes: list[int] = []
+    snapshots = (
+        SimpleNamespace(blocks_reclamation=False),
+        SimpleNamespace(blocks_reclamation=False),
+    )
+
+    def snapshot_many(targets):
+        worker_threads.append(threading.get_ident())
+        batch_sizes.append(len(targets))
+        return snapshots
+
+    agent = object.__new__(CodexAgent)
+    agent._transports = {"/a": object(), "/b": object()}
+    agent.controller = SimpleNamespace(
+        runtime_ownership=SimpleNamespace(snapshot_many=snapshot_many),
+    )
+    agent._runtime_ownership_target_for_cwd = Mock(
+        side_effect=lambda cwd: SimpleNamespace(resource_key=cwd)
+    )
+
+    result = asyncio.run(agent.runtime_ownership_snapshots())
+
+    assert result == snapshots
+    assert batch_sizes == [2]
+    assert worker_threads and worker_threads[0] != main_thread
+
+
+def test_agent_service_ownership_probe_runs_off_the_event_loop() -> None:
+    main_thread = threading.get_ident()
+    worker_threads: list[int] = []
+
+    def probe():
+        worker_threads.append(threading.get_ident())
+        return (SimpleNamespace(blocks_reclamation=False),)
+
+    service = AgentService(SimpleNamespace())
+    service.register(
+        SimpleNamespace(
+            name="codex",
+            runtime_ownership_snapshots=probe,
+            runtime_has_active_turns=Mock(return_value=False),
+        )
+    )
+
+    assert not asyncio.run(service.backend_runtime_active("codex"))
+    assert worker_threads and worker_threads[0] != main_thread
 
 
 def _delivery(conn, delivery_id: str, session_id: str, state: str = "queued") -> None:

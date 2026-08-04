@@ -208,6 +208,7 @@ vibe runs show                         # 在 Avibe Agent shell 内查看调用�
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # 在 Avibe Agent shell 内
+vibe task add --name nightly-sync --cron '0 3 * * *' --shell './scripts/sync.sh'   # 命令任务，不触发 Agent turn
 vibe task list
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
@@ -220,11 +221,22 @@ vibe task remove <task-id>
 - 用 `--create-session`、`--create-session-per-run`、`--same-scope` 和 `--scope-id` 控制 Session placement
 - 用 `--cron` / `--at` 控制定时方式
 - 以及 `--name`、`--timezone`、`--message-file` 等参数
+- 用 `--shell` 或写在 `--` 之后的 argv 创建不触发 Agent turn 的定时命令任务，
+  可搭配 `--on-failure {none,agent}` 和按次执行的 `--timeout`
+  （默认 21600 秒，`0` 表示不限制）
 
 当 `vibe task add` 运行在 Avibe 已注入 caller context 的 Agent shell 内时，
 可以省略 `--session-id`。Avibe 会把任务目标默认到 `AVIBE_SESSION_ID`
 对应的调用方 Session，并在命令输出里报告这次默认。显式 `--session-id`、
 session creation 参数和 delivery 参数仍然优先。
+
+纯命令任务（`--on-failure none`，即默认值）不会套用上面这条调用方 Session 默认，
+也不接受 session、scope 或 agent 相关参数。执行成功时完全静默；执行失败会记录一条
+持久化的失败通知，并在通知中写明命令与退出码。若使用
+`--on-failure agent --message '<处理说明>'`，失败会改为触发一次携带失败报告的 Agent
+turn，并由该 turn 取代这次执行的失败通知。`vibe task update` 可以修改命令任务的
+`--shell`、argv 或 `--timeout`，但在 message 形态与 command 形态之间切换、或修改
+`--on-failure`，都会被拒绝——请删除任务后重新创建。
 
 `--session-key` 仍兼容旧脚本，但新任务应使用当前 Avibe prompt
 里展示的 Agent Session ID。

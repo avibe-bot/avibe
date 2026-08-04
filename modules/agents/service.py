@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import inspect
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
@@ -148,12 +149,17 @@ class AgentService:
         if callable(prepare):
             await prepare()
 
-    def backend_runtime_active(self, backend: str) -> bool:
+    async def backend_runtime_active(self, backend: str) -> bool:
         agent = self.agents.get(backend)
         ownership_probe = getattr(agent, "runtime_ownership_snapshots", None)
         if callable(ownership_probe):
             try:
-                snapshots = ownership_probe()
+                if inspect.iscoroutinefunction(ownership_probe):
+                    snapshots = await ownership_probe()
+                else:
+                    snapshots = await asyncio.to_thread(ownership_probe)
+                if inspect.isawaitable(snapshots):
+                    snapshots = await snapshots
             except Exception:
                 logger.exception(
                     "Backend ownership probe failed closed for %s",

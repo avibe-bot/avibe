@@ -2010,6 +2010,9 @@ def test_mh_inj_codex_runtime_change_waits_for_shared_active_turn(tmp_path: Path
         agent._on_server_request = AsyncMock()
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
         agent.controller = SimpleNamespace(resource_governor=None)
+        agent._runtime_ownership_snapshot_for_cwd = Mock(
+            return_value=SimpleNamespace(blocks_transport_replacement=False)
+        )
         launch = ModelHubLaunch(
             "codex",
             "hub",
@@ -2075,6 +2078,9 @@ def test_mh_inj_codex_hub_to_direct_retires_gateway_scope(
             model_hub_runtime=SimpleNamespace(
                 retire_process_scope=retire_scope,
             ),
+        )
+        agent._runtime_ownership_snapshot_for_cwd = Mock(
+            return_value=SimpleNamespace(blocks_transport_replacement=False)
         )
         launch = ModelHubLaunch(
             "codex",
@@ -2227,11 +2233,12 @@ def test_mh_inj_codex_direct_resume_clears_implicit_hub_provider() -> None:
 def test_mh_inj_claude_channel_change_waits_for_active_turn() -> None:
     async def exercise() -> None:
         handler = object.__new__(SessionHandler)
+        handler.controller = SimpleNamespace(runtime_activation=None)
         key = "session:/work"
         client = SimpleNamespace(_vibe_model_hub_fingerprint="native_cli:src_native")
         handler.claude_sessions = {key: client}
         handler.active_sessions = {key}
-        handler.cleanup_session = AsyncMock()
+        handler._cleanup_session_locked = AsyncMock()
         launch = ModelHubLaunch(
             "claude",
             "hub",
@@ -2257,10 +2264,10 @@ def test_mh_inj_claude_channel_change_waits_for_active_turn() -> None:
             )
         )
         await asyncio.sleep(0.02)
-        handler.cleanup_session.assert_not_awaited()
+        handler._cleanup_session_locked.assert_not_awaited()
         handler.active_sessions.clear()
         assert await task is None
-        handler.cleanup_session.assert_awaited_once_with(
+        handler._cleanup_session_locked.assert_awaited_once_with(
             key,
             retire_model_hub_scope=False,
         )

@@ -464,7 +464,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invalidated, [])
         self.assertEqual(cleared_sessions, [])
 
-    async def test_prepare_resume_binding_does_not_reuse_retired_transport_when_stop_fails(self):
+    async def test_prepare_resume_binding_retains_generation_when_stop_fails(self):
         agent = object.__new__(CodexAgent)
         activation = RuntimeActivationRegistry()
         transport = SimpleNamespace()
@@ -497,9 +497,11 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         late_commit.assert_not_called()
-        self.assertNotIn("/tmp/work", agent._transports)
-        self.assertEqual(invalidated, ["session-1"])
-        self.assertIsNone(activation.current("codex", "/tmp/work"))
+        self.assertIs(agent._transports["/tmp/work"], transport)
+        self.assertEqual(invalidated, [])
+        self.assertIs(activation.current("codex", "/tmp/work"), identity)
+        self.assertTrue(activation.commit_if_current(identity, late_commit).admitted)
+        late_commit.assert_called_once_with()
 
     async def test_shutdown_runtime_retires_generation_before_transport_stop(self):
         agent = object.__new__(CodexAgent)
@@ -694,7 +696,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/tmp/work", agent._transports)
         agent.sessions.clear_agent_session_mapping.assert_not_called()
 
-    async def test_evict_idle_transports_detaches_retired_generation_when_stop_fails(self):
+    async def test_evict_idle_transports_retains_generation_when_stop_fails(self):
         agent = object.__new__(CodexAgent)
         invalidated_sessions = []
         cleared_turns = []
@@ -722,12 +724,12 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
             evicted = await agent.evict_idle_transports(600)
 
-        self.assertEqual(evicted, 1)
-        self.assertNotIn("/tmp/work", agent._transports)
+        self.assertEqual(evicted, 0)
+        self.assertIs(agent._transports["/tmp/work"], transport)
         self.assertIs(agent._transport_locks["/tmp/work"], lock)
-        self.assertNotIn("/tmp/work", agent._transport_last_activity)
-        self.assertEqual(invalidated_sessions, ["session-1"])
-        self.assertEqual(cleared_turns, ["session-1"])
+        self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
+        self.assertEqual(invalidated_sessions, [])
+        self.assertEqual(cleared_turns, [])
         agent.sessions.clear_agent_session_mapping.assert_not_called()
 
     async def test_evict_idle_transports_revalidates_activity_before_stop(self):
@@ -3510,7 +3512,7 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
 
-    async def test_stale_transport_stop_failure_leaves_retired_generation_detached(self):
+    async def test_stale_transport_stop_failure_retains_exact_generation(self):
         import tempfile
 
         agent = self._agent()
@@ -3533,8 +3535,8 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
                 await agent._get_or_create_transport(cwd)
 
             self.assertEqual(observed_current, [False])
-            self.assertNotIn(cwd, agent._transports)
-            self.assertIsNone(activation.current("codex", cwd))
+            self.assertIs(agent._transports[cwd], stale)
+            self.assertIs(activation.current("codex", cwd), identity)
 
     async def test_cached_transport_reused_while_cwd_unchanged(self):
         import tempfile

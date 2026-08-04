@@ -227,6 +227,7 @@ Create, inspect, update, run, pause, resume, or remove scheduled tasks.
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # inside an Avibe Agent shell
+vibe task add --name nightly-sync --cron '0 3 * * *' --shell './scripts/sync.sh'   # command task, no Agent turn
 vibe task list
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
@@ -239,11 +240,23 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 - `--create-session`, `--create-session-per-run`, `--same-scope`, and `--scope-id` for Session placement
 - `--cron` and `--at` scheduling
 - `--name`, `--timezone`, and message file support
+- `--shell` / trailing `-- <argv>` for a scheduled command with no Agent turn,
+  with `--on-failure {none,agent}` and a per-run `--timeout` (default 21600
+  seconds, 0 = none)
 
 When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
 may be omitted. Avibe defaults the task target to the caller Session from
 `AVIBE_SESSION_ID` and reports that default in the command output. Explicit
 `--session-id`, session creation flags, and delivery flags still win.
+
+A pure command task (`--on-failure none`, the default) skips that caller-session
+default and takes no session, scope, or agent flags. Successful runs are silent;
+a failed run records a durable failure notice naming the command and its exit
+code. With `--on-failure agent --message '<instructions>'` the failure instead
+starts one Agent turn carrying the failure report, and that turn replaces the
+notice for the run. `vibe task update` can change a command task's `--shell`,
+argv, or `--timeout`, but switching a task between message and command form, or
+changing `--on-failure`, is rejected — remove the task and recreate it.
 
 `--session-key` remains accepted for older scripts, but new tasks should use
 the Agent Session ID shown in the active Avibe prompt.

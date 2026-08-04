@@ -4,10 +4,13 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from core import watch_worker
@@ -21,9 +24,12 @@ from core.process_isolation import (
     inspect_process_identity,
     isolated_subprocess_kwargs,
     new_process_identity_marker,
+    process_group_exists,
     process_group_identity_status,
     process_identity_matches,
     process_identity_subprocess_env,
+    probe_process_liveness,
+    reap_orphaned_process_tree,
     signal_process_tree,
     terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
@@ -76,6 +82,175 @@ def test_process_identity_reads_inherited_worker_marker(monkeypatch: pytest.Monk
     identity = inspect_process_identity(12345)
 
     assert identity == _live_identity()
+
+
+def test_probe_tells_an_empty_pid_apart_from_one_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three answers must stay three, because callers act oppositely on two of them.
+
+    ``inspect_process_identity`` folds "gone" and "could not look" into ``None``,
+    which is right for deciding whether to signal and wrong for deciding whether to
+    DISCARD the record that names the process: only an empty pid means there is
+    nothing left to keep a handle for.
+    """
+
+    assert probe_process_liveness(os.getpid()) == "alive"
+    assert probe_process_liveness(0) == "gone"
+    assert probe_process_liveness(-1) == "gone"
+
+    def _raise(exc: BaseException):
+        def _factory(_pid: int):
+            raise exc
+
+        return _factory
+
+    monkeypatch.setattr(
+        "core.process_isolation.psutil.Process", _raise(psutil.NoSuchProcess(12345))
+    )
+    assert probe_process_liveness(12345) == "gone"
+
+    monkeypatch.setattr(
+        "core.process_isolation.psutil.Process", _raise(ProcessLookupError())
+    )
+    assert probe_process_liveness(12345) == "gone"
+
+    # A process that is there but unreadable: an exhausted fd table on the way into
+    # ``/proc``, or a platform refusing ``create_time``.
+    monkeypatch.setattr(
+        "core.process_isolation.psutil.Process", _raise(OSError(24, "Too many open files"))
+    )
+    assert probe_process_liveness(12345) == "unknown"
+
+    monkeypatch.setattr(
+        "core.process_isolation.psutil.Process", _raise(psutil.AccessDenied(12345))
+    )
+    assert probe_process_liveness(12345) == "unknown"
+
+
+_LEADER_THAT_LEAVES_A_CHILD = (
+    "import os, subprocess, sys, time\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3600)'])\n"
+    "sys.stdout.write(f'{child.pid}\\n')\n"
+    "sys.stdout.flush()\n"
+    "time.sleep(0.5)\n"
+    "os._exit(0)\n"
+)
+
+
+def test_reaping_an_orphan_follows_the_group_its_leader_left_behind() -> None:
+    """An empty pid is not an empty tree, so it cannot be where the reap stops.
+
+    A supervisor started with ``start_new_session`` leads the group ``pgid == pid``,
+    and on POSIX that group outlives it: kill the supervisor -- an OOM kill, a fault
+    in its own code -- and the backup or migration under it keeps running in a group
+    nothing else names. A recovery pass that reads the free pid as proof the tree was
+    reaped then drops the only record of it, and the survivor runs to completion
+    unowned while the next fire starts a second one beside it.
+    """
+
+    if os.name == "nt":
+        pytest.skip("process groups outliving their leader is POSIX-specific")
+
+    marker = new_process_identity_marker()
+    leader = subprocess.Popen(  # noqa: S603 - fixed argv, test-owned
+        [os.path.abspath(sys.executable), "-c", _LEADER_THAT_LEAVES_A_CHILD],
+        stdout=subprocess.PIPE,
+        text=True,
+        env=process_identity_subprocess_env(marker),
+        **isolated_subprocess_kwargs(),
+    )
+    child_pid: int | None = None
+    try:
+        identity = capture_spawned_process_identity(leader.pid, marker)
+        assert identity is not None
+        assert leader.stdout is not None
+        child_pid = int(leader.stdout.readline().strip())
+        assert leader.wait(timeout=15) == 0, "the leader did not exit on its own"
+
+        # The state under test: leader reaped, its group still occupied by the work.
+        assert probe_process_liveness(leader.pid) == "gone"
+        assert os.getpgid(child_pid) == leader.pid
+        assert process_group_exists(leader.pid, logging.getLogger(__name__), "test group")
+
+        outcome = reap_orphaned_process_tree(
+            logging.getLogger(__name__),
+            "test orphan",
+            expected_identity=identity,
+        )
+
+        assert outcome == "reaped", (
+            "the surviving child was left running and its identity was about to be "
+            f"discarded as spent: {outcome}"
+        )
+        assert not psutil.pid_exists(child_pid) or _is_reaped(child_pid), (
+            "the child outlived a reap that reported success"
+        )
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(child_pid, KILL_SIGNAL)
+        with suppress(Exception):
+            leader.kill()
+        with suppress(Exception):
+            leader.wait(timeout=5)
+        if leader.stdout is not None:
+            leader.stdout.close()
+
+
+def _is_reaped(pid: int) -> bool:
+    """Whether a pid that still exists is only a zombie awaiting its parent."""
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return True
+
+
+def test_reaping_an_orphan_keeps_a_group_it_cannot_identify() -> None:
+    """A group it cannot vouch for is neither killed nor forgotten.
+
+    Signalling a pgid whose members carry no recognizable marker is the coin flip on
+    an unrelated process group that the identity check exists to refuse -- but
+    "refused to signal" is not "nothing there", so the record has to survive for a
+    later pass rather than being retired as spent.
+    """
+
+    if os.name == "nt":
+        pytest.skip("process groups outliving their leader is POSIX-specific")
+
+    logger = logging.getLogger(__name__)
+    identity = _persisted_identity(pid=4242)
+    signalled: list[int] = []
+
+    def _never_reached(pgid, *_args, **_kwargs) -> bool:
+        signalled.append(pgid)
+        return True
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr("core.process_isolation.probe_process_liveness", lambda _pid: "gone")
+        patched.setattr("core.process_isolation.process_group_exists", lambda *_a, **_k: True)
+        patched.setattr(
+            "core.process_isolation.process_group_identity_status",
+            lambda *_a, **_k: "unknown",
+        )
+        patched.setattr(
+            "core.process_isolation.terminate_process_group_by_pgid", _never_reached
+        )
+
+        assert reap_orphaned_process_tree(
+            logger, "test orphan", expected_identity=identity
+        ) == "unconfirmed"
+        assert signalled == [], "an unidentifiable group was signalled anyway"
+
+        # A group whose members all carry SOME OTHER tree's marker is ours no longer.
+        patched.setattr(
+            "core.process_isolation.process_group_identity_status",
+            lambda *_a, **_k: "mismatch",
+        )
+        assert reap_orphaned_process_tree(
+            logger, "test orphan", expected_identity=identity
+        ) == "gone"
+        assert signalled == [], "a recycled pgid was signalled"
 
 
 def test_process_identity_survives_exec_transition() -> None:

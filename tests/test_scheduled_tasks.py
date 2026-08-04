@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
+import os
 import sqlite3
+import subprocess
 import sys
+import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,12 +21,21 @@ from sqlalchemy import select, update
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.scheduled_tasks as scheduled_tasks
+from core import command_runner
 from config import paths
 from config.v2_settings import make_thread_native_id
 from core.controller import Controller
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_mirror import mirror_harness_inbound
 from core.message_output import MessageOutput, stop_output_for
+import core.process_isolation as process_isolation
+from core.process_isolation import (
+    capture_spawned_process_identity,
+    fingerprint_process_marker,
+    isolated_subprocess_kwargs,
+    process_identity_subprocess_env,
+    serialize_process_identity,
+)
 from core.run_settlement import (
     RUN_INTERRUPTION_REASONS,
     SETTLED_BY_BACKEND_REFRESH,
@@ -50,13 +62,14 @@ from core.scheduled_tasks import (
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     BINDING_RECOVERY_METADATA_KEY,
     ParsedSessionKey,
+    ScheduledTask,
     ScheduledTaskService,
     ScheduledTaskStore,
     SessionBindingChange,
     TaskDispatchResult,
     TaskExecutionRequest,
     TaskExecutionStore,
-    _TASK_RESULT_NOT_RECORDED_ERROR,
+    _TASK_RESULT_NOT_RECORDED_I18N_KEY,
     _agent_run_message_for_request,
     build_session_key_for_context,
     normalize_agent_run_delivery_intent,
@@ -64,10 +77,17 @@ from core.scheduled_tasks import (
     resolve_session_id_target,
     session_anchor_for_target,
 )
+from core.watch_worker import WATCH_WORKER_ERROR_PREFIX
+from vibe.i18n import t as i18n_t
 from modules.im import MessageContext
 from storage import message_deliveries
 from storage.db import create_sqlite_engine
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    COMMAND_SNAPSHOT_METADATA_KEY,
+    COMMAND_TIMED_OUT_METADATA_KEY,
+    SQLiteBackgroundTaskStore,
+    definition_lifecycle_detail,
+)
 from storage.models import (
     agent_events,
     agent_runs,
@@ -630,6 +650,219 @@ def test_update_task_preserves_id_and_overwrites_selected_fields(tmp_path: Path)
     assert updated.cron is None
     assert updated.run_at == "2026-03-31T09:00:00+08:00"
     assert updated.timezone == "UTC"
+
+
+def _sqlite_backed_task_store(tmp_path: Path) -> tuple[ScheduledTaskStore, SQLiteBackgroundTaskStore]:
+    """A scheduled-task store on its own SQLite file under ``tmp_path``."""
+
+    sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    return store, sqlite
+
+
+def _reloaded_task_store(tmp_path: Path, sqlite: SQLiteBackgroundTaskStore) -> ScheduledTaskStore:
+    reloaded = ScheduledTaskStore(tmp_path / "scheduled_tasks-reloaded.json")
+    reloaded._sqlite = sqlite
+    reloaded.load()
+    return reloaded
+
+
+def _definition_row(sqlite: SQLiteBackgroundTaskStore, definition_id: str) -> dict[str, Any]:
+    with sqlite.engine.connect() as conn:
+        row = (
+            conn.execute(select(run_definitions).where(run_definitions.c.id == definition_id))
+            .mappings()
+            .first()
+        )
+    assert row is not None
+    return dict(row)
+
+
+def test_store_round_trip_persists_shell_command_task(tmp_path: Path) -> None:
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        name="Nightly sync",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+        shell_command="./sync.sh; exit 0",
+        timeout_seconds=300.0,
+        metadata={"on_failure": "agent"},
+    )
+
+    saved = _reloaded_task_store(tmp_path, sqlite).get_task(task.id)
+
+    assert saved is not None
+    assert saved.shell_command == "./sync.sh; exit 0"
+    assert saved.command is None
+    assert saved.timeout_seconds == 300.0
+    assert saved.last_exit_code is None
+    assert saved.has_command is True
+    assert saved.on_failure == "agent"
+    # A command task needs no session, and the inference must not invent one.
+    assert saved.session_policy is None
+
+
+def test_store_round_trip_persists_argv_command_task(tmp_path: Path) -> None:
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        name="Echo",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="*/5 * * * *",
+        timezone_name="UTC",
+        command=["/bin/echo", "hi"],
+    )
+
+    saved = _reloaded_task_store(tmp_path, sqlite).get_task(task.id)
+
+    assert saved is not None
+    assert saved.command == ["/bin/echo", "hi"]
+    assert saved.shell_command is None
+    assert saved.timeout_seconds is None
+    assert saved.has_command is True
+    assert saved.on_failure == "none"
+
+
+def test_message_task_keeps_command_columns_null(tmp_path: Path) -> None:
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+
+    row = _definition_row(sqlite, task.id)
+    saved = _reloaded_task_store(tmp_path, sqlite).get_task(task.id)
+
+    assert row["command_json"] is None
+    assert row["shell_command"] is None
+    assert row["timeout_seconds"] is None
+    assert row["last_exit_code"] is None
+    assert saved is not None
+    assert saved.shell_command is None
+    assert saved.command is None
+    assert saved.timeout_seconds is None
+    assert saved.last_exit_code is None
+    assert saved.has_command is False
+
+
+def test_from_dict_defaults_command_fields_for_legacy_payloads() -> None:
+    task = ScheduledTask.from_dict(
+        {
+            "id": "task-legacy",
+            "session_key": "slack::channel::C123",
+            "prompt": "send digest",
+            "schedule_type": "cron",
+            "cron": "0 * * * *",
+        }
+    )
+
+    assert task.shell_command is None
+    assert task.command is None
+    assert task.timeout_seconds is None
+    assert task.last_exit_code is None
+    assert task.has_command is False
+    assert task.on_failure == "none"
+    assert task.to_dict()["shell_command"] is None
+
+
+def test_update_task_only_rewrites_command_fields_when_gated(tmp_path: Path) -> None:
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+        shell_command="./sync.sh",
+        timeout_seconds=120.0,
+    )
+
+    preserved = store.update_task(
+        task.id,
+        name="Renamed",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        post_to=None,
+        deliver_key=None,
+        cron="0 4 * * *",
+        run_at=None,
+        timezone_name="UTC",
+    )
+
+    assert preserved.shell_command == "./sync.sh"
+    assert preserved.timeout_seconds == 120.0
+    assert _reloaded_task_store(tmp_path, sqlite).get_task(task.id).shell_command == "./sync.sh"
+
+    replaced = store.update_task(
+        task.id,
+        name="Renamed",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        post_to=None,
+        deliver_key=None,
+        cron="0 4 * * *",
+        run_at=None,
+        timezone_name="UTC",
+        command=["/bin/echo", "hi"],
+        timeout_seconds=45.0,
+        update_command_fields=True,
+    )
+
+    reloaded = _reloaded_task_store(tmp_path, sqlite).get_task(task.id)
+    assert replaced.shell_command is None
+    assert replaced.command == ["/bin/echo", "hi"]
+    assert reloaded.command == ["/bin/echo", "hi"]
+    assert reloaded.shell_command is None
+    assert reloaded.timeout_seconds == 45.0
+
+
+def test_last_exit_code_survives_an_unrelated_definition_write(tmp_path: Path) -> None:
+    """A definition edit must not wipe the exit code a command run recorded.
+
+    Every scheduled-task write is a FULL-ROW upsert, so a hardcoded ``None`` in the
+    column mapping would clear the exit code on the next rename or ``mark_task_result``.
+    """
+
+    store, sqlite = _sqlite_backed_task_store(tmp_path)
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+        shell_command="./sync.sh",
+    )
+    sqlite.upsert_scheduled_task({**task.to_dict(), "last_exit_code": 3})
+    store.load()
+
+    assert store.get_task(task.id).last_exit_code == 3
+
+    store.update_task(
+        task.id,
+        name="Renamed",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        post_to=None,
+        deliver_key=None,
+        cron="0 4 * * *",
+        run_at=None,
+        timezone_name="UTC",
+    )
+    assert store.mark_task_result(task.id, error=None) is True
+
+    assert _definition_row(sqlite, task.id)["last_exit_code"] == 3
+    assert _reloaded_task_store(tmp_path, sqlite).get_task(task.id).last_exit_code == 3
 
 
 def test_store_reload_detects_deleted_task_file(tmp_path: Path) -> None:
@@ -11341,9 +11574,7 @@ def test_a_refused_result_stamp_cannot_complete_the_run_ok(tmp_path: Path, monke
         "the run ledger recorded a success for a fire whose terminal stamp the "
         f"database refused (status={run['status']!r}); the stored task never moved"
     )
-    from core.scheduled_tasks import _TASK_RESULT_NOT_RECORDED_ERROR
-
-    assert run["error"] == _TASK_RESULT_NOT_RECORDED_ERROR, (
+    assert run["error"] == i18n_t(_TASK_RESULT_NOT_RECORDED_I18N_KEY, "en"), (
         f"the refusal reached the ledger without saying why: {run['error']!r}"
     )
 
@@ -11401,7 +11632,7 @@ def test_refused_task_stamp_fails_durable_run_and_reconciles_its_delivery(
     run = service.request_store.get_run(queued.id)
     assert run is not None
     assert run["status"] == "failed"
-    assert run["error"] == _TASK_RESULT_NOT_RECORDED_ERROR
+    assert run["error"] == i18n_t(_TASK_RESULT_NOT_RECORDED_I18N_KEY, "en")
     assert reconciled == [(queued.id, session_id)]
 
 
@@ -12992,4 +13223,3431 @@ def test_a_dropped_task_mirror_recovers_with_no_unrelated_commit_to_wake_it() ->
     assert durable_after is not None and durable_after.to_dict() == durable_before.to_dict(), (
         "the durable row changed, so the failed write committed something and the "
         "recovery above was reading a different definition than the one that was dropped"
+    )
+
+
+# --- Command tasks: a definition that runs a subprocess instead of an Agent turn ---
+
+
+def _command_task_env(tmp_path: Path, monkeypatch) -> Path:
+    """``_binding_env`` plus a test-owned fallback spawn cwd.
+
+    A command definition with no ``cwd`` spawns in ``paths.get_vibe_remote_dir()``,
+    which is the REAL ``~/.avibe`` in an unpatched process. Redirected here so no
+    command test can spawn a child inside the user's live product state.
+    """
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / "avibe_home")
+    return db_path
+
+
+def _fire_command_task(
+    service: ScheduledTaskService, task: ScheduledTask
+) -> dict[str, Any]:
+    """Fire one definition through the REAL claimed-request path; return its run row."""
+
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    return run
+
+
+def _add_command_task(
+    store: ScheduledTaskStore,
+    *,
+    shell_command: str,
+    cwd: Optional[str],
+    schedule_type: str = "cron",
+    timeout_seconds: Optional[float] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> ScheduledTask:
+    return store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type=schedule_type,
+        cron="0 * * * *" if schedule_type == "cron" else None,
+        run_at="2026-07-28T09:00:00+00:00" if schedule_type == "at" else None,
+        timezone_name="UTC",
+        cwd=cwd,
+        shell_command=shell_command,
+        timeout_seconds=timeout_seconds,
+        metadata=dict(metadata or {"origin": "cli"}),
+    )
+
+
+def test_command_task_fire_records_a_successful_run_and_exit_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A zero-exit command run is a SUCCEEDED run with its output on the row.
+
+    The whole point of a command task: the outcome the user reads is the exit code
+    and the captured output, not an Agent reply. Driven through the real
+    claimed-request path so the assertions are on ``agent_runs`` -- what
+    ``vibe task runs`` and the Harness detail pane actually show.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="echo hi; exit 0", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded", f"a zero-exit command run failed: {run['error']!r}"
+    assert run["error"] in (None, "")
+    assert run["exit_code"] == 0, f"the run row lost the exit code: {run['exit_code']!r}"
+    assert "hi" in (run["stdout"] or ""), f"stdout was not persisted: {run['stdout']!r}"
+    assert run["run_type"] == "scheduled", (
+        f"a command fire changed the run type to {run['run_type']!r}; the CLI and Harness "
+        "filter scheduled fires on it"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code == 0, (
+        f"the definition did not record the exit code: {stored.last_exit_code!r}"
+    )
+    assert stored.last_error is None
+    assert stored.last_run_at is not None
+
+
+def test_command_task_failure_records_the_exit_code_and_stderr(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A nonzero exit fails the run and keeps the cause where a reader can find it."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="echo boom >&2; exit 7", cwd=str(tmp_path)
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", "a command that exited 7 was recorded as a success"
+    assert "status 7" in (run["error"] or ""), (
+        f"the run error does not name the exit status: {run['error']!r}"
+    )
+    assert "boom" in (run["error"] or ""), (
+        "the last stderr line -- the only hint the list view shows -- was dropped from "
+        f"the error text: {run['error']!r}"
+    )
+    assert "boom" in (run["stderr"] or ""), f"stderr was not persisted: {run['stderr']!r}"
+    assert run["exit_code"] == 7
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code == 7
+    assert "status 7" in (stored.last_error or "")
+
+
+def test_command_failure_text_is_written_in_the_configured_language(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-022 -- the outcome a command fire generates is user-visible copy.
+
+    ``last_error`` is rendered verbatim inside the failure notice, ``vibe task list``
+    and the Workbench, all of which are otherwise translated. Generating it in English
+    put an English sentence in the middle of a Chinese notice.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    service.controller.config = SimpleNamespace(language="zh")
+
+    exited = _fire_command_task(
+        service,
+        _add_command_task(store, shell_command="echo boom >&2; exit 7", cwd=str(tmp_path)),
+    )
+    assert "命令退出" in (exited["error"] or ""), (
+        f"a Chinese install got an English command outcome: {exited['error']!r}"
+    )
+    assert "boom" in (exited["error"] or ""), "the stderr detail was lost in translation"
+
+    missing = tmp_path / "gone"
+    no_spawn = _fire_command_task(
+        service, _add_command_task(store, shell_command="true", cwd=str(missing))
+    )
+    assert "工作目录不存在" in (no_spawn["error"] or ""), (
+        f"the no-spawn outcome stayed English: {no_spawn['error']!r}"
+    )
+    assert str(missing) in (no_spawn["error"] or ""), "the translation dropped the path"
+
+
+def test_command_task_timeout_fails_the_run_with_the_timeout_exit_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A command that outlives its timeout is killed and reported as a timeout.
+
+    ``124`` is the runner's timeout code, and it must reach both the run row and the
+    definition: a wedged command that merely stopped being awaited would leave the
+    run ``running`` forever with nothing naming the cause.
+
+    SCT-024 rides along on the same fire, because both halves are about the sentence
+    the user reads. ``--timeout`` is a FLOAT, so the limit is stated as the user wrote
+    it: ``int()`` was not rounding a sub-second limit, it was deleting it, and "timed
+    out after 0 second(s)" describes an impossible event while hiding the setting that
+    has to change. And the definition records that the SCHEDULER is why the command
+    stopped, which nothing else can say -- ``timeout 5 ...`` inside a ``--shell``
+    script exits 124 all by itself.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="sleep 30", cwd=str(tmp_path), timeout_seconds=0.5
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed"
+    assert run["exit_code"] == 124, (
+        f"the timeout exit code did not reach the run row: {run['exit_code']!r}"
+    )
+    assert "timed out" in (run["error"] or ""), (
+        f"the error text does not say the command timed out: {run['error']!r}"
+    )
+    assert "0.5 second" in (run["error"] or ""), (
+        "the fractional limit was truncated away, so the text names a limit that was "
+        f"never configured: {run['error']!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code == 124
+    assert (stored.metadata or {}).get(COMMAND_TIMED_OUT_METADATA_KEY) is True, (
+        "the definition did not record that the scheduler is what stopped this fire, "
+        f"so 124 is all the row has to go on: {stored.metadata!r}"
+    )
+
+    # And a real 124 from the command itself POSITIVELY clears the claim, rather than
+    # merely failing to make it: the same definition, the next fire.
+    _edit_definition_command(task.id, "exit 124")
+    reread = ScheduledTaskStore().get_task(task.id)
+    assert reread is not None
+    _fire_command_task(service, reread)
+
+    settled = ScheduledTaskStore().get_task(task.id)
+    assert settled is not None and settled.last_exit_code == 124
+    assert (settled.metadata or {}).get(COMMAND_TIMED_OUT_METADATA_KEY) is False, (
+        "a command that chose its own 124 still reads as a scheduler timeout: "
+        f"{settled.metadata!r}"
+    )
+    assert (
+        definition_lifecycle_detail(
+            lifecycle_state="finished",
+            definition_type="scheduled",
+            last_run_at=settled.last_run_at,
+            last_exit_code=settled.last_exit_code,
+            last_error=settled.last_error,
+            timed_out=(settled.metadata or {}).get(COMMAND_TIMED_OUT_METADATA_KEY),
+        )
+        == "error"
+    ), "the UI would tell the user to raise a limit that was never reached"
+
+
+def test_command_task_with_a_missing_cwd_fails_without_spawning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A configured working directory that is gone must be named, not guessed at.
+
+    Spawning anyway raises a bare ``NotADirectoryError`` from deep inside asyncio
+    whose text never mentions the directory the user configured -- and there is no
+    exit code to report, because nothing ran.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    missing = tmp_path / "gone"
+    task = _add_command_task(store, shell_command="echo hi", cwd=str(missing))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    spawned: list[dict[str, Any]] = []
+
+    async def _never(**kwargs):
+        spawned.append(kwargs)
+        raise AssertionError("a command was spawned into a directory that does not exist")
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _never)
+
+    run = _fire_command_task(service, task)
+
+    assert spawned == []
+    assert run["status"] == "failed"
+    assert str(missing) in (run["error"] or ""), (
+        f"the error does not name the missing directory: {run['error']!r}"
+    )
+    assert run["exit_code"] is None, (
+        f"a run that never spawned reported an exit code: {run['exit_code']!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code is None
+    assert str(missing) in (stored.last_error or "")
+
+
+def test_command_task_reports_a_supervisor_startup_failure_verbatim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``SupervisedCommandStartupError`` must be caught BEFORE the broad handler.
+
+    It subclasses ``RuntimeError``, so a single ``except Exception`` would swallow it
+    and report the worker's own startup detail as an ordinary command error --
+    losing ``exc.detail``, the only text that says what the worker rejected.
+    """
+
+    from core.command_runner import SupervisedCommandStartupError
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="echo hi", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _startup_failure(**_kwargs):
+        raise SupervisedCommandStartupError("bad spec")
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _startup_failure)
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed"
+    assert run["error"] == "bad spec", (
+        f"the supervisor's own startup detail was rewritten: {run['error']!r}"
+    )
+    assert run["exit_code"] is None
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_error == "bad spec"
+
+
+def test_a_command_whose_executable_is_missing_reads_as_a_sentence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-025 -- the worker's machine-readable error line is not user-facing text.
+
+    ``SupervisedCommandStartupError`` is raised ONLY when the stdin handshake breaks,
+    so the ordinary failure -- an ``argv`` whose executable does not exist -- takes the
+    other route entirely: the worker accepts the spec, fails to spawn, and exits 1
+    with ``AVIBE_WATCH_WORKER_ERROR:{...}`` on stderr. The watch lane decodes that; the
+    scheduled lane did not, so the raw JSON became the definition's ``last_error``, the
+    text of the failure notice, and the body of the Agent escalation prompt.
+
+    Driven through the REAL worker, because the wire format is the thing under test:
+    a hand-written stderr string would keep passing if the encoder changed.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        cwd=str(tmp_path),
+        command=[str(tmp_path / "no-such-executable"), "--now"],
+        metadata={"origin": "cli"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the spawn failed ({run['error']!r})"
+    for field, value in (
+        ("error", run["error"]),
+        ("stderr", run["stderr"]),
+    ):
+        assert WATCH_WORKER_ERROR_PREFIX not in (value or ""), (
+            f"the run's {field} is raw worker protocol JSON, not a sentence: {value!r}"
+        )
+    assert "supervisor failed" in (run["error"] or "").lower(), (
+        f"the decoded text does not say what went wrong: {run['error']!r}"
+    )
+    assert "no-such-executable" in (run["error"] or ""), (
+        f"the decoded text dropped the detail naming the cause: {run['error']!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert WATCH_WORKER_ERROR_PREFIX not in (stored.last_error or ""), (
+        f"the definition stored the raw protocol line: {stored.last_error!r}"
+    )
+
+
+def test_a_supervisor_failure_records_no_command_exit_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-039 -- the supervisor's exit status is not the command's.
+
+    SCT-025 decoded the worker's error LINE and left its exit STATUS misattributed.
+    ``core/watch_worker.py``'s ``main()`` returns 1 for both of its own failures, so a
+    spawn the worker could not perform arrived as ``exit_code == 1`` and was published as
+    a fact about the user's command: ``Exit code: 1`` in the failure notice and the
+    escalation prompt, ``last_exit_code = 1`` on the definition, an ``exit_code`` in the
+    run row ``vibe runs show`` prints -- for a command that never ran, and next to
+    "Command exited with status 1" contradicting the supervisor sentence beside it.
+
+    The negative half is the point of the discriminator: a command that DID run and
+    exited 1 must keep saying so, or this fix would blind every failing cron job.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        cwd=str(tmp_path),
+        command=[str(tmp_path / "no-such-executable"), "--now"],
+        metadata={"origin": "cli"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the spawn failed ({run['error']!r})"
+    assert run["exit_code"] is None, (
+        "the run row published the SUPERVISOR's status as the command's exit code "
+        f"({run['exit_code']!r}); the command never started"
+    )
+    assert "supervisor failed" in (run["error"] or "").lower(), (
+        f"the failure stopped naming the supervisor: {run['error']!r}"
+    )
+    assert "exited with status" not in (run["error"] or "").lower(), (
+        "one message claims the command exited AND that the supervisor failed: "
+        f"{run['error']!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code is None, (
+        "the definition's lifecycle claims a command exited: "
+        f"last_exit_code={stored.last_exit_code!r}"
+    )
+
+    # The negative half, through the same real worker: a command that ran and failed.
+    ran = _add_command_task(
+        store, shell_command="exit 3", cwd=str(tmp_path), timeout_seconds=30.0
+    )
+    ran_run = _fire_command_task(service, ran)
+    assert ran_run["status"] == "failed"
+    assert ran_run["exit_code"] == 3, (
+        "a real command's exit status was blanked along with the supervisor's: "
+        f"{ran_run['exit_code']!r}"
+    )
+    assert "3" in (ran_run["error"] or ""), (
+        f"the failure no longer reports the status the command exited with: {ran_run['error']!r}"
+    )
+
+
+def test_command_run_is_not_gated_on_im_transport_readiness(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A command run needs no IM transport, so a down adapter must not hold it queued.
+
+    The regression guard is the second half: the SAME setup on a MESSAGE definition
+    must still be gated, because that fire really does owe a reply to a platform.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    metadata = {"origin": "cli", "session_scope_id": "slack::channel::C123"}
+    command_task = _add_command_task(
+        store, shell_command="echo hi", cwd=str(tmp_path), metadata=metadata
+    )
+    message_task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        metadata=dict(metadata),
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    service.controller.is_im_transport_ready = lambda _platform: False
+
+    command_request = TaskExecutionRequest(
+        id="run-command",
+        request_type="scheduled",
+        task_id=command_task.id,
+        metadata=dict(metadata),
+    )
+    message_request = TaskExecutionRequest(
+        id="run-message",
+        request_type="scheduled",
+        task_id=message_task.id,
+        metadata=dict(metadata),
+    )
+
+    assert service._transport_ready_for_request(command_request) is True, (
+        "a command run was held queued behind an IM adapter it never needs"
+    )
+    assert service._transport_ready_for_request(message_request) is False, (
+        "the short-circuit leaked to message tasks; a reply-owing fire must stay gated "
+        "until its platform can deliver"
+    )
+
+
+def test_one_shot_command_task_is_disabled_after_it_fires(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An ``at`` command definition must not be able to fire twice."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="echo hi", cwd=str(tmp_path), schedule_type="at"
+    )
+    assert task.enabled is True
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded"
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.enabled is False, "a one-shot command definition stayed enabled"
+
+
+def test_command_task_never_dispatches_an_agent_turn(tmp_path: Path, monkeypatch) -> None:
+    """A command definition must run its subprocess INSTEAD of prompting an Agent.
+
+    Not a stylistic check: dispatching as well would post an unasked-for reply into
+    the bound conversation and bill an Agent turn for every scheduled backup.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="echo hi", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    dispatched: list[dict[str, Any]] = []
+
+    async def _spy(**kwargs):
+        dispatched.append(kwargs)
+        return TaskDispatchResult(error=None)
+
+    service._execute_request = _spy  # type: ignore[method-assign]
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded"
+    assert dispatched == [], (
+        f"a command task also dispatched an Agent turn: {dispatched!r}"
+    )
+
+
+def test_mark_task_result_stamps_an_exit_code_only_when_one_is_given(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``exit_code=None`` means "this fire had none", never "clear the stored one".
+
+    A message fire of a definition that also stores a command must not blank the last
+    exit code a command fire recorded.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="echo hi", cwd=str(tmp_path))
+
+    assert store.mark_task_result(task.id, error="boom", exit_code=7) is True
+    assert ScheduledTaskStore().get_task(task.id).last_exit_code == 7
+
+    assert store.mark_task_result(task.id, error=None) is True
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code == 7, (
+        f"a result with no exit code cleared the stored one: {stored.last_exit_code!r}"
+    )
+    assert stored.last_error is None
+
+    assert store.mark_task_result(task.id, error=None, exit_code=0) is True
+    assert ScheduledTaskStore().get_task(task.id).last_exit_code == 0
+
+
+def test_canceling_a_command_fire_propagates_and_stamps_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Cancellation must escape the command path un-swallowed.
+
+    ``_execute_claimed_request``'s own ``except asyncio.CancelledError`` is what
+    settles the run row as an interruption, so absorbing the cancellation here would
+    record a service stop as an ordinary failed command AND leave a stale
+    ``last_error`` on the definition for a fire whose outcome is unknown.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="sleep 30", cwd=str(tmp_path), timeout_seconds=0.0
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    stamped: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        store,
+        "mark_task_result",
+        lambda *args, **kwargs: stamped.append(kwargs) or True,
+    )
+
+    real_runner = scheduled_tasks.run_supervised_command
+    entered = asyncio.Event()
+
+    async def _tracking_runner(**kwargs):
+        entered.set()
+        return await real_runner(**kwargs)
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _tracking_runner)
+
+    # A real claimed run, because the execution id is not decoration: the fire records
+    # its worker onto that ``running`` row before it will run the user's command
+    # (SCT-037), and a fabricated id would be refused at the spawn -- leaving this test
+    # cancelling a fire that had already failed.
+    request = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert request is not None
+
+    async def _exercise() -> None:
+        fire = asyncio.ensure_future(
+            service._execute_command_task(
+                task, execution_id=request.id, disable_one_shot=False
+            )
+        )
+        # Cancel only once the child is genuinely being awaited: a cancel that landed
+        # before the spawn would prove nothing about the running path.
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        await asyncio.sleep(0.2)
+        fire.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fire
+
+    asyncio.run(_exercise())
+
+    assert entered.is_set(), "the command never started, so nothing was cancelled"
+    assert stamped == [], (
+        f"a cancelled command fire stamped a terminal result anyway: {stamped!r}"
+    )
+
+
+# --- ``--on-failure agent``: the escalation turn a failed command fire owes -------
+#
+# A command definition never prompts an Agent, so a failure it should ACT on has to
+# queue that turn itself. The turn is what the result stamp AUTHORISES, so the two are
+# ONE transaction (HFR-269, ``core/watches.py``: "TWO COMMITS ARE NOT ONE DECISION").
+# Split in two, a teardown between the commits queues an escalation under a definition
+# that no longer authorises it, and an exception between them disables a failed one-shot
+# while LOSING the report that explains it.
+
+
+def _escalation_command_task(
+    store: ScheduledTaskStore,
+    tmp_path: Path,
+    *,
+    shell_command: str,
+    schedule_type: str = "cron",
+    session_id: Optional[str] = None,
+    prompt: str = "",
+    agent_name: Optional[str] = None,
+) -> ScheduledTask:
+    """A command definition configured with ``--on-failure agent`` and a binding.
+
+    The CLI guarantees such a definition has a session policy and a binding, because
+    the escalation is a real Agent turn that has to land in a real conversation.
+    """
+
+    return store.add_task(
+        session_key="",
+        session_id=session_id,
+        session_policy="existing" if session_id else None,
+        agent_name=agent_name,
+        prompt=prompt,
+        schedule_type=schedule_type,
+        cron="0 * * * *" if schedule_type == "cron" else None,
+        run_at="2026-07-28T09:00:00+00:00" if schedule_type == "at" else None,
+        timezone_name="UTC",
+        cwd=str(tmp_path),
+        deliver_key="slack::channel::C123",
+        shell_command=shell_command,
+        metadata={"origin": "cli", "on_failure": "agent"},
+    )
+
+
+def _queued_runs(store: ScheduledTaskStore) -> list[dict[str, Any]]:
+    assert store._sqlite is not None
+    return [run for run in store._sqlite.list_runs() if run["status"] == "queued"]
+
+
+def _escalation_runs(store: ScheduledTaskStore) -> list[dict[str, Any]]:
+    return [run for run in _queued_runs(store) if run["run_type"] == "task_escalation"]
+
+
+def _escalation_run_payload(task: ScheduledTask, *, run_id: str = "esc-1") -> dict[str, Any]:
+    """The ``agent_runs`` outbox payload an escalation stamp would carry."""
+
+    return {
+        "id": run_id,
+        "request_type": "task_escalation",
+        "task_id": task.id,
+        "session_key": "",
+        "session_id": task.session_id,
+        "prompt": "the report",
+        "message": "the report",
+        "source_kind": "scheduler",
+        "parent_run_id": "parent-run",
+        "status": "queued",
+        "created_at": "2026-07-28T09:00:00+00:00",
+        "updated_at": "2026-07-28T09:00:00+00:00",
+    }
+
+
+def test_the_atomic_task_stamp_and_its_queued_run_both_land(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-269 control — with nothing racing it, ONE transaction carries both halves.
+
+    A combined write that simply refused everything would satisfy the refusal test
+    below vacuously ("no run row, definition untouched" is exactly what a method that
+    never commits produces), so the positive half needs its own test: the definition's
+    transition is readable AND the outbox row is durable, from one call.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    assert store.sqlite_backend is not None, (
+        "this test needs the SQLite backend; a shared transaction is the whole fix"
+    )
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 7")
+    expect = store._read_state(task)
+    task.last_error = "command exited with status 7"
+    task.last_exit_code = 7
+
+    landed = store.sqlite_backend.upsert_scheduled_task_with_queued_run(
+        task.to_dict(), expect=expect, run_payload=_escalation_run_payload(task)
+    )
+
+    assert landed is True
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code == 7, (
+        f"the definition's transition did not commit: {stored and stored.last_exit_code!r}"
+    )
+    runs = _escalation_runs(store)
+    assert len(runs) == 1, f"expected exactly one queued escalation, got {runs!r}"
+    assert runs[0]["id"] == "esc-1" and runs[0]["task_id"] == task.id
+
+
+def test_a_refused_atomic_task_stamp_writes_neither_half(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A refused compare-and-set must leave NO run row and an untouched definition.
+
+    The inverse of the control above, and the reason the two are one transaction: an
+    escalation queued against a definition whose stamp was refused is a durable turn
+    nothing authorises.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    assert store.sqlite_backend is not None
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 7")
+    before = _stored_definition_row(task.id)
+    # A STALE expectation: the payload claims it was read from a paused definition,
+    # which is what a teardown committed after the read would have left behind.
+    stale = scheduled_tasks.DefinitionWriteExpectation.from_read(
+        session_id=task.session_id,
+        enabled=False,
+        deleted_at=None,
+        metadata=task.metadata,
+    )
+    task.last_error = "command exited with status 7"
+
+    landed = store.sqlite_backend.upsert_scheduled_task_with_queued_run(
+        task.to_dict(), expect=stale, run_payload=_escalation_run_payload(task)
+    )
+
+    assert landed is False, "a stale expectation must be refused"
+    assert _escalation_runs(store) == [], (
+        "the refused stamp still queued its escalation; the two are not one transaction"
+    )
+    assert _stored_definition_row(task.id)["last_error"] == before["last_error"], (
+        "a refused compare-and-set partially landed"
+    )
+
+
+def test_mark_task_result_stamps_and_enqueues_in_one_call(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``queued_run`` rides the stamp: one call, one transaction, both effects."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 7")
+
+    stamped = store.mark_task_result(
+        task.id,
+        error="command exited with status 7",
+        exit_code=7,
+        queued_run=_escalation_run_payload(task),
+    )
+
+    assert stamped is True
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code == 7
+    assert [run["id"] for run in _escalation_runs(store)] == ["esc-1"]
+
+
+def test_a_refused_mark_task_result_queues_no_run(tmp_path: Path, monkeypatch) -> None:
+    """The refusal path: an unmatched binding expectation writes neither half."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(store, tmp_path, shell_command="exit 7")
+
+    stamped = store.mark_task_result(
+        task.id,
+        error="command exited with status 7",
+        exit_code=7,
+        # The binding this fire started against, as the caller remembers it — and it
+        # is not what the definition says, so the stamp must refuse.
+        expected_binding=("some-other-session", "", "cron"),
+        queued_run=_escalation_run_payload(task),
+    )
+
+    assert stamped is False
+    assert _escalation_runs(store) == []
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code is None, (
+        "a refused stamp recorded the exit code anyway"
+    )
+
+
+def test_an_agent_renamed_during_the_command_still_gets_the_escalation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-030 -- the queued turn must name an Agent the catalog still has.
+
+    The escalation payload is composed from the definition as the fire CLAIMED it,
+    which for a command task is however long the command ran. A rename committed in
+    that window rewrites the definition and every ACTIVE run, but this run does not
+    exist yet, so it escaped the rewrite and was inserted naming an Agent nobody can
+    resolve: the turn carrying the failure report could never be claimed, while the
+    notice its own stamp suppressed was already gone -- neither report, which is the
+    one outcome the two-report invariant exists to rule out.
+
+    The narrower race (a rename the mirror has NOT yet seen) needs no fix: the payload
+    then carries the pre-rename binding revision and the compare-and-set refuses both
+    halves, leaving the fire to the notice ladder exactly like the reclaim in SCT-004.
+    What survives that guard is the rename the mirror ABSORBED -- and it absorbs one
+    whenever ``PRAGMA data_version`` reports another connection's commit, which during
+    a command long enough to matter is the normal case, not the exotic one. The reload
+    is forced here because that probe is timing-dependent and the defect is not.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    from core.vibe_agents import VibeAgentStore
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        # A user Agent, because a built-in one cannot be renamed at all.
+        agent_store.create(name="ops", backend="claude")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="exit 7", agent_name="ops"
+    )
+    assert task.agent_name == "ops"
+    # What ``build_hook_send`` puts on the payload: the name, resolved by the executor
+    # before the command started. There is no ``agent_id`` to carry -- ``run_definitions``
+    # stores only the spelling.
+    run_payload = _escalation_run_payload(task)
+    run_payload["agent_name"] = task.agent_name
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        renamed = agent_store.rename("ops", "night-shift")
+    finally:
+        agent_store.close()
+    # The executor's mirror catching up mid-command, which is what makes the stamp's
+    # expectation current and the pre-composed run row the only stale thing left.
+    store.load()
+    assert store.get_task(task.id).agent_name == "night-shift"
+
+    stamped = store.mark_task_result(
+        task.id,
+        error="command exited with status 7",
+        exit_code=7,
+        records_command_outcome=True,
+        queued_run=run_payload,
+    )
+
+    assert stamped is True, "the rename was absorbed by the reload, so the stamp must land"
+    runs = _escalation_runs(store)
+    assert len(runs) == 1, f"expected exactly one queued escalation, got {runs!r}"
+    queued = runs[0]
+    assert queued["agent_name"] == "night-shift", (
+        "the escalation was queued against the pre-rename name, which resolves to no "
+        f"Agent at claim time: {queued['agent_name']!r}"
+    )
+    assert queued["agent_id"] == renamed.id, (
+        "the escalation was not pinned to the Agent's durable identity, so the NEXT "
+        f"rename loses it again: {queued['agent_id']!r}"
+    )
+
+
+def test_an_archived_agent_keeps_the_escalations_own_spelling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-030, negative half -- a REMOVED Agent must not be papered over.
+
+    Resolution failing is not always a rename. If the user archived or deleted the
+    Agent the definition names, there is no identity to pin and inventing one would
+    bind the report to a different Agent than the definition asks for. The row keeps
+    the definition's own spelling and lets the claim report the truth.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    from core.vibe_agents import VibeAgentStore
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        agent_store.create(name="ops", backend="claude")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="exit 7", agent_name="ops"
+    )
+    run_payload = _escalation_run_payload(task)
+    run_payload["agent_name"] = task.agent_name
+    _delete_agent_row(paths.get_sqlite_state_path(), "ops")
+
+    stamped = store.mark_task_result(
+        task.id,
+        error="command exited with status 7",
+        exit_code=7,
+        records_command_outcome=True,
+        queued_run=run_payload,
+    )
+
+    assert stamped is True
+    runs = _escalation_runs(store)
+    assert len(runs) == 1
+    assert runs[0]["agent_name"] == "ops", (
+        f"the definition's own spelling was dropped: {runs[0]['agent_name']!r}"
+    )
+    assert not (runs[0]["agent_id"] or ""), (
+        f"an identity was invented for an Agent that no longer exists: {runs[0]['agent_id']!r}"
+    )
+
+
+def _delete_agent_row(db_path: Path, name: str) -> None:
+    """Remove an Agent from the catalog outright, as a delete leaves it."""
+
+    from storage.models import agents as agents_table
+
+    with create_sqlite_engine(db_path).begin() as conn:
+        conn.execute(agents_table.delete().where(agents_table.c.name == name))
+
+
+def test_a_file_backed_task_store_refuses_a_queued_run(tmp_path: Path) -> None:
+    """The watch store's answer, replicated: REFUSE rather than save-then-enqueue.
+
+    A file-backed store cannot make the two writes one decision at all, so a
+    best-effort second write would be exactly the two-commits bug HFR-269 removed.
+    Passing one here is a caller bug and says so.
+    """
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    assert store.sqlite_backend is None
+    task = store.add_task(
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        shell_command="exit 7",
+        metadata={"on_failure": "agent"},
+    )
+
+    with pytest.raises(ValueError):
+        store.mark_task_result(
+            task.id, error="boom", queued_run=_escalation_run_payload(task)
+        )
+
+
+def test_a_failed_on_failure_agent_command_fire_queues_exactly_one_escalation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-003 — a failed ``--on-failure agent`` fire reports through ONE Agent turn.
+
+    The whole point of the mode: instead of a notification the user has to act on, the
+    failure becomes a turn the Agent can act on. So all four halves are asserted from a
+    REAL fire through the claimed-request path:
+
+    * the parent run is ``failed`` and carries the ``escalation_run_id`` marker,
+    * exactly one queued ``task_escalation`` row exists, pointing back at the fire and
+      at the definition,
+    * its prompt carries the command and the outcome the Agent has to act on, and
+    * the parent owes NO failure notice -- the escalation IS the report, and both would
+      be the same failure told twice.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_escalation")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    escalations = _escalation_runs(store)
+    assert len(escalations) == 1, (
+        f"expected exactly one queued escalation for one failed fire: {escalations!r}"
+    )
+    escalation = escalations[0]
+    assert run["metadata"].get("escalation_run_id") == escalation["id"], (
+        "the failed run does not point at the turn that reports it: "
+        f"{run['metadata'].get('escalation_run_id')!r} != {escalation['id']!r}"
+    )
+    assert escalation["parent_run_id"] == run["id"], (
+        f"the escalation lost its parent fire: {escalation['parent_run_id']!r}"
+    )
+    assert escalation["task_id"] == task.id, (
+        f"the escalation lost its definition: {escalation['task_id']!r}"
+    )
+    assert escalation["session_id"] == session_id
+    assert "echo boom >&2; exit 7" in (escalation["prompt"] or ""), (
+        f"the escalation must name the command that failed: {escalation['prompt']!r}"
+    )
+    assert "status 7" in (escalation["prompt"] or ""), (
+        f"and the outcome it failed with: {escalation['prompt']!r}"
+    )
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "an escalated failure also owes a notice; the same failure would be reported "
+        "twice, once as a turn and once as an alert"
+    )
+
+
+def test_archiving_the_session_gives_a_killed_escalation_its_notice_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-005 -- teardown must not turn an escalated failure into a silent one.
+
+    A failed ``--on-failure agent`` fire suppresses its own failure notice because
+    the escalation turn IS the report. Session teardown then cancels every queued run
+    bound to that session -- the escalation among them -- and a ``canceled`` run owes
+    nothing. So the failure ended up with NO turn and NO notice, which is the one
+    direction this design refuses: the accepted crash window biases towards BOTH,
+    never towards neither.
+
+    The failure must fall back to the notice ladder, which does not need the
+    torn-down session: a notice is delivered to the scope, not into a conversation.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_archive_esc")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    escalations = _escalation_runs(store)
+    assert len(escalations) == 1, f"the premise: one escalation is queued ({escalations!r})"
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "the premise: the escalation suppressed the notice"
+    )
+
+    from storage.workbench_sessions_service import archive_session
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            archive_session(conn, session_id)
+    finally:
+        engine.dispose()
+
+    assert _escalation_runs(store) == [], (
+        "the premise: archiving the session cancels the queued escalation"
+    )
+    notice = store._sqlite.owed_failure_notice(run["id"])
+    assert notice is not None, (
+        "the escalation was canceled and no notice replaced it, so this failure is "
+        "reported by nothing at all"
+    )
+    assert notice["state"] == "pending"
+
+
+def _start_the_escalation(escalation_id: str) -> None:
+    """Move an escalation to ``running``, the way the executor does when it claims it."""
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == escalation_id)
+                .values(status="running", started_at="2026-07-28T09:00:01+00:00")
+            )
+    finally:
+        engine.dispose()
+
+
+def test_archiving_the_session_gives_an_already_running_escalation_its_notice_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-009 -- an escalation teardown kills MID-TURN owes the same fallback.
+
+    Teardown treats the two halves of "not yet terminal" differently: it flags all four
+    active statuses ``cancel_requested`` and lets the executor honour it, but only
+    ``pending``/``queued`` are terminalized on the spot. So an escalation the executor
+    had already claimed is not canceled by this transaction -- it is canceled a moment
+    later, out here, by the executor.
+
+    That is the same silence as the queued case and it is harder to see. The re-arm ran
+    only for ``pending``/``queued``, so an escalation cancelled at ``running`` settled
+    ``canceled`` (owing nothing, as a cancel does) while the parent's notice stayed
+    suppressed by ``escalation_run_id`` on the promise of a turn that was killed before
+    it reported anything. What the re-arm must key on is "teardown has condemned this
+    escalation", which is exactly the set teardown cancel-requests -- not the narrower
+    set it happens to terminalize in the same statement.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_running_esc")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    escalations = _escalation_runs(store)
+    assert len(escalations) == 1, f"the premise: one escalation is queued ({escalations!r})"
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "the premise: the escalation suppressed the notice"
+    )
+
+    # The window: the executor claims the turn, then teardown lands.
+    _start_the_escalation(escalations[0]["id"])
+
+    from storage.workbench_sessions_service import archive_session
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            archive_session(conn, session_id)
+        with engine.begin() as conn:
+            condemned = (
+                conn.execute(
+                    select(agent_runs.c.cancel_requested).where(
+                        agent_runs.c.id == escalations[0]["id"]
+                    )
+                )
+                .scalars()
+                .first()
+            )
+    finally:
+        engine.dispose()
+
+    assert condemned, (
+        "the premise: teardown condemns a running escalation too, it just leaves the "
+        "terminalizing to the executor"
+    )
+    notice = store._sqlite.owed_failure_notice(run["id"])
+    assert notice is not None, (
+        "the turn was killed before it could report anything and no notice replaced "
+        "it, so this failure is reported by nothing at all"
+    )
+    assert notice["state"] == "pending"
+
+
+def test_hard_deleting_the_session_gives_a_killed_escalation_its_notice_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-005, other half -- ``/new`` owes the same fallback, and owes it EARLIER.
+
+    ``_delete_agent_session_rows`` splits on retained history: a Session with Messages
+    or Deliveries is archived and re-anchored (and cancels its queued runs on the way),
+    while an EMPTY one is deleted outright. The empty branch is the one that bites,
+    because it is both reachable and quieter: a Session created for a command task has
+    no Messages until a turn actually delivers, so the first thing that ever happens in
+    it can be a queued escalation -- and deleting the row leaves that escalation queued
+    against a Session that no longer exists. It is not cancelled, so no cancel-shaped
+    guard can see it; it simply never runs, and the notice it suppressed never came.
+
+    So the re-arm belongs BEFORE the branch, not inside the archival half: the failure
+    must fall back to the notice ladder whichever way the row goes.
+    """
+
+    from storage.models import agent_sessions
+    from storage.session_reclaim import RECLAIM_PAUSE
+    from storage.sessions_service import _delete_agent_session_rows
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_delete_esc")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    assert len(_escalation_runs(store)) == 1, "the premise: one escalation is queued"
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "the premise: the escalation suppressed the notice"
+    )
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            deleted = _delete_agent_session_rows(
+                conn,
+                select(agent_sessions.c.id).where(agent_sessions.c.id == session_id),
+                reclaim_mode=RECLAIM_PAUSE,
+                reclaim_reason="new_session",
+            )
+    finally:
+        engine.dispose()
+
+    assert deleted == 1, "the premise: the empty Session row was torn down"
+    notice = store._sqlite.owed_failure_notice(run["id"])
+    assert notice is not None, (
+        "the Session the escalation was queued against is gone, so the turn can never "
+        "run and no notice replaced it: this failure is reported by nothing at all"
+    )
+    assert notice["state"] == "pending"
+
+
+def test_hard_deleting_the_session_also_cancels_the_runs_bound_to_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-010 -- a deleted Session must not leave claimable runs behind it.
+
+    ``agent_runs.session_id`` carries no foreign key, so deleting the Session row does
+    not touch the runs bound to it: they stay ``queued``, and the executor will happily
+    claim one against a Session that no longer exists. The archival half of this same
+    function cancels them; the delete half only stopped mattering less because the row
+    it removes hid the problem.
+
+    For a command-task escalation the cost is precise. The re-arm above has already
+    handed the failure back to the notice ladder on the grounds that the turn can never
+    run -- so if the turn is nonetheless claimed and dies on the missing Session, that
+    death reports the SAME failure a second time, from the lane meant to replace it.
+    Terminalizing here is what makes the re-arm's premise true.
+    """
+
+    from storage.models import agent_sessions
+    from storage.session_reclaim import RECLAIM_PAUSE
+    from storage.sessions_service import _delete_agent_session_rows
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_delete_orphan")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed", f"the premise: the fire failed ({run['error']!r})"
+    escalations = _escalation_runs(store)
+    assert len(escalations) == 1, f"the premise: one escalation is queued ({escalations!r})"
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            deleted = _delete_agent_session_rows(
+                conn,
+                select(agent_sessions.c.id).where(agent_sessions.c.id == session_id),
+                reclaim_mode=RECLAIM_PAUSE,
+                reclaim_reason="new_session",
+            )
+        with engine.begin() as conn:
+            settled = (
+                conn.execute(
+                    select(agent_runs.c.status, agent_runs.c.cancel_requested).where(
+                        agent_runs.c.id == escalations[0]["id"]
+                    )
+                )
+                .mappings()
+                .first()
+            )
+    finally:
+        engine.dispose()
+
+    assert deleted == 1, "the premise: the empty Session row was torn down"
+    assert settled is not None, "the escalation row itself should survive as history"
+    assert settled["status"] == "canceled", (
+        "the escalation is still claimable against a Session that no longer exists: "
+        f"{settled['status']!r}"
+    )
+    assert settled["cancel_requested"], (
+        "and nothing recorded that the teardown is what ended it"
+    )
+
+
+def _edit_definition_command(definition_id: str, shell_command: str) -> None:
+    """Commit a command edit from another connection, the way ``vibe task update`` does."""
+
+    from storage.models import run_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == definition_id)
+                .values(shell_command=shell_command)
+            )
+    finally:
+        engine.dispose()
+
+
+def _repoint_definition_session(definition_id: str, session_id: str) -> None:
+    """Commit a binding change from another connection, the way ``/new`` does."""
+
+    from storage.models import run_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == definition_id)
+                .values(session_id=session_id)
+            )
+    finally:
+        engine.dispose()
+
+
+def test_a_reclaim_during_the_command_refuses_the_stamp_and_escalates_nowhere(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-004 -- a binding that moved mid-fire must not receive the escalation.
+
+    ``mark_task_result`` reloads the mirror and derives its compare-and-set
+    expectation FROM THE RELOADED ROW, so a ``/new`` reclaim that commits while the
+    command is running becomes the expectation the stamp compares against -- it
+    matches, and the stamp lands. That was survivable while the stamp only wrote
+    bookkeeping. It is not survivable now that the same stamp QUEUES AN AGENT TURN:
+    the escalation is composed from the pre-execution task object, so it would be
+    durably queued against the session the reclaim just tore down, and the notice
+    would be suppressed in favour of a turn that can never be delivered there.
+
+    The fire must instead be refused whole: no escalation row, and the failure
+    reported on the run so the owed-notice ladder still owns it.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_reclaim_before")
+    reclaimed_session_id = _bare_session_row(
+        workdir=tmp_path, anchor="avibe_task_reclaim_after"
+    )
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    real_runner = scheduled_tasks.run_supervised_command
+
+    async def _reclaim_then_fail(**kwargs):
+        # The reclaim commits WHILE the command runs, which is the only ordering that
+        # reaches the window: before the fire there is nothing to stamp, and after the
+        # stamp the transaction has already closed.
+        result = await real_runner(**kwargs)
+        _repoint_definition_session(task.id, reclaimed_session_id)
+        return result
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _reclaim_then_fail)
+
+    run = _fire_command_task(service, task)
+
+    assert _escalation_runs(store) == [], (
+        "an escalation was queued against a binding the definition no longer has"
+    )
+    assert run["status"] == "failed", (
+        f"a fire whose stamp was refused must not report success: {run['status']!r}"
+    )
+    assert run["metadata"].get("escalation_run_id") in (None, ""), (
+        "the run claims an escalation that was never queued, which suppresses the "
+        f"notice too: {run['metadata'].get('escalation_run_id')!r}"
+    )
+
+
+def test_a_cancel_during_the_command_refuses_the_escalation_and_settles_canceled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-026 -- a stopped job must not answer by starting an Agent.
+
+    The reclaim twin above guards the BINDING; this guards the STOP, and the window is
+    narrower than the one SCT-013 covers. There the flag is observed by the tick, which
+    cancels the awaiting coroutine and the fire never reaches its stamp. Here the
+    command has already exited, so nothing is left to interrupt: ``mark_task_result``
+    stamps the failure and durably queues the escalation, and only afterwards does
+    ``complete`` read ``cancel_requested`` and settle the run ``canceled``.
+
+    Two commits are not one decision. The turn the stamp authorises is durable by then,
+    so the user stops a job and the job answers by starting an Agent. The stop has to be
+    re-read SERVER-SIDE inside the stamp's own transaction, which is the only place it
+    can still roll the escalation back with it.
+
+    The definition must still end up describing this fire rather than the one before it
+    -- that is the terminal projection's job, and a refused stamp is exactly when it is
+    needed.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_cancel_stamp")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        session_id=session_id,
+    )
+    # The premise for the projection assertion: a PREVIOUS fire left an outcome behind.
+    store.mark_task_result(task.id, error=None, exit_code=3, records_command_outcome=True)
+
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    real_runner = scheduled_tasks.run_supervised_command
+
+    async def _stop_it_as_it_exits(**kwargs):
+        result = await real_runner(**kwargs)
+        # The only ordering that reaches the window: after the command is done, so the
+        # tick has nothing left to interrupt, and before the stamp opens its transaction.
+        service.request_store.cancel_run(queued.id)
+        return result
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", _stop_it_as_it_exits)
+
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "canceled", (
+        f"the premise: the stop won the settlement race ({run['status']!r})"
+    )
+    assert _escalation_runs(store) == [], (
+        "the user stopped this run and it answered by durably queueing an Agent turn"
+    )
+    assert run["metadata"].get("escalation_run_id") in (None, ""), (
+        "the run claims an escalation that was rolled back with the stamp: "
+        f"{run['metadata'].get('escalation_run_id')!r}"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    # 7, not the 3 the previous fire left: the stamp was refused, so the terminal
+    # projection is what describes this fire -- and the fire did exit 7, which the run
+    # row carries. The refusal rolls back the ESCALATION, not the record of the outcome.
+    assert stored.last_exit_code == 7, (
+        "the refused stamp left the definition reporting the exit code of the fire "
+        f"BEFORE this one: {stored.last_exit_code!r}"
+    )
+    assert (stored.metadata or {}).get(COMMAND_TIMED_OUT_METADATA_KEY) is False, (
+        "the projection left the timeout claim of an earlier fire standing beside a "
+        f"code this one chose for itself: {stored.metadata!r}"
+    )
+
+
+def test_a_stop_that_lands_after_the_stamp_retracts_the_escalation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-033 -- a compare-and-set can only refuse the stops it can already see.
+
+    SCT-026 closes the window where the cancel is visible when the stamp commits: the
+    transaction re-reads it server-side and rolls the escalation back with the stamp.
+    One step further along the same coroutine the guard has already run. ``cancel_run``
+    on a running fire writes only a flag, so the flag can land AFTER
+    ``mark_task_result`` returns -- and ``settle_run_terminal`` then re-reads it and
+    normalizes this fire to ``canceled`` while the escalation it just committed sits
+    queued and claimable. The user stops a job and the job answers by starting an Agent,
+    which is SCT-026's defect surviving one lane later.
+
+    Retraction rather than a wider transaction: the enqueue must commit with the STAMP
+    (that is what authorises the turn), and this settlement happens afterwards in
+    another lane, so no single transaction holds both without reopening HFR-269.
+
+    NEITHER report is owed. ``canceled`` is written only for a stop the user asked for,
+    and a stopped fire owes no notice -- SCT-027's rule. Alerting instead would report a
+    failure for a job they had just stopped. The definition still describes the failure,
+    because this stamp -- unlike SCT-026's -- landed.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_late_stop")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    real_mark = service.store.mark_task_result
+
+    def _stop_it_after_the_stamp(*args, **kwargs):
+        stamped = real_mark(*args, **kwargs)
+        # THE window: the guarded transaction has committed, so the escalation is
+        # durable and no compare-and-set is left to consult.
+        service.request_store.cancel_run(queued.id)
+        return stamped
+
+    monkeypatch.setattr(service.store, "mark_task_result", _stop_it_after_the_stamp)
+
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "canceled", (
+        f"the premise: the stop won the settlement race ({run['status']!r})"
+    )
+    assert run["metadata"].get("escalation_run_id"), (
+        "the premise: this stamp LANDED, so the run names the turn it authorised"
+    )
+
+    escalation_id = str(run["metadata"]["escalation_run_id"])
+    escalation = service.request_store.get_run(escalation_id)
+    assert escalation is not None, "the escalation row vanished rather than settling"
+    assert escalation["status"] == "canceled", (
+        "the user stopped this command and the Agent turn it queued is still claimable: "
+        f"{escalation['status']!r}"
+    )
+    assert _escalation_runs(store) == [], (
+        "a queued escalation survived the stop of the fire that queued it"
+    )
+
+    # The failure itself is not lost: this stamp landed, unlike SCT-026's.
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code == 7
+
+
+def test_claiming_the_escalation_of_a_stopped_fire_is_refused_at_the_door(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-034 -- retraction is too late once the dispatch loop has claimed the turn.
+
+    SCT-033 takes the escalation back from whoever settles the fire ``canceled``, and
+    that works for exactly as long as the row is still queued. The dispatch loop runs on
+    the same loop as the fire's own coroutine, and the escalation becomes claimable the
+    moment the stamp commits -- well before this settlement reaches it. A claim is the
+    one transition retraction cannot undo: ``cancel_run`` on a running Agent Run writes
+    a flag, and the turn lane does not watch that flag, so the stopped job would launch
+    an Agent and run it to completion.
+
+    So the CLAIM answers the question, from the parent row, inside the transaction that
+    would otherwise start the work -- and then it no longer matters which of the two
+    lanes gets there first. Keyed on the fire's ``cancel_requested``, which is set the
+    instant the user asks, rather than on any status a claim would have to wait for.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_claimed_stop")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    real_mark = service.store.mark_task_result
+    claim_attempt: dict[str, Any] = {}
+
+    def _stop_it_then_claim_the_escalation(*args, **kwargs):
+        stamped = real_mark(*args, **kwargs)
+        if claim_attempt:
+            # The terminal projection stamps the definition again on its way out; only
+            # the FIRST stamp is the one that queued the escalation.
+            return stamped
+        # THE ordering: the escalation is durable, the user's stop lands, and the
+        # dispatch loop claims the escalation before the fire's settlement gets to it.
+        service.request_store.cancel_run(queued.id)
+        escalation = service.request_store.find_escalation_run(parent_run_id=queued.id)
+        assert escalation is not None, "the premise: the stamp queued an escalation"
+        claim_attempt["id"] = str(escalation["id"])
+        claim_attempt["claimed"] = service.request_store.claim(claim_attempt["id"])
+        return stamped
+
+    monkeypatch.setattr(
+        service.store, "mark_task_result", _stop_it_then_claim_the_escalation
+    )
+
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "canceled", (
+        f"the premise: the stop won the settlement race ({run['status']!r})"
+    )
+    assert claim_attempt.get("claimed") is None, (
+        "the dispatch loop was handed the escalation of a fire the user had already "
+        f"stopped: {claim_attempt.get('claimed')!r}"
+    )
+
+    escalation = service.request_store.get_run(str(claim_attempt["id"]))
+    assert escalation is not None, "the escalation row vanished rather than settling"
+    assert escalation["status"] == "canceled", (
+        "the refused claim left the escalation of a stopped fire non-terminal, so a "
+        f"later pass can start it: {escalation['status']!r}"
+    )
+    assert _escalation_runs(store) == [], (
+        "a claimable escalation survived the stop of the fire that queued it"
+    )
+
+    # The failure is still recorded on the definition; only the Agent turn is withdrawn.
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_exit_code == 7
+
+
+def test_teardown_between_the_stamp_and_the_settle_cancels_the_fire_itself(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-027 -- why the settle needs no second check on the escalation it names.
+
+    SCT-005 and SCT-009 both let the parent settle FIRST, so
+    ``rearm_notices_for_escalations_canceled_with_session`` finds a ``failed`` row and
+    can hand it a notice. The window in between looks like it breaks that: teardown
+    lands after the atomic stamp+enqueue and before ``complete``, so the re-arm sees a
+    parent that is still ``running`` and owes nothing yet, and ``complete`` then writes
+    ``escalation_run_id`` -- apparently suppressing a notice in favour of a turn that
+    was cancelled a moment earlier, leaving the failure reported by nothing.
+
+    IT DOES NOT, and this test is the reason a status check inside the settle would be
+    dead code. The teardown that cancels the escalation cannot cancel only the
+    escalation: ``archive_session`` flags EVERY non-terminal run of that session, and
+    this fire is one of them. So the settle normalizes the parent to ``canceled``, and
+    ``canceled`` owes no notice by design -- the run is recorded as stopped, not as a
+    failure whose report went missing. Nothing is suppressed because nothing was owed.
+    """
+
+    from storage.workbench_sessions_service import archive_session
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_stamp_teardown")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    real_mark = store.mark_task_result
+
+    def _stamp_then_tear_down(*args, **kwargs):
+        stamped = real_mark(*args, **kwargs)
+        engine = create_sqlite_engine(paths.get_sqlite_state_path())
+        try:
+            with engine.begin() as conn:
+                archive_session(conn, session_id)
+        finally:
+            engine.dispose()
+        return stamped
+
+    monkeypatch.setattr(store, "mark_task_result", _stamp_then_tear_down)
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "canceled", (
+        "the teardown that cancelled the escalation left this fire settling as a "
+        f"failure, so the settle really can suppress a notice for a dead turn: {run['status']!r}"
+    )
+    assert _escalation_runs(store) == [], (
+        "the premise: teardown cancelled the escalation this fire queued"
+    )
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "a cancelled fire stamped a failure notice, which is the noise "
+        "``_owed_failure_notice_for_transition`` exists to refuse"
+    )
+
+
+def test_the_escalation_prompt_prepends_the_stored_message_and_names_the_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The user's standing instruction first, then the machine-generated evidence.
+
+    ``vibe task add --shell ... --on-failure agent --message "open a ticket"`` stores
+    that message as the definition's prompt: it is the instruction, and the report is
+    what it operates on. The report also has to name the run, or the Agent cannot look
+    up the full output the one-line tails were cut from.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo boom >&2; exit 7",
+        prompt="Open a ticket if the nightly sync breaks.",
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    prompt = service._escalation_prompt(
+        task,
+        run_id="run-abc123",
+        error="command exited with status 7: boom",
+        exit_code=7,
+        stdout="starting\nsyncing\n",
+        stderr="warning: slow\nboom\n",
+    )
+
+    assert prompt.startswith("Open a ticket if the nightly sync breaks."), (
+        f"the stored instruction must come first: {prompt!r}"
+    )
+    assert "echo boom >&2; exit 7" in prompt, f"the command must be named: {prompt!r}"
+    assert "command exited with status 7: boom" in prompt
+    assert "Exit code: 7" in prompt
+    assert "boom" in prompt.split("Last stderr line:")[1].splitlines()[0], (
+        f"the stderr tail is where the cause usually is: {prompt!r}"
+    )
+    assert "syncing" in prompt.split("Last stdout line:")[1].splitlines()[0], (
+        f"the stdout tail was dropped: {prompt!r}"
+    )
+    assert "run-abc123" in prompt and "vibe runs show run-abc123" in prompt, (
+        f"the report must say how to read the full output: {prompt!r}"
+    )
+
+
+def test_an_escalating_command_runs_in_its_bound_sessions_workdir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-008 -- the relative commands the docs promise have to resolve somewhere.
+
+    ``--cwd`` is REFUSED for a definition bound to an existing Session, on the rule
+    that the Session owns its working directory (`cwd_with_existing_session`), so the
+    CLI stores ``cwd=None``. For a message task that is complete: the Agent turn starts
+    in the Session's workdir. A command task has no Agent turn to inherit it from, so
+    the stored ``None`` fell through to the ``~/.avibe`` fallback -- meaning
+    ``--shell './scripts/sync.sh'``, the form the docs use, ran from the product state
+    directory with no way to override it: the flag that would fix it is the one the
+    Session rule rejects.
+
+    So the binding has to supply what it refused to let the user state.
+
+    The lookup opens a store per FIRE, and each one carries an engine and an
+    invalidation probe, so the second assertion is that it does not outlive the read:
+    a cron command running every minute would otherwise leak a connection a minute for
+    the life of the service.
+    """
+
+    import storage.sessions_service as sessions_service
+
+    _command_task_env(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "marker").write_text("bound-session-workdir\n", encoding="utf-8")
+
+    opened: list[str] = []
+    closed: list[str] = []
+
+    class _CountedSessionsService(sessions_service.SQLiteSessionsService):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            opened.append(str(id(self)))
+
+        def close(self) -> None:
+            closed.append(str(id(self)))
+            super().close()
+
+    monkeypatch.setattr(
+        sessions_service, "SQLiteSessionsService", _CountedSessionsService
+    )
+
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=project, anchor="avibe_task_cwd")
+    task = store.add_task(
+        session_key="",
+        session_id=session_id,
+        # The exact shape ``vibe task add --shell ... --on-failure agent
+        # --session-id ...`` stores: an existing binding, and NO cwd.
+        session_policy="existing",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        cwd=None,
+        deliver_key="slack::channel::C123",
+        shell_command="cat marker",
+        metadata={"origin": "cli", "on_failure": "agent"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded", (
+        "the command could not read a file sitting in its own Session's workdir, so it "
+        f"ran somewhere else: {run['error']!r}"
+    )
+    assert _escalation_runs(store) == [], "a succeeded fire must not escalate"
+    assert opened, "the premise: the fire resolved its workdir through a Session store"
+    assert closed == opened, (
+        "the workdir lookup left its Session store open, so every fire of this cron "
+        f"leaks an engine and its invalidation probe: opened {opened!r}, closed {closed!r}"
+    )
+
+
+def test_a_command_with_nothing_to_inherit_runs_where_agent_work_runs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-048 -- the product state directory is the wrong last resort.
+
+    SCT-008 gave a Session-bound command its binding's workdir. A definition can still
+    reach the fire with neither: a per-run binding whose Session does not exist yet
+    (created before the CLI recorded the invocation directory for it), or one written
+    straight through the API. Those fell through to ``paths.get_vibe_remote_dir()`` --
+    ``~/.avibe`` -- so a relative command ran against persisted product state, where its
+    files are missing and its writes land among the store's.
+
+    ``runtime.default_cwd`` is where this install's Agent turns already run, so it is
+    both a real directory and the same answer the escalation Session would get.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    work = tmp_path / "agent-work"
+    work.mkdir()
+    (work / "marker").write_text("runtime-default-workdir\n", encoding="utf-8")
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        # The shape ``--create-session-per-run`` stores: no cwd, and no Session to read
+        # one from until escalation creates it.
+        session_policy="create_per_run",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        cwd=None,
+        shell_command="cat marker",
+        metadata={"origin": "cli", "on_failure": "agent"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    service.controller.config = SimpleNamespace(
+        language="en", runtime=SimpleNamespace(default_cwd=str(work))
+    )
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded", (
+        "the command could not read a file sitting in the configured runtime workdir, "
+        f"so it ran in the product state directory instead: {run['error']!r}"
+    )
+    assert "runtime-default-workdir" in (run["stdout"] or "")
+
+
+def test_the_run_snapshot_names_the_command_the_fire_actually_ran(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-028 -- the snapshot is only worth having if it is the executed copy.
+
+    The enqueue stamps the definition as it stood THEN, but the executor re-reads the
+    definition after claiming the run -- so an edit committed in that window left the
+    run naming command A while command B ran, and the notice, the escalation prompt and
+    the Workbench run detail all repeated that wrong answer with a snapshot's authority.
+    Worse than no snapshot: it is the record readers were told to trust precisely
+    because the definition is mutable.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(
+        store, shell_command="echo original", cwd=str(tmp_path)
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    predicted = service.request_store.get_run(queued.id)
+    assert predicted is not None
+    assert predicted["metadata"].get(COMMAND_SNAPSHOT_METADATA_KEY) == {
+        "shell": "echo original",
+        "argv": [],
+    }, f"the premise: the enqueue predicted a command ({predicted['metadata']!r})"
+
+    # ``SqliteInvalidationProbe`` reports "changed" only by COMPARING two readings of
+    # ``PRAGMA data_version``, so its very first call always answers no. A live service
+    # has ticked long before a fire claims anything; a test has to prime it, or the
+    # mirror below never reloads and the executor cannot see the edit at all.
+    service.store.maybe_reload()
+
+    # The window: the user rewrites the command after it was queued and before it runs.
+    _edit_definition_command(task.id, "echo edited")
+
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert "edited" in (run["stdout"] or ""), (
+        f"the premise: the executor ran the edited command ({run['stdout']!r})"
+    )
+    assert run["metadata"].get(COMMAND_SNAPSHOT_METADATA_KEY) == {
+        "shell": "echo edited",
+        "argv": [],
+    }, (
+        "the run's immutable record of what it executed names a command it did not "
+        f"execute: {run['metadata'].get(COMMAND_SNAPSHOT_METADATA_KEY)!r}"
+    )
+
+
+def test_a_running_command_fire_does_not_hold_its_conversations_turn_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-012 -- a six-hour backup command must not mute the conversation for six hours.
+
+    The per-session lock exists to stop TWO AGENT TURNS running in one conversation at
+    once. A command fire is not a turn: it talks to no Agent, writes no message, and
+    holds no native session. But it is bound to a Session (``--on-failure agent`` needs
+    one), so it inherited that Session's lock key -- and with ``--timeout`` defaulting
+    to six hours, one long command left every queued turn in the conversation skipped as
+    ``session_busy`` for as long as it ran.
+
+    The escalation it may queue is the part that IS a turn, and it is a separate run
+    that takes the lock in the ordinary way. So the fire keys on the definition instead:
+    still serialized against itself, no longer against the user.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_lock")
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="sleep 3600", session_id=session_id
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    fire = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert fire is not None
+    fire_lock = service._execution_lock_key(fire)
+    session_lock = service._canonical_session_lock(session_id, None)
+    assert fire_lock == f"task:{task.id}", (
+        "the command fire took a lock keyed on something other than its own definition"
+    )
+    assert fire_lock != session_lock, "the fire is holding the conversation's turn lock"
+
+    # And the consequence, through the real drain: the escalation turn this very
+    # definition would queue has to be dispatchable while the command is still running.
+    service._inflight_sessions.add(fire_lock)
+    escalation = service.request_store.enqueue_hook_send(
+        session_key="",
+        session_id=session_id,
+        prompt="the report",
+        run_type="task_escalation",
+        definition_id=task.id,
+        source_kind="scheduler",
+    )
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        service, "_spawn_execution", lambda request, lock_key: dispatched.append(request.id)
+    )
+
+    asyncio.run(service._drain_requests())
+
+    assert dispatched == [escalation.id], (
+        "the escalation was held behind the command fire: "
+        f"{service.request_store.get_run(escalation.id)['metadata']}"
+    )
+
+
+def test_canceling_a_running_command_run_actually_stops_the_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-013 -- ``vibe runs cancel`` has to mean the work stops, not just the row.
+
+    For every other run type cancellation reaches the work: a turn is interrupted, a
+    queued claim is terminalized at the door. A command fire had NOTHING watching the
+    flag, so ``cancel_requested`` was only read at settlement -- which for a command
+    that hangs is up to ``--timeout`` (six hours by default) away. Until then the child
+    kept running, holding whatever it was holding, and the row the user was shown said
+    the run was already canceled.
+
+    The runner already owns the kill: cancelling the awaiting coroutine tears down the
+    process tree. What was missing was somebody to observe the flag and pull it, so the
+    scheduler tick does -- the same ``_inflight_cancellation_causes`` + ``task.cancel()``
+    pair service shutdown uses, only with the user named as the cause.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_cancel")
+    started = tmp_path / "command-started"
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        # Announces itself, then hangs for far longer than this test may wait.
+        shell_command=f"touch {started.name}; sleep 3600",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _cancel_it_mid_flight() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        execution = service._inflight_executions[request.id]
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started, so nothing was cancelled"
+
+        service.request_store.cancel_run(request.id)
+        service._propagate_requested_cancellations()
+        # Ten seconds, against a command that sleeps for an hour: the point of the
+        # assertion is that the wait ends because the command was killed.
+        await asyncio.wait_for(
+            asyncio.gather(execution, return_exceptions=True), timeout=10
+        )
+
+    try:
+        asyncio.run(_cancel_it_mid_flight())
+    except asyncio.TimeoutError:  # pragma: no cover - the defect this test reproduces
+        pytest.fail("cancelling the run left the command running")
+
+    run = next(
+        row
+        for row in store._sqlite.list_runs()
+        if row["run_type"] not in {"task_escalation"}
+    )
+    assert run["status"] == "canceled", f"a cancelled fire settled as {run['status']!r}"
+    assert _escalation_runs(store) == [], (
+        "a fire the user cancelled escalated to an Agent as though the command had failed"
+    )
+    stored = ScheduledTaskStore().get_task(task.id)
+    # The stop landed before the result stamp, which is what keeps the definition free
+    # of a fabricated outcome: a command killed mid-flight has no exit status, and the
+    # cancellation is recorded as the stop it was (``last_error``), not as a command that
+    # reported one.
+    assert stored is not None and stored.last_exit_code is None, (
+        "a cancelled fire stamped an exit code the command never produced"
+    )
+
+
+def test_canceling_a_run_whose_task_was_removed_still_stops_the_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-020 -- removing the task must not make its running command unkillable.
+
+    ``remove_task`` drops the definition immediately and leaves the in-flight Run
+    alive, which is the ONLY way a user can react to a command that is misbehaving
+    right now. Deciding command-ness by asking the live store therefore answered
+    "not a command" exactly when the answer mattered, the cancellation was ignored,
+    and the child ran on to its ``--timeout`` -- six hours by default. The run
+    carries an immutable snapshot of what it launched; that is what decides.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    started = tmp_path / "orphan-started"
+    task = _add_command_task(
+        store,
+        shell_command=f"touch {started.name}; sleep 3600",
+        cwd=str(tmp_path),
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _remove_then_cancel() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started, so nothing was cancelled"
+
+        assert store.remove_task(task.id), "the definition was not removed"
+        assert store.get_task(task.id) is None
+        service.request_store.cancel_run(request.id)
+        service._propagate_requested_cancellations()
+        await asyncio.wait_for(
+            asyncio.gather(service._inflight_executions[request.id], return_exceptions=True),
+            timeout=10,
+        )
+
+    try:
+        asyncio.run(_remove_then_cancel())
+    except asyncio.TimeoutError:  # pragma: no cover - the defect this test reproduces
+        pytest.fail("removing the task left its cancelled command running")
+
+
+def test_a_crashed_service_reaps_the_command_worker_it_left_running(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-023 -- a service that dies without unwinding must not leak its command.
+
+    Every ORDERLY stop reaches the child through the awaiting coroutine's
+    ``CancelledError``. A SIGKILL or a crash delivers none: the isolated supervisor
+    and the backup, deployment or migration under it keep running, unowned, and the
+    next cron fire starts a SECOND one beside it. Nothing on disk named that child,
+    so the restart could not have found it even in principle.
+
+    The crash is simulated by abandoning the in-flight coroutine and constructing a
+    fresh service over the same state, which is what a restart does; the assertion
+    is that the abandoned fire then ends on its own, because its worker was killed.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    started = tmp_path / "worker-started"
+    task = _add_command_task(
+        store,
+        shell_command=f"touch {started.name}; sleep 3600",
+        cwd=str(tmp_path),
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _crash_then_restart() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started, so nothing was orphaned"
+
+        workers = service.request_store.list_running_command_workers()
+        assert workers, "the fire recorded no worker, so a restart cannot find it"
+        assert workers[0]["run_id"] == request.id
+
+        # The controller invokes recovery only after backend/Turn recovery has
+        # reconstructed exact owners. Command reaping remains the first step of
+        # that recovery pass, before the row carrying its identity can settle.
+        restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted.recover_processing_requests()
+
+        await asyncio.wait_for(
+            asyncio.gather(
+                service._inflight_executions[request.id], return_exceptions=True
+            ),
+            timeout=15,
+        )
+
+    try:
+        asyncio.run(_crash_then_restart())
+    except asyncio.TimeoutError:  # pragma: no cover - the defect this test reproduces
+        pytest.fail("the restart left the orphaned command worker running")
+
+
+def test_a_worker_that_survives_the_reap_is_kept_for_the_next_start(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-029 -- an unconfirmed kill must not throw away the only handle on the child.
+
+    SCT-023 records the worker's identity so a restart can find it. But the reap
+    cleared that record unconditionally, INCLUDING when the teardown came back
+    unconfirmed and the process was still there -- a task wedged in uninterruptible
+    I/O outlives even ``SIGKILL``. Since the run is the only place the identity is
+    written, and ``recover_processing`` settles the run moments later, no later pass
+    could ever find that backup or migration again: it ran to completion unowned.
+
+    So the record survives and the row stays ``running`` for the next start to retry.
+    The cap is the other half: retrying forever would hold a run ``running`` for the
+    life of the install whenever the process genuinely never exits.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    started = tmp_path / "unkillable-started"
+    task = _add_command_task(
+        store,
+        shell_command=f"touch {started.name}; sleep 3600",
+        cwd=str(tmp_path),
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    attempts: list[int] = []
+
+    def _refuse_to_confirm(pid, *args, **kwargs):
+        """A teardown that reports "not confirmed" while the process keeps running."""
+
+        attempts.append(pid)
+        return False
+
+    def _worker_record() -> Optional[dict[str, Any]]:
+        workers = service.request_store.list_running_command_workers()
+        return workers[0]["identity"] if workers else None
+
+    def _run_row(run_id: str) -> dict[str, Any]:
+        row = service.request_store.get_run(run_id)
+        assert row is not None
+        return row
+
+    async def _restart_until_it_gives_up() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started, so nothing was orphaned"
+        assert _worker_record(), "the fire recorded no worker"
+
+        real_terminate = process_isolation.terminate_process_tree_by_pid
+        monkeypatch.setattr(
+            process_isolation, "terminate_process_tree_by_pid", _refuse_to_confirm
+        )
+        cap = ScheduledTaskService._MAX_COMMAND_WORKER_REAP_ATTEMPTS
+        # Every start before the cap: the kill is attempted, comes back unconfirmed,
+        # and the record is kept with its attempt count so the NEXT one can try.
+        for attempt in range(1, cap):
+            restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+            restarted.recover_processing_requests()
+            assert len(attempts) == attempt, (
+                f"start {attempt} did not attempt the kill: {attempts!r}"
+            )
+            identity = _worker_record()
+            assert identity is not None, (
+                f"start {attempt} discarded a live worker's identity, so no later start "
+                "can ever find it"
+            )
+            assert identity.get("reap_attempts") == attempt, (
+                f"the attempt count did not advance: {identity!r}"
+            )
+            assert _run_row(request.id)["status"] == "running", (
+                "the run was settled while its worker was still alive; "
+                "``list_running_command_workers`` will not see it again"
+            )
+
+        # The cap. The process is still there and still unkillable, but the run stops
+        # being held open on its behalf.
+        restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted.recover_processing_requests()
+        assert _worker_record() is None, "the reap never gave up; this run stays running forever"
+        assert _run_row(request.id)["status"] != "running", (
+            "the spent run was left ``running`` with nothing tracking it"
+        )
+
+        # Cleanup: the abandoned coroutine still owns the child, and its cancellation
+        # is the orderly teardown every non-crash stop uses. Restored by name, never
+        # ``monkeypatch.undo()`` -- that would also put back the real ``paths``, and a
+        # teardown writing to the user's live ``~/.avibe`` is exactly what
+        # ``_command_task_env`` exists to prevent.
+        monkeypatch.setattr(
+            process_isolation, "terminate_process_tree_by_pid", real_terminate
+        )
+        execution = service._inflight_executions[request.id]
+        execution.cancel()
+        await asyncio.wait_for(
+            asyncio.gather(execution, return_exceptions=True), timeout=15
+        )
+
+    try:
+        asyncio.run(_restart_until_it_gives_up())
+    except asyncio.TimeoutError:  # pragma: no cover - cleanup only
+        pytest.fail("the cancelled command was left running")
+
+
+_SUPERVISOR_KILLED_MID_COMMAND = (
+    "import os, subprocess, sys, time\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3600)'])\n"
+    "sys.stdout.write(f'{child.pid}\\n')\n"
+    "sys.stdout.flush()\n"
+    "time.sleep(0.5)\n"
+    "os._exit(0)\n"
+)
+
+
+def test_a_restart_reaps_the_group_a_dead_supervisor_left_behind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-032 -- an empty supervisor pid is not an empty tree.
+
+    The worker is spawned into its own session, so it LEADS the process group
+    ``pgid == pid``, and on POSIX that group outlives it. Kill the supervisor alone --
+    the OOM killer picking the parent, a fault in the supervisor's own code -- and the
+    backup or migration underneath keeps running in a group nothing else names.
+
+    Reading the free pid as proof the tree was reaped is the whole defect: the reap
+    stopped there, cleared ``command_worker``, and let ``recover_processing`` settle
+    the row moments later, so the survivor ran to completion unowned and the next
+    cron fire started a second one beside it. The watch lane already walked the
+    surviving group; this asserts the command lane does too, on a real one.
+    """
+
+    if os.name == "nt":
+        pytest.skip("a process group outliving its leader is POSIX-specific")
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    request = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert request is not None
+
+    marker = process_isolation.new_process_identity_marker()
+    leader = subprocess.Popen(  # noqa: S603 - fixed argv, test-owned
+        [os.path.abspath(sys.executable), "-c", _SUPERVISOR_KILLED_MID_COMMAND],
+        stdout=subprocess.PIPE,
+        text=True,
+        env=process_isolation.process_identity_subprocess_env(marker),
+        **process_isolation.isolated_subprocess_kwargs(),
+    )
+    child_pid: Optional[int] = None
+    try:
+        identity = process_isolation.capture_spawned_process_identity(leader.pid, marker)
+        assert identity is not None
+        assert leader.stdout is not None
+        child_pid = int(leader.stdout.readline().strip())
+        assert leader.wait(timeout=15) == 0, "the supervisor did not die on its own"
+        assert process_isolation.probe_process_liveness(leader.pid) == "gone"
+        assert os.getpgid(child_pid) == leader.pid, (
+            "the command did not inherit the supervisor's process group, so this is "
+            "not the state the defect needs"
+        )
+
+        assert service.request_store.record_command_worker(
+            request.id, process_isolation.serialize_process_identity(identity)
+        )
+        assert service.request_store.list_running_command_workers(), (
+            "the fixture did not leave the run in the state the startup reap scans"
+        )
+
+        # Recovery reaps before settling the row that stores the identity.
+        restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted.recover_processing_requests()
+
+        deadline = 15.0
+        while deadline > 0 and process_isolation.probe_process_liveness(child_pid) != "gone":
+            time.sleep(0.1)
+            deadline -= 0.1
+        assert process_isolation.probe_process_liveness(child_pid) == "gone", (
+            "the restart read the dead supervisor as a reaped tree and left the "
+            "command running, unowned, with nothing on disk naming it"
+        )
+        assert not service.request_store.list_running_command_workers(), (
+            "a proven death must retire the record; keeping it would pin the run "
+            "``running`` and retry a kill on a pid that is free"
+        )
+        row = service.request_store.get_run(request.id)
+        assert row is not None and row["status"] != "running"
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(child_pid, process_isolation.KILL_SIGNAL)
+        with suppress(Exception):
+            leader.kill()
+        with suppress(Exception):
+            leader.wait(timeout=5)
+        if leader.stdout is not None:
+            leader.stdout.close()
+
+
+def test_a_probe_that_cannot_read_the_process_keeps_its_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-031 -- "I could not look" is not "it is gone", and only gone retires a record.
+
+    SCT-029 keeps the handle when the KILL comes back unconfirmed. The liveness
+    question in front of that kill had the same two answers folded into one:
+    ``inspect_process_identity`` returns ``None`` both for an empty pid and for a
+    probe that could not read the process table at all -- an exhausted fd table, a
+    ``/proc`` read losing a race, a platform refusing ``create_time``. Treating the
+    second as absence skipped the kill AND cleared the record, so a backup still
+    writing became unfindable by every later start too, and the next fire could run
+    beside it.
+
+    Reads as a restart, because that is the only caller: the reap runs from
+    ``__init__``, before ``recover_processing`` settles the row the identity lives on.
+    The cap applies here as well -- a probe that never recovers must not hold a run
+    ``running`` for the life of the install.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    request = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert request is not None
+
+    # A worker record for a process that is never spawned: the probe is what is
+    # under test, so the pid only has to survive ``process_identity_from_payload``.
+    assert service.request_store.record_command_worker(
+        request.id,
+        {
+            "pid": 424242,
+            "create_time": 1.0,
+            "worker_fingerprint": fingerprint_process_marker("orphaned-worker"),
+        },
+    )
+    assert service.request_store.list_running_command_workers(), (
+        "the fixture did not leave the run in the state the startup reap scans"
+    )
+
+    signalled: list[int] = []
+
+    def _record_kill(pid, *_args, **_kwargs) -> bool:
+        signalled.append(pid)
+        return True
+
+    monkeypatch.setattr(
+        process_isolation, "probe_process_liveness", lambda _pid: "unknown"
+    )
+    monkeypatch.setattr(
+        process_isolation, "terminate_process_tree_by_pid", _record_kill
+    )
+
+    def _worker_record() -> Optional[dict[str, Any]]:
+        workers = service.request_store.list_running_command_workers()
+        return workers[0]["identity"] if workers else None
+
+    cap = ScheduledTaskService._MAX_COMMAND_WORKER_REAP_ATTEMPTS
+    for attempt in range(1, cap):
+        restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted.recover_processing_requests()
+        identity = _worker_record()
+        assert identity is not None, (
+            f"start {attempt} read the process as gone because it could not read it at "
+            "all, and threw away the only handle on it"
+        )
+        assert identity.get("reap_attempts") == attempt, (
+            f"the attempt count did not advance: {identity!r}"
+        )
+        row = service.request_store.get_run(request.id)
+        assert row is not None and row["status"] == "running", (
+            "the run was settled while its worker was unaccounted for; "
+            "``list_running_command_workers`` will not see it again"
+        )
+
+    assert signalled == [], (
+        "the reap signalled a pid whose identity it could not read; that is the "
+        "coin flip on an unrelated process the identity check exists to refuse"
+    )
+
+    # The cap. Still unreadable, but the run stops being held open on its behalf.
+    restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+    restarted.recover_processing_requests()
+    assert _worker_record() is None, "the reap never gave up; this run stays running forever"
+    row = service.request_store.get_run(request.id)
+    assert row is not None and row["status"] != "running", (
+        "the spent run was left ``running`` with nothing tracking it"
+    )
+
+
+def test_a_command_whose_worker_cannot_be_recorded_is_never_started(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-037 -- the handshake is the one moment a nameless worker can be refused.
+
+    Every other guard in this family protects a record that already exists. If the
+    stamp itself does not land, the fire runs a backup or deployment with nothing on
+    disk naming it, and a crash mid-command leaves the same unfindable orphan
+    SCT-023/029/031/032 exist to prevent -- reached before the record was ever written.
+
+    Refusing costs almost nothing HERE and only here: the supervisor is blocked reading
+    its spec off stdin, so the user's command has not started, and the runner reaps the
+    tree on the way out. So a captured identity that cannot be persisted fails the fire.
+
+    The negative half is the same judgement from the other side: an identity that could
+    not be CAPTURED does not refuse. Its dominant cause is a supervisor that already
+    exited, where there is no process to name, and no amount of persisting makes an
+    uncapturable identity trustworthy -- every kill path refuses a record it cannot
+    vouch for. Turning that into a refusal would stop honest commands from running.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    ran = tmp_path / "command-ran"
+    task = _add_command_task(
+        store, shell_command=f"touch {ran.name}", cwd=str(tmp_path)
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    supervisors: list[int] = []
+    real_capture = command_runner.capture_spawned_process_identity
+
+    def _remember_the_supervisor(pid, marker):
+        supervisors.append(pid)
+        return real_capture(pid, marker)
+
+    monkeypatch.setattr(
+        command_runner, "capture_spawned_process_identity", _remember_the_supervisor
+    )
+
+    real_record = type(service.request_store).record_command_worker
+
+    def _cannot_write(self, run_id, identity):
+        if identity is not None:
+            raise RuntimeError("database is locked")
+        return real_record(self, run_id, identity)
+
+    monkeypatch.setattr(
+        type(service.request_store), "record_command_worker", _cannot_write
+    )
+
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert not ran.exists(), (
+        "the command ran with nothing on disk naming the process running it; a crash "
+        "here leaves an orphan no later start can find"
+    )
+    run = service.request_store.get_run(queued.id)
+    assert run is not None and run["status"] == "failed", (
+        f"the refusal was not reported as a failed fire: {run and run['status']!r}"
+    )
+    assert "could not be recorded" in (run["error"] or ""), (
+        f"the user is not told why the command did not run: {run and run['error']!r}"
+    )
+    assert supervisors, "the supervisor never spawned, so nothing was refused"
+    for _ in range(100):
+        if process_isolation.probe_process_liveness(supervisors[0]) == "gone":
+            break
+        time.sleep(0.05)
+    assert process_isolation.probe_process_liveness(supervisors[0]) == "gone", (
+        "the refusal left the supervisor running -- the very leak it exists to prevent"
+    )
+
+    # The negative half: nothing to name is not the same as failing to name it.
+    monkeypatch.setattr(
+        type(service.request_store), "record_command_worker", real_record
+    )
+    monkeypatch.setattr(
+        command_runner, "capture_spawned_process_identity", lambda _pid, _marker: None
+    )
+    second = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    claimed = service.request_store.claim(second.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert ran.exists(), (
+        "a command whose identity could not be captured was refused; the usual cause "
+        "is a supervisor that already exited, and the honest ones must still run"
+    )
+    run = service.request_store.get_run(second.id)
+    assert run is not None and run["status"] == "succeeded", (
+        f"the uncaptured identity failed an otherwise fine fire: {run and run['status']!r}"
+    )
+
+
+def test_an_enumeration_that_fails_leaves_the_records_it_could_not_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-036 -- "I could not enumerate" is not "there is nothing to protect".
+
+    SCT-031 fixed that category error one layer down, on a single process. The same
+    mistake sat one layer up, on the whole set: the startup reap answered a failed
+    ``list_running_command_workers`` with an empty skip set, and the ``recover_processing``
+    on the very next line then settled EVERY ``running`` command fire -- because only
+    ``running`` rows carry ``command_worker``, one momentary read failure permanently
+    unnamed every live backup and deployment on the host, and the next fire ran beside
+    them.
+
+    So the settle pass no longer trusts a set handed to it. It reads the record off the
+    row it is about to settle, inside the same transaction, and the reap communicates by
+    WRITING that record: cleared once the process is proven dead or the retries are
+    spent, left in place on every maybe -- including the maybe where it never looked.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    def _claimed_fire() -> str:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        return request.id
+
+    # Two interrupted fires, differing only in whether a worker record survived: one
+    # whose process is unaccounted for, and one the last life already proved dead.
+    with_worker = _claimed_fire()
+    without_worker = _claimed_fire()
+    assert service.request_store.record_command_worker(
+        with_worker,
+        {
+            "pid": 424242,
+            "create_time": 1.0,
+            "worker_fingerprint": fingerprint_process_marker("orphaned-worker"),
+        },
+    )
+
+    real_list = type(service.request_store).list_running_command_workers
+
+    def _cannot_read(_self):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(
+        type(service.request_store), "list_running_command_workers", _cannot_read
+    )
+
+    # The recovery pass, with enumeration failing exactly as a momentary lock would.
+    restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+    restarted.recover_processing_requests()
+
+    monkeypatch.setattr(
+        type(service.request_store), "list_running_command_workers", real_list
+    )
+
+    workers = {
+        worker["run_id"]: worker["identity"]
+        for worker in service.request_store.list_running_command_workers()
+    }
+    assert with_worker in workers, (
+        "a start that could not enumerate the workers settled the run anyway, and the "
+        "identity lives on that row -- no later start can find that process again"
+    )
+    assert workers[with_worker].get("reap_attempts") is None, (
+        "no kill was attempted, so nothing may be charged against the attempt cap"
+    )
+    row = service.request_store.get_run(with_worker)
+    assert row is not None and row["status"] == "running", (
+        "the row must stay ``running`` for the next start's enumeration to see it"
+    )
+
+    # The other half: preservation keys on the surviving record, not on the run type,
+    # so a fire with no worker to protect is settled like any other interrupted run.
+    row = service.request_store.get_run(without_worker)
+    assert row is not None and row["status"] != "running", (
+        "a fire carrying no worker record was held open by a read failure that had "
+        "nothing to do with it"
+    )
+
+
+def test_a_definition_does_not_fire_while_its_own_worker_may_be_alive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-040 -- single flight per definition must survive the restart that breaks it.
+
+    ``_execution_lock_key`` keys a command fire on its definition "so a fire is still
+    serialized against itself", but ``self._inflight_sessions`` is memory: the rule
+    lapses at exactly the moment a survivor is most likely. The service dies, the
+    supervisor's tree keeps running, the startup reap RETAINS its record because it
+    could not prove it dead -- and then the next tick of the same cron starts a second
+    copy of that backup over the same dataset.
+
+    So a command fire consults the durable record too, by identity, and only for its
+    own definition: another definition's live worker is not its business. It looks and
+    never signals -- the retained record exists so a later start can kill that tree, and
+    a fire that reaped it to make room would destroy the work it was scheduled to
+    protect. Proof of death releases the definition here rather than a restart later.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    second_copy = tmp_path / "second-copy-ran"
+    other_ran = tmp_path / "other-definition-ran"
+    task = _add_command_task(
+        store, shell_command=f"touch {second_copy}", cwd=str(tmp_path)
+    )
+    other = _add_command_task(store, shell_command=f"touch {other_ran}", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _drain_and_wait() -> None:
+        await service._drain_requests()
+        for execution in list(service._inflight_executions.values()):
+            await execution
+
+    marker = "surviving-command-worker"
+    survivor = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        env=process_identity_subprocess_env(marker),
+        **isolated_subprocess_kwargs(),
+    )
+    try:
+        identity = capture_spawned_process_identity(survivor.pid, marker)
+        assert identity is not None
+        # A fire from the previous life: claimed, ``running``, still naming the process
+        # that outlived the service -- what the startup reap leaves behind on a maybe.
+        orphan = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert orphan is not None
+        assert service.request_store.record_command_worker(
+            orphan.id, serialize_process_identity(identity)
+        )
+
+        asyncio.run(service._run_task(task.id))
+        assert not second_copy.exists(), (
+            "the cron tick started a second copy of a command whose first copy is still "
+            "running -- two writers over one dataset"
+        )
+        deferred = [
+            request
+            for request in service.request_store.list_pending()
+            if request.task_id == task.id
+        ]
+        assert deferred, (
+            "the deferred fire was dropped rather than requeued; it must run once the "
+            "earlier worker is shown gone"
+        )
+
+        # The drain reaches the same row on its own tick and must answer it the same way,
+        # recording the skip so an indefinitely deferred fire never looks sweepable.
+        asyncio.run(_drain_and_wait())
+        assert not second_copy.exists(), (
+            "the drain ran the second copy the scheduler had just refused to run"
+        )
+        row = service.request_store.get_run(deferred[0].id)
+        assert row is not None and (row["metadata"] or {}).get(
+            "last_skip_reason"
+        ) == "session_busy", (
+            "a fire deferred by a live worker recorded no skip reason, so the stale-run "
+            f"sweep sees an idle queued row: {row and row['metadata']!r}"
+        )
+
+        assert any(
+            worker["run_id"] == orphan.id
+            for worker in service.request_store.list_running_command_workers()
+        ), "the fire cleared the live worker's record, the only handle on that process"
+        assert survivor.poll() is None, (
+            "the fire SIGNALLED the earlier worker to make room for itself"
+        )
+
+        # Scoped to the definition: another definition's fire is not held up by it.
+        asyncio.run(service._run_task(other.id))
+        assert other_ran.exists(), (
+            "one definition's live worker blocked every other definition's fire"
+        )
+    finally:
+        survivor.kill()
+        survivor.wait()
+
+    # Proven dead now, so the record is retired and the definition fires again.
+    asyncio.run(_drain_and_wait())
+    assert second_copy.exists(), (
+        "the deferred fire never ran after its blocking worker exited; a dead worker's "
+        "record would hold its own schedule shut until the next restart"
+    )
+    assert not [
+        worker
+        for worker in service.request_store.list_running_command_workers()
+        if worker["run_id"] == orphan.id
+    ], "the proven-dead worker's record was left to block later fires forever"
+
+
+def test_both_run_stores_name_the_definition_a_command_worker_belongs_to(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-042 -- a worker record nobody can attribute defers nothing.
+
+    SCT-040's guard filters the recorded workers by definition, because "some command
+    is running" is not a reason to skip a different one. The file backend omitted the
+    field: the SQLite column was renamed ``definition_id`` while the file payload still
+    spells the association ``task_id``, so its entries matched no definition at all --
+    which does not read as "no worker", it reads as "no worker for every definition at
+    once", and single flight silently stopped holding on that backend.
+
+    Asserted on both backends together, since the field is a store contract and a
+    reader cannot tell which one it was handed.
+    """
+
+    db_path = _command_task_env(tmp_path, monkeypatch)
+    assert db_path is not None
+    task_store = ScheduledTaskStore()
+    task = _add_command_task(task_store, shell_command="sleep 3600", cwd=str(tmp_path))
+    identity = {
+        "pid": 424242,
+        "create_time": 1.0,
+        "worker_fingerprint": fingerprint_process_marker("attributed-worker"),
+    }
+
+    for label, store in (
+        ("sqlite", TaskExecutionStore()),
+        ("file", TaskExecutionStore(tmp_path / "task_requests")),
+    ):
+        claimed = store.claim(
+            store.enqueue_task_run(task.id, source_kind="scheduler", task=task).id
+        )
+        assert claimed is not None, f"{label}: could not claim the fire"
+        assert store.record_command_worker(claimed.id, identity), (
+            f"{label}: the worker record did not land"
+        )
+        workers = [
+            worker
+            for worker in store.list_running_command_workers()
+            if worker["run_id"] == claimed.id
+        ]
+        assert workers, f"{label}: the recorded worker was not listed"
+        assert workers[0].get("definition_id") == task.id, (
+            f"{label}: the worker is not attributed to its definition "
+            f"({workers[0].get('definition_id')!r}), so a fire of that definition "
+            "cannot tell this worker apart from another definition's and starts a "
+            "second copy of the command"
+        )
+
+
+def test_both_run_stores_settle_a_fire_with_the_command_it_ran(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-049 -- the executed snapshot has to survive the completion that publishes it.
+
+    SCT-028 re-stamps the run with the command the executor really spawned, and every
+    reader of that record -- the failure notice, the escalation prompt, the Workbench run
+    detail -- reads it off the TERMINAL row. The file backend composed that row from the
+    ``TaskExecutionRequest`` the caller still held, which is the enqueue-time copy, so the
+    re-stamp was overwritten at the last step and the settled run named the command as it
+    stood before the edit. SQLite updates the row the metadata already lives on and keeps
+    it for free; the gap was invisible from there.
+
+    Asserted on both backends together, like SCT-042: what a settled run remembers is a
+    store contract, and its readers cannot tell which store answered them.
+    """
+
+    db_path = _command_task_env(tmp_path, monkeypatch)
+    assert db_path is not None
+    task_store = ScheduledTaskStore()
+    task = _add_command_task(
+        task_store, shell_command="echo original", cwd=str(tmp_path)
+    )
+
+    for label, store in (
+        ("sqlite", TaskExecutionStore()),
+        ("file", TaskExecutionStore(tmp_path / "task_requests")),
+    ):
+        queued = store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+        predicted = store.get_run(queued.id)
+        assert predicted is not None
+        assert predicted["metadata"].get(COMMAND_SNAPSHOT_METADATA_KEY) == {
+            "shell": "echo original",
+            "argv": [],
+        }, f"{label}: the premise -- the enqueue predicted a command"
+
+        claimed = store.claim(queued.id)
+        assert claimed is not None, f"{label}: could not claim the fire"
+        # The executor's re-stamp: the definition was edited between enqueue and claim.
+        assert store.record_command_snapshot(
+            claimed.id, {"shell": "echo edited", "argv": []}
+        ), f"{label}: the executed snapshot did not land on the in-flight row"
+
+        assert (
+            store.complete(claimed, ok=True, exit_code=0, stdout="edited\n")
+            == "succeeded"
+        ), f"{label}: the fire did not settle"
+
+        settled = store.get_run(queued.id)
+        assert settled is not None, f"{label}: the settled run is unreadable"
+        assert settled["metadata"].get(COMMAND_SNAPSHOT_METADATA_KEY) == {
+            "shell": "echo edited",
+            "argv": [],
+        }, (
+            f"{label}: the settled run's immutable record of what it executed names a "
+            "command it did not execute "
+            f"({settled['metadata'].get(COMMAND_SNAPSHOT_METADATA_KEY)!r}), so the "
+            "notice and the escalation prompt report the wrong command with a "
+            "snapshot's authority"
+        )
+
+
+def test_a_failed_retention_write_keeps_the_stored_worker_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-041 -- the last write in the retain path is not allowed to lose the record.
+
+    SCT-036 established the invariant one call up: every maybe keeps the record, a
+    failure to look included. The retain path itself then broke it at the end -- a
+    locked database while re-stamping the attempt count answered "did not retain", and
+    the caller's next line clears the record. A store hiccup, which says nothing at all
+    about the process, thereby did the one thing the whole path exists to prevent.
+
+    The stored record survives a failed write untouched, so the honest answer is that it
+    was kept: it simply keeps the attempt count it had, this pass is not charged against
+    the cap, and the next start looks again.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    orphan = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert orphan is not None
+    identity = {
+        "pid": 424242,
+        "create_time": 1.0,
+        "worker_fingerprint": fingerprint_process_marker("unreapable-worker"),
+    }
+    assert service.request_store.record_command_worker(orphan.id, identity)
+
+    # A worker that could not be shown dead, and a re-stamp that fails the way a
+    # momentary lock does. Neither is a fact about the process.
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "reap_orphaned_process_tree",
+        lambda *_a, **_kw: "unconfirmed",
+    )
+    real_record = type(service.request_store).record_command_worker
+
+    def _cannot_write(self, run_id, identity):
+        if identity is None:
+            # Only the re-stamp fails. The clear on the caller's next line must still
+            # work, or this test cannot tell a kept record from an undeletable one.
+            return real_record(self, run_id, identity)
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(
+        type(service.request_store), "record_command_worker", _cannot_write
+    )
+
+    service._reap_orphaned_command_workers()
+
+    monkeypatch.setattr(
+        type(service.request_store), "record_command_worker", real_record
+    )
+
+    workers = {
+        worker["run_id"]: worker["identity"]
+        for worker in service.request_store.list_running_command_workers()
+    }
+    assert orphan.id in workers, (
+        "a failed attempt-count write discarded the identity of a worker that could not "
+        "be shown dead -- that row was the only place it was written"
+    )
+    assert workers[orphan.id].get("reap_attempts") is None, (
+        "the write failed, so nothing was stored and nothing may be charged against the "
+        "attempt cap"
+    )
+    row = service.request_store.get_run(orphan.id)
+    assert row is not None and row["status"] == "running", (
+        "the row must stay ``running`` for the next start's enumeration to see it"
+    )
+
+
+def test_a_recovered_fire_is_settled_when_its_worker_is_finally_shown_gone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-044 -- releasing the definition is only half of closing the old fire.
+
+    SCT-040 made a proven death release the definition immediately instead of waiting
+    for a restart, which left the interrupted run behind: NO OTHER PASS COMES BACK FOR
+    IT. ``recover_processing`` runs once at startup and steps over any row still naming
+    a worker -- this row's whole reason for surviving -- and ``sweep_stale_runs`` only
+    classifies orphans of ``run_type == "agent_run"``. So the run stayed ``running``
+    until the next restart while the backup it described was over, the definition read
+    as still executing, and the user was never told the fire had been interrupted at all.
+
+    Settled the same way the startup pass would have settled it, ``restarted``, since
+    that is what happened -- one interruption should not be told two ways depending on
+    which pass got to prove the death.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    # A worker whose death is PROVABLE: spawned, named, then reaped, so its recorded
+    # identity points at a pid the OS has fully released.
+    marker = "worker-that-died-while-the-service-was-down"
+    dead = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.exit(0)"],
+        env=process_identity_subprocess_env(marker),
+        **isolated_subprocess_kwargs(),
+    )
+    identity = capture_spawned_process_identity(dead.pid, marker)
+    dead.wait()
+    assert identity is not None
+
+    orphan = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert orphan is not None
+    assert service.request_store.record_command_worker(
+        orphan.id, serialize_process_identity(identity)
+    )
+
+    assert service._command_definition_has_live_worker(task.id) is False, (
+        "a worker proven dead must not defer the next fire"
+    )
+
+    row = service.request_store.get_run(orphan.id)
+    assert row is not None
+    assert row["status"] == "failed", (
+        "the recovered fire was released but never closed, so it reads as still running "
+        f"a command that ended before the service came back: {row['status']!r}"
+    )
+    assert row["completed_at"], "a terminal run with no completion time"
+    assert row["error"], (
+        "the interrupted fire settled with no explanation for the user to read"
+    )
+    assert (row["metadata"] or {}).get("interrupt_reason") == "restarted", (
+        "the interruption was recorded under a different cause than the startup pass "
+        f"uses for the same event: {row['metadata']!r}"
+    )
+    assert not [
+        worker
+        for worker in service.request_store.list_running_command_workers()
+        if worker["run_id"] == orphan.id
+    ], "the dead worker's record outlived the run it named"
+    settled = store.get_task(task.id)
+    assert settled is not None and settled.last_error, (
+        "the definition still shows no failure for a fire that was interrupted, so the "
+        "Harness lists it as healthy and the user never learns the command was cut off"
+    )
+
+
+def test_a_recovered_fire_is_settled_on_the_file_store_too(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-046 -- the legacy store must not release a fire it never closed.
+
+    SCT-044 settles the released fire through the guarded per-run writer, which only
+    SQLite has. On the file store that check answered "unsupported" and the method
+    returned having done nothing but clear the worker record: the definition was
+    released, the next fire ran, and the interrupted run's file sat in ``processing``
+    reading ``running`` until some later restart -- the exact leak SCT-044 removed,
+    still open one backend over.
+
+    Both backends are asked the same question here because both are read the same way:
+    ``vibe runs`` and the Harness show whatever the store says, and a run that says
+    ``running`` describes a backup that is still going.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _binding_service(tmp_path, store, [])
+    assert service.request_store.supports_guarded_settlement() is False, (
+        "this test is about the store WITHOUT the guarded writer"
+    )
+
+    marker = "file-store-worker-that-died-while-the-service-was-down"
+    dead = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.exit(0)"],
+        env=process_identity_subprocess_env(marker),
+        **isolated_subprocess_kwargs(),
+    )
+    identity = capture_spawned_process_identity(dead.pid, marker)
+    dead.wait()
+    assert identity is not None
+
+    orphan = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert orphan is not None
+    assert service.request_store.mark_execution_started(orphan.id)
+    assert service.request_store.record_command_worker(
+        orphan.id, serialize_process_identity(identity)
+    )
+
+    assert service._command_definition_has_live_worker(task.id) is False
+
+    row = service.request_store.get_run(orphan.id)
+    assert row is not None
+    assert row["status"] == "failed", (
+        "the file-backed fire was released but never closed, so it still reads as "
+        f"running a command that ended before the service came back: {row['status']!r}"
+    )
+    assert row["error"], "the interrupted fire settled with no explanation"
+    assert (row["metadata"] or {}).get("interrupt_reason") == "restarted"
+    assert not (tmp_path / "task_requests" / "processing" / f"{orphan.id}.json").exists(), (
+        "the run was reported terminal while its processing file still claimed it"
+    )
+    assert not [
+        worker
+        for worker in service.request_store.list_running_command_workers()
+        if worker["run_id"] == orphan.id
+    ], "the dead worker's record outlived the run it named"
+
+
+def test_an_interrupted_command_fire_clears_the_previous_exit_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-021 -- an interrupted fire is still a fire with no status of its own.
+
+    SCT-017 gave the command fire's own stamp authority over ``last_exit_code``,
+    ``None`` included. A cancelled or shutdown-interrupted fire never reaches that
+    stamp: ``run_supervised_command`` raises, and settlement projects the run through
+    the generic lane, which by design leaves the column alone so a message task cannot
+    blank a command's code. The result was "exited 7" on the row beside a run the user
+    had just stopped -- the same fabricated fact SCT-017 removed, one lane over.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    started = tmp_path / "interrupted-started"
+    task = _add_command_task(
+        store,
+        shell_command=f"touch {started.name}; sleep 3600",
+        cwd=str(tmp_path),
+    )
+    # What a previous fire of this definition left behind.
+    assert store.mark_task_result(
+        task.id, error="exited 7", exit_code=7, records_command_outcome=True
+    )
+    assert ScheduledTaskStore().get_task(task.id).last_exit_code == 7
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _cancel_mid_flight() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started"
+        service.request_store.cancel_run(request.id)
+        service._propagate_requested_cancellations()
+        await asyncio.wait_for(
+            asyncio.gather(service._inflight_executions[request.id], return_exceptions=True),
+            timeout=10,
+        )
+
+    asyncio.run(_cancel_mid_flight())
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.last_exit_code is None, (
+        "an interrupted command fire kept the previous fire's exit code: "
+        f"{stored.last_exit_code!r}"
+    )
+    assert stored.last_error, "the interruption was not recorded on the definition"
+
+
+def test_a_failed_one_shot_command_task_is_disabled_and_escalates_together(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The trap this design avoids: the stamp that authorises the turn also disables.
+
+    ``enqueue_definition_run`` re-reads the definition server-side and RAISES on a
+    disabled one -- and a failed ``at`` task is disabled by the very stamp that
+    authorises its escalation. Routing the turn through that writer would mean a
+    one-shot command task NEVER escalates, which is the case that needs it most: there
+    is no next fire to notice the failure.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_oneshot")
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="exit 7",
+        schedule_type="at",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "failed"
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.enabled is False, (
+        "a failed one-shot command definition stayed enabled"
+    )
+    assert len(_escalation_runs(store)) == 1, (
+        "the one-shot was disabled without queueing the report that explains why"
+    )
+
+
+def test_a_refused_result_stamp_queues_no_escalation_and_leaves_a_notice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Stamp refused -> zero escalation rows AND a notice: never silent.
+
+    THE PRODUCTION STORY (HFR-261/HFR-264 applied to this lane). A command task fires
+    and fails. While the fire is running the user archives the bound Session, and
+    ``reclaim_bound_definitions(mode='delete')`` soft-deletes the definition. The
+    guarded stamp then correctly REFUSES -- and the escalation rolls back with it,
+    because both were the same transaction. The failure must still be visible, so the
+    owed-notice path takes it over.
+    """
+
+    from storage.session_reclaim import RECLAIM_DELETE
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    _binding_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / "avibe_home")
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None
+    sessions = SQLiteSessionsService(paths.get_sqlite_state_path())
+    try:
+        session_id = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:escalation_refusal",
+            native_session_id="native-esc",
+        )
+    finally:
+        sessions.close()
+    assert session_id is not None
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="exit 7", session_id=session_id
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine,
+        session_id,
+        read=_DEFINITION_EXISTS_SELECT,
+        mode=RECLAIM_DELETE,
+        reason="the session was archived",
+    )
+
+    run = _fire_command_task(service, task)
+
+    assert race["fired"] == 1, (
+        "the competing archive never landed inside the write window, so this test "
+        "proved nothing; the rendered SQL of the guarded upsert's existence probe drifted"
+    )
+    assert run["status"] == "failed"
+    assert _escalation_runs(store) == [], (
+        "an escalation survived a refused stamp: a durable turn nothing authorises"
+    )
+    assert run["metadata"].get("escalation_run_id") is None, (
+        "the run claims an escalation the transaction rolled back"
+    )
+    notice = store._sqlite.owed_failure_notice(run["id"])
+    assert notice is not None and notice.get("state"), (
+        "no escalation AND no notice: the failure is silent, which is the one outcome "
+        "this design must never produce"
+    )
+
+
+def test_claiming_an_escalation_dispatches_it_as_a_hook_send(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The executor has to accept the new request type and route it somewhere real.
+
+    ``delivery_intent_for_trigger`` has a CLOSED vocabulary and would RAISE on an
+    unmapped trigger, so an escalation takes the hook intent -- it IS an out-of-band
+    turn a definition queued. Provenance is not lost: the row still carries
+    ``run_type="task_escalation"`` and its parent fire.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_escalation_exec")
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="exit 7", session_id=session_id
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    dispatched: list[dict[str, Any]] = []
+
+    async def _spy(**kwargs):
+        dispatched.append(kwargs)
+        return TaskDispatchResult(error=None)
+
+    service._execute_request = _spy  # type: ignore[method-assign]
+
+    escalation = service.request_store.build_hook_send(
+        session_key="",
+        session_id=session_id,
+        prompt="A scheduled command task failed: nightly sync",
+        deliver_key=task.deliver_key,
+        session_policy=task.session_policy,
+        run_type="task_escalation",
+        definition_id=task.id,
+        source_kind="scheduler",
+        parent_run_id="parent-run",
+    )
+    service.request_store.enqueue(escalation)
+    assert [run["id"] for run in _escalation_runs(store)] == [escalation.id], (
+        "the escalation is not visible as a queued run at all"
+    )
+    assert [
+        pending.id
+        for pending in service.request_store.list_pending()
+        if pending.request_type == "task_escalation"
+    ] == [escalation.id], (
+        "the drain loop's pending list filters the escalation out, so a durable "
+        "escalation would never be executed"
+    )
+    claimed = service.request_store.claim(escalation.id)
+    assert claimed is not None
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert len(dispatched) == 1, f"the escalation was not dispatched: {dispatched!r}"
+    assert dispatched[0]["trigger_kind"] == "hook", (
+        f"an escalation must take the hook delivery intent: {dispatched[0]['trigger_kind']!r}"
+    )
+    assert dispatched[0]["prompt"] == escalation.prompt, (
+        "the dispatched turn is not carrying the composed report"
+    )
+    settled = service.request_store.get_run(escalation.id)
+    assert settled is not None and settled["status"] == "succeeded"
+    assert settled["run_type"] == "task_escalation", (
+        f"the escalation's provenance was rewritten to {settled['run_type']!r}"
+    )
+
+
+def test_a_successful_on_failure_agent_command_fire_escalates_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``--on-failure agent`` is a FAILURE policy; success stays silent.
+
+    Otherwise a minute-ly health check would bill an Agent turn every minute and post
+    a reply nobody asked for.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_escalation_ok")
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="echo fine", session_id=session_id
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded", f"the premise: the fire succeeded ({run['error']!r})"
+    assert _escalation_runs(store) == [], "a successful fire escalated anyway"
+    assert run["metadata"].get("escalation_run_id") is None
+    assert store._sqlite.owed_failure_notice(run["id"]) is None, (
+        "a succeeded run must owe no notice either"
+    )
+
+
+def test_complete_with_an_escalation_marker_stamps_no_owed_notice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The suppression is decided from the metadata the SAME statement writes.
+
+    ``_merge_owed_failure_notice`` applies ``extra_metadata`` before
+    ``_owed_failure_notice_for_transition`` reads it, which is what makes the marker
+    visible to the notice decision. The regression half is the second run: without the
+    kwarg the identical failure still owes its notice, so this cannot silence anything
+    it was not asked to.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    requests = TaskExecutionStore()
+    assert requests.sqlite_backend is not None
+
+    escalated = requests.enqueue_hook_send(session_key="slack::channel::C123", prompt="hi")
+    claimed = requests.claim(escalated.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="boom", escalation_run_id="esc-9")
+
+    row = requests.get_run(escalated.id)
+    assert row is not None and row["status"] == "failed"
+    assert row["metadata"].get("escalation_run_id") == "esc-9", (
+        f"the marker never reached the run row: {row['metadata']!r}"
+    )
+    assert requests.sqlite_backend.owed_failure_notice(escalated.id) is None, (
+        "an escalated failure stamped a notice as well"
+    )
+
+    plain = requests.enqueue_hook_send(session_key="slack::channel::C123", prompt="hi")
+    plain_claimed = requests.claim(plain.id)
+    assert plain_claimed is not None
+    requests.complete(plain_claimed, ok=False, error="boom")
+
+    notice = requests.sqlite_backend.owed_failure_notice(plain.id)
+    assert notice is not None and notice.get("state"), (
+        "the suppression leaked to ordinary failures; every failed run would go silent"
     )

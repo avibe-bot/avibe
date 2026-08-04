@@ -1125,6 +1125,13 @@
     "qualityUnknown": "测量中",
     "qualityRecovering": "正在优化",
     "qualityDegraded": "异常",
+    "protocolAutomatic": "{{protocol}}（自动）",
+    "protocolUnknown": "检测中",
+    "connectorPath": "连接器 · {{protocol}} · {{connections}}/4 · 往返 {{rtt}}",
+    "rttUnavailable": "不可用",
+    "requestPath": "远程请求 · P95 {{p95}} · P99 {{p99}} · {{slow}}% 超过 1 秒",
+    "requestPathUnavailable": "远程请求不可用 · {{success}}/{{count}} 成功",
+    "requestPathMeasuring": "正在测量远程请求 · {{count}} 个样本",
     "optimizeRoute": "优化线路",
     "optimizingRoute": "优化中...",
     "optimizeStarted": "第二条 Connector 正在评估更优线路"
@@ -2872,7 +2879,20 @@
       "parentRun": "父 Run",
       "callback": "回传",
       "effort": "推理 {{value}}",
-      "waitingSince": "开始等待"
+      "waitingSince": "开始等待",
+      "onFailure": "失败处理",
+      "timeout": "超时",
+      "timeoutSeconds": "{{seconds}} 秒",
+      "timeoutNone": "不限时",
+      "timeoutDefault": "{{duration}}（默认）",
+      "lastExitCode": "最近退出码"
+    },
+    "taskKind": {
+      "command": "命令"
+    },
+    "onFailure": {
+      "none": "仅通知（无 Agent）",
+      "agent": "升级给 Agent 处理"
     },
     "sessionPolicy": {
       "createPerRun": "每次运行新建会话",

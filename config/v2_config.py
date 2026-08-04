@@ -910,6 +910,7 @@ class VibeCloudRemoteAccessConfig:
     instance_secret: str = ""
     session_secret: str = ""
     cloudflared_path: str = ""
+    transport_protocol: str = "auto"
     dev_login_hint: str = ""
 
 
@@ -1190,6 +1191,13 @@ class V2Config:
                 **_filter_dataclass_fields(VibeCloudRemoteAccessConfig, vibe_cloud_payload)
             ),
         )
+        remote_access.vibe_cloud.transport_protocol = str(
+            remote_access.vibe_cloud.transport_protocol or "auto"
+        ).strip().lower()
+        if remote_access.vibe_cloud.transport_protocol not in {"auto", "quic", "http2"}:
+            raise ValueError(
+                "Config 'remote_access.vibe_cloud.transport_protocol' must be 'auto', 'quic', or 'http2'"
+            )
 
         audio_asr_payload = payload.get("audio_asr") or {}
         if not isinstance(audio_asr_payload, dict):
