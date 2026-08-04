@@ -171,6 +171,23 @@ export function stripRestoreParam(
   return Object.keys(rest).length ? rest : undefined;
 }
 
+/**
+ * Whether THIS shell mount takes part in the shared saved layout — restoring it at
+ * mount AND writing it back. Restore and persist are deliberately the same predicate:
+ * a shell that skips the restore starts with an empty window list, so letting it save
+ * would clobber the real layout with `[]` for every other tab.
+ *
+ *  - below md: the window layer is `hidden md:block` and windowed apps open only from
+ *    the desktop-only launcher/Dock, so a phone would restore invisible bodies and its
+ *    empty save would wipe a real desktop layout.
+ *  - a standalone app tab (⌘/Ctrl-click on an app icon, §7.1m): it exists to show ONE
+ *    app, which restored windows would float above — and hide entirely if one of them
+ *    was persisted maximized.
+ */
+export function sharesWorkbenchLayout(standalone: boolean, isDesktop: boolean): boolean {
+  return !standalone && isDesktop;
+}
+
 // Read + parse the persisted layout. Returns [] when storage is unavailable or empty.
 export function loadWorkbenchWindows(): WindowInstance[] {
   try {

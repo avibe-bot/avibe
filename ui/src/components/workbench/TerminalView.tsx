@@ -15,6 +15,7 @@ import {
   resetTerminalFontSize,
   subscribeTerminalFontSize,
 } from '../../lib/terminalFontSize';
+import { IS_APPLE } from '../../lib/platform';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 // xterm.js wired to the /api/terminal/{id} WebSocket. Protocol (locked with the
@@ -75,12 +76,8 @@ function buildWsUrl(sessionId: string, cwd?: string | null): string {
   return cwd ? `${base}?cwd=${encodeURIComponent(cwd)}` : base;
 }
 
-// Apple vs. non-Apple decides the Find chord below. Detected once (navigator.platform is deprecated but
-// remains the most reliable signal, with userAgent as a fallback).
-const IS_APPLE =
-  typeof navigator !== 'undefined' &&
-  /Mac|iP(hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
-
+// Apple vs. non-Apple decides the Find chord below (shared detection in lib/platform).
+//
 // The chord that opens Find: ⌘F on Apple platforms, Ctrl+Shift+F everywhere else. Plain Ctrl+F is a live
 // terminal key on BOTH macOS and Linux (readline forward-char, less/vim page-forward), so it must keep
 // reaching the PTY — hence ⌘ on Apple (a free modifier) and the Shift-qualified chord elsewhere, which is

@@ -4,6 +4,7 @@ import {
   MAX_RESTORED_WINDOWS,
   WINDOW_RESTORE_PARAM,
   parseWorkbenchWindows,
+  sharesWorkbenchLayout,
   serializeWorkbenchWindows,
   stripRestoreParam,
   type PersistedWindow,
@@ -171,5 +172,23 @@ describe('stripRestoreParam', () => {
     const p = { path: '/a.ts' };
     expect(stripRestoreParam(p)).toBe(p);
     expect(stripRestoreParam(undefined)).toBeUndefined();
+  });
+});
+
+describe('sharesWorkbenchLayout', () => {
+  it('restores + persists only for a desktop shell that is not a standalone app tab', () => {
+    expect(sharesWorkbenchLayout(false, true)).toBe(true);
+  });
+
+  it('opts a standalone app tab out entirely', () => {
+    // Restoring would float the saved windows over the one app the tab was opened for
+    // (a maximized one would hide it); persisting from that empty list would then wipe
+    // the real layout for every other tab. Both must be off, on any viewport.
+    expect(sharesWorkbenchLayout(true, true)).toBe(false);
+    expect(sharesWorkbenchLayout(true, false)).toBe(false);
+  });
+
+  it('keeps the pre-existing below-md opt-out', () => {
+    expect(sharesWorkbenchLayout(false, false)).toBe(false);
   });
 });

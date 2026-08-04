@@ -7588,6 +7588,10 @@ class ScheduledTaskService:
                         else request.request_type
                     ),
                     agent_name=request.agent_name,
+                    # A composed hook / watch / webhook / escalation prompt is the one
+                    # case where the request itself knows which part a person wrote, so
+                    # its metadata must reach ``_build_context``.
+                    metadata=request.metadata if isinstance(request.metadata, dict) else None,
                     _capture_dispatch_result=True,
                     **({"agent_id": request.agent_id} if request.agent_id else {}),
                 )
@@ -9840,6 +9844,7 @@ class ScheduledTaskService:
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
         _capture_dispatch_result: bool = False,
     ) -> Optional[str] | TaskDispatchResult:
         target_info = resolve_session_id_target(session_id) if session_id else None
@@ -9859,6 +9864,12 @@ class ScheduledTaskService:
             agent_name=agent_name,
             agent_id=agent_id,
             target_info=target_info,
+            # Forwarded like the ``agent_run`` path already does. Without it every
+            # metadata field ``_build_context`` reads — the display-prompt override, the
+            # source/parent provenance — is unreachable for an enqueued hook, watch,
+            # webhook, or escalation request, which are exactly the composed kinds whose
+            # echo depends on being handed the user-authored instruction.
+            metadata=metadata,
         )
         # A scheduled avibe turn drives the sidebar dot through the SAME two
         # chokepoints as any other turn — inbound AgentService.handle_message
@@ -9941,6 +9952,8 @@ class ScheduledTaskService:
         if native_session_fork is None and target_info and not str(target_info.native_session_id or "").strip():
             native_session_fork = fork_metadata_from_session_metadata(getattr(target_info, "metadata", None))
 
+        definition_name, definition_prompt = self._definition_display_fields(task_id)
+
         return MessageContext(
             user_id=session_target_context["user_id"],
             channel_id=channel_id,
@@ -9973,6 +9986,17 @@ class ScheduledTaskService:
                 # definition id (task / watch). Carried so the message mirror can
                 # attribute the injected prompt to its precise definition.
                 "task_definition_id": task_id,
+                # Human label for the same definition, so an outward echo of the
+                # injected prompt can name what fired instead of an opaque id.
+                "task_definition_name": definition_name,
+                # The definition's STORED instruction, i.e. the part of this run's
+                # prompt a person actually wrote. A watch / hook / webhook prompt is
+                # composed for the agent to read and appends machine-generated
+                # evidence (waiter stdout, a failure report, a webhook payload); an
+                # outward echo may show only this segment, never the composed text.
+                "harness_display_prompt": (
+                    str((metadata or {}).get("harness_display_prompt") or "").strip() or definition_prompt
+                ),
                 "vibe_agent_name": agent_name,
                 "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
@@ -10000,6 +10024,42 @@ class ScheduledTaskService:
                     else None
                 ),
             },
+        )
+
+    def _definition_display_fields(
+        self, definition_id: Optional[str]
+    ) -> tuple[Optional[str], Optional[str]]:
+        """``(name, stored instruction)`` for *definition_id*, either one ``None``.
+
+        Resolved the same way the failure notice does it (``get_task`` mirrors
+        scheduled tasks only, so a watch needs the definition row), in ONE lookup
+        because both fields feed the same display copy, and best-effort: a store that
+        cannot answer must not break the run it is describing. ``agent_run`` has no
+        definition and passes ``None``.
+
+        The stored instruction is the definition's own prompt — a task's ``prompt``,
+        a watch's ``message`` (which the row already falls back to ``prefix`` for) —
+        so it is the user-authored text with none of the evidence a composed run
+        prompt appends.
+        """
+
+        identifier = str(definition_id or "").strip()
+        if not identifier:
+            return None, None
+        try:
+            task = self.store.get_task(identifier)
+            if task is not None:
+                return (
+                    str(getattr(task, "name", "") or "").strip() or None,
+                    str(getattr(task, "prompt", "") or "").strip() or None,
+                )
+            watch = self.store.get_watch_definition(identifier) or {}
+        except Exception:
+            logger.debug("failed to resolve definition display fields for %s", identifier, exc_info=True)
+            return None, None
+        return (
+            str(watch.get("name") or "").strip() or None,
+            str(watch.get("message") or watch.get("prefix") or "").strip() or None,
         )
 
     def _resolve_target_context(self, target: ParsedSessionKey) -> Dict[str, Any]:
