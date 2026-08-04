@@ -31,6 +31,7 @@ from core.process_isolation import (
 from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
     DEFINITION_CYCLE_COLUMNS,
+    NO_EVENT_EXIT_CODE,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
     SQLiteBackgroundTaskStore,
@@ -42,14 +43,22 @@ from vibe.i18n import t as i18n_t
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETRY_EXIT_CODE = 75
-# A waiter that ran to completion and decided the cycle is not worth waking the
-# Agent for. It is neither an event (exit 0, which authorises a hook) nor a
-# failure (any other non-zero, which authorises a failure hook): the cycle is
-# recorded, no hook is built, and the watch ends or re-arms quietly. Without it
-# every terminal outcome costs an Agent turn, so waiters that can only report
-# "nothing happened" -- green CI, filtered-out review chatter -- had to either
-# fire a useless turn or spin in forever mode.
-NO_EVENT_EXIT_CODE = 64
+# ``NO_EVENT_EXIT_CODE`` (imported above) marks a waiter that ran to completion and
+# decided the cycle is not worth waking the Agent for. It is neither an event (exit 0,
+# which authorises a hook) nor a failure (any other non-zero, which authorises a
+# failure hook): the cycle is recorded, no hook is built, and the watch ends or
+# re-arms quietly. Without it every terminal outcome costs an Agent turn, so waiters
+# that can only report "nothing happened" -- green CI, filtered-out review chatter --
+# had to either fire a useless turn or spin in forever mode.
+#
+# It lives in ``storage.background`` because the lifecycle projections there have to
+# agree that this code is a CLEAN ending. A second literal here is exactly how the
+# supervisor and those projections disagreed about it before.
+#
+# A quiet cycle's own output is logged rather than stored: it is diagnostic detail, not
+# state, and the whole point of the code is that it costs nothing to reach. The limit is
+# wider than an error squash because a suppressed summary lists every watched workflow.
+NO_EVENT_SUMMARY_LOG_LIMIT = 1000
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
@@ -1389,6 +1398,20 @@ class ManagedWatchService:
                 continue
 
             if result.exit_code == NO_EVENT_EXIT_CODE:
+                # A quiet cycle still has to leave a trace. Its output is the ONLY
+                # record of what the waiter saw and chose not to report -- a green CI
+                # summary, the review comments a filter swallowed -- and no hook
+                # carries it, so without this line it is discarded with the process.
+                # The stamp says a cycle ran and found nothing; the log says what.
+                summary = _squash_error(result.stderr, limit=NO_EVENT_SUMMARY_LOG_LIMIT) or _squash_error(
+                    result.stdout, limit=NO_EVENT_SUMMARY_LOG_LIMIT
+                )
+                logger.info(
+                    "Watch cycle found nothing to report watch_id=%s name=%s%s",
+                    watch.id,
+                    watch.name or "-",
+                    f": {summary}" if summary else "",
+                )
                 # No prompt, prefix or body: ``_hook_request`` returns None, so this
                 # commits the cycle WITHOUT authorising a hook. The stamp still lands,
                 # so ``vibe watch show`` can say the cycle ran and found nothing.

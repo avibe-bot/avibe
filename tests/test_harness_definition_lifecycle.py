@@ -33,6 +33,7 @@ from storage.background import (
     DEFINITION_RETIREMENT_COLUMNS,
     DEFINITION_STATUS_COUNTS,
     DEFINITION_STATUS_FILTERS,
+    NO_EVENT_EXIT_CODE,
     SQLiteBackgroundTaskStore,
     _id_batches,
     compute_next_run_at,
@@ -243,6 +244,46 @@ def test_counts_and_rows_come_from_one_expression(store) -> None:
             assert {row["lifecycle_state"] for row in rows} <= set(expected), status
 
 
+def test_a_one_shot_watch_that_ended_quietly_counts_as_a_success(store) -> None:
+    """Exit 64 retires a ``once`` watch cleanly, so the compact list hides it.
+
+    The two projections have to agree with the supervisor about which codes are
+    clean endings. While this one recognised only ``None``/``0``, a watch that
+    ended on the no-event path stayed pinned to ``vibe watch list`` as unfinished
+    business and reported itself as failed — the opposite of what it did.
+    """
+    _watch(
+        store,
+        "quiet",
+        mode="once",
+        enabled=False,
+        last_finished_at=NOW,
+        retired_at=NOW,
+        last_exit_code=NO_EVENT_EXIT_CODE,
+    )
+    _watch(
+        store,
+        "broken",
+        mode="once",
+        enabled=False,
+        last_finished_at=NOW,
+        retired_at=NOW,
+        last_exit_code=1,
+        last_error="boom",
+    )
+
+    assert _state(store, "quiet") == "finished"
+    compact = store.list_watches_page(
+        page_request=PageRequest(page=1, limit=10), include_successful_finished=False
+    )
+    full = store.list_watches_page(
+        page_request=PageRequest(page=1, limit=10), include_successful_finished=True
+    )
+
+    assert {row["id"] for row in compact.items} == {"broken"}
+    assert {row["id"] for row in full.items} == {"quiet", "broken"}
+
+
 def test_an_unknown_status_is_rejected_rather_than_silently_ignored(store) -> None:
     with pytest.raises(ValueError):
         store.list_watches_page(status="enabled", page_request=PageRequest(page=1, limit=5))
@@ -270,6 +311,12 @@ def test_an_unknown_status_is_rejected_rather_than_silently_ignored(store) -> No
         # And the flag outranks the code in the other direction as well: a command
         # killed by the scheduler that still managed its own exit status.
         (137, "command timed out after 5 second(s)", True, "timeout"),
+        # A waiter that finished its cycle and found nothing worth an Agent turn ended
+        # cleanly. Reading 64 as a failure made the quiet path -- the reason the code
+        # exists -- look broken everywhere a finished watch is rendered.
+        (NO_EVENT_EXIT_CODE, None, None, "normal"),
+        # The code does not excuse a real error the waiter also reported.
+        (NO_EVENT_EXIT_CODE, "boom", None, "error"),
     ],
 )
 def test_lifecycle_detail_names_how_a_finished_row_ended(

@@ -1560,6 +1560,83 @@ def test_main_ignores_an_unreadable_state_file(tmp_path) -> None:
     assert json.loads(state_file.read_text(encoding="utf-8"))["repo"] == "avibe-bot/avibe"
 
 
+def test_main_refuses_to_poll_when_the_state_file_cannot_be_written(tmp_path) -> None:
+    """An unwritable ``--state-file`` is terminal, and terminal BEFORE the first poll.
+
+    Warning and continuing left a forever watch polling without the cursors it was
+    asked to keep: every fresh cycle re-baselines from the current PR, so activity
+    that arrived between cycles is silently dropped — the exact loss the flag
+    exists to prevent. Discovering that only when the cycle tries to save has
+    already cost the activity that cycle observed.
+    """
+    module = _load_module()
+    read_only = tmp_path / "read-only"
+    read_only.mkdir()
+    read_only.chmod(0o500)
+    state_file = read_only / "pr-153.json"
+
+    stderr = io.StringIO()
+    try:
+        with (
+            patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
+            patch.object(module, "get_token", return_value="token"),
+            patch.object(module, "get_authenticated_login", return_value=None),
+            patch.object(module.time, "sleep", return_value=None),
+            patch(
+                "sys.argv",
+                ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+            ),
+            patch("sys.stderr", stderr),
+        ):
+            rc = module.run_cli()
+    finally:
+        read_only.chmod(0o700)
+
+    # 1, not the retryable 75: a read-only directory does not start working next cycle.
+    assert rc == 1
+    assert "Cannot write state file" in stderr.getvalue()
+    assert not state_file.exists()
+
+
+def test_main_stops_when_persisting_advanced_cursors_fails(tmp_path) -> None:
+    """The same rule once polling is under way: losing cursors stops the watch."""
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.os, "replace", side_effect=OSError("disk went away")),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.run_cli()
+
+    assert rc == 1
+    assert "Could not write state file" in stderr.getvalue()
+
+
 def test_main_state_file_round_trips_new_pr_cursor(tmp_path) -> None:
     module = _load_module()
     state_file = tmp_path / "new-prs.json"

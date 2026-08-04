@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -1152,6 +1153,63 @@ def test_managed_watch_service_once_no_event_exit_finishes_without_follow_up(tmp
     assert saved.last_error is None
     # The whole point: a completed cycle that found nothing costs no Agent turn.
     assert request_store.list_pending() == []
+
+
+def test_managed_watch_service_logs_what_a_quiet_cycle_suppressed(tmp_path: Path, caplog) -> None:
+    """A cycle that reports nothing still has to leave its summary somewhere.
+
+    No hook carries a no-event cycle's output, so the waiter's own account of what
+    it saw and chose not to report — the green CI table, the filtered comments —
+    died with the process. ``--only-on-failure`` documents that summary as
+    inspectable, which it was not.
+    """
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Green CI waiter",
+        session_key="slack::channel::C123",
+        command=[
+            sys.executable,
+            "-c",
+            "import sys; print('All watched workflows succeeded: lint, build', file=sys.stderr); "
+            f"sys.exit({NO_EVENT_EXIT_CODE})",
+        ],
+        shell_command=None,
+        prefix="CI failed. Fix it.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        service.start()
+        for _ in range(100):
+            saved = store.get_watch(watch.id)
+            if saved and not saved.enabled:
+                break
+            await asyncio.sleep(0.02)
+        await service.stop()
+
+    with caplog.at_level(logging.INFO, logger="core.watches"):
+        asyncio.run(_run())
+
+    assert request_store.list_pending() == []
+    quiet_logs = [record.getMessage() for record in caplog.records if "found nothing to report" in record.getMessage()]
+    assert quiet_logs, caplog.text
+    assert watch.id in quiet_logs[0]
+    assert "All watched workflows succeeded: lint, build" in quiet_logs[0]
 
 
 def test_managed_watch_service_forever_no_event_exit_rearms_without_follow_up(tmp_path: Path) -> None:

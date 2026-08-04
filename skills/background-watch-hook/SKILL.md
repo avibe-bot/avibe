@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.10.0
+version: 0.10.1
 ---
 
 # Background Watch Hook
@@ -89,7 +89,9 @@ Write waiters to follow this contract:
 
 Exit 64 is the token-saving path. Every other terminal exit costs one Agent turn,
 so a waiter whose normal outcome is uninteresting — green CI, review chatter that
-was filtered out — should end on 64 rather than reporting "nothing to do".
+was filtered out — should end on 64 rather than reporting "nothing to do". It is a
+clean ending, so a `once` watch that retires on 64 reads as completed rather than
+failed, and whatever the waiter wrote to `stderr` is logged beside the watch id.
 
 Keep the output split clean:
 
@@ -244,7 +246,10 @@ anything that arrived between the previous cycle's exit and that snapshot is los
 The file also carries the `since` filters and the resolved GitHub login forward, so
 a resumed cycle asks GitHub only for what is new instead of re-reading the whole PR.
 It is written on every cursor advance and on timeout, replaced atomically, and
-ignored if it belongs to another PR or is unreadable.
+ignored if it belongs to another PR or is unreadable. A path that cannot be written
+to is terminal, not a warning: the waiter checks writability before its first poll
+and stops the watch with exit `1` rather than polling on without the cursors it was
+asked to keep.
 
 GitHub-specific notes:
 
@@ -297,7 +302,9 @@ vibe watch add \
 
 `--only-on-failure` exits `64` when every watched workflow succeeded, so a green
 build ends the watch silently instead of spending an Agent turn to say so. The
-full summary still goes to `stderr` and stays readable via `vibe watch show`.
+full summary still goes to `stderr`, which the supervisor records in the Avibe log
+(`~/.avibe/logs/vibe_remote.log`) beside the watch id; `vibe watch show` reports
+that the cycle ran and found nothing, not the summary itself.
 Drop the flag when the follow-up should also run on success, for example when a
 green build is supposed to trigger a deploy.
 

@@ -60,6 +60,14 @@ STATE_CURSOR_KEYS = (
 SETTLE_MAX_ROUNDS = 3
 
 
+class StatePersistenceError(RuntimeError):
+    """The cursors an explicit ``--state-file`` promised could not be saved.
+
+    Raised rather than warned about because a forever watch that keeps polling
+    without its cursors loses activity instead of reporting it.
+    """
+
+
 def _format_review(review: dict[str, Any]) -> str:
     review_id = review.get("id")
     author = ((review.get("user") or {}).get("login")) or "unknown"
@@ -474,6 +482,33 @@ def _load_state_file(path: str | None, *, repo: str, pr_number: int | None) -> d
     return payload
 
 
+def _verify_state_file_writable(path: str | None) -> None:
+    """Fail before the first poll if the requested state file cannot be written.
+
+    A forever watch only discovers a read-only parent directory when the cycle it
+    spent minutes on tries to save its cursors, and by then the activity that
+    cycle observed is already unrecoverable. Probing a sibling file leaves the
+    real state file untouched, so a watch resuming from good cursors keeps them.
+    """
+
+    if not path:
+        return
+
+    target = Path(path)
+    probe = target.with_name(f"{target.name}.probe")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(probe, "w", encoding="utf-8") as handle:
+            handle.write("")
+    except OSError as err:
+        raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+
+
 def _write_state_file(path: str | None, *, repo: str, pr_number: int | None, **fields: Any) -> None:
     if not path:
         return
@@ -489,7 +524,11 @@ def _write_state_file(path: str | None, *, repo: str, pr_number: int | None, **f
             json.dump(payload, handle)
         os.replace(temporary, target)
     except OSError as err:
-        print(f"Could not write state file {path}: {err}", file=sys.stderr)
+        # Terminal, not a warning. The caller asked for cursors that survive the
+        # process; continuing without them lets the next cycle re-baseline from the
+        # current PR and silently drop everything that arrived in between, which is
+        # the exact loss ``--state-file`` exists to prevent.
+        raise StatePersistenceError(f"Could not write state file {path}: {err}") from err
 
 
 def _saved_int(saved: dict[str, Any], key: str) -> int | None:
@@ -581,6 +620,7 @@ def main() -> int:
 
     token = get_token()
     cache = ResponseCache()
+    _verify_state_file_writable(args.state_file)
     saved = _load_state_file(args.state_file, repo=args.repo, pr_number=args.pr)
     viewer_login = None
     if not args.include_self_comments:
@@ -965,5 +1005,20 @@ def main() -> int:
         return 0
 
 
+def run_cli() -> int:
+    """``main`` plus the terminal handling of a broken ``--state-file``.
+
+    Exit 1 and not the retryable 75: a directory that cannot be written to will
+    not start working on the next cycle, and a forever watch retrying into it
+    would poll indefinitely while losing the activity it saw.
+    """
+
+    try:
+        return main()
+    except StatePersistenceError as err:
+        print(f"{err}. Fix the path or drop --state-file, then recreate the watch.", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli())
