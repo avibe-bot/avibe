@@ -21,7 +21,7 @@ from core.process_isolation import (
     ProcessIdentity,
     fingerprint_process_marker,
 )
-from core.runtime_work import RuntimeWorkLane, RuntimeWorkSupervisor
+from core.runtime_work import RuntimeWorkItem, RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import (
     ManagedWatchService,
@@ -1886,6 +1886,40 @@ def test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop(
         assert reconcile_threads == [loop_thread]
 
     asyncio.run(_run())
+
+
+def test_watch_runtime_state_persistence_failure_rearms_maintenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = True
+
+    async def _persist_but_remain_dirty() -> None:
+        service._runtime_state_dirty = True
+
+    monkeypatch.setattr(service, "_persist_runtime_state", _persist_but_remain_dirty)
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+    item = RuntimeWorkItem(
+        "managed-watches",
+        {
+            "recovery": _StaleWorkerRecovery(True),
+            "unblocked": (),
+            "changed": False,
+            "watches": (),
+        },
+        rearm_after_process=False,
+    )
+
+    assert asyncio.run(handler.process(item)) is False
+    assert service._runtime_state_dirty is True
 
 
 def test_managed_watch_service_start_retries_unreadable_runtime_before_reconcile(

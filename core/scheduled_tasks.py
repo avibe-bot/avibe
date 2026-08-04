@@ -4584,7 +4584,7 @@ class ScheduledTaskService:
             raise
 
     async def _legacy_request_directory_probe(self) -> None:
-        """Wake request and callback owners on a legacy directory edge."""
+        """Wake every Run consumer on a legacy directory edge."""
 
         try:
             while self._running:
@@ -4598,6 +4598,7 @@ class ScheduledTaskService:
                 self._wake_runtime_work(
                     RuntimeWorkLane.REQUESTS,
                     RuntimeWorkLane.RUN_CALLBACKS,
+                    RuntimeWorkLane.STALE_RUNS,
                 )
         except asyncio.CancelledError:
             raise

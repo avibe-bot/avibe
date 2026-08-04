@@ -866,6 +866,8 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                     self.service._runtime_state_dirty = True
             if self.service._runtime_state_dirty:
                 await self.service._persist_runtime_state()
+                if self.service._runtime_state_dirty:
+                    return False
             self.service._store_reconcile_failures = 0
             self.service._reconcile_dirty = False
             return True

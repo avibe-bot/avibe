@@ -6980,6 +6980,27 @@ async def _archive_release_vault_scopes(session_id: str, revoked_vault_scopes: l
         logger.debug("archive: resident-agent grant release failed for %s", session_id, exc_info=True)
 
 
+async def _archive_publish_definition_updates(reclaimed: dict[str, Any]) -> None:
+    definition_types = [
+        definition_type
+        for definition_type, key in (("scheduled", "tasks"), ("watch", "watches"))
+        if reclaimed.get(key)
+    ]
+    if not definition_types:
+        return
+    from core.inbox_events import publish_definitions_updated
+
+    await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                publish_definitions_updated,
+                definition_type=definition_type,
+            )
+            for definition_type in definition_types
+        )
+    )
+
+
 @app.route("/api/sessions/<session_id>", methods=["DELETE"])
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
@@ -7010,13 +7031,7 @@ async def sessions_archive(session_id: str):
 
     revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
     reclaimed = session.get("reclaimed") or {}
-    if reclaimed.get("tasks") or reclaimed.get("watches"):
-        from core.inbox_events import publish_definitions_updated
-
-        if reclaimed.get("tasks"):
-            publish_definitions_updated(definition_type="scheduled")
-        if reclaimed.get("watches"):
-            publish_definitions_updated(definition_type="watch")
+    await _archive_publish_definition_updates(reclaimed)
 
     # Broadcast + return immediately — the archive is already committed. Other
     # mounted clients (sidebars, tabs) drop the row live and leave the chat if

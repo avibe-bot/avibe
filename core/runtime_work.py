@@ -97,6 +97,7 @@ _EVENT_LANES = {
         RuntimeWorkLane.REQUESTS,
         RuntimeWorkLane.RUN_CALLBACKS,
         RuntimeWorkLane.FAILURE_NOTICES,
+        RuntimeWorkLane.STALE_RUNS,
     ),
     VAULTS_UPDATED_EVENT: (RuntimeWorkLane.VAULT_CALLBACKS,),
     DEFINITIONS_UPDATED_EVENT: (

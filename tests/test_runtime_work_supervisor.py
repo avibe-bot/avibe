@@ -412,6 +412,7 @@ async def test_concurrent_stop_callers_join_the_same_blocked_scan() -> None:
                 RuntimeWorkLane.REQUESTS,
                 RuntimeWorkLane.RUN_CALLBACKS,
                 RuntimeWorkLane.FAILURE_NOTICES,
+                RuntimeWorkLane.STALE_RUNS,
             },
         ),
         (VAULTS_UPDATED_EVENT, {RuntimeWorkLane.VAULT_CALLBACKS}),

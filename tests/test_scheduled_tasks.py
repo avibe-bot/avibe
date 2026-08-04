@@ -9259,6 +9259,7 @@ def test_hfr_176_legacy_file_probes_wake_only_their_mapped_lanes(
         (
             RuntimeWorkLane.REQUESTS,
             RuntimeWorkLane.RUN_CALLBACKS,
+            RuntimeWorkLane.STALE_RUNS,
         )
     ]
 
