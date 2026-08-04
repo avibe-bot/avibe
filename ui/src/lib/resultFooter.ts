@@ -8,6 +8,10 @@ export type ResultFooterParts = {
   footer: string | null;
 };
 
+function webResultFooter(footer: string): string {
+  return footer.replace(/^✅\s+/u, '');
+}
+
 /** Separate Avibe's generated duration/token summary from an Agent reply body. */
 export function resultFooterParts(
   message: Pick<WorkbenchMessage, 'author' | 'type' | 'text' | 'content'>,
@@ -22,12 +26,12 @@ export function resultFooterParts(
     const suffix = `\n\n${footer}`;
     return {
       body: message.text.endsWith(suffix) ? message.text.slice(0, -suffix.length) : message.text,
-      footer,
+      footer: webResultFooter(footer),
     };
   }
 
   if (LEGACY_RESULT_FOOTER_RE.test(message.text)) {
-    return { body: '', footer: message.text };
+    return { body: '', footer: webResultFooter(message.text) };
   }
 
   // Rows created before result_footer became structured still contain the exact
@@ -37,5 +41,5 @@ export function resultFooterParts(
   if (splitAt < 0) return { body: message.text, footer: null };
   const candidate = message.text.slice(splitAt + 2);
   if (!LEGACY_RESULT_FOOTER_RE.test(candidate)) return { body: message.text, footer: null };
-  return { body: message.text.slice(0, splitAt), footer: candidate };
+  return { body: message.text.slice(0, splitAt), footer: webResultFooter(candidate) };
 }
