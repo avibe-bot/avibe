@@ -1448,6 +1448,18 @@ class SessionTurnManager:
             {
                 "delivery_id": str(deliveries[0]["id"]),
                 "delivery_ids": [str(row["id"]) for row in deliveries],
+                # Every display snapshot this Turn dispatches, in FIFO order.
+                # ``_hydrate_delivery_context`` set the singular ``display_text`` from
+                # the FIRST Delivery only, while ``_segment_dispatch_text`` sends the
+                # whole merged batch to the backend: a consumer that shows one prompt
+                # (the IM prompt echo) would announce one instruction for a result that
+                # answers several. Snapshots, never ``dispatch_text`` — the replay
+                # guards prepended there are backend-only.
+                "display_texts": [
+                    str(payload.get("text") or "")
+                    for payload in payloads
+                    if str(payload.get("text") or "").strip()
+                ],
                 "message_content": {
                     "text": "\n".join(
                         str(payload.get("text") or "")

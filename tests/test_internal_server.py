@@ -5249,6 +5249,13 @@ def test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn(tmp_path, 
     assert len(runs) == 1
     assert runs[0][2].message_id == "watch:def-watch:run-1"
     assert len(runs[0][2].platform_specific["delivery_ids"]) == 2
+    # Every merged Delivery's display snapshot travels with the context. The dispatch
+    # text carries BOTH prompts, so a consumer that reads the singular ``display_text``
+    # (the IM prompt echo) would announce one instruction for a two-prompt result.
+    assert runs[0][2].platform_specific["display_texts"] == [
+        "first callback",
+        "second callback",
+    ]
     with create_sqlite_engine().begin() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
 

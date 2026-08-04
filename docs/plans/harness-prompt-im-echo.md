@@ -52,7 +52,13 @@ the dispatcher.
    runtime turn gate first, so a pipeline-side send would show a queued task's prompt
    while another turn is still working — or leave a prompt behind for a turn that was
    cancelled on the gate. Emitted before `begin_status_bubble` so the channel still
-   reads trigger -> work -> result. Best-effort and `getattr`-guarded.
+   reads trigger -> work -> result. Best-effort, `getattr`-guarded, and bounded at
+   `HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS = 5`: this await holds the runtime gate, and an
+   adapter's own request budget is much longer than a turn start may wait (Telegram
+   allows 60s), so an unbounded send would let a degraded transport delay the
+   background task itself plus every turn queued behind it. Same bound, same reason as
+   the `begin_status_bubble` post right after. The staged text is popped first, so a
+   timeout drops that one echo instead of deferring it.
 3. `core/message_dispatcher.py::emit_harness_prompt` — owns the gates and the send.
    Deliberately **not** routed through `emit_agent_message`: this is neither agent
    output nor a lifecycle event, and must not consolidate into the status bubble,
@@ -74,10 +80,18 @@ the dispatcher.
        definition's stored instruction (`harness_display_prompt`) and stays silent
        when none resolves. The Workbench transcript still renders the full prompt for
        the operator;
-     - otherwise the Delivery's `display_text` snapshot when present, else the staged
-       prompt: `SessionTurnGate` prepends internal instructions to `dispatch_text` (the
+     - otherwise the Delivery display snapshots when present, else the staged prompt:
+       `SessionTurnGate` prepends internal instructions to `dispatch_text` (the
        `[Avibe recovery: ...]` guard on an ambiguous-start replay) that must stay
-       backend-only;
+       backend-only. *All* snapshots, de-duplicated: a busy session merges the queued
+       deliveries of one definition into a single Turn
+       (`_collect_delivery_segment`) and dispatches every prompt
+       (`_segment_dispatch_text`), so the singular first snapshot would announce one
+       instruction for a result answering several — two `vibe agent run` calls merge
+       under the shared `agent_run` definition id. Repeat firings of one scheduled task
+       carry the same stored prompt, hence the de-dup. The instruction-only kinds are
+       unaffected: a merged batch shares its definition, so its stored instruction is
+       already single;
    - mentions are neutralized in the whole body, label included: quoting does not stop
      a renderer from resolving `@everyone` / `<@U…>` / `<@&role>` / `<!channel>`, and
      the Discord adapter sends without `allowed_mentions`, so an echoed broadcast
@@ -94,7 +108,12 @@ the dispatcher.
      delivery cannot read as the task having fired twice. A cross-restart replay is
      not covered on purpose: it writes a new Delivery anyway, a duplicate echo is
      cosmetic, and a missing echo defeats the feature.
-4. `core/scheduled_tasks.py::_build_context` stamps `task_definition_name` and
+4. `core/session_turns.py::_hydrate_delivery_batch_context` stamps `display_texts`,
+   every merged Delivery's snapshot in FIFO order, next to the existing
+   `delivery_ids` — `_hydrate_delivery_context` set the singular `display_text` from the
+   first Delivery only. Read from the snapshots, never `dispatch_text`, so the replay
+   guards prepended there stay internal.
+5. `core/scheduled_tasks.py::_build_context` stamps `task_definition_name` and
    `harness_display_prompt` next to the existing `task_definition_id`, both resolved
    in one best-effort lookup (`_definition_display_fields`: task row, else watch
    definition), so the label names the task instead of an id and the echo has the
@@ -103,7 +122,7 @@ the dispatcher.
    `agent_run` has no definition. Both survive a cross-restart replay: the flush
    restores every provenance key that is not execution routing
    (`_EXECUTION_ROUTING_KEYS` is a blocklist).
-5. Config: `V2Config.runtime.harness_prompt_echo` (default `true`), mirrored onto
+6. Config: `V2Config.runtime.harness_prompt_echo` (default `true`), mirrored onto
    `AppCompatConfig` + `to_app_config` (the turn path reads `controller.config`,
    which is the compat object) and hot-reloaded in
    `Controller._refresh_config_from_disk`. The gate calls that mtime-guarded reload
@@ -115,7 +134,7 @@ the dispatcher.
    default, so an opt-out would silently revert on any unrelated settings save. The
    four `harness_run_*` knobs are projected for the same reason (same latent bug,
    fixed here rather than left next to the new field).
-6. Copy: `harness.promptEcho.*` in `vibe/i18n/en.json` and `zh.json`.
+7. Copy: `harness.promptEcho.*` in `vibe/i18n/en.json` and `zh.json`.
 
 ## Evidence
 
@@ -125,7 +144,10 @@ the dispatcher.
   reload, display-snapshot precedence over internal dispatch text, instruction-only
   echo for the composed kinds — with the waiter output absent from the body and no
   echo at all when no instruction resolves — mention neutralization, markdown parse
-  mode);
+  mode, a merged batch echoing every distinct prompt while repeat firings of one task
+  collapse to one, blank snapshots falling back to the singular key);
+  `tests/test_internal_server.py::test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn`
+  (the merged context carries both snapshots);
   `tests/test_api_save_config_merge.py::test_save_config_preserves_harness_runtime_knobs_on_partial_save`;
   `tests/test_message_handler_harness_echo.py` (pipeline staging: raw prompt,
   subagent-prefixed prompt staged unstripped, human turn stages nothing, blank prompt
@@ -133,7 +155,7 @@ the dispatcher.
   the pipeline);
   `tests/test_agent_service.py` (turn-start emission: a queued turn stays quiet until
   it owns the runtime gate, the key is popped, no staged prompt echoes nothing, a
-  failing echo never breaks turn start);
+  failing echo never breaks turn start, a hanging echo cannot hold the gate);
   `tests/test_scheduled_tasks.py::test_build_context_carries_the_definition_name_for_display`,
   `::test_build_context_prefers_an_explicit_display_prompt_from_the_request` and
   `::test_build_context_survives_a_store_that_cannot_name_the_definition`.

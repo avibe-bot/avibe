@@ -1666,11 +1666,11 @@ class ConsolidatedMessageDispatcher:
             if not prompt:
                 return None
         else:
-            # The Delivery's display snapshot wins over the dispatch text when present:
+            # The Delivery's display snapshots win over the dispatch text when present:
             # ``SessionTurnGate`` prepends internal instructions to ``dispatch_text``
             # (the ``[Avibe recovery: ...]`` guard on an ambiguous-start replay), and
             # the channel must see the stored prompt, not a backend-only directive.
-            prompt = str(spec.get("display_text") or "").strip() or text
+            prompt = self._harness_echo_snapshot_prompt(spec) or text
         body = self._harness_prompt_body(trigger_kind, spec.get("task_definition_name"), prompt)
         if not body:
             return None
@@ -1712,6 +1712,30 @@ class ConsolidatedMessageDispatcher:
             return None
         self._remember_harness_prompt_echo(echo_key)
         return message_id
+
+    @staticmethod
+    def _harness_echo_snapshot_prompt(spec: dict) -> str:
+        """Every prompt this turn actually dispatched, from the Delivery snapshots.
+
+        A busy session merges the queued Harness deliveries of one definition into a
+        single Turn (``core/session_turns.py::_collect_delivery_segment``) and sends
+        *all* of their prompts to the backend, so echoing the singular ``display_text``
+        — the first snapshot only — would show one instruction for a result answering
+        several. Two firings of one scheduled task carry the same stored prompt, hence
+        the de-dup: a merged batch reads as one echo unless the instructions really
+        differ (two ``vibe agent run`` calls do). Falls back to the singular key for
+        the legacy mirror path, which has no batch.
+        """
+        raw = spec.get("display_texts")
+        snapshots = (
+            [str(item or "") for item in raw] if isinstance(raw, (list, tuple)) else []
+        )
+        if not any(snapshot.strip() for snapshot in snapshots):
+            snapshots = [str(spec.get("display_text") or "")]
+        unique = dict.fromkeys(
+            snapshot.strip() for snapshot in snapshots if snapshot.strip()
+        )
+        return "\n\n".join(unique)
 
     def _harness_prompt_body(
         self,

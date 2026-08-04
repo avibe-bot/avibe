@@ -4,7 +4,7 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.session_activities import SessionActivityRegistry
+from modules.agents import service as service_module
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
 from storage.db import create_sqlite_engine
@@ -250,6 +251,45 @@ def test_agent_service_failed_harness_prompt_echo_never_breaks_the_turn() -> Non
         request.context.platform_specific = {HARNESS_PROMPT_ECHO_SPEC_KEY: "do the thing"}
         await service.handle_message("claude", request)
 
+        assert agent.started == ["hi"]
+        controller.message_dispatcher.begin_status_bubble.assert_awaited_once()
+
+    asyncio.run(_run())
+
+
+def test_agent_service_slow_harness_prompt_echo_does_not_hold_the_gate() -> None:
+    """A degraded IM transport must not stall the turn it is announcing (Codex P2).
+
+    The echo is awaited with the runtime gate held, and an adapter's own request
+    budget is far longer than a turn start should ever wait (Telegram allows 60s), so
+    the wait is bounded like the status-bubble post that follows it.
+    """
+
+    async def _run():
+        started = asyncio.Event()
+
+        async def _hanging_echo(_context, _text):
+            started.set()
+            await asyncio.sleep(30)
+
+        class _SlowEchoController:
+            session_turns = None
+            message_dispatcher = SimpleNamespace(
+                emit_harness_prompt=_hanging_echo,
+                begin_status_bubble=AsyncMock(),
+            )
+
+        controller = _SlowEchoController()
+        service = AgentService(controller=controller)
+        agent = _RuntimeAgent()
+        service.register(agent)
+
+        request = _request("hi")
+        request.context.platform_specific = {HARNESS_PROMPT_ECHO_SPEC_KEY: "do the thing"}
+        with patch.object(service_module, "HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS", 0.05):
+            await asyncio.wait_for(service.handle_message("claude", request), timeout=3)
+
+        assert started.is_set()
         assert agent.started == ["hi"]
         controller.message_dispatcher.begin_status_bubble.assert_awaited_once()
 

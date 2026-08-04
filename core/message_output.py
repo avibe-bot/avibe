@@ -34,6 +34,13 @@ HARNESS_RUN_ID_TRIGGER_KINDS: frozenset[str] = HARNESS_TRIGGER_KINDS - {"activit
 # announce its prompt while that other turn is still working.
 HARNESS_PROMPT_ECHO_SPEC_KEY = "harness_prompt_echo_text"
 
+# The echo is awaited WITH the runtime turn gate held, so a slow or unreachable IM
+# API would delay the Harness turn itself plus every turn queued on that gate — an
+# adapter's own budget is far longer than a turn start should ever wait (Telegram
+# allows 60s per request). Bounded like the status-bubble post that follows it
+# (``MessageDispatcher.begin_status_bubble``); the echo is optional, the turn is not.
+HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS = 5.0
+
 
 @dataclass(frozen=True)
 class MessageOutput:

@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional
 from core.session_activities import SessionActivityRegistry
 from core.message_output import (
     HARNESS_PROMPT_ECHO_SPEC_KEY,
+    HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS,
     terminal_output_for,
     terminal_turn_output,
 )
@@ -1052,8 +1053,8 @@ class AgentService:
         gate — never while it is still queued behind another turn, and never for a
         turn cancelled before it ran. Popped so a retry cannot post it twice, and
         emitted before the status bubble so the order stays trigger -> work -> result.
-        Best-effort: the dispatcher owns the gates, and a failed echo never breaks the
-        turn.
+        Best-effort and time-bounded: the dispatcher owns the gates, and neither a
+        failed nor a slow echo may break or stall the turn.
         """
         spec = getattr(context, "platform_specific", None)
         if not isinstance(spec, dict):
@@ -1066,7 +1067,17 @@ class AgentService:
         if not callable(emit):
             return
         try:
-            await emit(context, text)
+            # This await holds the runtime gate (see ``_begin_turn_status``), so an
+            # unbounded send would let a degraded IM transport delay the background
+            # task itself and every turn queued behind it for the adapter's full
+            # request budget. The staged text is already popped, so a timeout drops
+            # this one echo rather than deferring it into a later turn.
+            await asyncio.wait_for(
+                emit(context, text),
+                timeout=HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.debug("harness prompt echo timed out at turn start; turn continues")
         except Exception:
             logger.debug("harness prompt echo failed at turn start", exc_info=True)
 

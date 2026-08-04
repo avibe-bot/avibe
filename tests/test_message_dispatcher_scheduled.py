@@ -3959,6 +3959,61 @@ class HarnessPromptEchoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("> summarize open PRs", text)
         self.assertNotIn("Avibe recovery", text)
 
+    async def test_merged_batch_echoes_every_distinct_prompt_it_dispatched(self):
+        """Scenario: MESSAGE-DELIVERY-018
+
+        Two ``vibe agent run`` deliveries queued for one busy session merge into a
+        single Turn (``_collect_delivery_segment``) and BOTH prompts reach the backend
+        (``_segment_dispatch_text``). Echoing the first snapshot alone would announce
+        one instruction for a result that answers two (Codex P2).
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                task_trigger_kind="agent_run",
+                display_text="summarize open PRs",
+                display_texts=["summarize open PRs", "then close the stale ones"],
+            ),
+            "summarize open PRs\n\n---\n\nthen close the stale ones",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertIn("> summarize open PRs", text)
+        self.assertIn("> then close the stale ones", text)
+
+    async def test_merged_repeat_firings_of_one_task_echo_the_prompt_once(self):
+        # Two firings of the same scheduled task carry the SAME stored prompt, so the
+        # merged batch must not read as the instruction having been given twice.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                display_text="summarize open PRs",
+                display_texts=["summarize open PRs", "summarize open PRs"],
+            ),
+            "summarize open PRs\n\n---\n\nsummarize open PRs",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertEqual(text.count("> summarize open PRs"), 1)
+
+    async def test_empty_batch_snapshots_fall_back_to_the_single_snapshot(self):
+        # The legacy mirror path stages no batch, and a batch of blank snapshots must
+        # not silence an echo the singular key can still serve.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(display_text="summarize open PRs", display_texts=["", "  "]),
+            "summarize open PRs",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertIn("> summarize open PRs", text)
+
     async def test_runtime_switch_is_reloaded_before_the_gate(self):
         """A Harness turn reaches no IM inbound handler, so nothing else reloads
         ``controller.config``: the config-only toggle must be re-read here, or a
