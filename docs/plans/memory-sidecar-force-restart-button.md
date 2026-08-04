@@ -1,13 +1,13 @@
-# Add a forced sidecar restart action to Memory settings (rev9)
+# Add a forced sidecar restart action to Memory settings (rev10)
 
-> Rev9 keeps one public recovery action and a focused set of internal fixes:
+> Rev10 keeps one public recovery action and a focused set of internal fixes:
 > replayable configuration, config-wide write serialization, restart-specific
-> lifecycle admission, generation-fenced ready activation, complete supervisor
-> quiescing, bounded orphan recovery, disk/live replay convergence, store-thread
-> settlement, worker lease rotation, and locked clear-marker recovery. Timed-out
-> work remains owned until it is either joined or proven unable to mutate state.
-> It does not add a lifecycle coordinator, explicit state machine,
-> provider/store port, or frontend DOM test framework.
+> and Clear-intent admission, generation-fenced ready activation, complete
+> supervisor quiescing, bounded orphan recovery, disk/live replay convergence,
+> store-thread settlement, worker lease rotation, and locked clear-marker
+> recovery. Timed-out work remains owned until it is either joined or proven
+> unable to mutate state. It does not add a lifecycle coordinator, explicit
+> state machine, provider/store port, or frontend DOM test framework.
 
 ## Background and goals
 
@@ -97,6 +97,14 @@ Add private `_restart_config` and `_persisted_memory_snapshot` values to
   `_restart_config`, `_persisted_memory_snapshot`, and the later restored
   `self._config`, without changing any other Memory field. It does not run the
   processing probe.
+- Every successful runtime-owned V2 Memory mutation returns the exact committed
+  `MemoryConfig` from `mutate_v2_config()`. While `_reconcile_lock` is still
+  owned, install that returned value into `_persisted_memory_snapshot`
+  immediately. In particular, ordinary persisted reconcile captures the
+  marker-bearing candidate first, then marker settlement returns the
+  marker-free disk block and refreshes the snapshot before any later reconcile
+  phase can return or fail. A failed/aborted transaction leaves the previous
+  snapshot unchanged.
 
 These snapshots answer which configuration an explicit restart replays and
 which exact Memory block it may conditionally replace on disk. They do not
@@ -139,9 +147,14 @@ Memory-only serialization is insufficient.
   restart request and response. Every Memory PATCH already holds this same lock
   across load, save, controller reconcile, and rollback, so a PATCH cannot write
   C1 between the controller's C0 comparison and marker-clear save.
-- Add one synchronous `mutate_v2_config(mutator, *, initializer=None)` write API
-  in `config/v2_config.py`. Its outermost call first acquires a config-specific
-  cross-process file lock, using the existing
+- Add one synchronous
+  `mutate_v2_config(mutator, *, config_path=None, initializer=None)` write API in
+  `config/v2_config.py`. Normalize the selected default or custom target to one
+  absolute path without resolving away its existing symlink/replace semantics.
+  Preserve `V2Config.save(config_path)`'s parent-creation behavior before lock
+  acquisition, then derive a deterministic per-target sibling lock path from
+  that normalized config path. Its outermost call first acquires this
+  path-specific cross-process file lock, using the existing
   `storage.lock.MigrationFileLock` primitive with a dedicated lock path and
   bounded acquisition, without owning `CONFIG_LOCK`. Only after the file lock is
   held does it acquire `CONFIG_LOCK`, load the current document, invoke a
@@ -153,14 +166,18 @@ Memory-only serialization is insufficient.
   without freezing their async event loop behind that writer's bounded wait.
   The API never accepts a caller-supplied or preloaded `V2Config` instance.
   First-install/default paths may supply an initializer factory, which is also
-  invoked only under both locks when the document is absent.
+  invoked only under both locks when the selected document is absent. Loading,
+  initializing, token validation, and the final atomic replace all use that same
+  normalized target; custom-path callers never fall back to the default config.
 - Make the raw save primitive private to that API. Bind its opaque write token
-  to both the transaction session and the exact config object loaded inside it;
-  a missing token, a token from another session, or a config object loaded
-  before lock acquisition is rejected. Reentrant same-thread mutation calls
-  reuse the outer session and its one working object, and only the outermost call
-  publishes one final document, rather than reloading or saving a nested stale
-  baseline.
+  to the normalized target path, transaction session, and exact config object
+  loaded inside it; a missing token, a token for another path/session, or a
+  config object loaded before lock acquisition is rejected. Reentrant
+  same-thread mutation calls for the same target reuse the outer session and its
+  one working object, and only the outermost call publishes one final document.
+  Reject a nested request for a different target before acquiring another lock;
+  callers split it into a separate outer operation so lock ordering remains
+  explicit.
 - Migrate every whole-file V2 writer to the mutation API: the generic and Memory
   paths in `vibe/api.py`, direct writers in `vibe/ui_server.py` and
   `vibe/remote_access.py`, `SettingsHandler`, `ModelHubService`, controller and
@@ -224,8 +241,9 @@ An explicit restart must not wait silently behind another lifecycle operation.
 Otherwise the transport can time out first while the controller later performs
 an abandoned restart, and a user retry can enqueue a second one.
 
-- Before any await, `restart()` checks `_reconcile_lock` and
-  `module._lifecycle_lock`. If either is held, return
+- Before any await, `restart()` checks `_clear_pending_count`, `_reconcile_lock`,
+  and `module._lifecycle_lock`. If a destructive Clear is pending/active or
+  either lock is held, return
   `{ok: false, error: 'memory_restart_busy'}` without changing the process,
   claims, or worker.
 - When both are free, acquire them in the established order in the same event
@@ -234,15 +252,24 @@ an abandoned restart, and a user retry can enqueue a second one.
   release the lock and return `memory_restart_busy` before resolving an artifact
   or touching worker/process state. This check covers `install_artifact()`'s
   deliberate unlocked `ensure(force=True)` interval.
-- Track a narrow `_explicit_restart_active` boolean in `MemoryRuntime`. Set it
-  after restart has acquired both lifecycle locks, before the first lifecycle
-  await, and clear it only in the final ownership cleanup. `MemoryRuntime.clear()`
-  checks this flag before awaiting `module.clear()` and returns
-  `memory_clear_failed` without starting or queueing `begin_clear()` only when an
-  explicit restart owns the lifecycle. `MemoryModule.clear()` retains its
-  existing queued lock behavior, so search/profile/read contention still
-  serializes instead of becoming a spurious Clear failure. If Clear reaches the
-  module lock first, restart observes that lock and returns `memory_restart_busy`.
+- Track a narrow `_explicit_restart_active` boolean and
+  `_clear_pending_count` in `MemoryRuntime`. Restart sets its boolean after
+  acquiring both lifecycle locks, before the first lifecycle await, and clears
+  it only in final ownership cleanup. `MemoryRuntime.clear()` checks the restart
+  boolean and, if false, increments the Clear counter in the same event-loop turn
+  before its first await. Keep the counter owned across `module.clear()` and the
+  subsequent reconcile, then decrement it in `finally` on every completion or
+  cancellation path. Multiple queued Clears each own one count.
+- `MemoryRuntime.clear()` still returns `memory_clear_failed` without starting
+  or queueing `begin_clear()` when an explicit restart already owns admission.
+  `MemoryModule.clear()` retains its existing queued lifecycle-lock behavior, so
+  search/profile/read contention still serializes. While a Clear waits behind
+  such a reader, the nonzero counter makes restart return
+  `memory_restart_busy`; restart cannot exploit the brief unlocked handoff while
+  `asyncio.Lock` wakes the queued Clear. Conversely, once restart admission has
+  started, the active boolean rejects Clear before it increments the counter.
+  Both updates and admission checks contain no intervening await, so one side
+  wins deterministically without inspecting private lock waiters.
 - Bound interrupted-clear recovery and the embedding guard/config convergence
   separately by `CLEAR_CLEANUP_TIMEOUT_SECONDS`, because both phases can run in
   one request. Transaction timeout is a reporting threshold, not permission to
@@ -290,8 +317,9 @@ an abandoned restart, and a user retry can enqueue a second one.
   displays a localized reason.
 
 No additional restart lock or queue is needed. The existing UI settings lock,
-config-wide write transaction, installer flag, restart-ownership boolean, and
-controller/module lifecycle locks define single-flight ownership.
+config-wide write transaction, installer flag, restart-ownership boolean,
+Clear-intent counter, and controller/module lifecycle locks define single-flight
+ownership.
 
 ### 5. Forced replacement and lease handoff
 
@@ -351,7 +379,9 @@ The locked sequence is fixed:
    When `_restart_config` has `embedding_change_pending`, run the root guard
    first and clear the marker in the replay block. The transaction must replace
    only the expected persisted Memory block with replay C0, preserving every
-   unrelated field. Restore `self._config` only after convergence succeeds.
+   unrelated field, and return the exact committed block. Refresh
+   `_persisted_memory_snapshot` from that return value and restore `self._config`
+   only after convergence succeeds.
 9. Stop the old process. Do not discard its supervisor or start another child
    until its process tree is confirmed reaped.
 10. Create a process from `_restart_config` bound to the lifecycle generation
@@ -470,15 +500,18 @@ exceptions use the transport-only `memory_restart_failed`.
 
 1. `config/v2_config.py`, `vibe/api.py`, and every audited whole-file writer:
    add the cross-process `mutate_v2_config()` API, make raw save private, bind
-   the working object to an opaque session token, always acquire the file lock
-   before `CONFIG_LOCK`, and offload the complete mutation from every
-   asynchronous caller.
+   the target path and working object to an opaque session token, derive one
+   lock per normalized default/custom path, always acquire that file lock before
+   `CONFIG_LOCK`, and offload the complete mutation from every asynchronous
+   caller.
 2. `core/memory/runtime.py`: add `_restart_config`,
-   `_persisted_memory_snapshot`, `_explicit_restart_active`, lifecycle generation
-   and a retained ready activation task, and fail-fast `restart()`; conditionally
-   converge disk to replay before launch; retain worker/store tasks that outlive
-   cancellation; reject restart while artifact installation is active; make
-   only restart-owned Clear contention fail fast.
+   `_persisted_memory_snapshot`, `_explicit_restart_active`,
+   `_clear_pending_count`, lifecycle generation and a retained ready activation
+   task, and fail-fast `restart()`; refresh the persisted snapshot after every
+   successful runtime-owned V2 mutation; conditionally converge disk to replay
+   before launch; retain worker/store tasks that outlive cancellation; reject
+   restart while artifact installation is active; make only restart/Clear
+   contention fail fast.
    `Controller.reconcile_memory()` marks only its persisted candidate explicitly;
    post-Clear and artifact-internal reconciles cannot change the disk snapshot.
 3. `core/memory/module.py`: extract locked clear recovery while retaining the
@@ -545,6 +578,9 @@ exceptions use the transport-only `memory_restart_failed`.
     `begin_clear()` and leaves no waiter or durable marker; the inverse ordering
     makes restart return busy. A search/profile call holding the same module lock
     still makes Clear wait and then complete, preserving existing behavior.
+    While that Clear is queued, `_clear_pending_count` also makes restart return
+    busy through the lock-release/waiter-wakeup gap. Concurrent Clear requests
+    retain independent counts until their complete Clear/reconcile paths exit.
   - Hung add and flush cases use shortened bounds; add can be reclaimed by the
     new owner, while flush becomes `unknown` and opens the fault.
   - A worker task that ignores its first cancellation is retained with the old
@@ -575,7 +611,9 @@ exceptions use the transport-only `memory_restart_failed`.
   - Clear-marker recovery and replacement share one lifecycle critical section;
     recovery failure launches no child.
   - A startup snapshot with the embedding marker rejects existing vectors and
-    settles an empty root before launch.
+    settles an empty root before launch. A successful ordinary persisted
+    reconcile that clears the marker refreshes `_persisted_memory_snapshot` to
+    the exact marker-free disk block, so a later restart accepts it.
   - Disabled, `start() is False`, factory exception, explicit activation
     exception, automatic activation exception, failed-start cleanup, and stop
     exception cases assert error codes, supervisor ownership, claims/worker
@@ -604,6 +642,10 @@ exceptions use the transport-only `memory_restart_failed`.
   and publish once without deadlock. While a second process holds the file lock,
   writers wait without owning `CONFIG_LOCK`, representative inline async UI and
   controller reads complete, and event-loop probes continue to run.
+  A custom-path initializer and mutation update only that selected target and
+  its sibling lock, leaving the default config untouched. Tokens cannot cross
+  paths, same-target nested mutation reuses its session, and nested
+  different-target mutation is rejected before acquiring another lock.
 - `tests/test_memory_worker.py`: `_store_call()` shields and retains its explicit
   thread task across drain cancellation. `settle_store_calls()` times out without
   cancelling the thread, retains it for retry, consumes its terminal result, and
@@ -650,17 +692,19 @@ The necessary complexity comes from existing safety and concurrency contracts:
 failed candidates cannot replace last-good config, and successful replay must
 conditionally converge the known persisted Memory block to that same config;
 config mutation cannot race any whole-file V2 writer, start from an unlocked
-baseline, hold `CONFIG_LOCK` during a file-lock wait, block an async event loop,
-or outlive its transaction; explicit restart and destructive Clear cannot queue
-behind each other while ordinary reads retain their existing serialization;
-artifact installation excludes launch; orphan recovery has one complete cap;
-every active process lifecycle owner is settled and budgeted before stop;
-delayed automatic activation is fenced by lifecycle generation and both runtime
-locks; pending embeddings cannot bypass the root guard; claimed rows require a
-new lease only after the old worker and every shielded store thread exit;
-activation success is observable; and clear markers serialize with root/child
-lifecycle. The implementation adds two private snapshots, narrow helpers, and
-two precise transport-only error codes while reusing existing locks, guards,
+baseline, lose a custom target path, hold `CONFIG_LOCK` during a file-lock wait,
+block an async event loop, or outlive its transaction; every successful
+runtime-owned mutation refreshes the exact persisted snapshot; explicit restart
+and destructive Clear cannot queue behind or leapfrog each other while ordinary
+reads retain their existing serialization; artifact installation excludes
+launch; orphan recovery has one complete cap; every active process lifecycle
+owner is settled and budgeted before stop; delayed automatic activation is
+fenced by lifecycle generation and both runtime locks; pending embeddings cannot
+bypass the root guard; claimed rows require a new lease only after the old
+worker and every shielded store thread exit; activation success is observable;
+and clear markers serialize with root/child lifecycle. The implementation adds
+two private snapshots, two narrow admission fields, focused helpers, and two
+precise transport-only error codes while reusing existing locks, guards,
 recovery SQL, supervision, and UI primitives.
 
 Do not introduce a general coordinator, explicit restart state machine, new
@@ -670,15 +714,16 @@ implementation appears to require one, revise this plan before expanding scope.
 ## Todo
 
 - [ ] Replay/disk snapshots, conditional C1-to-C0 convergence, focused tests
+- [ ] Marker-settlement snapshot refresh and later-restart regression
 - [ ] Settings/restart serialization and stale-C0 overwrite regression
-- [ ] Token-bound config mutation API and concurrent non-Memory writer regression
+- [ ] Path-aware token-bound config mutation and custom-target regression
 - [ ] File-lock-first order, async writers off-thread, inline-reader responsiveness
 - [ ] Timed-out settlement ownership and retained-request regression
 - [ ] Worker lease rotation and add/flush recovery tests
 - [ ] Retained worker cancellation fail-closed state and retry
 - [ ] Shielded store-thread registry, bounded settlement, and retry
 - [ ] Locked clear recovery and race regression
-- [ ] Restart-specific Clear admission and artifact-install admission
+- [ ] Restart/Clear intent admission, queued-Clear handoff, artifact admission
 - [ ] Supervisor handoff fence, lifecycle-owner settlement, and deadline contract
 - [ ] Lifecycle-generation ready activation and Clear/reconcile race regression
 - [ ] Complete orphan/start budgets, explicit activation, failed-start cleanup
