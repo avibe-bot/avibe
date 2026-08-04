@@ -151,6 +151,53 @@ def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict
     return {"id": str(row["id"]), "name": str(row["name"])}
 
 
+def _pin_run_to_definition_agent(
+    conn: Any,
+    run_values: dict[str, Any],
+    *,
+    agent_name: Any,
+) -> None:
+    """Point a not-yet-inserted run row at the Agent its DEFINITION names now.
+
+    Both stamp-plus-enqueue writers compose their run row LONG before the transaction
+    opens: the escalation turn a command failure authorises, and the completion hook a
+    terminal watch authorises, are built from the definition as the executor claimed
+    it -- minutes or hours of command runtime earlier. A rename in that window rewrites
+    ``run_definitions.agent_name`` and every ACTIVE run's reference (see
+    ``core.vibe_agents._rewrite_references``), but this row does not exist yet, so it
+    escapes the rewrite and is inserted naming an Agent the catalog no longer has.
+    ``refresh_run_agent_reference`` then resolves nothing at claim time and the turn
+    carrying the report cannot run -- while the notice its stamp suppressed is already
+    gone. That is the one unrecoverable outcome the two-report invariant exists to
+    prevent: neither report, not both.
+
+    The narrower race -- a rename landing AFTER the payload was reloaded -- needs
+    nothing here, because it bumps the definition's agent binding revision and
+    ``definition_state_unchanged`` refuses the whole stamp, rolling both writes back.
+    What survives that guard is a rename the reload already absorbed, leaving the
+    definition current and only this pre-composed run row stale. So the name is read
+    from the definition values being written in THIS transaction, and resolved to the
+    catalog's durable ``agent_id`` so the NEXT rename cannot reopen the window. A row
+    that already carries an ``agent_id`` is left alone: it is pinned by identity, which
+    a rename does not move.
+    """
+
+    if str(run_values.get("agent_id") or "").strip():
+        return
+    name = str(agent_name or "").strip()
+    if not name:
+        return
+    agent = _resolve_agent_identity_by_name(conn, name)
+    if agent is None:
+        # Archived or deleted, not renamed. Keep the definition's own spelling and
+        # leave the claim to report it: inventing an id here would bind the turn to
+        # an Agent the user removed.
+        run_values["agent_name"] = name
+        return
+    run_values["agent_id"] = agent["id"]
+    run_values["agent_name"] = agent["name"]
+
+
 def resolve_run_at(run_at: str, timezone_name: Optional[str]) -> datetime:
     """The instant a one-shot ``run_at`` names, in the task's own timezone.
 
@@ -223,6 +270,16 @@ RUN_STATUS_ALIASES: dict[str, str] = {
     "canceled": "canceled",
 }
 _LIKE_ESCAPE = "\\"
+# Every run status Session teardown condemns, which is deliberately WIDER than the
+# set it terminalizes in the same statement. Teardown flags all four
+# ``cancel_requested`` and then flips only ``pending``/``queued`` to ``canceled`` on
+# the spot; a run the executor has already claimed is canceled a moment later, by the
+# executor, out of that transaction. For anything that has to compensate for a
+# teardown cancel, the decision is made here, so this is the set to key on.
+# ``storage.sessions_service._delete_agent_session_rows`` uses this directly;
+# ``_ACTIVE_RUN_STATUSES`` in ``storage.workbench_sessions_service`` still mirrors it
+# to keep that module's import graph unchanged, so widen the two together.
+TEARDOWN_CONDEMNED_RUN_STATUSES = ("pending", "queued", "processing", "running")
 # What a task/watch is *doing*, which is not what ``enabled`` records.
 #
 # ``enabled`` is a switch: it says whether the scheduler may fire the row, and
@@ -267,6 +324,17 @@ _TIMEOUT_EXIT_CODE = 124
 # read as "running" and leave "waiting" unreachable. Waiter liveness is a
 # separate field (``process_alive``), not a state.
 _WATCH_RUNTIME_RUN_TYPE = "watch_runtime"
+# The Agent turn a ``--on-failure agent`` command fire queues to REPORT its failure.
+# It carries the failing definition's own ``definition_id`` -- that link is how the
+# Harness shows the turn beside the task -- and it settles ``succeeded`` whenever the
+# Agent answers, because answering is all it was asked to do.
+_TASK_ESCALATION_RUN_TYPE = "task_escalation"
+# Rows that carry a definition's id but are NOT a verdict on that definition. Both
+# members present as the newest row for the definition and both settle ``succeeded``
+# on their own schedule, so counted as verdicts they make a broken definition read
+# healthy: the watch heartbeat on every service restart, the escalation turn on the
+# very failure it exists to report.
+_NON_VERDICT_RUN_TYPES = (_WATCH_RUNTIME_RUN_TYPE, _TASK_ESCALATION_RUN_TYPE)
 # SQLite caps how many parameters one statement may bind (999 on builds before
 # 3.32). Paged lookups stay far under it, but the unpaged harness lists resolve
 # every row in the store at once, so batch resolvers chunk their id lists: a few
@@ -616,6 +684,20 @@ def _row_lifecycle_state(row: Any) -> Optional[str]:
         return None
 
 
+def _definition_timed_out(metadata: Any) -> Optional[bool]:
+    """Whether the scheduler stopped this definition's last fire, or ``None`` if unknown.
+
+    Anything other than a real boolean reads as unknown: an absent key is a row from
+    before the fact was recorded, and a corrupted one must not be trusted to overrule
+    the exit code either way.
+    """
+
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get(COMMAND_TIMED_OUT_METADATA_KEY)
+    return value if isinstance(value, bool) else None
+
+
 def definition_lifecycle_detail(
     *,
     lifecycle_state: Optional[str],
@@ -623,6 +705,7 @@ def definition_lifecycle_detail(
     last_run_at: Any = None,
     last_exit_code: Any = None,
     last_error: Any = None,
+    timed_out: Optional[bool] = None,
 ) -> Optional[str]:
     """How a finished task/watch ended: ``normal``, ``timeout``, or ``error``.
 
@@ -630,13 +713,25 @@ def definition_lifecycle_detail(
     have no ending to report yet. Python rather than SQL because it has exactly
     one consumer — the row — and never a ``GROUP BY``: the filter groups by
     state, and the row alone says which of the three endings it was.
+
+    ``timed_out`` is THE ANSWER when the row has one, and the three states are
+    distinct on purpose. 124 is the code the runner synthesizes for a limit it
+    enforced itself, but it is also an exit status a command is free to return —
+    ``timeout 5 ...`` inside a ``--shell`` script returns exactly that — so reading
+    the code alone told a user their backup had been cut short by Avibe when it had
+    in fact cut itself short. ``False`` therefore SUPPRESSES the old inference rather
+    than merely not triggering it; ``None`` means the row never recorded the fact
+    (a watch, or a task stamped before this key existed) and keeps the inference,
+    which is still the best guess available for those rows.
     """
 
     if lifecycle_state != "finished":
         return None
     if definition_type == "scheduled" and last_run_at is None:
         return None
-    if last_exit_code == _TIMEOUT_EXIT_CODE:
+    if timed_out:
+        return "timeout"
+    if timed_out is None and last_exit_code == _TIMEOUT_EXIT_CODE:
         return "timeout"
     if last_exit_code not in (None, 0):
         return "error"
@@ -875,6 +970,47 @@ NOTICE_SKIPPED = "skipped"
 NOTICE_FAILED = "failed"
 #: Terminal notice states: never delivered again, and no longer blocking a streak.
 NOTICE_TERMINAL_STATES = frozenset({NOTICE_SENT, NOTICE_SKIPPED, NOTICE_FAILED})
+
+#: Where a command run records WHAT IT RAN, inside the run's own ``metadata``.
+#: Entry: ``{"shell": str | None, "argv": list[str]}``. Read by
+#: ``core.scheduled_tasks.command_snapshot_of_run`` and by the Workbench run detail.
+COMMAND_SNAPSHOT_METADATA_KEY = "command"
+
+#: Where a command run records the ISOLATED SUPERVISOR it spawned, so a service that
+#: dies without unwinding can still find and kill the orphan on the next start.
+#: Entry: the ``core.process_isolation.serialize_process_identity`` payload. Distinct
+#: from the ``pid`` column, which holds the SERVICE pid and gates startup recovery.
+COMMAND_WORKER_METADATA_KEY = "command_worker"
+
+#: How many starts have tried and failed to kill that supervisor, inside the same
+#: payload. Entry: a positive ``int``, absent until a teardown comes back unconfirmed.
+#: It is what keeps "retry the orphan next start" from holding a run ``running``
+#: forever when the process genuinely never exits.
+COMMAND_WORKER_REAP_ATTEMPTS_KEY = "reap_attempts"
+
+#: Whether the SCHEDULER stopped the DEFINITION's last command fire, on the definition's
+#: own ``metadata``. Entry: ``True``/``False``, written by every command stamp and
+#: absent on every row that predates it -- see ``definition_lifecycle_detail``, which
+#: needs those three states apart.
+COMMAND_TIMED_OUT_METADATA_KEY = "last_command_timed_out"
+
+
+def command_snapshot_from_definition_row(row: Any) -> Optional[dict[str, Any]]:
+    """The ``{"shell", "argv"}`` record of what a scheduled definition row would run.
+
+    ``None`` for anything that is not a command *task*: a message task has both
+    columns NULL, and a watch fills them with its WAITER command, which is not the
+    work a watch run performs.
+    """
+
+    if str(row["definition_type"] or "") != "scheduled":
+        return None
+    shell_command = row["shell_command"] or None
+    argv = _json_loads(row["command_json"], None)
+    argv = [str(part) for part in argv] if isinstance(argv, (list, tuple)) else []
+    if not shell_command and not argv:
+        return None
+    return {"shell": str(shell_command) if shell_command else None, "argv": argv}
 
 
 class _UnstampableInstant(str):
@@ -1257,6 +1393,21 @@ def _not_an_out_of_band_interruption() -> Any:
     reason = literal_column(INTERRUPT_REASON_SQL)
     return or_(reason.is_(None), reason.notin_(sorted(RUN_INTERRUPTION_REASONS)))
 
+
+def _is_a_definition_verdict() -> Any:
+    """SQL for "this row's outcome is an outcome OF the definition it names".
+
+    Shared by name across the health window, the streak scope and the last-success
+    read, because those three answer one question -- how is this definition doing --
+    and a row class excluded from one but not the others gives the same definition two
+    different answers on two surfaces. See ``_NON_VERDICT_RUN_TYPES`` for the members.
+    """
+
+    return or_(
+        agent_runs.c.run_type.is_(None),
+        agent_runs.c.run_type.notin_(_NON_VERDICT_RUN_TYPES),
+    )
+
 #: Derived health, per definition. No new state: both counters come from one
 #: indexed query over ``agent_runs``, so nothing has to be kept in sync or
 #: backfilled.
@@ -1294,12 +1445,38 @@ def _owed_failure_notice_for_transition(
     An existing notice is never overwritten. Re-stamping would reset ``attempts``
     and resurrect a dead letter, so a row that already carries a notice keeps the
     one it has whatever later writer touches it.
+
+    ``escalation_run_id`` SUPPRESSES the notice, the same shape of decision
+    ``_callback_parent_owns_failure_notice`` makes: a command definition configured
+    with ``--on-failure agent`` already had one Agent turn queued -- carrying the
+    failure report -- in the SAME transaction that stamped its definition, so a notice
+    as well is the identical failure told twice, once as a report and once as an alert.
+
+    ACCEPTED CRASH WINDOW, stated rather than hidden. The escalation is durable before
+    this settle runs, and the marker only reaches the run row here, so a teardown
+    between the atomic stamp+enqueue and this settle loses the marker: the escalation
+    still fires AND a notice is stamped. That is the deliberate direction -- both,
+    never neither. A cross-row lookup ("does some queued run name me as its parent?")
+    would close the duplicate at the cost of the never-silent bias, and the duplicate
+    is the cheaper failure.
+
+    THE OPPOSITE ORDERING NEEDS NO GUARD HERE, and the reason is worth stating because
+    it looks like it should. A teardown that cancels the escalation in that same window
+    cancels the PARENT with it -- ``archive_session`` flags every non-terminal run of
+    the session, and the hard-delete path removes their rows -- so this settle sees
+    ``canceled`` (or no row at all) and owes nothing to suppress. Checking the
+    escalation's status from here would only describe ``vibe runs cancel`` aimed at the
+    escalation itself, which is the user declining that report the same way
+    ``canceled`` above declines a notice.
     """
 
     if normalize_run_status(status) != "failed":
         return None
     existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
     if isinstance(existing, dict) and str(existing.get("state") or "").strip():
+        return None
+    if str(metadata.get("escalation_run_id") or "").strip():
+        # The escalation turn IS the user-visible report for this failure.
         return None
     reason = str(metadata.get("interrupt_reason") or "").strip() or None
     return {
@@ -1355,6 +1532,104 @@ def _owed_failure_notice_for_transition(
         "ack_evidence": None,
         "stamped_at": now,
     }
+
+
+def rearm_notices_for_escalations_canceled_with_session(
+    conn: Any, session_id: str, *, now: str
+) -> list[str]:
+    """Give a failed command fire its notice back when teardown kills its escalation.
+
+    An ``--on-failure agent`` fire suppresses its own failure notice because the
+    escalation turn IS the report (``_owed_failure_notice_for_transition``). Session
+    teardown then cancels every not-yet-terminal run bound to the session -- the
+    escalation among them -- and a ``canceled`` run owes nothing. Without this, the
+    failure ends up with NO turn and NO notice: the exactly-one-of invariant broken in
+    the silent direction, which is the one direction the design refuses. The accepted
+    crash window biases towards BOTH reports; this must not bias towards neither.
+
+    The notice ladder is the right fallback precisely because it does not need the
+    session: a notice is delivered to the scope, not into a conversation.
+
+    Escalations teardown has merely condemned count too, not only the ones it
+    terminalizes on the spot (``TEARDOWN_CONDEMNED_RUN_STATUSES``). A turn already
+    under way is the worse case, since it can have reported nothing yet while looking
+    like it will. Re-arming one that did manage to report costs a duplicate, which is
+    the bias the design already accepts; the alternative costs silence, which it does
+    not.
+
+    MUST be called inside the SAME transaction as the cancel it compensates for. Two
+    commits are not one decision: a teardown that committed the cancel and then failed
+    here would leave exactly the silence this closes.
+
+    ``escalation_run_id`` is deliberately LEFT on the parent. It is the audit trail of
+    what was attempted, and the row is then honest about both facts -- it escalated,
+    the escalation died, a notice is owed. Returns the parents it re-armed.
+    """
+
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        return []
+    doomed = (
+        conn.execute(
+            select(agent_runs.c.parent_run_id)
+            .where(agent_runs.c.session_id == normalized)
+            .where(agent_runs.c.run_type == "task_escalation")
+            # Not just the queued ones. An escalation the executor had already claimed
+            # is condemned by this same teardown, only terminalized later and
+            # elsewhere -- and it is the worse case, because a turn killed mid-flight
+            # can have reported nothing while still looking like it was under way.
+            .where(agent_runs.c.status.in_(TEARDOWN_CONDEMNED_RUN_STATUSES))
+        )
+        .scalars()
+        .all()
+    )
+    rearmed: list[str] = []
+    for raw_parent_id in doomed:
+        parent_id = str(raw_parent_id or "").strip()
+        if not parent_id:
+            continue
+        parent = (
+            conn.execute(
+                select(agent_runs.c.status, agent_runs.c.metadata_json)
+                .where(agent_runs.c.id == parent_id)
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        if parent is None:
+            continue
+        metadata = _json_loads(parent["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            continue
+        # The marker is withheld from the BUILDER, not from the row: it exists only to
+        # suppress this notice in favour of a turn that is being canceled in this very
+        # transaction, so for the purpose of deciding what is owed it no longer applies.
+        # Everything else is passed through untouched so the interruption/failure lane
+        # still picks the identity the live path would have used.
+        notice = _owed_failure_notice_for_transition(
+            parent_id,
+            status=parent["status"],
+            metadata={
+                key: value
+                for key, value in metadata.items()
+                if key != "escalation_run_id"
+            },
+            now=now,
+        )
+        if notice is None:
+            # Not a failure, or it already owes one. Either way nothing is missing.
+            continue
+        metadata[OWED_FAILURE_NOTICE_KEY] = notice
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == parent_id)
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        rearmed.append(parent_id)
+    if rearmed:
+        _defer_run_ids_updated_from_connection(conn, rearmed)
+    return rearmed
 
 
 def _callback_parent_owns_failure_notice(
@@ -2516,10 +2791,81 @@ class SQLiteBackgroundTaskStore:
         values = self._watch_values(payload)
         run_values = self._run_values(run_payload)
         with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
             if not upsert_definition_in_connection(
                 conn, values, expect=expect, definition_type="watch"
             ):
                 return False
+            _pin_run_to_definition_agent(
+                conn, run_values, agent_name=values.get("agent_name")
+            )
+            enqueue_run_in_connection(conn, run_values)
+        return True
+
+    def upsert_scheduled_task_with_queued_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None,
+        run_payload: dict[str, Any],
+        expected_uncanceled_run_id: Optional[str] = None,
+    ) -> bool:
+        """A guarded task stamp and the outbox row it authorises, ONE transaction.
+
+        The twin of ``upsert_watch_with_queued_run``, and HFR-269 is the same bug on
+        the scheduled side: two commits are not one decision.
+
+            self.store.mark_task_result(...)                # transaction 1, COMMITS
+            self.request_store.enqueue_hook_send(...)        # transaction 2, COMMITS
+
+        A ``/new`` reclaim or an archive from another connection can commit in the gap.
+        The stamp is accepted -- it won its compare-and-set fairly, before the teardown
+        -- and the escalation turn is queued afterwards anyway, against a definition the
+        database has since paused or soft-deleted. The inverse is the other half: an
+        exception between the two commits leaves a failed one-shot ``at`` task durably
+        DISABLED with the failure report that explains it LOST, so the user is never
+        told why the task they scheduled never came back.
+
+        Here they are one: the outbox row is written on the same connection, after the
+        guard, and a refusal or an exception rolls BOTH back. ``False`` means nothing
+        was written; the definition is untouched and no queued run exists.
+
+        Deliberately NOT ``enqueue_definition_run``: that writer re-reads the
+        definition server-side and RAISES on a disabled one, and the stamp in this very
+        transaction is what disables a failed one-shot.
+
+        ``expected_uncanceled_run_id`` is the PARENT fire, re-read here rather than in
+        the caller for the same reason ``cancel_not_requested`` is a SQL predicate: a
+        ``vibe runs cancel`` committed while the command was exiting sets the flag from
+        another connection, and the caller's snapshot is older than this write. Without
+        the re-read the flag could land after the command returned and before this
+        stamp, and the run then settled as ``canceled`` while this transaction had
+        already marked the definition failed and durably queued an Agent turn -- a
+        stopped run that goes on to start follow-up work. Refusing leaves the outcome
+        to the terminal projection lane, which is where a canceled fire belongs.
+        """
+
+        values = self._scheduled_task_values(payload)
+        run_values = self._run_values(run_payload)
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            if expected_uncanceled_run_id and agent_run_cancellation_won_in_connection(
+                conn, expected_uncanceled_run_id
+            ):
+                return False
+            if not upsert_definition_in_connection(
+                # Only the refusal LOG's label; the row's ``definition_type`` column
+                # comes from ``_scheduled_task_values``. Spelled the way the rest of
+                # the scheduled family spells it.
+                conn,
+                values,
+                expect=expect,
+                definition_type="scheduled task",
+            ):
+                return False
+            _pin_run_to_definition_agent(
+                conn, run_values, agent_name=values.get("agent_name")
+            )
             enqueue_run_in_connection(conn, run_values)
         return True
 
@@ -2560,6 +2906,7 @@ class SQLiteBackgroundTaskStore:
             reserve_write_lock(conn)
             definition = conn.execute(
                 select(
+                    run_definitions.c.definition_type,
                     run_definitions.c.agent_name,
                     run_definitions.c.session_policy,
                     run_definitions.c.session_id,
@@ -2570,6 +2917,8 @@ class SQLiteBackgroundTaskStore:
                     run_definitions.c.message,
                     run_definitions.c.message_payload_json,
                     run_definitions.c.metadata_json,
+                    run_definitions.c.command_json,
+                    run_definitions.c.shell_command,
                     run_definitions.c.enabled,
                     run_definitions.c.deleted_at,
                 )
@@ -2588,6 +2937,18 @@ class SQLiteBackgroundTaskStore:
                 metadata = _json_loads(definition["metadata_json"], {})
                 if not isinstance(metadata, dict):
                     metadata = {}
+                # A run is an immutable record of one execution, so WHAT it executed
+                # belongs on it -- the definition it came from is editable and
+                # deletable, and the failure-notice drain reads long after the fire.
+                # Taken here rather than trusted from the caller because this method
+                # replaces the caller's metadata wholesale with the authoritative row,
+                # and a snapshot a caller can forget to pass is a snapshot production
+                # will be missing.
+                snapshot = command_snapshot_from_definition_row(definition)
+                if snapshot is not None:
+                    metadata[COMMAND_SNAPSHOT_METADATA_KEY] = snapshot
+                else:
+                    metadata.pop(COMMAND_SNAPSHOT_METADATA_KEY, None)
                 values.update(
                     agent_name=identity["name"] if identity else current_name,
                     agent_id=identity["id"] if identity else None,
@@ -2988,6 +3349,15 @@ class SQLiteBackgroundTaskStore:
                         run_definitions.c.schedule_type,
                         run_definitions.c.cron,
                         run_definitions.c.run_at,
+                        # A command task's instruction lives here, not in
+                        # ``message``/``prompt`` -- which it may leave empty, since
+                        # nothing is being said to an Agent. Without these two the only
+                        # text that distinguishes such a row is the one text search
+                        # would not read. ``cwd`` stays out on purpose (the ``watch``
+                        # branch keeps it): task rows overwhelmingly share one working
+                        # directory, so matching on it returns almost everything.
+                        run_definitions.c.command_json,
+                        run_definitions.c.shell_command,
                     ]
                 )
             elif definition_type == "watch":
@@ -3126,14 +3496,65 @@ class SQLiteBackgroundTaskStore:
         _publish_queue_updated(queue_session_id)
         return row_to_publish is not None
 
+    def _escalates_a_stopped_fire(self, conn: Any, row: Any) -> bool:
+        """Is this claim about to start an Agent turn for a fire the user stopped?
+
+        A failed ``--on-failure agent`` fire commits its stamp and its escalation in ONE
+        transaction guarded on the fire not being cancelled, and whoever settles that
+        fire ``canceled`` takes the escalation back
+        (``_retract_escalation_of_stopped_fire``). Between those two moments the
+        escalation is a queued row like any other, so the dispatch loop can claim it --
+        and a claim is the one transition retraction cannot undo, because
+        ``cancel_run`` on a running Agent Run only writes a flag that nothing in the
+        turn lane is watching. The stopped job would then answer by starting an Agent.
+
+        So the claim asks the question itself, from the parent row, inside the
+        transaction that would otherwise start the work: the escalation exists only to
+        report ITS fire, and a fire the user stopped has nothing to report. Read from
+        ``run_type`` plus ``parent_run_id`` -- the durable linkage the stamp wrote --
+        rather than from anything the retraction has to reach first, so the ordering
+        between the two lanes stops mattering.
+
+        ``cancel_requested`` counts as well as a written ``canceled``: the flag is what
+        the fire's own settlement normalizes from, and it is set the instant the user
+        asks, which is earlier than any status this could wait for. A shutdown-
+        interrupted fire carries no flag, so its escalation is still claimed -- there
+        the report IS owed.
+        """
+
+        if str(row["run_type"] or "").strip() != "task_escalation":
+            return False
+        parent_run_id = str(row["parent_run_id"] or "").strip()
+        if not parent_run_id:
+            return False
+        parent = conn.execute(
+            select(agent_runs.c.status, agent_runs.c.cancel_requested)
+            .where(agent_runs.c.id == parent_run_id)
+            .limit(1)
+        ).mappings().first()
+        if parent is None:
+            return False
+        return bool(parent["cancel_requested"]) or normalize_run_status(parent["status"]) == "canceled"
+
     def claim_pending_run(self, run_id: str, *, started_at: str) -> Optional[dict[str, Any]]:
         row_to_publish = None
         payload = None
         with self.engine.begin() as conn:
+            # BEFORE the reads this claim decides on, because one of them is now
+            # another row: an escalation's parent fire, which a concurrent
+            # ``cancel_run`` writes. Holding the writer from the start means the
+            # decision cannot rest on a snapshot that goes stale before the UPDATE
+            # lands -- in WAL mode that is not a lost update but an unretryable
+            # ``SQLITE_BUSY_SNAPSHOT`` on the claim itself.
+            reserve_write_lock(conn)
             row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
             if not row:
                 return None
-            if bool(row["cancel_requested"]) or normalize_run_status(row["status"]) == "canceled":
+            if (
+                bool(row["cancel_requested"])
+                or normalize_run_status(row["status"]) == "canceled"
+                or self._escalates_a_stopped_fire(conn, row)
+            ):
                 conn.execute(
                     update(agent_runs)
                     .where(agent_runs.c.id == run_id)
@@ -3193,6 +3614,130 @@ class SQLiteBackgroundTaskStore:
                 )
         _publish_run_rows_updated([row_to_publish])
         return row_to_publish is not None
+
+    def merge_running_run_metadata(
+        self,
+        run_id: str,
+        key: str,
+        value: Optional[dict[str, Any]],
+    ) -> bool:
+        """Set (or drop) ONE key on a ``running`` run's metadata document.
+
+        Restricted to ``running`` rows because every caller is an in-flight execution
+        describing itself: a terminal run's worker is by definition already gone, and
+        re-stamping one would hand startup recovery a pid that has since been
+        recycled.
+
+        Read-modify-write of ``metadata_json`` inside one transaction: the column is
+        a whole-blob JSON document, so a bare UPDATE of the key would drop whatever
+        the enqueue and the notice machinery put there.
+        """
+
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status.in_(_status_query_values("running")))
+                .limit(1)
+            ).mappings().first()
+            if not row:
+                return False
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if value is None:
+                if key not in metadata:
+                    return False
+                metadata.pop(key, None)
+            else:
+                metadata[key] = dict(value)
+            result = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status.in_(_status_query_values("running")))
+                .values(metadata_json=_json_dumps(metadata), updated_at=now)
+            )
+            return bool(result.rowcount)
+
+    def record_command_worker(
+        self,
+        run_id: str,
+        identity: Optional[dict[str, Any]],
+    ) -> bool:
+        """Remember (or forget) the isolated supervisor a command run has spawned.
+
+        Written the instant the child exists and cleared the instant it is reaped, so
+        the window in which a SIGKILLed service leaves an untracked orphan is the
+        spawn itself.
+        """
+
+        return self.merge_running_run_metadata(
+            run_id, COMMAND_WORKER_METADATA_KEY, identity
+        )
+
+    def record_command_snapshot(
+        self,
+        run_id: str,
+        snapshot: Optional[dict[str, Any]],
+    ) -> bool:
+        """Re-stamp what this run is ABOUT TO RUN, over what its enqueue predicted.
+
+        The enqueue writes the snapshot from the definition row as it stood then, but
+        the executor re-reads the definition after claiming the run -- so an edit
+        committed in the enqueue-to-claim window left the run naming command A while
+        command B ran, and the notice, the escalation prompt and the Workbench run
+        detail all repeated that wrong answer with the authority of a snapshot.
+
+        Called from the execution path with the exact definition instance being
+        executed, which is the only object that can settle the question.
+        """
+
+        return self.merge_running_run_metadata(
+            run_id, COMMAND_SNAPSHOT_METADATA_KEY, snapshot
+        )
+
+    def list_running_command_workers(self) -> list[dict[str, Any]]:
+        """Every ``running`` run that still names a command worker.
+
+        Called at startup BEFORE ``recover_processing_runs`` settles these rows, which
+        is the only moment the association between a run and its orphaned child is
+        still on disk. A failure here is not a licence to settle them: the caller
+        leaves the records untouched, and ``recover_processing_runs`` reads the record
+        off each row rather than trusting this list.
+
+        Also called per fire, to ask whether the definition about to run still has a
+        worker recorded from an earlier one -- hence ``definition_id`` in each entry.
+        Without it a caller can see that *some* worker survives but not whose, and "some
+        command is running" is not a reason to skip a different one.
+        """
+
+        with self.engine.connect() as conn:
+            rows = list(
+                conn.execute(
+                    select(
+                        agent_runs.c.id,
+                        agent_runs.c.definition_id,
+                        agent_runs.c.metadata_json,
+                    ).where(agent_runs.c.status.in_(_status_query_values("running")))
+                ).mappings()
+            )
+        workers: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                continue
+            identity = metadata.get(COMMAND_WORKER_METADATA_KEY)
+            if isinstance(identity, dict):
+                definition_id = row["definition_id"]
+                workers.append(
+                    {
+                        "run_id": str(row["id"]),
+                        "definition_id": str(definition_id) if definition_id else None,
+                        "identity": identity,
+                    }
+                )
+        return workers
 
     def update_run_status(
         self,
@@ -3772,6 +4317,9 @@ class SQLiteBackgroundTaskStore:
         task_id: Optional[str] = None,
         session_key: Optional[str] = None,
         session_id: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None,
     ) -> Optional[str]:
         """Terminalize a non-terminal run in one guarded write.
 
@@ -3794,6 +4342,12 @@ class SQLiteBackgroundTaskStore:
         are written whether or not the status transition lands — otherwise routing
         the completion through this guarded writer would lose them on exactly the
         rows another actor settled first.
+
+        ``exit_code`` / ``stdout`` / ``stderr`` are the opposite kind of value: a
+        command run's OUTCOME. They ride the guarded transition alongside ``error``,
+        so a run another actor already settled -- a ``vibe runs cancel`` that won the
+        race, say -- does not have its terminal story overwritten by the losing fire's
+        output.
 
         Returns the terminal status actually written, or ``None`` when nothing was
         written (already terminal, deferred, or missing).
@@ -3846,6 +4400,12 @@ class SQLiteBackgroundTaskStore:
                     values["error"] = str(error)
                 if result_text is not None:
                     values["result_text"] = str(result_text)
+                if exit_code is not None:
+                    values["exit_code"] = int(exit_code)
+                if stdout is not None:
+                    values["stdout"] = str(stdout)
+                if stderr is not None:
+                    values["stderr"] = str(stderr)
                 _merge_owed_failure_notice(
                     values,
                     conn=conn,
@@ -4032,6 +4592,25 @@ class SQLiteBackgroundTaskStore:
         _publish_run_rows_updated([row_to_publish])
         return transitioned
 
+    def find_escalation_run(self, *, parent_run_id: str) -> Optional[dict[str, Any]]:
+        """Return the escalation Run one failed command fire queued.
+
+        ``run_type`` plus ``parent_run_id`` is the durable linkage: the escalation is
+        inserted by the stamp transaction carrying both, so it is findable from the fire
+        even by a caller that never saw the enqueue -- a settlement reached through a
+        ``CancelledError``, or a later pass entirely.
+        """
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.run_type == "task_escalation")
+                .where(agent_runs.c.parent_run_id == parent_run_id)
+                .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                .limit(1)
+            ).mappings().first()
+            return self._run_from_row(row) if row else None
+
     def find_callback_run(
         self,
         *,
@@ -4059,6 +4638,23 @@ class SQLiteBackgroundTaskStore:
         interrupt_reason: str,
         cancellation_error: str,
     ) -> None:
+        """Settle every run a dead service left ``running``, except live workers.
+
+        A run that STILL CARRIES a ``command_worker`` record is left alone: that
+        record is readable only while the row is ``running``, so settling it here
+        would strip a surviving orphan's only durable name, and no later start could
+        find that process even in principle.
+
+        THE ROW ITSELF IS THE PREDICATE, not a set passed in by the caller. The
+        recovery pass runs after ``_reap_orphaned_command_workers``, which decides
+        each worker's fate by WRITING it -- cleared once the process is proven dead
+        or the retries are spent, re-stamped while it may still be running -- so the
+        surviving record is already the answer, read here inside the very transaction
+        that would otherwise settle the row. Asking a separate query instead made a
+        momentary read failure ("I could not enumerate") mean "there is nothing to
+        protect", which is the one mistake whose damage cannot be undone.
+        """
+
         with run_update_event_transaction(self.engine) as conn:
             now = _utc_now_iso()
             rows = list(
@@ -4078,6 +4674,11 @@ class SQLiteBackgroundTaskStore:
                 ):
                     continue
                 run_id = str(row["id"])
+                row_metadata = _json_loads(row["metadata_json"], {})
+                if isinstance(row_metadata, dict) and row_metadata.get(
+                    COMMAND_WORKER_METADATA_KEY
+                ):
+                    continue
                 if row["pid"] is None:
                     requeued_ids.append(run_id)
                     continue
@@ -4900,7 +5501,9 @@ class SQLiteBackgroundTaskStore:
         ``succeeded`` on every write, and a ``succeeded`` row bearing the watch's
         ``definition_id`` sitting between two failures CLOSES the streak, so every
         watch failure would read as a first failure and notify. Fixing only the
-        deferral predicate would trade a permanent silence for daily spam.
+        deferral predicate would trade a permanent silence for daily spam. An
+        escalation turn is the same shape one definition type along: it settles
+        ``succeeded`` between two failed fires of the command that queued it.
 
         Interruptions are dropped HERE, in SQL, rather than while classifying: they
         are transparent to a streak — neither joining one nor closing one — so a row
@@ -4912,12 +5515,7 @@ class SQLiteBackgroundTaskStore:
         return (
             select(*columns)
             .where(agent_runs.c.definition_id == definition_id)
-            .where(
-                or_(
-                    agent_runs.c.run_type.is_(None),
-                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
-                )
-            )
+            .where(_is_a_definition_verdict())
             .where(_not_an_out_of_band_interruption())
         )
 
@@ -5282,10 +5880,12 @@ class SQLiteBackgroundTaskStore:
     # because the ``LIMIT`` is applied to whatever the predicates let through —
     # anything the classifier would ignore must never reach it:
     #
-    # 1. the watch supervisor heartbeat (``run_type = watch_runtime``), which shares
-    #    the watch's ``definition_id``, is refreshed to the waiter's ``started_at``
-    #    on every restart, and flips its predecessor to ``succeeded`` — so it both
-    #    presents as the newest "run" and closes a failure streak;
+    # 1. rows that carry a definition's id without being a verdict on it
+    #    (``_NON_VERDICT_RUN_TYPES``): the watch supervisor heartbeat, refreshed to the
+    #    waiter's ``started_at`` on every restart and flipping its predecessor to
+    #    ``succeeded``; and the ``--on-failure agent`` escalation turn, which settles
+    #    ``succeeded`` when the Agent answers — on the very failure it was queued to
+    #    report. Both present as the newest "run" AND close a failure streak;
     # 2. nonterminal executions: a failing recurring definition's next fire is the
     #    newest row for the definition and is not an outcome, so reading "the latest
     #    run failed" off it reports an actively failing definition as healthy for the
@@ -5326,21 +5926,20 @@ class SQLiteBackgroundTaskStore:
         batch with one value, so without the secondary key "the last success" is whichever
         row SQLite happens to return first).
 
-        ``watch_runtime`` is excluded for the same reason the health window excludes it:
-        the supervisor heartbeat is not the definition succeeding, and it flips to
-        ``succeeded`` on every restart — so without this term a permanently broken watch
-        would report a fresh "last succeeded" instant on every service restart.
+        NON-VERDICT ROW CLASSES ARE EXCLUDED for the same reason the health window
+        excludes them (``_NON_VERDICT_RUN_TYPES``), and this read is where the damage is
+        most direct, because the instant it returns is printed in the notice as the last
+        time the thing WORKED: the supervisor heartbeat is not the watch succeeding and
+        flips to ``succeeded`` on every restart, so a permanently broken watch would
+        report a fresh instant per restart; and a ``--on-failure agent`` escalation is
+        not the command succeeding — it succeeds by REPORTING that the command failed —
+        so the notice would date the outage from the report of the outage.
         """
 
         statement = (
             select(_SETTLED_AT)
             .where(agent_runs.c.definition_id == str(definition_id))
-            .where(
-                or_(
-                    agent_runs.c.run_type.is_(None),
-                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
-                )
-            )
+            .where(_is_a_definition_verdict())
             .where(agent_runs.c.status.in_(_status_query_values("succeeded")))
             .order_by(_SETTLED_AT.desc(), agent_runs.c.id.desc())
             .limit(1)
@@ -5417,12 +6016,7 @@ class SQLiteBackgroundTaskStore:
             # Correlated to the id currently being iterated, which is what makes the
             # LIMIT below per-definition rather than per-batch.
             .where(agent_runs.c.definition_id == id_list.c.value)
-            .where(
-                or_(
-                    agent_runs.c.run_type.is_(None),
-                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
-                )
-            )
+            .where(_is_a_definition_verdict())
             .where(agent_runs.c.status.in_(verdicts))
             .where(settled_at >= cutoff)
             # The same expression the streak read excludes interruptions with, shared
@@ -5664,12 +6258,14 @@ class SQLiteBackgroundTaskStore:
             "cron": payload.get("cron"),
             "run_at": payload.get("run_at"),
             "timezone": payload.get("timezone") or "UTC",
-            "command_json": None,
-            "shell_command": None,
+            # Command tasks reuse the watch columns, but None-preserving: a message
+            # task must keep every one of them NULL (no watch-style defaults here).
+            "command_json": _json_dumps(payload["command"]) if payload.get("command") else None,
+            "shell_command": payload.get("shell_command"),
             "prefix": None,
             "cwd": payload.get("cwd"),
             "mode": None,
-            "timeout_seconds": None,
+            "timeout_seconds": float(payload["timeout_seconds"]) if payload.get("timeout_seconds") is not None else None,
             "lifetime_timeout_seconds": None,
             "retry_exit_codes_json": None,
             "retry_delay_seconds": None,
@@ -5686,7 +6282,10 @@ class SQLiteBackgroundTaskStore:
             "last_run_at": payload.get("last_run_at"),
             "last_run_id": payload.get("last_run_id"),
             "last_error": payload.get("last_error"),
-            "last_exit_code": None,
+            # Runtime state, but written through the same FULL-ROW upsert every
+            # definition edit uses: hardcoding None here would silently clear a
+            # recorded exit code on the next unrelated write.
+            "last_exit_code": payload.get("last_exit_code"),
             "metadata_json": _json_dumps(payload.get("metadata") or {}),
         }
 
@@ -5798,6 +6397,10 @@ class SQLiteBackgroundTaskStore:
             "cron": row["cron"],
             "run_at": row["run_at"],
             "timezone": row["timezone"] or "UTC",
+            "shell_command": row["shell_command"],
+            "command": _json_loads(row["command_json"], None),
+            "timeout_seconds": float(row["timeout_seconds"]) if row["timeout_seconds"] is not None else None,
+            "last_exit_code": row["last_exit_code"],
             "enabled": bool(row["enabled"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -6018,6 +6621,7 @@ class SQLiteBackgroundTaskStore:
                 last_run_at=row.get("last_run_at"),
                 last_exit_code=row.get("last_exit_code"),
                 last_error=row.get("last_error"),
+                timed_out=_definition_timed_out(row.get("metadata")),
             )
             row["next_run_at"] = compute_next_run_at(
                 enabled=bool(row.get("enabled")),

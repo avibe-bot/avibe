@@ -11,7 +11,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Dict, Mapping, NamedTuple, Optional, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -61,13 +61,30 @@ from storage.agent_session_rows import (
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
+from core.command_runner import (
+    SupervisedCommandStartupError,
+    command_line_preview,
+    run_supervised_command,
+)
 from core.delivery_evidence import (
     ACK_EVIDENCE_DELIVERY_ONLY,
     ACK_EVIDENCE_RECEIPT,
     STAGE_PERSIST,
     DeliveryEvidence,
 )
+from core.process_isolation import (
+    PersistedProcessIdentity,
+    orphaned_process_tree_presence,
+    process_identity_from_payload,
+    reap_orphaned_process_tree,
+    serialize_process_identity,
+)
+from core.watch_worker import decode_watch_worker_error, localize_worker_error
 from storage.background import (
+    COMMAND_SNAPSHOT_METADATA_KEY,
+    COMMAND_TIMED_OUT_METADATA_KEY,
+    COMMAND_WORKER_METADATA_KEY,
+    COMMAND_WORKER_REAP_ATTEMPTS_KEY,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
     NOTICE_FAILED,
@@ -132,6 +149,39 @@ def _adopt_delivery_evidence(target: DeliveryEvidence, source: DeliveryEvidence)
     target.send_returned = source.send_returned
     target.error = source.error
     target.error_stage = source.error_stage
+
+
+#: How much of a failing command's stderr may ride the one-line error text. The full
+#: stream is on the run row; this is only the hint the CLI list and the notice show.
+_COMMAND_ERROR_DETAIL_MAX_CHARS = 200
+
+
+def _last_nonempty_line(text: Optional[str]) -> str:
+    """The LAST non-empty stderr line, trimmed -- the usual place the cause is.
+
+    A failing command's stderr commonly ends with the sentence that explains the
+    failure (a traceback's exception line, a shell's "command not found"), while the
+    first lines are warnings and progress noise.
+    """
+
+    for line in reversed((text or "").splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped[:_COMMAND_ERROR_DETAIL_MAX_CHARS]
+    return ""
+
+
+def _format_seconds(seconds: float) -> str:
+    """A duration as the user wrote it: ``3600``, ``0.5``, ``1.9``.
+
+    ``--timeout`` is a float, so ``int()`` was not rounding, it was DELETING the value
+    for every sub-second limit: ``--timeout 0.5`` reported "timed out after 0
+    second(s)", a sentence that describes an impossible event and hides the actual
+    setting the user has to change.
+    """
+
+    value = float(seconds)
+    return str(int(value)) if value.is_integer() else f"{value:g}"
 
 
 def _json_loads(value: str | None, default: Any) -> Any:
@@ -453,6 +503,17 @@ class TaskExecutionResult:
     failure_code: Optional[str] = None
     complete_on_return: bool = True
     reconcile_delivery_on_return: bool = False
+    #: Command-task outcome facts, all ``None`` for a message task. They ride the
+    #: result rather than being written by the executor so the run row's terminal
+    #: write stays a single guarded statement in ``complete()``.
+    exit_code: Optional[int] = None
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
+    #: The Agent turn a failed ``--on-failure agent`` command fire queued, already
+    #: durable when this is set. It rides the run row's metadata so the settle that
+    #: transitions the run also records that its failure has a REPORT, which is what
+    #: suppresses the owed failure notice for the same failure.
+    escalation_run_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -522,15 +583,84 @@ BINDING_FOLLOWS_SESSION_METADATA_KEY = "binding_follows_session"
 #: Each entry: ``{"session_id": str, "reason": str, "at": iso8601}``.
 ORPHANED_RESERVATIONS_METADATA_KEY = "orphaned_reservations"
 
+#: Wall-clock ceiling applied to a command task that stored no ``timeout_seconds``.
+#: Six hours: long enough that an ordinary batch job is never cut short, short
+#: enough that a wedged child cannot hold a run row ``running`` forever. A stored
+#: ``0`` is NOT this default -- it flows through the runner as "no timeout".
+COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS = 21600.0
+
+#: Retained bytes per output stream for one command run. The runner keeps draining
+#: the child past the cap, so a chatty command is truncated in the run row rather
+#: than deadlocked on a full pipe.
+COMMAND_TASK_OUTPUT_CAP_BYTES = 64 * 1024
+
+def command_snapshot(task: Any) -> Optional[dict[str, Any]]:
+    """The ``{"shell", "argv"}`` record of what a command definition would run.
+
+    A run row carried an exit code and output but never the command, so every reader
+    -- the failure notice, ``vibe runs show``, the Workbench run detail -- had to go
+    back to the definition for the copy. The definition is mutable and deletable, and
+    the notice drain is asynchronous, so by the time a reader asked, the answer could
+    be a command that never ran (the user rewrote it after the fire) or no answer at
+    all (the user deleted the task). A run is an immutable record of one execution;
+    what it executed belongs ON it.
+
+    The SQLite backend stamps the same key from the authoritative definition row
+    inside its enqueue transaction; this is the file backend's copy of that write.
+    ``None`` for a definition that has no command, so a caller can merge the result
+    unconditionally without stamping an empty key onto every Agent run's metadata.
+    """
+
+    if not getattr(task, "has_command", False):
+        return None
+    shell_command = getattr(task, "shell_command", None)
+    argv = getattr(task, "command", None)
+    return {
+        "shell": shell_command or None,
+        "argv": [str(part) for part in (argv or [])],
+    }
+
+
+def command_snapshot_of_run(run: Any) -> Optional[SimpleNamespace]:
+    """The snapshot a run carries, shaped like the definition readers already accept.
+
+    Returns an object exposing ``has_command`` / ``shell_command`` / ``command`` so
+    the preview helpers take it and a ``ScheduledTask`` through the same code path.
+    ``None`` when the run predates the snapshot or is not a command run at all -- the
+    callers fall back to the live definition there, which is the best (and, for those
+    rows, the only) answer available.
+    """
+
+    if not isinstance(run, dict):
+        return None
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    snapshot = metadata.get(COMMAND_SNAPSHOT_METADATA_KEY)
+    if not isinstance(snapshot, dict):
+        return None
+    shell_command = snapshot.get("shell")
+    raw_argv = snapshot.get("argv")
+    argv = [str(part) for part in raw_argv] if isinstance(raw_argv, (list, tuple)) else []
+    shell_command = str(shell_command) if isinstance(shell_command, str) else None
+    if not shell_command and not argv:
+        return None
+    return SimpleNamespace(
+        has_command=True,
+        shell_command=shell_command,
+        command=argv,
+    )
+
 #: What a fire reports when its terminal stamp was REFUSED by the guarded
-#: full-row write (HFR-261/HFR-264). Plain text, like every other value that
-#: reaches ``last_error`` and the run ledger's ``error`` from this module (the
-#: rebind/pause details right below, ``str(exc)``, the reclaim's pause reason), so
-#: one outcome channel does not carry two different string conventions.
-_TASK_RESULT_NOT_RECORDED_ERROR = (
-    "the result of this run could not be recorded: the task was reclaimed, "
-    "repointed or removed while it was running, so its stored state is unchanged"
-)
+#: full-row write (HFR-261/HFR-264). Translated, not plain text: this is a sentence
+#: THIS MODULE composes for a user, and it lands in the run ledger's ``error`` --
+#: the same column ``harness.command.timedOut`` / ``exited`` and the settlement
+#: reasons in ``core/run_settlement.py`` already fill through ``vibe/i18n``, rendered
+#: verbatim in the Harness detail pane, the CLI and the failure notice. The values
+#: that stay untranslated on this channel are the ones nobody here wrote -- ``str(exc)``
+#: from an arbitrary exception, a worker's own stderr -- so "one convention per
+#: channel" is the wrong reading: the line is between OUR copy and QUOTED text.
+_TASK_RESULT_NOT_RECORDED_I18N_KEY = "harness.task.resultNotRecorded"
 
 #: "No value was supplied", as distinct from "the supplied value is ``None``".
 #: A reclaim snapshot records a session's ``model`` / ``reasoning_effort`` as
@@ -831,6 +961,38 @@ def _created_by_caller(task: Any, run_metadata: Any) -> Optional[dict[str, Any]]
     return caller if isinstance(caller, dict) else None
 
 
+def _coerce_command_argv(value: Any) -> Optional[list[str]]:
+    """An argv list of strings, or ``None`` for absent/empty/malformed input.
+
+    ``[]`` collapses to ``None`` on purpose: an empty argv is not a command, and the
+    storage layer must keep the column NULL so ``has_command`` stays False.
+    """
+
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(item, str) for item in value):
+        return None
+    return [str(item) for item in value]
+
+
+def _coerce_optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class ScheduledTask:
     id: str
@@ -853,6 +1015,29 @@ class ScheduledTask:
     last_run_at: Optional[str] = None
     last_error: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Command tasks run a subprocess instead of messaging an Agent. All four stay
+    # ``None`` for a message task, which is what keeps its stored columns NULL.
+    shell_command: Optional[str] = None
+    command: Optional[list[str]] = None
+    timeout_seconds: Optional[float] = None
+    last_exit_code: Optional[int] = None
+
+    @property
+    def has_command(self) -> bool:
+        """Whether this definition runs a command rather than prompting an Agent."""
+
+        return bool(self.shell_command or self.command)
+
+    @property
+    def on_failure(self) -> str:
+        """What a failed command run should do; ``"none"`` when unset.
+
+        Kept in ``metadata`` rather than a column: it is a command-task-only policy,
+        and the CLI owns validating which values are accepted.
+        """
+
+        value = str((self.metadata or {}).get("on_failure") or "none").strip().lower()
+        return value or "none"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -880,6 +1065,10 @@ class ScheduledTask:
             last_run_at=payload.get("last_run_at"),
             last_error=payload.get("last_error"),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            shell_command=(str(payload["shell_command"]) if payload.get("shell_command") else None),
+            command=_coerce_command_argv(payload.get("command")),
+            timeout_seconds=_coerce_optional_float(payload.get("timeout_seconds")),
+            last_exit_code=_coerce_optional_int(payload.get("last_exit_code")),
         )
 
 
@@ -1156,15 +1345,33 @@ class ScheduledTaskStore:
             metadata=task.metadata,
         )
 
+    @property
+    def sqlite_backend(self) -> Optional[SQLiteBackgroundTaskStore]:
+        """The SQLite backend behind this store, or ``None`` for the file backend.
+
+        The guard ``_write_task`` applies lives in SQLite; the file backend has no
+        compare-and-set at all. Exposed so a caller can ask whether a guarded stamp and
+        an outbox row can be committed together (HFR-269).
+        """
+
+        return self._sqlite
+
     def _write_task(
         self,
         task: ScheduledTask,
         expect: DefinitionWriteExpectation,
         *,
+        queued_run: Optional[dict[str, Any]] = None,
+        expected_uncanceled_run_id: Optional[str] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """Persist a whole task row; ``False`` means the guard refused the write.
+
+        ``queued_run`` is an ``agent_runs`` outbox payload this write AUTHORISES; it is
+        committed in the SAME transaction as the row (HFR-269), so a refusal or a
+        failure leaves neither behind. Only the SQLite backend can do that, and passing
+        one to the file backend is a caller bug -- see ``sqlite_backend``.
 
         On refusal the in-memory mirror is reloaded, so the store never keeps serving
         the mutated task that the database rejected -- and on a RAISED write too
@@ -1177,14 +1384,33 @@ class ScheduledTaskStore:
 
         try:
             if self._sqlite is None:
+                # The watch store's answer, replicated verbatim: REFUSE rather than
+                # save-then-enqueue. A file-backed store cannot make the two writes one
+                # decision at all, and a best-effort second write is exactly the
+                # two-commits bug HFR-269 removed.
+                if queued_run is not None:
+                    raise ValueError(
+                        "a file-backed scheduled task store cannot commit a queued run "
+                        "with the task row"
+                    )
                 self._save()
                 return True
-            landed = self._sqlite.upsert_scheduled_task(
-                task.to_dict(),
-                expect=expect,
-                expected_enabled_agent_id=expected_enabled_agent_id,
-                expected_reference_agent_id=expected_reference_agent_id,
-            )
+            if queued_run is None:
+                landed = self._sqlite.upsert_scheduled_task(
+                    task.to_dict(),
+                    expect=expect,
+                    expected_enabled_agent_id=expected_enabled_agent_id,
+                    expected_reference_agent_id=expected_reference_agent_id,
+                )
+            else:
+                # No agent-guard kwargs: the only caller that passes a queued run is
+                # ``mark_task_result``, which never passes them either.
+                landed = self._sqlite.upsert_scheduled_task_with_queued_run(
+                    task.to_dict(),
+                    expect=expect,
+                    run_payload=queued_run,
+                    expected_uncanceled_run_id=expected_uncanceled_run_id,
+                )
         except Exception:
             self._reload_after_lost_write(task.id)
             raise
@@ -1270,6 +1496,9 @@ class ScheduledTaskStore:
         cron: Optional[str] = None,
         run_at: Optional[str] = None,
         timezone_name: str,
+        shell_command: Optional[str] = None,
+        command: Optional[list[str]] = None,
+        timeout_seconds: Optional[float] = None,
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
@@ -1290,6 +1519,9 @@ class ScheduledTaskStore:
             run_at=run_at,
             timezone=timezone_name,
             metadata=dict(metadata or {}),
+            shell_command=shell_command,
+            command=command,
+            timeout_seconds=timeout_seconds,
         )
         return self.upsert_task(
             task,
@@ -1349,6 +1581,10 @@ class ScheduledTaskStore:
         session_policy: Optional[str] = None,
         cwd: Optional[str] = None,
         update_cwd: bool = False,
+        shell_command: Optional[str] = None,
+        command: Optional[list[str]] = None,
+        timeout_seconds: Optional[float] = None,
+        update_command_fields: bool = False,
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
@@ -1374,6 +1610,12 @@ class ScheduledTaskStore:
         task.cron = cron
         task.run_at = run_at
         task.timezone = timezone_name
+        if update_command_fields:
+            # Gated like ``cwd``: an edit that says nothing about the command must not
+            # clear it, and ``last_exit_code`` is runtime state no edit ever rewrites.
+            task.shell_command = shell_command
+            task.command = command
+            task.timeout_seconds = timeout_seconds
         if metadata is not None:
             task.metadata = dict(metadata)
         task.updated_at = _utc_now_iso()
@@ -1485,7 +1727,30 @@ class ScheduledTaskStore:
         error: Optional[str],
         disable_one_shot: bool = True,
         expected_binding: Optional[tuple[Optional[str], str, str]] = None,
+        exit_code: Optional[int] = None,
+        records_command_outcome: bool = False,
+        timed_out: bool = False,
+        queued_run: Optional[dict[str, Any]] = None,
+        expected_uncanceled_run_id: Optional[str] = None,
     ) -> bool:
+        """Stamp a fire's outcome; ``False`` means the store refused the write.
+
+        ``queued_run`` is the outbox row this stamp AUTHORISES -- today the
+        ``--on-failure agent`` escalation turn. Passing it makes the stamp and the turn
+        ONE transaction (HFR-269): both land or neither does, so no teardown can commit
+        between them and a failed one-shot ``at`` task cannot be disabled while losing
+        the report that explains why.
+
+        ``records_command_outcome`` marks the ONE stamp that is a command fire's own
+        result, and it is what makes ``exit_code`` authoritative in both directions --
+        see the write below.
+
+        ``expected_uncanceled_run_id`` re-asserts, inside that same transaction, that
+        the fire being stamped has not been stopped -- see
+        ``upsert_scheduled_task_with_queued_run``. Only meaningful alongside
+        ``queued_run``, because it exists to stop a stopped run queuing an Agent turn.
+        """
+
         self.maybe_reload()
         task = self._tasks.get(task_id)
         if task is None:
@@ -1499,6 +1764,29 @@ class ScheduledTaskStore:
         expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
         task.last_error = error
+        if records_command_outcome:
+            # A COMMAND FIRE'S OWN STAMP OWNS THIS COLUMN, ``None`` included. A fire
+            # that never reached a process -- a working directory that vanished, a
+            # supervisor that died during startup -- has no status of its own, and
+            # leaving the previous fire's code on the row made every surface report
+            # "exited 7" beside a failure that ran no command. The notice already
+            # refuses to print an exit code it does not have; the row must refuse to
+            # keep one it no longer has.
+            task.last_exit_code = int(exit_code) if exit_code is not None else None
+            # AND WHETHER THE SCHEDULER IS WHY IT STOPPED, which the code cannot say on
+            # its own: the runner reports its own timeout as 124, and a command that
+            # wraps itself in ``timeout`` reports a real one as 124 too. Written on
+            # every command stamp, both values, so a fire that did NOT time out
+            # positively clears the previous fire's claim that one did.
+            task.metadata = {
+                **(task.metadata if isinstance(task.metadata, dict) else {}),
+                COMMAND_TIMED_OUT_METADATA_KEY: bool(timed_out),
+            }
+        elif exit_code is not None:
+            # A stamp from any other lane reports the code only when it has one: a
+            # message task has none and must never blank what a command fire of the
+            # same definition recorded.
+            task.last_exit_code = int(exit_code)
         if disable_one_shot and task.schedule_type == "at":
             task.enabled = False
         task.updated_at = _utc_now_iso()
@@ -1506,7 +1794,12 @@ class ScheduledTaskStore:
         # guarded: this payload carries the mirror's ``session_id`` and ``enabled``, so
         # a run result landing after a ``/new`` reclaim would re-enable the definition
         # and re-point it at the session the reclaim just tore down.
-        return self._write_task(task, expect)
+        return self._write_task(
+            task,
+            expect,
+            queued_run=queued_run,
+            expected_uncanceled_run_id=expected_uncanceled_run_id,
+        )
 
 
 class TaskExecutionStore:
@@ -1571,6 +1864,17 @@ class TaskExecutionStore:
         interrupt_reason: str = SETTLED_BY_RESTARTED,
         cancellation_error: Optional[str] = None,
     ) -> None:
+        """Settle the fires a dead service left ``running``.
+
+        A fire that still carries a ``command_worker`` record is left ``running``:
+        that record is the last name anyone has for a process this start could not
+        prove dead, and it is readable only while the row is ``running``. Settling it
+        would leave a backup or deployment running with nothing able to find it, so
+        the row waits for the next start to retry -- bounded by
+        ``_retain_unreaped_command_worker``, which stops re-stamping after
+        ``_MAX_COMMAND_WORKER_REAP_ATTEMPTS``.
+        """
+
         interruption_error = interruption_error or i18n_t(
             SETTLEMENT_I18N_KEYS[interrupt_reason],
             "en",
@@ -1600,38 +1904,114 @@ class TaskExecutionStore:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 payload = {}
+            stored_metadata = payload.get("metadata") if isinstance(payload, dict) else None
+            if isinstance(stored_metadata, dict) and stored_metadata.get(
+                COMMAND_WORKER_METADATA_KEY
+            ):
+                # Same rule as the SQLite pass: a surviving worker record means a
+                # process this start could not prove dead, and this file is the only
+                # place its identity is written. Requeuing is no safer than settling --
+                # it would run the command again alongside the one still running.
+                continue
             if not isinstance(payload, dict) or not payload.get("pid"):
                 path.replace(pending_path)
                 continue
-            now = _utc_now_iso()
-            metadata = payload.get("metadata")
-            canceled = bool(payload.get("cancel_requested"))
-            effective_error = cancellation_error if canceled else interruption_error
-            effective_reason = SETTLED_BY_STOPPED if canceled else interrupt_reason
-            payload.update(
-                {
-                    "status": "canceled" if canceled else "failed",
-                    "ok": False,
-                    "error": effective_error,
-                    "completed_at": now,
-                    "updated_at": now,
-                    "metadata": {
-                        **(metadata if isinstance(metadata, dict) else {}),
-                        "interrupt_reason": effective_reason,
-                    },
-                }
+            self._settle_processing_file(
+                path,
+                payload,
+                interruption_error=interruption_error,
+                cancellation_error=cancellation_error,
+                interrupt_reason=interrupt_reason,
             )
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=self.completed_dir,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, indent=2)
-                tmp_path = Path(handle.name)
-            tmp_path.replace(completed_path)
-            path.unlink(missing_ok=True)
+
+    def _settle_processing_file(
+        self,
+        path: Path,
+        payload: dict[str, Any],
+        *,
+        interruption_error: str,
+        cancellation_error: str,
+        interrupt_reason: str,
+    ) -> str:
+        """Write one processing file out to ``completed`` as a result-less terminal.
+
+        The file store's only settlement primitive, shared by the startup pass above and
+        the per-run settle below so that both write the same row. A cancel the user
+        already requested wins the status and the reason: they asked before the service
+        could answer, and the answer never came.
+        """
+
+        now = _utc_now_iso()
+        metadata = payload.get("metadata")
+        canceled = bool(payload.get("cancel_requested"))
+        status = "canceled" if canceled else "failed"
+        payload.update(
+            {
+                "status": status,
+                "ok": False,
+                "error": cancellation_error if canceled else interruption_error,
+                "completed_at": now,
+                "updated_at": now,
+                "metadata": {
+                    **(metadata if isinstance(metadata, dict) else {}),
+                    "interrupt_reason": SETTLED_BY_STOPPED if canceled else interrupt_reason,
+                },
+            }
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=self.completed_dir,
+            suffix=".tmp",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            json.dump(payload, handle, indent=2)
+            tmp_path = Path(handle.name)
+        tmp_path.replace(self.completed_dir / path.name)
+        path.unlink(missing_ok=True)
+        return status
+
+    def settle_recovered_run(
+        self,
+        run_id: str,
+        *,
+        interruption_error: str,
+        cancellation_error: str,
+        interrupt_reason: str = SETTLED_BY_RESTARTED,
+    ) -> Optional[str]:
+        """Terminalize the ONE run whose retained worker has just been proven dead.
+
+        ``recover_processing`` settles a whole start's worth of rows and deliberately
+        steps over any row that still names a worker; this settles the single row whose
+        worker was proven dead later, mid-life, once closing it can no longer orphan
+        anything. Both backends answer, because the leak is the same on both: a run left
+        ``running`` for a command that is long over, until some later start notices.
+
+        Returns the status written, or ``None`` when nothing was: the SQLite write is
+        status-scoped, and on the file store the processing file may already be gone.
+        """
+
+        if self._sqlite is not None:
+            return self.settle_without_result(
+                run_id,
+                terminal_status=SETTLEMENT_TERMINAL_STATUS.get(interrupt_reason, "failed"),
+                error=interruption_error,
+                metadata={"interrupt_reason": interrupt_reason},
+            )
+        processing_path = self._request_path(run_id, state="processing")
+        try:
+            payload = json.loads(processing_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return self._settle_processing_file(
+            processing_path,
+            payload,
+            interruption_error=interruption_error,
+            cancellation_error=cancellation_error,
+            interrupt_reason=interrupt_reason,
+        )
 
     def mark_execution_started(self, request_id: str) -> bool:
         """Persist the boundary between a bare claim and executing its coroutine."""
@@ -1664,6 +2044,116 @@ class TaskExecutionStore:
             tmp_path = Path(handle.name)
         tmp_path.replace(processing_path)
         return True
+
+    def record_command_worker(
+        self,
+        request_id: str,
+        identity: Optional[dict[str, Any]],
+    ) -> bool:
+        """Remember (or forget) the isolated supervisor this in-flight fire spawned.
+
+        See ``SQLiteBackgroundTaskStore.record_command_worker``.
+        """
+
+        return self._merge_inflight_metadata(
+            request_id, COMMAND_WORKER_METADATA_KEY, identity
+        )
+
+    def record_command_snapshot(
+        self,
+        request_id: str,
+        snapshot: Optional[dict[str, Any]],
+    ) -> bool:
+        """Re-stamp what this in-flight fire is about to run.
+
+        See ``SQLiteBackgroundTaskStore.record_command_snapshot``.
+        """
+
+        return self._merge_inflight_metadata(
+            request_id, COMMAND_SNAPSHOT_METADATA_KEY, snapshot
+        )
+
+    def _merge_inflight_metadata(
+        self,
+        request_id: str,
+        key: str,
+        value: Optional[dict[str, Any]],
+    ) -> bool:
+        """Set (or drop) one metadata key on an in-flight fire.
+
+        The file backend keeps the same keys in the processing payload's ``metadata``
+        so a store swapped in by a test observes the same contract as SQLite.
+        """
+
+        if self._sqlite is not None:
+            return self._sqlite.merge_running_run_metadata(request_id, key, value)
+        processing_path = self._request_path(request_id, state="processing")
+        try:
+            payload = json.loads(processing_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        metadata = payload.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        if value is None:
+            if key not in metadata:
+                return False
+            metadata.pop(key, None)
+        else:
+            metadata[key] = dict(value)
+        payload["metadata"] = metadata
+        payload["updated_at"] = _utc_now_iso()
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=self.processing_dir,
+            suffix=".tmp",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            json.dump(payload, handle, indent=2)
+            tmp_path = Path(handle.name)
+        tmp_path.replace(processing_path)
+        return True
+
+    def list_running_command_workers(self) -> list[dict[str, Any]]:
+        """Every in-flight fire that still names a command worker.
+
+        ``definition_id`` is part of the contract, not decoration: a caller asking
+        whether ITS definition still has a worker running filters on it, so a backend
+        that omits the field does not report "no worker" -- it reports it about every
+        definition at once, and single flight silently stops holding here. The file
+        payload spells the same association ``task_id`` (SQLite renamed that column),
+        so the field is normalized at this boundary rather than at each reader.
+        """
+
+        if self._sqlite is not None:
+            return self._sqlite.list_running_command_workers()
+        self._ensure_dirs()
+        workers: list[dict[str, Any]] = []
+        for path in sorted(self.processing_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            metadata = payload.get("metadata")
+            identity = (
+                metadata.get(COMMAND_WORKER_METADATA_KEY)
+                if isinstance(metadata, dict)
+                else None
+            )
+            if isinstance(identity, dict):
+                definition_id = payload.get("task_id")
+                workers.append(
+                    {
+                        "run_id": path.stem,
+                        "definition_id": str(definition_id) if definition_id else None,
+                        "identity": identity,
+                    }
+                )
+        return workers
 
     @staticmethod
     def queued_run_payload(request: TaskExecutionRequest) -> dict[str, Any]:
@@ -1728,6 +2218,13 @@ class TaskExecutionStore:
                     source_kind=source_kind,
                 )
             )
+        metadata = dict(task.metadata or {})
+        snapshot = command_snapshot(task)
+        if snapshot is not None:
+            # Taken HERE, where the run row is created, because this is the last moment
+            # at which the definition and the work about to run are the same thing. The
+            # definition is editable and deletable from this instant on; the run is not.
+            metadata[COMMAND_SNAPSHOT_METADATA_KEY] = snapshot
         return self.enqueue_definition_run(
             definition_id=task.id,
             run_type="scheduled",
@@ -1739,7 +2236,7 @@ class TaskExecutionStore:
             prompt=task.prompt,
             agent_name=task.agent_name,
             session_policy=task.session_policy,
-            metadata=task.metadata,
+            metadata=metadata,
         )
 
     def enqueue_definition_run(
@@ -1943,7 +2440,20 @@ class TaskExecutionStore:
             return [
                 TaskExecutionRequest.from_dict(item)
                 for item in self._sqlite.list_runs(status="pending")
-                if item.get("request_type") in {"task_run", "hook_send", "agent_run", "scheduled", "watch", "webhook"}
+                # ``task_escalation`` belongs here for the same reason ``hook_send``
+                # does: it is a queued Agent turn the drain loop must claim. Left out,
+                # the escalation row would be durable and never executed -- a failure
+                # report the atomic stamp promised and nothing ever delivered.
+                if item.get("request_type")
+                in {
+                    "task_run",
+                    "hook_send",
+                    "agent_run",
+                    "scheduled",
+                    "watch",
+                    "webhook",
+                    "task_escalation",
+                }
             ]
         self._ensure_dirs()
         requests: list[TaskExecutionRequest] = []
@@ -2024,6 +2534,24 @@ class TaskExecutionStore:
             and (_normalize_requested_run_status(run.get("status")) or run.get("status"))
             not in TERMINAL_RUN_STATUSES
         ]
+
+    def find_escalation_run(self, *, parent_run_id: str) -> Optional[dict[str, Any]]:
+        """Return the escalation Run one command fire queued, whatever its status.
+
+        The status is the CALLER's decision to make -- retracting one is only valid
+        while it is still non-terminal -- so this reports the row rather than filtering
+        it out and answering "there is none".
+        """
+
+        if self._sqlite is not None:
+            return self._sqlite.find_escalation_run(parent_run_id=parent_run_id)
+        for run in self._list_file_runs():
+            if (
+                run.get("request_type") == "task_escalation"
+                and run.get("parent_run_id") == parent_run_id
+            ):
+                return run
+        return None
 
     def find_callback_run(
         self,
@@ -2486,6 +3014,10 @@ class TaskExecutionStore:
         session_id: Optional[str] = None,
         interrupt_reason: Optional[str] = None,
         failure_code: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None,
+        escalation_run_id: Optional[str] = None,
     ) -> Optional[str]:
         """Settle one claimed request.
 
@@ -2505,6 +3037,16 @@ class TaskExecutionStore:
         passthrough at a completion site is how an unrelated key comes to overwrite
         ``interrupt_reason``, ``failure_code`` or the notice blob itself.
 
+        ``exit_code`` / ``stdout`` / ``stderr`` are a command fire's outcome facts and
+        stay ``None`` for every other request type.
+
+        ``escalation_run_id`` names the already-durable Agent turn that carries this
+        failure's report (``--on-failure agent``). It rides the metadata channel for
+        exactly the reason ``interrupt_reason`` does: ``_merge_owed_failure_notice``
+        applies ``extra_metadata`` BEFORE ``_owed_failure_notice_for_transition`` reads
+        it, so the marker is in place when the notice decision is made and the same
+        failure is not reported twice -- once as a turn, once as an alert.
+
         Returns the exact terminal status this call wrote, or ``None`` when another
         terminal owner already won.
         """
@@ -2514,6 +3056,8 @@ class TaskExecutionStore:
             extra_metadata["interrupt_reason"] = interrupt_reason
         if failure_code:
             extra_metadata["failure_code"] = failure_code
+        if escalation_run_id:
+            extra_metadata["escalation_run_id"] = escalation_run_id
         if self._sqlite is not None:
             # Guarded, NOT ``update_run_status``: that writer's UPDATE has no status
             # predicate, so an ordinary completion rewrote a status another actor had
@@ -2530,6 +3074,9 @@ class TaskExecutionStore:
                 session_key=session_key if session_key is not None else request.session_key,
                 session_id=session_id if session_id is not None else request.session_id,
                 metadata=extra_metadata,
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
             )
         processing_path = self._request_path(request.id, state="processing")
         completed_path = self._request_path(request.id, state="completed")
@@ -2537,6 +3084,7 @@ class TaskExecutionStore:
             return None
         terminal_status = "succeeded" if ok else "failed"
         payload = request.to_dict()
+        self._carry_inflight_writes(processing_path, payload)
         payload.update(
             {
                 "ok": ok,
@@ -2548,16 +3096,27 @@ class TaskExecutionStore:
                 "callback_session_id": request.callback_session_id,
             }
         )
-        if interrupt_reason or failure_code:
+        # Command outcome facts only when this fire produced them, so a message task's
+        # completed JSON keeps exactly the keys it has always had.
+        if exit_code is not None:
+            payload["exit_code"] = exit_code
+        if stdout is not None:
+            payload["stdout"] = stdout
+        if stderr is not None:
+            payload["stderr"] = stderr
+        if interrupt_reason or failure_code or escalation_run_id:
             # The file backend has no owed-notice machinery at all, so this records the
             # class where its only reader — an operator looking at the completed JSON —
             # can see it, rather than dropping the one fact the caller went to the
-            # trouble of classifying.
+            # trouble of classifying. ``escalation_run_id`` rides the same channel: it
+            # suppresses nothing here (there is nothing to suppress), but the pointer
+            # from a failure to the turn that reports it is the same kind of fact.
             existing = payload.get("metadata")
             payload["metadata"] = {
                 **(existing if isinstance(existing, dict) else {}),
                 **({"interrupt_reason": interrupt_reason} if interrupt_reason else {}),
                 **({"failure_code": failure_code} if failure_code else {}),
+                **({"escalation_run_id": escalation_run_id} if escalation_run_id else {}),
             }
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -2571,6 +3130,54 @@ class TaskExecutionStore:
         tmp_path.replace(completed_path)
         processing_path.unlink(missing_ok=True)
         return terminal_status
+
+    @staticmethod
+    def _carry_inflight_writes(processing_path: Path, payload: dict[str, Any]) -> None:
+        """Layer what was written to this run WHILE it ran onto its terminal payload.
+
+        ``complete`` composes that payload from the caller's ``TaskExecutionRequest``,
+        which is the copy taken at ENQUEUE: every in-flight write went to the processing
+        file and to nothing the caller holds. ``record_command_snapshot`` is one --
+        SCT-028's re-stamp of the command the executor really spawned, after its
+        post-claim reload of the definition -- so starting from the request alone
+        discarded it, and the completed run reported the definition as it stood BEFORE
+        an edit committed in that window. SQLite has no such gap: the metadata lives on
+        the row ``settle_run_terminal`` updates in place and is carried forward for free,
+        which is exactly why this backend has to do it deliberately. Same reason the
+        recovery writer (``_settle_processing_file``) composes from the file, and the two
+        terminal writers must not disagree about what a settled row remembers.
+
+        The file wins on ``metadata`` key by key rather than wholesale, so a key only
+        the request carries is not dropped by a store whose in-flight merges never saw
+        it, and the caller's own outcome facts still land afterwards. ``pid`` and
+        ``started_at`` come along for the same reason the metadata does: they exist only
+        because ``mark_execution_started`` wrote them here.
+        """
+
+        try:
+            stored = json.loads(processing_path.read_text(encoding="utf-8"))
+        except Exception:
+            # The payload composed from the request is still a truthful terminal record
+            # of the fire; it just forgets what ran. Failing the completion instead would
+            # leave the row ``running`` over bookkeeping.
+            logger.debug(
+                "failed to read in-flight state for %s while completing it",
+                processing_path.name,
+                exc_info=True,
+            )
+            return
+        if not isinstance(stored, dict):
+            return
+        stored_metadata = stored.get("metadata")
+        if isinstance(stored_metadata, dict):
+            existing = payload.get("metadata")
+            payload["metadata"] = {
+                **(existing if isinstance(existing, dict) else {}),
+                **stored_metadata,
+            }
+        for key in ("pid", "started_at"):
+            if stored.get(key) is not None:
+                payload[key] = stored[key]
 
     def settle_turn_participants(
         self,
@@ -2605,6 +3212,10 @@ class ScheduledTaskService:
     # simply leaves the rest queued and re-checks on the next tick. This caps
     # fan-out without re-introducing head-of-line blocking.
     _MAX_CONCURRENT_EXECUTIONS = 8
+    #: Starts allowed to try killing one surviving command worker. Retrying is what
+    #: gives an unkillable orphan a second chance at all; the cap is what stops its
+    #: run from being held ``running`` for the life of the install.
+    _MAX_COMMAND_WORKER_REAP_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -2655,6 +3266,13 @@ class ScheduledTaskService:
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._drain_dirty = True
         self._recover_activity_lifecycle()
+        # BEFORE ``recover_processing``, which nulls ``pid`` and settles these rows:
+        # the run is the only place the orphan's identity is recorded, so once it is
+        # terminal the child can never be found again. This pass decides each record by
+        # WRITING it -- cleared once the process is proven dead, re-stamped while it may
+        # still be running -- and ``recover_processing`` then leaves exactly the rows
+        # whose record survived, so the NEXT start can try again.
+        self._reap_orphaned_command_workers()
         self.request_store.recover_processing(
             interruption_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_RESTARTED]),
             cancellation_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
@@ -2671,6 +3289,417 @@ class ScheduledTaskService:
         config = getattr(self.controller, "config", None)
         lang = str(getattr(config, "language", "en") or "en")
         return i18n_t(key, lang, **kwargs)
+
+    def _localize_worker_error(self, stderr: Optional[str]) -> str:
+        """The shared worker-error decoder, reading this lane's copy.
+
+        Both lanes spawn the SAME supervisor, so both can receive its
+        machine-readable error line -- see ``core.watch_worker.localize_worker_error``.
+        The ``harness.command`` namespace is what keeps the sentence honest: a user
+        managing a cron job has no watch worker, and should not be told about one.
+        Ordinary command stderr passes through untouched.
+        """
+
+        return localize_worker_error(
+            stderr or "", self._t, namespace="harness.command"
+        )
+
+    def _require_command_worker_record(
+        self,
+        execution_id: str,
+        identity: Optional[PersistedProcessIdentity],
+    ) -> None:
+        """Refuse to run a command whose worker could not be durably named.
+
+        THE ONE MOMENT THIS CAN BE REFUSED FOR FREE. The supervisor is blocked reading
+        its spec off stdin, so the backup, deployment or migration has not started: an
+        exception here costs the user a reported failure, while continuing costs the
+        ability to ever find the process again if this service dies mid-command -- the
+        unrecoverable side of the same trade SCT-029/031/032 keep landing on. The runner
+        reaps the tree on the way out (the callback runs inside its protected block).
+
+        An UNCAPTURED identity is not that case and does not refuse. Its dominant cause
+        is a supervisor that has already exited -- ``psutil.NoSuchProcess`` -- where there
+        is no process to name and the handshake is about to report the worker's own,
+        better error; and an identity that could not be captured cannot be made
+        trustworthy by persisting it, because every kill path refuses a record it cannot
+        fully vouch for (``process_identity_from_payload``).
+
+        A refused stamp (``False``) means the row is no longer ``running``: the fire was
+        stopped or already settled, so nothing would ever read the record anyway. Failing
+        is right there too, and costs the user nothing -- a stop normalizes this fire to
+        ``canceled``, which owes no notice (SCT-027).
+        """
+
+        if identity is None:
+            logger.warning(
+                "command fire %s has no durable worker identity; a crash during this "
+                "command would leave it unfindable",
+                execution_id,
+            )
+            return
+        try:
+            stamped = self.request_store.record_command_worker(
+                execution_id, serialize_process_identity(identity)
+            )
+        except Exception as exc:
+            raise RuntimeError(self._t("harness.command.workerNotRecorded")) from exc
+        if not stamped:
+            raise RuntimeError(self._t("harness.command.workerNotRecorded"))
+
+    def _clear_command_worker(self, execution_id: str) -> None:
+        """Drop a fire's worker record, never failing the fire.
+
+        Best-effort on purpose, and the opposite trade from the stamp: this runs when
+        the process is gone or proven dead, so the record it removes protects nothing,
+        and a store hiccup must not turn a command that ran fine into a reported
+        failure. A record left behind by such a hiccup is harmless -- the next start
+        finds a pid it cannot vouch for and drops it.
+        """
+
+        try:
+            self.request_store.record_command_worker(execution_id, None)
+        except Exception:
+            logger.debug(
+                "failed to clear command worker for %s", execution_id, exc_info=True
+            )
+
+    def _record_executed_command(self, execution_id: str, task: ScheduledTask) -> None:
+        """Correct the run's command snapshot to the definition actually being run.
+
+        The enqueue stamped the definition as it stood THEN; this stamps it as it
+        stands at the moment of execution, which is the copy the fire will really
+        spawn (``_execute_claimed_request`` re-reads the definition after claiming).
+        An edit committed in that window otherwise left the notice, the escalation
+        prompt and the Workbench run detail naming a command that never ran.
+
+        Best-effort like the worker stamp: a store hiccup must degrade the record,
+        not fail a command that is about to run correctly.
+        """
+
+        try:
+            self.request_store.record_command_snapshot(
+                execution_id, command_snapshot(task)
+            )
+        except Exception:
+            logger.debug(
+                "failed to record executed command for %s", execution_id, exc_info=True
+            )
+
+    def _reap_orphaned_command_workers(self) -> None:
+        """Kill command workers this host left running when the service died.
+
+        Identity, not pid: between the crash and this pass the OS is free to reuse
+        the number, so a bare ``kill(pid)`` here would be a coin flip on the user's
+        other processes. Every kill path inside ``reap_orphaned_process_tree``
+        re-reads the live start time and ``AVIBE_PROCESS_IDENTITY`` marker and
+        refuses on any mismatch, and ``process_identity_from_payload`` refuses a
+        record it cannot fully trust -- in both directions the safe answer is to
+        leave the process alone and just drop the record.
+
+        The tree, not the leaf: the worker is a supervisor, and the backup or
+        migration doing the side effects is its child -- which is also why an empty
+        pid is not the end of the question. ``reap_orphaned_process_tree`` owns that
+        walk (the leader, then the group it left behind) so both worker lanes answer
+        it the same way.
+
+        THE PASS COMMUNICATES BY WRITING, and that is why it returns nothing. Only a
+        proven death retires the record; every maybe keeps it, and ``recover_processing``
+        -- which runs next -- leaves any fire still carrying one ``running``. Clearing
+        on a maybe throws away the ONLY durable handle on a backup or deployment that is
+        still writing, and it is unrecoverable: that row is where the identity lives, so
+        no later start can find the process even in principle.
+
+        So EVERY FAILURE HERE MUST LEAVE THE RECORD ALONE, including a failure to look.
+        Returning a "nothing to protect" answer on a read error was the same category
+        mistake one layer up: it licensed the settle pass to strip every live worker's
+        name. A row unexamined for any reason keeps its record, hence its ``running``
+        status, and ``_MAX_COMMAND_WORKER_REAP_ATTEMPTS`` stops the retries from
+        becoming a run that is ``running`` forever.
+        """
+
+        try:
+            workers = self.request_store.list_running_command_workers()
+        except Exception:
+            # Warning, not debug: nothing was killed and nothing was cleared, so any
+            # orphan from the last life survives this start untouched -- worth a line in
+            # the log, and safe, because the unread records keep their rows ``running``.
+            logger.warning(
+                "failed to list command workers for recovery; leaving their records "
+                "in place for the next start",
+                exc_info=True,
+            )
+            return
+        for worker in workers:
+            run_id = str(worker.get("run_id") or "")
+            payload = worker.get("identity")
+            pid = payload.get("pid") if isinstance(payload, dict) else None
+            expected = (
+                process_identity_from_payload(payload, pid)
+                if isinstance(pid, int) and not isinstance(pid, bool)
+                else None
+            )
+            # An untrusted payload counts as gone: every kill path refuses a record it
+            # cannot fully trust, on this pass and on every future one, so keeping it
+            # would pin the run ``running`` without ever buying a kill.
+            try:
+                outcome = (
+                    reap_orphaned_process_tree(
+                        logger,
+                        f"scheduled command worker {run_id}",
+                        expected_identity=expected,
+                    )
+                    if expected is not None
+                    else "gone"
+                )
+            except Exception:
+                # One row's inspection blowing up must not abort the loop: the rows
+                # after it would go unexamined AND the settle pass would never run, so
+                # every other interrupted run of every other type would stay ``running``.
+                logger.warning(
+                    "failed to inspect command worker from run %s; treating it as "
+                    "possibly alive",
+                    run_id,
+                    exc_info=True,
+                )
+                outcome = "unconfirmed"
+            if outcome == "unconfirmed" and run_id and self._retain_unreaped_command_worker(run_id, payload):
+                continue
+            if run_id:
+                self._clear_command_worker(run_id)
+
+    def _retain_unreaped_command_worker(
+        self,
+        run_id: str,
+        payload: Any,
+    ) -> bool:
+        """Keep an unkillable worker's identity for the next start, up to a limit.
+
+        ``True`` means the record was kept and the run must stay ``running`` for
+        ``list_running_command_workers`` to find it again. ``False`` is the give-up
+        answer, and it has exactly two grounds: the attempts are spent, or the row is
+        no longer ``running`` and so cannot hold a record at all. Then the run settles
+        and reports like any other interrupted fire rather than being held open by a
+        process that never exits.
+
+        A WRITE THAT FAILS IS NOT A GROUND. The caller's next line clears the record,
+        which is the one outcome this whole path exists to prevent: a locked database or
+        a lost connection during the re-stamp says nothing about the process, and
+        answering ``False`` there would hand a still-running backup's only durable name
+        to the very code that deletes it. The already-stored record survives the failed
+        write untouched -- it simply keeps the attempt count it had, so this pass is not
+        charged against the cap and the next start looks again.
+        """
+
+        identity = dict(payload) if isinstance(payload, dict) else {}
+        attempts = identity.get(COMMAND_WORKER_REAP_ATTEMPTS_KEY)
+        attempts = attempts + 1 if isinstance(attempts, int) and not isinstance(attempts, bool) else 1
+        if attempts >= self._MAX_COMMAND_WORKER_REAP_ATTEMPTS:
+            logger.error(
+                "giving up on command worker pid=%s from run %s after %s attempts; "
+                "it may still be running",
+                identity.get("pid"),
+                run_id,
+                attempts,
+            )
+            return False
+        identity[COMMAND_WORKER_REAP_ATTEMPTS_KEY] = attempts
+        logger.warning(
+            "command worker pid=%s from run %s survived teardown; retrying on the "
+            "next start (attempt %s)",
+            identity.get("pid"),
+            run_id,
+            attempts,
+        )
+        try:
+            # The already-serialized payload, re-stamped with its attempt count:
+            # ``_require_command_worker_record`` takes a live identity and this record's
+            # process is precisely the one we could not inspect our way back to.
+            return bool(self.request_store.record_command_worker(run_id, identity))
+        except Exception:
+            logger.warning(
+                "failed to re-stamp the attempt count on the command worker record for "
+                "run %s; keeping the record as stored",
+                run_id,
+                exc_info=True,
+            )
+            return True
+
+    def _command_fire_definition_id(self, request: TaskExecutionRequest) -> Optional[str]:
+        """The definition id when this request is a command fire, else ``None``."""
+
+        if request.request_type not in {"task_run", "scheduled"}:
+            return None
+        task_id = request.task_id
+        if not task_id:
+            return None
+        task = self.store.get_task(task_id)
+        if task is None or not task.has_command:
+            return None
+        return task_id
+
+    def _command_definition_has_live_worker(self, task_id: str) -> bool:
+        """Whether a previous fire of this definition may still be running.
+
+        SINGLE FLIGHT PER DEFINITION IS THE RULE (see ``_execution_lock_key``), and
+        ``self._inflight_sessions`` only enforces it for as long as this process lives.
+        A crash is exactly when it stops being enforced and exactly when a survivor is
+        most likely: the supervisor's tree outlives the service, its record is retained
+        by ``_reap_orphaned_command_workers`` precisely because it could not be shown
+        dead, and the next tick of the same cron would then start a SECOND copy of that
+        backup or migration -- two writers over one dataset, which is worse than a late
+        fire in every case.
+
+        A LOOK, NEVER A SIGNAL: the retained record's whole purpose is to let a later
+        start kill that tree, so a fire must not resolve the collision by killing the
+        earlier copy. ``orphaned_process_tree_presence`` answers on identity and returns
+        the three answers apart, and ``present``/``unknown`` both defer the new fire --
+        proceeding on "could not tell" is the same wager as proceeding on "yes".
+
+        Proof of death releases the definition here rather than waiting for the next
+        start: the record is retired, the interrupted fire is SETTLED (nothing else will
+        ever come back for it -- see ``_settle_recovered_command_fire``) and the new fire
+        runs, so a supervisor that ended while the service was down does not hold its own
+        schedule shut.
+
+        Untrusted records do not block. Every kill path refuses them, so no pass will
+        ever act on one; treating it as a live worker would wedge the definition for
+        good, which is the mirror of the reap's own reading of the same payload.
+        """
+
+        try:
+            workers = self.request_store.list_running_command_workers()
+        except Exception:
+            # Unreadable, so unknown -- and unknown defers. Deferring costs a late fire
+            # that the next tick retries; guessing "clear" costs a second writer.
+            logger.warning(
+                "failed to check for a live command worker on task %s; deferring the "
+                "fire",
+                task_id,
+                exc_info=True,
+            )
+            return True
+        for worker in workers:
+            if str(worker.get("definition_id") or "") != task_id:
+                continue
+            run_id = str(worker.get("run_id") or "")
+            if run_id and run_id in self._inflight_executions:
+                # This process's own fire, already covered by the in-memory lock the
+                # callers check first; not an orphan and not this method's business.
+                continue
+            payload = worker.get("identity")
+            pid = payload.get("pid") if isinstance(payload, dict) else None
+            expected = (
+                process_identity_from_payload(payload, pid)
+                if isinstance(pid, int) and not isinstance(pid, bool)
+                else None
+            )
+            if expected is None:
+                continue
+            try:
+                presence = orphaned_process_tree_presence(
+                    logger,
+                    f"scheduled command worker {run_id}",
+                    expected_identity=expected,
+                )
+            except Exception:
+                logger.warning(
+                    "failed to inspect command worker from run %s; deferring the fire "
+                    "for task %s",
+                    run_id,
+                    task_id,
+                    exc_info=True,
+                )
+                return True
+            if presence == "gone":
+                if run_id:
+                    self._settle_recovered_command_fire(run_id)
+                continue
+            logger.warning(
+                "task %s still has a command worker pid=%s from run %s (%s); deferring "
+                "this fire",
+                task_id,
+                expected.pid,
+                run_id,
+                presence,
+            )
+            return True
+        return False
+
+    def _settle_recovered_command_fire(self, run_id: str) -> None:
+        """Close the fire whose retained worker has just been shown dead.
+
+        NO OTHER PASS COMES BACK FOR THIS ROW. ``recover_processing`` runs once, at
+        startup, and deliberately steps over a run that still names a worker; the only
+        other pass over stale rows -- ``sweep_stale_runs`` -- classifies orphans as
+        ``run_type == "agent_run"`` and never looks at a command fire. So the row here,
+        kept ``running`` by ``_reap_orphaned_command_workers`` because the process could
+        not be proven dead and proven dead only now, has nobody left to close it.
+        Releasing the definition without closing it would just trade a stuck schedule for
+        a run that reads ``running`` until the next restart, describing a backup that
+        ended long ago.
+
+        THE RECORD GOES FIRST, because it is readable only while the row is ``running``:
+        clearing after the settle would leave a dead process's name stamped on a terminal
+        row where nothing would ever read or retire it. Neither order can cost a live
+        process its only handle -- reaching this method IS the proof that there is no
+        live process.
+
+        Reported as ``restarted`` because that is what happened: the service died
+        mid-fire and the supervisor did not outlive it. It is the same sentence the
+        startup pass writes for every other run that restart cut off, so one
+        interruption is not told two ways depending on which pass could prove it. The
+        settle owes the notice, hence the drain nudge -- the user hears that the fire was
+        interrupted, rather than only seeing the next one succeed.
+
+        Settled through ``settle_recovered_run`` rather than the guarded writer directly,
+        because the leak is not SQLite's alone: the legacy file store has no guarded
+        per-run write, and skipping it here would release the definition while its
+        processing file still read ``running``. The store owns that difference, so this
+        method has one path instead of a supported-store branch that silently does
+        nothing.
+
+        Best-effort by construction: the caller is a fire's own admission check, and a
+        store hiccup while closing the PREVIOUS run must not stop this one. Nothing is
+        lost by deferring -- the record is already gone, so the next start's
+        ``recover_processing`` settles the row it left behind.
+        """
+
+        self._clear_command_worker(run_id)
+        settled_by = SETTLED_BY_RESTARTED
+        try:
+            settled = self.request_store.settle_recovered_run(
+                run_id,
+                interruption_error=self._t(SETTLEMENT_I18N_KEYS[settled_by]),
+                cancellation_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
+                interrupt_reason=settled_by,
+            )
+            if settled is None:
+                logger.info(
+                    "Interrupted command fire %s was already settled elsewhere",
+                    run_id,
+                )
+                return
+            logger.warning(
+                "Command fire %s settled %s after its worker was shown gone (%s)",
+                run_id,
+                settled,
+                settled_by,
+            )
+            self._project_terminal_definition_result(
+                self.request_store.get_run(run_id),
+                execution_id=run_id,
+                expected_status=settled,
+            )
+        except Exception:
+            logger.warning(
+                "failed to settle interrupted command fire %s after its worker was "
+                "shown gone; leaving it for the next start",
+                run_id,
+                exc_info=True,
+            )
+            return
+        self._drain_dirty = True
 
     def _execution_interruption(self, execution_id: str) -> str:
         return self._inflight_cancellation_causes.get(
@@ -2957,6 +3986,77 @@ class ScheduledTaskService:
             return SETTLED_BY_STOPPED
         return SETTLED_BY_RESTARTED
 
+    def _is_command_execution(self, request: TaskExecutionRequest) -> bool:
+        """Is this in-flight request a command fire rather than an Agent turn?
+
+        Answered from the REQUEST, which is fixed for the life of the fire, before
+        falling back to the live definition. Asking the store first got this wrong in
+        the one case where the answer decides whether a child process lives: removing
+        a task drops the definition and leaves its Run in flight, so a user cancelling
+        a misbehaving command was told it was not a command and the child ran on to
+        its ``--timeout``. The fallback still covers runs enqueued before the snapshot
+        existed, whose definition is the only record there is.
+        """
+
+        if request.request_type not in {"task_run", "scheduled"} or not request.task_id:
+            return False
+        if command_snapshot_of_run({"metadata": request.metadata}) is not None:
+            return True
+        task = self.store.get_task(request.task_id)
+        return bool(task is not None and task.has_command)
+
+    def _propagate_requested_cancellations(self) -> None:
+        """Pull the trigger on in-flight COMMAND fires the user has cancelled.
+
+        ``cancel_run`` sets a flag; for a command fire nothing was reading it while the
+        work was in flight. The flag was honoured only at settlement, and for a command
+        that hangs that is up to ``--timeout`` away -- six hours by default -- so the
+        child kept running, kept holding whatever it held, and the row the user had just
+        cancelled reported a run that was over. Every other lane already closes this
+        loop: a queued claim is terminalized at the door by ``claim_pending_run``, and a
+        turn is interrupted by the turn lane.
+
+        The kill itself needs nothing new. ``run_supervised_command`` turns a cancelled
+        await into a process-tree teardown, and ``_execute_claimed_request`` settles the
+        row from its ``CancelledError`` handler -- before the result stamp, so a
+        cancelled fire also queues no escalation and stamps no failure on the definition.
+        What was missing was somebody to observe the flag, which is this: the same
+        ``_inflight_cancellation_causes`` + ``task.cancel()`` pair service shutdown uses,
+        with the user named as the cause so the run reads ``stopped`` rather than
+        ``interrupted``.
+
+        COMMAND FIRES ONLY, deliberately. For an Agent turn cancelling this coroutine
+        would abandon work that is still streaming into a conversation, and stopping a
+        turn coherently -- interrupting the backend, closing the transcript -- belongs to
+        the lane that owns it. A command's coroutine cancel IS the complete stop.
+        """
+
+        if not self._inflight_executions:
+            return
+        for request_id, execution in list(self._inflight_executions.items()):
+            if execution.done() or request_id in self._inflight_cancellation_causes:
+                continue
+            request = self._inflight_requests.get(request_id)
+            if request is None or not self._is_command_execution(request):
+                continue
+            try:
+                run = self.request_store.get_run(request_id)
+            except Exception:
+                logger.exception(
+                    "Failed to read Run %s while checking for a requested cancellation",
+                    request_id,
+                )
+                continue
+            if not run or not bool(run.get("cancel_requested")):
+                continue
+            if str(run.get("status") or "") in TERMINAL_RUN_STATUSES:
+                continue
+            logger.info(
+                "Stopping in-flight command Run %s: cancellation requested", request_id
+            )
+            self._inflight_cancellation_causes[request_id] = SETTLED_BY_STOPPED
+            execution.cancel()
+
     def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
         self._running = False
         current_task = self._current_asyncio_task()
@@ -3055,6 +4155,11 @@ class ScheduledTaskService:
                 # so sweep for owed auto-resume callbacks every tick — a cheap indexed lookup that
                 # no-ops when nothing is pending.
                 await self._drain_vault_callbacks()
+                # A cancellation requested against work THIS process is running emits no
+                # store change either — the flag is written by the CLI or the UI — so
+                # only a periodic pass can act on it. No-ops unless a command fire is
+                # actually in flight.
+                self._propagate_requested_cancellations()
                 # Same reason, one layer down: a run whose owner vanished emits no
                 # store change either, so only a periodic pass can find it. Self
                 # rate-limited, so riding this tick is cheap.
@@ -3349,6 +4454,15 @@ class ScheduledTaskService:
         if lock_key is not None and lock_key in self._inflight_sessions:
             self.request_store.requeue(request.id)
             return
+        command_definition_id = self._command_fire_definition_id(request)
+        if command_definition_id is not None and self._command_definition_has_live_worker(
+            command_definition_id
+        ):
+            # Requeued, not dropped: the row stays the definition's one pending fire and
+            # runs as soon as the earlier worker is shown gone.
+            self.request_store.requeue(request.id)
+            self._drain_dirty = True
+            return
         self._spawn_execution(request, lock_key)
         execution = self._inflight_executions.get(request.id)
         if execution is not None:
@@ -3386,6 +4500,15 @@ class ScheduledTaskService:
                 # The next drain tick picks it up once the session frees.
                 # Recorded so it can clear a stale transport reason — this row is
                 # making progress and must not look sweepable.
+                self.request_store.record_skip_reason(pending.id, reason=SKIP_REASON_SESSION_BUSY)
+                continue
+            command_definition_id = self._command_fire_definition_id(pending)
+            if command_definition_id is not None and self._command_definition_has_live_worker(
+                command_definition_id
+            ):
+                # Same reason as the lock above and recorded the same way: the definition
+                # is busy -- here with a worker this process did not start -- so the row
+                # keeps waiting and must not look sweepable while it does.
                 self.request_store.record_skip_reason(pending.id, reason=SKIP_REASON_SESSION_BUSY)
                 continue
             request = self.request_store.claim(pending.id)
@@ -4522,7 +5645,40 @@ class ScheduledTaskService:
             )
         else:
             headline = self._t("harness.notice.failed", name=name)
-        lines = [headline, self._t("harness.notice.error", error=error)]
+        # COMMAND COPY, ORDINARY-FAILED LANE ONLY. A command definition's notice named
+        # the definition and the error but never the command, so "Error: command exited
+        # with status 7: boom" left the reader to go and look up WHAT exited. The lane
+        # gate is deliberate: an interrupted command run is a fact about the SERVICE
+        # (restart, eviction) and not about the command, so that lane keeps the generic
+        # copy the headline already explains.
+        #
+        # The command copy is read off the RUN's own snapshot, falling back to the live
+        # definition only for rows written before the snapshot existed. This notice is
+        # drained asynchronously, so the definition can have been rewritten -- or
+        # deleted -- between the fire and this call; either way ``get_task`` answers
+        # about the wrong execution, or not at all.
+        executed = command_snapshot_of_run(run)
+        command_source = executed if executed is not None else task
+        is_command_failure = (
+            not failure_notices.is_interruption(notice)
+            and command_source is not None
+            and command_source.has_command
+        )
+        lines = [headline]
+        if is_command_failure:
+            command_preview = self._notice_command_preview(command_source)
+            if command_preview:
+                lines.append(self._t("harness.notice.commandLine", command=command_preview))
+        lines.append(self._t("harness.notice.error", error=error))
+        if is_command_failure and run.get("exit_code") is not None:
+            # ONLY when the row actually carries one. A fire that never spawned — a
+            # missing working directory, a supervisor that died during startup — has no
+            # exit code at all, and "Exit code: None" (or a fabricated 0/1) would be
+            # copy about nothing on the very notice that has to be trusted. No stderr
+            # tail line either: the executor already appends the last non-empty stderr
+            # line to the run's ``error``, so the line above carries it and a third
+            # line would print the same text twice.
+            lines.append(self._t("harness.notice.commandExit", exitCode=run.get("exit_code")))
         if not failure_notices.is_interruption(notice):
             # D5 asks for "the error and its CLASS", and on this lane the class was
             # dropped: the interrupted headline was the only place any reason was
@@ -4626,6 +5782,19 @@ class ScheduledTaskService:
                         lines.append(self._t("harness.notice.nextRun", when=next_run))
                 lines.append(self._t("harness.notice.rerun", id=definition_id))
         return "\n".join(lines)
+
+    @staticmethod
+    def _notice_command_preview(task: Any) -> str:
+        """The one-line command a notice names, or ``""`` for a non-command definition.
+
+        Reads whichever shape the caller has -- a ``ScheduledTask`` or the run's own
+        snapshot -- and hands both to the shared ``command_line_preview``, so the
+        command in a failure notice is the same string ``vibe task list`` showed.
+        """
+
+        return command_line_preview(
+            getattr(task, "shell_command", None), getattr(task, "command", None)
+        )
 
     def _task_lifecycle_state(self, definition_id: Optional[str], task: Any) -> str:
         """The lifecycle state the badge shows for this task — asked of the badge.
@@ -4929,6 +6098,16 @@ class ScheduledTaskService:
 
         Returns ``None`` for ``create_per_run`` (fresh session each time) and
         unkeyable requests.
+
+        A COMMAND FIRE IS NOT A TURN, so it never takes a conversation's key. The lock
+        exists to stop two Agent turns running in one conversation at once; a command
+        talks to no Agent and holds no native session, yet it is bound to one (an
+        ``--on-failure agent`` definition must be), and ``--timeout`` defaults to six
+        hours -- so inheriting that key let one long backup command leave every queued
+        turn in the conversation skipped as ``session_busy`` for as long as it ran. Its
+        escalation IS a turn, and that is a separate run which takes the lock in the
+        ordinary way. Keyed on the definition rather than dropped to ``None`` so a fire
+        is still serialized against itself.
         """
         session_policy = request.session_policy
         session_id = request.session_id
@@ -4937,6 +6116,8 @@ class ScheduledTaskService:
         if request.request_type in {"task_run", "scheduled"} and task_id:
             task = self.store.get_task(task_id)
             if task is not None:
+                if task.has_command:
+                    return f"task:{task_id}"
                 session_policy = task.session_policy or session_policy
                 session_id = task.session_id or session_id
                 session_key = task.session_key or session_key
@@ -4982,6 +6163,14 @@ class ScheduledTaskService:
         return None
 
     def _transport_ready_for_request(self, request: TaskExecutionRequest) -> bool:
+        if request.request_type in {"task_run", "scheduled"} and request.task_id:
+            task = self.store.get_task(request.task_id)
+            if task is not None and task.has_command:
+                # A command run needs no IM transport: it produces an exit code and
+                # output, not a reply. Gating it on a platform's readiness would hold a
+                # backup or health check queued while an unrelated IM adapter is down.
+                # The failure-notice path owns delivery, and it can be owed later.
+                return True
         try:
             platform = self._request_target_platform(request)
         except Exception:
@@ -5115,6 +6304,15 @@ class ScheduledTaskService:
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
+        #: Command-fire outcome facts. They stay ``None`` for every other request type,
+        #: which is what keeps those rows' columns untouched.
+        exit_code: Optional[int] = None
+        stdout: Optional[str] = None
+        stderr: Optional[str] = None
+        #: The already-durable escalation turn a failed ``--on-failure agent`` command
+        #: fire queued, or ``None``. Recorded on THIS run's metadata by ``complete()``,
+        #: which is what stops the same failure being reported twice.
+        escalation_run_id: Optional[str] = None
         try:
             if request.request_type in {"task_run", "scheduled"}:
                 self.store.maybe_reload()
@@ -5141,7 +6339,16 @@ class ScheduledTaskService:
                 failure_code = result.failure_code
                 should_complete = result.complete_on_return
                 reconcile_delivery_on_return = result.reconcile_delivery_on_return
-            elif request.request_type in {"hook_send", "watch", "webhook"}:
+                exit_code = result.exit_code
+                stdout = result.stdout
+                stderr = result.stderr
+                escalation_run_id = result.escalation_run_id
+            elif request.request_type in {
+                "hook_send",
+                "watch",
+                "webhook",
+                "task_escalation",
+            }:
                 if not request.prompt:
                     raise ValueError("hook request requires prompt")
                 if request.session_policy == "create_per_run":
@@ -5163,7 +6370,17 @@ class ScheduledTaskService:
                     prompt=request.prompt,
                     execution_id=request.id,
                     task_id=task_id,
-                    trigger_kind=request.request_type if request.request_type != "hook_send" else "hook",
+                    # ``delivery_intent_for_trigger`` has a CLOSED vocabulary, and an
+                    # escalation IS a hook send -- an out-of-band turn a definition
+                    # queued -- so it takes the hook intent rather than a new one no
+                    # mapping knows. Provenance is not lost: the run row still carries
+                    # ``run_type="task_escalation"`` and the failed fire's
+                    # ``parent_run_id``.
+                    trigger_kind=(
+                        "hook"
+                        if request.request_type in {"hook_send", "task_escalation"}
+                        else request.request_type
+                    ),
                     agent_name=request.agent_name,
                     _capture_dispatch_result=True,
                     **({"agent_id": request.agent_id} if request.agent_id else {}),
@@ -5288,8 +6505,34 @@ class ScheduledTaskService:
                     session_id=session_id,
                     interrupt_reason=interrupt_reason,
                     failure_code=failure_code,
+                    exit_code=exit_code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    escalation_run_id=escalation_run_id,
                 )
-                if project_terminal_definition_on_cancel and written_status is not None:
+                # A STOP THAT NEVER BECAME A ``CancelledError``. ``cancel_run`` can
+                # commit its flag after the work returned, so ``complete`` normalizes
+                # this run to ``canceled`` while the coroutine ran to the end without
+                # ever being interrupted -- and a command stamp refused by that same
+                # flag then left the definition still reporting the fire BEFORE this
+                # one. Read from the status ACTUALLY written rather than from
+                # ``project_terminal_definition_on_cancel``, which says only that the
+                # cancellation arrived the usual way: a service shutdown cancels the
+                # same coroutine and settles ``interrupted``, which is a stop of the
+                # SERVICE and not of this fire.
+                fire_was_stopped = written_status == "canceled" and request.request_type in {
+                    "task_run",
+                    "scheduled",
+                }
+                if fire_was_stopped:
+                    # BEFORE the projection, because the escalation is claimable the
+                    # whole time this coroutine is still finishing up.
+                    self._retract_escalation_of_stopped_fire(request.id)
+                if written_status is not None and (
+                    # The projection is the lane that settles a canceled fire.
+                    project_terminal_definition_on_cancel
+                    or fire_was_stopped
+                ):
                     self._project_terminal_definition_result(
                         self.request_store.get_run(request.id),
                         execution_id=request.id,
@@ -5341,6 +6584,386 @@ class ScheduledTaskService:
                             session_id,
                         )
 
+    def _runtime_default_workdir(self) -> Optional[str]:
+        """The configured directory Agent work runs in, when nothing closer answered.
+
+        Last stop before the ``~/.avibe`` fallback, and the reason that fallback is now
+        nearly unreachable: a definition can legitimately carry no ``cwd`` and no
+        readable Session -- a per-run binding created before
+        ``_command_definition_spawn_cwd`` recorded one, or a definition written straight
+        through the API -- and the product state directory is the worst possible place to
+        run a user's command. ``runtime.default_cwd`` is where this install's Agent turns
+        already run, so it is the same answer the escalation Session would get.
+
+        Validated here rather than trusted: an unset or deleted ``default_cwd`` must fall
+        through to the fallback below, not fail the fire with ``workdirMissing``.
+        """
+
+        config = getattr(self.controller, "config", None)
+        candidate = getattr(getattr(config, "runtime", None), "default_cwd", None)
+        if not isinstance(candidate, str) or not candidate.strip():
+            return None
+        resolved = os.path.abspath(os.path.expanduser(candidate.strip()))
+        return resolved if os.path.isdir(resolved) else None
+
+    def _bound_session_workdir(self, task: ScheduledTask) -> Optional[str]:
+        """Where a command with no stored ``cwd`` should run: its binding's directory.
+
+        ``--cwd`` is REFUSED for a definition bound to an existing Session
+        (``cwd_with_existing_session``), on the rule that the Session owns its working
+        directory -- so an escalating command task legitimately stores ``cwd=None``. A
+        message task loses nothing to that: the Agent turn starts in the Session's
+        workdir. A command has no turn to inherit it from, so ``None`` fell through to
+        the ``~/.avibe`` fallback and ``--shell './scripts/sync.sh'`` -- the form the
+        docs use -- ran from the product state directory, with the one flag that could
+        have said otherwise rejected by the Session rule.
+
+        Read live rather than copied into the definition at creation time, so the
+        command follows a Session whose workdir was later changed, and so a per-run
+        binding that does not exist yet simply reads as "no answer" (``None``) instead
+        of a stale one. Best effort by design: a missing row, a NULL workdir or a read
+        failure all fall back rather than failing the fire, and the fallback is still
+        validated by the ``isdir`` check below.
+        """
+
+        session_id = str(task.session_id or "").strip()
+        if not session_id:
+            return None
+        try:
+            from storage.sessions_service import SQLiteSessionsService
+
+            service = SQLiteSessionsService(paths.get_sqlite_state_path())
+            try:
+                row = service.get_agent_session_by_id(session_id)
+            finally:
+                # One store per FIRE, so it must not outlive the read: each one
+                # carries an engine and an invalidation probe, and a cron command
+                # running every minute would otherwise accumulate a connection a
+                # minute for the life of the service.
+                service.close()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Could not read the workdir of Session %s bound to task %s: %s",
+                session_id,
+                task.id,
+                exc,
+            )
+            return None
+        if not row:
+            return None
+        return str(row.get("workdir") or "").strip() or None
+
+    async def _execute_command_task(
+        self, task: ScheduledTask, *, execution_id: str, disable_one_shot: bool
+    ) -> TaskExecutionResult:
+        """Run one command definition's fire and record its outcome.
+
+        The command runner owns the process mechanics -- spawn, spec handshake,
+        timeout, cancellation and tree teardown -- so this method owns only scheduled
+        task policy: where to run, how long to allow, and how the outcome is written
+        to the definition and the run row.
+
+        Every ORDERLY stop reaches the child through the runner: a timeout kills the
+        tree from inside, while a service stop and a ``vibe runs cancel`` both cancel
+        the awaiting coroutine, which the runner turns into a tree teardown (see
+        ``_propagate_requested_cancellations`` for how the cancel flag becomes that
+        cancellation). A SIGKILLed or crashed service reaches it through none of them:
+        no ``CancelledError`` is ever delivered, and the isolated supervisor keeps its
+        command running -- so a later fire of the same cron would start a second
+        backup or migration beside the orphan. ``on_spawn`` therefore persists the
+        worker identity on the run for ``_reap_orphaned_command_workers`` to find on
+        the next start, and the ``finally`` clears it the moment the child is reaped.
+
+        That identity lives in the run's ``metadata``, NOT in its ``pid`` column: that
+        column holds the SERVICE pid, written by ``mark_execution_started`` for the
+        recovery gate, and must not be repurposed.
+        """
+
+        error: Optional[str] = None
+        exit_code: Optional[int] = None
+        stdout_value: Optional[str] = None
+        stderr_value: Optional[str] = None
+        #: Whether the SCHEDULER stopped this fire, as opposed to the command choosing
+        #: its own exit status. Recorded separately because the two are indistinguishable
+        #: from the code alone: the runner reports a timeout as 124, and ``timeout 5 ...``
+        #: inside a shell command reports a real one as 124 too.
+        timed_out = False
+
+        # BEFORE anything can fail, and before the spawn: the enqueue predicted this
+        # command from the definition as it stood then, and the executor re-read the
+        # definition after claiming. This is the copy that will actually run.
+        self._record_executed_command(execution_id, task)
+
+        spawn_cwd = (
+            task.cwd
+            or self._bound_session_workdir(task)
+            or self._runtime_default_workdir()
+        )
+        if not spawn_cwd:
+            stable_cwd = paths.get_vibe_remote_dir()
+            stable_cwd.mkdir(parents=True, exist_ok=True)
+            spawn_cwd = str(stable_cwd)
+
+        if not os.path.isdir(spawn_cwd):
+            # Do NOT spawn: ``create_subprocess_exec`` would raise a bare
+            # ``NotADirectoryError``/``FileNotFoundError`` whose text does not name the
+            # directory the user configured.
+            error = self._t("harness.command.workdirMissing", cwd=spawn_cwd)
+        else:
+            effective_timeout = (
+                task.timeout_seconds
+                if task.timeout_seconds is not None
+                else COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS
+            )
+            try:
+                result = await run_supervised_command(
+                    command=task.command,
+                    shell_command=task.shell_command,
+                    cwd=spawn_cwd,
+                    timeout_seconds=effective_timeout,
+                    label=f"scheduled task {task.id}",
+                    on_spawn=lambda pid, identity: self._require_command_worker_record(
+                        execution_id, identity
+                    ),
+                    max_output_bytes=COMMAND_TASK_OUTPUT_CAP_BYTES,
+                )
+            except SupervisedCommandStartupError as exc:
+                # Its own clause, BEFORE the broad one: the class subclasses
+                # ``RuntimeError``, so a single ``except Exception`` would swallow it and
+                # report the worker's startup failure as an ordinary command error.
+                error = self._localize_worker_error(exc.detail) or self._t(
+                    "harness.command.supervisorExitedDuringStartup"
+                )
+            except Exception as exc:
+                error = str(exc)
+                logger.error(
+                    "Scheduled task %s command failed: %s", task.id, exc, exc_info=True
+                )
+            else:
+                exit_code = result.exit_code
+                # THE WORKER'S OWN FAILURES ARRIVE HERE, not only through
+                # ``SupervisedCommandStartupError``: that is raised solely when the
+                # stdin handshake breaks, so a worker that accepted the spec and THEN
+                # could not spawn (an argv whose executable does not exist is the
+                # ordinary case) simply exits 1 with its machine-readable error line on
+                # stderr. Left undecoded, that raw JSON became the definition's
+                # ``last_error``, the failure notice, and the Agent escalation prompt.
+                worker_error = decode_watch_worker_error(result.stderr or "")
+                stderr_value = self._localize_worker_error(result.stderr)
+                stdout_value = result.stdout
+                if result.timed_out:
+                    # Both streams are kept: whatever the command printed before it
+                    # hung is the only evidence of WHY it hung, and a timeout has no
+                    # exit status that explains itself. The runner preserves the
+                    # capped readers' buffers across the kill for exactly this.
+                    timed_out = True
+                    error = self._t(
+                        "harness.command.timedOut",
+                        seconds=_format_seconds(effective_timeout),
+                    )
+                elif worker_error is not None:
+                    # THE SUPERVISOR'S EXIT STATUS IS NOT THE COMMAND'S. ``main()``
+                    # returns 1 for both of its own failures, so a spawn the worker
+                    # could not perform arrived here as ``exit_code == 1`` and was
+                    # published as a fact about the user's command: "Exit code: 1" in
+                    # the failure notice and the escalation prompt, ``last_exit_code = 1``
+                    # on the definition, an ``exit_code`` in the run row that
+                    # ``vibe runs show`` prints -- for a command that never started, and
+                    # alongside "Command exited with status 1" contradicting the
+                    # supervisor sentence in the same message. There IS no command exit
+                    # status in this outcome, and ``None`` is how this lane spells that
+                    # (the handshake failure above reports it the same way). The error
+                    # line the worker wrote is the discriminator, decoded rather than
+                    # sniffed: only the supervisor emits it, before any of the command's
+                    # own output can reach the stream, and a command that forged it is
+                    # already reporting itself as a supervisor failure through
+                    # ``_localize_worker_error`` -- losing an exit code it lied about is
+                    # the smaller half of that.
+                    #
+                    # The WATCH lane keeps its exit code here by design: a cycle's status
+                    # drives ``retry_exit_codes`` and ``_CycleResult`` has no "no status"
+                    # to spell, so leave that behaviour to the lane that owns it.
+                    exit_code = None
+                    error = stderr_value or self._t(
+                        "harness.command.unknownSupervisorFailure"
+                    )
+                elif exit_code:
+                    detail = _last_nonempty_line(stderr_value)
+                    error = (
+                        self._t(
+                            "harness.command.exitedWithDetail",
+                            code=exit_code,
+                            detail=detail,
+                        )
+                        if detail
+                        else self._t("harness.command.exited", code=exit_code)
+                    )
+            finally:
+                # Reached on success, on failure, and on the ``CancelledError`` a
+                # stop raises: by the time control is here the runner has reaped
+                # the tree, so the stored identity now names a dead pid that the
+                # OS is free to hand to something else.
+                self._clear_command_worker(execution_id)
+
+        # THE ESCALATION IS COMPOSED BEFORE THE STAMP AND QUEUED BY IT. A definition
+        # carrying ``on_failure == "agent"`` owes the user ONE Agent turn per failed
+        # fire, carrying the report -- and that turn is what the stamp AUTHORISES, so
+        # the two must be one transaction (HFR-269, ``core/watches.py``: "TWO COMMITS
+        # ARE NOT ONE DECISION"). Split in two, a teardown landing between them queues
+        # an escalation under a definition that no longer authorises it, and an
+        # exception between them disables a failed one-shot while LOSING the report.
+        #
+        # Never ``enqueue_definition_run``: that writer re-reads the definition and
+        # RAISES on a disabled one, and a failed ``at`` task is disabled by the very
+        # stamp that authorises this turn.
+        escalation_request = None
+        if error and task.on_failure == "agent":
+            escalation_request = self.request_store.build_hook_send(
+                session_key=task.session_key or "",
+                session_id=task.session_id,
+                prompt=self._escalation_prompt(
+                    task,
+                    run_id=execution_id,
+                    error=error,
+                    exit_code=exit_code,
+                    stdout=stdout_value,
+                    stderr=stderr_value,
+                ),
+                post_to=task.post_to,
+                deliver_key=task.deliver_key,
+                agent_name=task.agent_name,
+                session_policy=task.session_policy,
+                run_type="task_escalation",
+                definition_id=task.id,
+                source_kind="scheduler",
+                parent_run_id=execution_id,
+                metadata=dict(task.metadata or {}),
+            )
+        stamped = self.store.mark_task_result(
+            task.id,
+            error=error,
+            disable_one_shot=disable_one_shot,
+            exit_code=exit_code,
+            # This IS the command fire's own result, so its ``exit_code`` -- including
+            # ``None`` for a fire that never spawned -- is the whole truth about the
+            # definition's last status.
+            records_command_outcome=True,
+            timed_out=timed_out,
+            # THE BINDING THIS FIRE STARTED AGAINST, and only when a turn is being
+            # authorised. ``mark_task_result`` reloads the mirror and derives its
+            # compare-and-set expectation from the RELOADED row, so a ``/new`` reclaim
+            # committed while the command ran becomes the expectation -- it matches, and
+            # the stamp lands. Harmless while the stamp wrote only bookkeeping; not
+            # harmless now that it queues an Agent turn, because the escalation above was
+            # composed from the PRE-EXECUTION task and would be durably queued against
+            # the session the reclaim just tore down, with the notice suppressed in its
+            # favour. Refusing instead rolls both halves back and leaves the failure to
+            # the owed-notice ladder.
+            expected_binding=(
+                (task.session_id, task.session_key, task.schedule_type)
+                if escalation_request is not None
+                else None
+            ),
+            # AND THAT THIS FIRE HAS NOT BEEN STOPPED, re-read server-side for the same
+            # reason and in the same transaction. A ``vibe runs cancel`` committed while
+            # the command was exiting settles the run ``canceled`` a moment later, and
+            # without this the turn it authorises would already be durably queued: the
+            # user stops a job and the job answers by starting an Agent.
+            expected_uncanceled_run_id=(
+                execution_id if escalation_request is not None else None
+            ),
+            queued_run=(
+                self.request_store.queued_run_payload(escalation_request)
+                if escalation_request is not None
+                else None
+            ),
+        )
+        # ONLY when the stamp landed. A refusal rolled the escalation row back with it,
+        # so claiming an escalation id here would suppress the failure notice in favour
+        # of a turn that does not exist -- and the failure would be silent.
+        escalation_run_id = (
+            escalation_request.id if escalation_request is not None and stamped else None
+        )
+        if not stamped:
+            # Same refusal as the message path (HFR-261/HFR-264): the definition was
+            # reclaimed, repointed or removed while this fire was running, so nothing
+            # was stored. A would-be success must not be reported as one.
+            logger.warning(
+                "Scheduled task %s produced a result the store refused to stamp; "
+                "reporting the run as failed",
+                task.id,
+            )
+            if not error:
+                error = self._t(_TASK_RESULT_NOT_RECORDED_I18N_KEY)
+        # An ``at`` command task just disabled itself; the APScheduler job must drop.
+        self.reconcile_jobs()
+        return TaskExecutionResult(
+            error=error,
+            session_key=task.session_key or "",
+            session_id=task.session_id,
+            failure_code=None,
+            complete_on_return=True,
+            exit_code=exit_code,
+            stdout=stdout_value,
+            stderr=stderr_value,
+            escalation_run_id=escalation_run_id,
+        )
+
+    def _escalation_prompt(
+        self,
+        task: ScheduledTask,
+        *,
+        run_id: str,
+        error: str,
+        exit_code: Optional[int],
+        stdout: Optional[str],
+        stderr: Optional[str],
+    ) -> str:
+        """The Agent-facing failure report a ``--shell ... --on-failure agent`` fire sends.
+
+        NOT i18n'd, deliberately, and the watch completion-hook prompts are the
+        precedent: this text is read by an AGENT, not shown to a user. It is the input
+        to a turn, so the reply it produces is what the user actually reads -- and that
+        reply is written in whatever language the conversation is in. Localizing the
+        input would only make the instructions the model follows vary by locale.
+
+        The user's own stored message comes FIRST when there is one: it is the standing
+        instruction ("open a ticket if the backup fails"), and the machine-generated
+        report is the evidence it operates on.
+        """
+
+        lines: list[str] = []
+        stored_message = (task.prompt or "").strip()
+        if stored_message:
+            lines.append(stored_message)
+            lines.append("")
+        label = (task.name or "").strip()
+        lines.append(
+            f"A scheduled command task failed: {label} ({task.id})"
+            if label
+            else f"A scheduled command task failed: {task.id}"
+        )
+        command_preview = self._notice_command_preview(task)
+        if command_preview:
+            lines.append(f"Command: {command_preview}")
+        # ``error`` already names the outcome in the only form that covers every branch:
+        # the exit status, the timeout, a missing working directory, or the supervisor's
+        # own startup detail. The exit code line is added only when the fire actually
+        # produced one -- a run that never spawned has none, and "Exit code: None" would
+        # be a fabricated fact on the one message that has to be trusted.
+        lines.append(f"Outcome: {error}")
+        if exit_code is not None:
+            lines.append(f"Exit code: {exit_code}")
+        stdout_tail = _last_nonempty_line(stdout)
+        if stdout_tail:
+            lines.append(f"Last stdout line: {stdout_tail}")
+        stderr_tail = _last_nonempty_line(stderr)
+        if stderr_tail:
+            lines.append(f"Last stderr line: {stderr_tail}")
+        lines.append(f"Run id: {run_id}")
+        lines.append(f"Inspect with: vibe runs show {run_id}")
+        return "\n".join(lines)
+
     async def _execute_task(
         self,
         task: ScheduledTask,
@@ -5362,6 +6985,15 @@ class ScheduledTaskService:
         # books whatever this run does, and outside the ``try`` because it reports
         # itself and must never be mistaken for the run's own failure.
         self._retry_orphaned_reservations(task)
+        if task.has_command:
+            # A command definition runs a subprocess instead of prompting an Agent, so
+            # none of the session/binding machinery below applies to it. An
+            # ``on_failure == "agent"`` definition queues its escalation turn from in
+            # there, in the same transaction as its result stamp -- it does not dispatch
+            # one from here.
+            return await self._execute_command_task(
+                task, execution_id=execution_id, disable_one_shot=disable_one_shot
+            )
         try:
             if task.session_policy == "create_per_run":
                 session_id = self._reserve_runtime_session(
@@ -5462,7 +7094,7 @@ class ScheduledTaskService:
                 task.id,
             )
             if not error:
-                error = _TASK_RESULT_NOT_RECORDED_ERROR
+                error = self._t(_TASK_RESULT_NOT_RECORDED_I18N_KEY)
             reconcile_delivery_on_return = not complete_on_return
             complete_on_return = True
         if binding_change is not None:
@@ -5813,6 +7445,87 @@ class ScheduledTaskService:
         if settled_any:
             self._drain_dirty = True
 
+    def _retract_escalation_of_stopped_fire(self, execution_id: str) -> None:
+        """Take back the Agent turn a fire queued, once the user stops that fire.
+
+        A failed ``--on-failure agent`` fire commits its stamp and its escalation in ONE
+        transaction, guarded on the fire not being cancelled (HFR-269). That guard can
+        only see the cancels that exist WHEN IT COMMITS: ``cancel_run`` on a running fire
+        writes a flag, and the flag can land after the stamp has already returned --
+        ``settle_run_terminal`` then re-reads it and normalizes this fire to ``canceled``
+        while the durable escalation sits queued and claimable. The user stops a job and
+        the job answers by starting an Agent, which is the same defect the compare-and-set
+        was written for, one lane further along.
+
+        WHY RETRACTION AND NOT ONE BIGGER TRANSACTION. The enqueue has to commit with the
+        STAMP -- that is what authorises the turn, and splitting them is what HFR-269
+        closed -- while this settlement happens later, in another lane, after
+        ``reconcile_jobs``. There is no single transaction that holds both without
+        reopening the window it fixed. So the escalation is committed optimistically and
+        withdrawn by whoever settles the fire against it.
+
+        NEITHER REPORT IS OWED HERE, and that is deliberate. ``canceled`` is written only
+        when the user asked for this fire to stop (``_cancel_aware_terminal_status``), and
+        a stopped fire owes no failure notice -- the same rule SCT-027 relies on when a
+        teardown cancels the fire itself. Re-arming the notice instead would alert the
+        user about a job they had just stopped, which is this defect's mirror image. The
+        failure is not lost either way: the stamp landed, so the definition still reports
+        it.
+
+        Found by LINKAGE rather than from the local ``escalation_run_id``: a
+        ``CancelledError`` delivered anywhere after the stamp skips the assignment
+        entirely, and the escalation is durable by then regardless.
+
+        THIS IS THE SECOND OF TWO GUARDS, and it is the weaker one. Retraction can only
+        take back a row that is still queued: ``cancel_run`` on an escalation the
+        dispatch loop has already claimed writes a flag, and the turn lane does not
+        watch that flag (see ``_propagate_requested_cancellations`` for why a turn's
+        stop belongs to the lane that owns it). So the claim itself refuses an
+        escalation whose fire is already cancelled
+        (``_escalates_a_stopped_fire``), which is what actually makes the ordering
+        between these two lanes irrelevant: whichever runs first, no Agent turn starts
+        for a stopped fire. What remains is only an escalation claimed BEFORE the user's
+        stop landed -- a turn that was legitimately in flight when the request arrived,
+        which is the same thing that happens to any other out-of-band turn and is
+        stopped from the turn lane, not from here.
+        """
+
+        try:
+            escalation = self.request_store.find_escalation_run(parent_run_id=execution_id)
+        except Exception:
+            logger.exception(
+                "Failed to look for the escalation queued by stopped Run %s", execution_id
+            )
+            return
+        if escalation is None:
+            return
+        escalation_id = str(escalation.get("id") or "").strip()
+        status = str(
+            _normalize_requested_run_status(escalation.get("status"))
+            or escalation.get("status")
+            or ""
+        ).strip()
+        if not escalation_id or status in TERMINAL_RUN_STATUSES:
+            # Already settled -- including by the claim door, which refuses an
+            # escalation whose fire is cancelled and terminalizes it as ``canceled``
+            # exactly as this would have.
+            return
+        try:
+            retracted = self.request_store.cancel_run(escalation_id)
+        except Exception:
+            logger.exception(
+                "Failed to retract escalation Run %s for stopped Run %s",
+                escalation_id,
+                execution_id,
+            )
+            return
+        if retracted:
+            logger.info(
+                "Retracted escalation Run %s: its command fire %s was stopped",
+                escalation_id,
+                execution_id,
+            )
+
     def _project_terminal_definition_result(
         self,
         run: Optional[dict[str, Any]],
@@ -5874,11 +7587,24 @@ class ScheduledTaskService:
             str(run.get("source_kind") or "") == "scheduler"
             and task.schedule_type == "at"
         )
+        # A COMMAND fire that ends here ended without reaching its own result stamp --
+        # cancelled, or interrupted by shutdown -- so this projection IS that fire's
+        # authoritative outcome, and it has no exit status to report. Saying so
+        # (``records_command_outcome``) is what clears the previous fire's code;
+        # without it the row read "exited 7" beside a run the user had just stopped.
+        # Only for command runs: the generic lane must never blank the column on
+        # behalf of a message task, which never had a code of its own.
+        records_command_outcome = (
+            command_snapshot_of_run(run) is not None or task.has_command
+        )
+        raw_exit_code = run.get("exit_code")
         try:
             recorded = self.store.mark_task_result(
                 task.id,
                 error=error,
                 disable_one_shot=retire_one_shot,
+                exit_code=int(raw_exit_code) if raw_exit_code is not None else None,
+                records_command_outcome=records_command_outcome,
                 expected_binding=(
                     task.session_id,
                     task.session_key,

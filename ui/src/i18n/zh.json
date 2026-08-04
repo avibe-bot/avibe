@@ -2879,7 +2879,20 @@
       "parentRun": "父 Run",
       "callback": "回传",
       "effort": "推理 {{value}}",
-      "waitingSince": "开始等待"
+      "waitingSince": "开始等待",
+      "onFailure": "失败处理",
+      "timeout": "超时",
+      "timeoutSeconds": "{{seconds}} 秒",
+      "timeoutNone": "不限时",
+      "timeoutDefault": "{{duration}}（默认）",
+      "lastExitCode": "最近退出码"
+    },
+    "taskKind": {
+      "command": "命令"
+    },
+    "onFailure": {
+      "none": "仅通知（无 Agent）",
+      "agent": "升级给 Agent 处理"
     },
     "sessionPolicy": {
       "createPerRun": "每次运行新建会话",

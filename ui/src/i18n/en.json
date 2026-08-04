@@ -2879,7 +2879,20 @@
       "parentRun": "Parent run",
       "callback": "Callback",
       "effort": "effort {{value}}",
-      "waitingSince": "Waiting since"
+      "waitingSince": "Waiting since",
+      "onFailure": "On failure",
+      "timeout": "Timeout",
+      "timeoutSeconds": "{{seconds}}s",
+      "timeoutNone": "No timeout",
+      "timeoutDefault": "{{duration}} (default)",
+      "lastExitCode": "Last exit code"
+    },
+    "taskKind": {
+      "command": "Command"
+    },
+    "onFailure": {
+      "none": "Notice only (no Agent)",
+      "agent": "Escalate to an Agent"
     },
     "sessionPolicy": {
       "createPerRun": "New session each run",

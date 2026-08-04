@@ -782,6 +782,8 @@ Preferred CLI shape:
 - recurring task for this conversation: `vibe task add --cron '<expr>' --message '...'`
 - one-off task for this conversation: `vibe task add --at '<ISO-8601>' --message '...'`
 - task that creates a visible sibling Session: `vibe task add --create-session --same-scope --cron '<expr>' --message '...'`
+- scheduled command with no Agent turn: `vibe task add --cron '<expr>' --shell '<command>'`
+- command task with AI failure triage: `vibe task add --cron '<expr>' --shell '<command>' --on-failure agent --message '<what to do>'`
 - immediate rerun: `vibe task run <id>`
 - managed background watch for this conversation: `vibe watch add --message '...' -- <cmd>` (or `--shell '<cmd>'` to pass a single shell string)
 - watch that creates a visible sibling Session: `vibe watch add --create-session --same-scope --message '...' -- <cmd>`
@@ -803,7 +805,7 @@ Targeting and callbacks:
 - When a task, watch, or new Agent run creates a Session and `--cwd` is omitted, Avibe uses the command's current working directory. Forks keep the source Session cwd by default.
 - Async Agent runs return the final result to this conversation by default. Pass `--no-callback` only when you will inspect the run later with `vibe runs`. Pass `--callback-session-id <id>` only when the final result should return to a different Session.
 - `--message` and `--message-file` are the user-message flags for task, watch, and agent-run commands.
-- `vibe task add` stores the message template and creates Agent Runs when the time trigger fires.
+- `vibe task add` stores a message template — or, with `--shell` / a trailing `-- <argv>`, a command — and creates Runs when the time trigger fires. A command task runs with no Agent turn: silent on success, a failure notice on failure, `--on-failure agent` to escalate failures to an Agent.
 - `vibe watch add` uses `--message` as the instruction template for the Agent Run created after the waiter reaches a reportable state.
 - `--fork-self` forks this Session's native backend context. `--fork-session <id>` forks another explicit Session. Forks keep the source Session backend, scope, and cwd by default.
 - Fork overrides are intentionally narrow: `--agent`, `--model`, and `--reasoning-effort` can override the forked Session only if the backend stays the same. Do not combine fork flags with existing-session or session-creation flags.
@@ -811,7 +813,7 @@ Targeting and callbacks:
 Operational guidance:
 
 - use `vibe task list` before editing or deleting an existing task; use `vibe watch list` before touching a managed watch
-- if this is the first time using `vibe task add`, `vibe agent run`, `vibe runs`, or `vibe watch add`, read the matching `--help` output first — watches accept additional flags like `--shell`, `--timeout` (per-cycle), `--lifetime-timeout` (overall), `--forever`, `--retry-exit-code`, and `--retry-delay`
+- if this is the first time using `vibe task add`, `vibe agent run`, `vibe runs`, or `vibe watch add`, read the matching `--help` output first — watches and command tasks both accept `--shell` and `--timeout` (per-cycle for watches, per-run for tasks), while `--lifetime-timeout` (overall), `--forever`, `--retry-exit-code`, and `--retry-delay` stay watch-only
 - use `vibe task update <id>` to keep the same task ID while changing name, schedule, message, agent, or target
 - use `vibe watch update <id> ...` when you must rename, retarget, or change the waiter/options
 - Agent-facing collection commands return 20 compact rows per page, cap `--limit` at 100, and have no unpaginated `--all` mode; follow `pagination.next_command` when more rows exist
@@ -966,6 +968,7 @@ Screenshots:
 Scheduled tasks:
 
 - `vibe task add`, `vibe task update`, `vibe task list [--include-finished] [--page N] [--limit N]`, `vibe task show <id>`, `vibe task run <id>`, `vibe task pause <id>`, `vibe task resume <id>`, `vibe task remove <id>`
+- Switching a task between message and command form, or changing `--on-failure`, is rejected — remove and recreate.
 
 Agent runs:
 
@@ -976,7 +979,7 @@ Watches:
 
 - `vibe watch add`, `vibe watch update <id>`, `vibe watch list [--include-finished] [--page N] [--limit N]`, `vibe watch show <id>`, `vibe watch pause <id>`, `vibe watch resume <id>`, `vibe watch remove <id>`
 
-For any subcommand, prefer `<command> --help` before composing a new invocation. Harness commands default to this Agent Session inside an Avibe-injected Agent shell. Use `--session-id` only to target a different existing Session, `--same-scope` or `--scope-id` when creating a Session in a visible scope, and `--no-callback` only when an async Agent run will be inspected later through `vibe runs`. Use `--message` / `--message-file` for user messages. `vibe task add` and `vibe watch add` take `--name`; only `vibe task add` takes `--cron` / `--at` / `--timezone`; `vibe agent run` takes `--sync`; and `vibe watch add` takes its own waiter options (`--shell` or a positional command after `--`, `--cwd`, `--timeout`, `--forever`, `--lifetime-timeout`, `--retry-exit-code`, `--retry-delay`). Do not copy flags between task, watch, and agent-run commands without checking help.
+For any subcommand, prefer `<command> --help` before composing a new invocation. Harness commands default to this Agent Session inside an Avibe-injected Agent shell. Use `--session-id` only to target a different existing Session, `--same-scope` or `--scope-id` when creating a Session in a visible scope, and `--no-callback` only when an async Agent run will be inspected later through `vibe runs`. Use `--message` / `--message-file` for user messages. `vibe task add` and `vibe watch add` take `--name`; only `vibe task add` takes `--cron` / `--at` / `--timezone`; `vibe agent run` takes `--sync`; and `vibe watch add` takes its own waiter options (`--shell` or a positional command after `--`, `--cwd`, `--timeout`, `--forever`, `--lifetime-timeout`, `--retry-exit-code`, `--retry-delay`). `vibe task add` also accepts `--shell` or a command after `--`, plus `--on-failure {none,agent}` and a per-run `--timeout`; a pure command task takes no session, scope, or agent flags. Do not copy flags between task, watch, and agent-run commands without checking help.
 
 ## Troubleshooting
 

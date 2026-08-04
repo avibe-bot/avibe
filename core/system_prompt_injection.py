@@ -257,7 +257,7 @@ Before choosing a command, ask: what outcome is the user trying to secure, what 
 | Agent | Reusable role: backend, model, prompt, description, enabled state | Work needs a stable specialist identity |
 | Session | Continuing context for one Agent work lineage | Work should continue or fork context |
 | Scope | IM surface and routing context: channel, thread, DM, user scope | Delivery, workdir, user/platform context matter |
-| Task | Saved message triggered by time | Time is the trigger |
+| Task | Time trigger: saved Agent message, or a command with no Agent turn | Time is the trigger |
 | Watch | Managed waiter triggered by an external signal | Any condition needs monitoring until it becomes true |
 | Run | Concrete execution record | You need status, output, result, error, or history |
 
@@ -277,6 +277,7 @@ Useful Harness queries include schema discovery, current session lookup, existin
 | Need | Use |
 | --- | --- |
 | Time trigger | `vibe task add` |
+| Scheduled command, no Agent turn | `vibe task add --cron "<expr>" --shell "<cmd>"` |
 | External signal trigger | `vibe watch add` |
 | Independent Agent delegation | `vibe agent run --agent <agent-name>` |
 | Continue a pointed Session | `vibe agent run --session-id ...` |
@@ -287,7 +288,7 @@ Useful Harness queries include schema discovery, current session lookup, existin
 | State/history inspection | `vibe data query`, `vibe runs list --current-session`, `vibe runs show` |
 | Recurring specialist workflow | `vibe agent create/update` plus tasks, watches, or runs |
 
-`vibe task add` creates a time-triggered saved Agent message. Tasks created from an Avibe Agent shell continue this conversation by default. Use `--cron "<expr>"` for recurrence or `--at "<ISO-8601>"` for one-off delivery; if `--timezone` is omitted, Avibe uses the local system timezone at creation time. If `--cwd` is omitted for a task-created Session, Avibe follows the caller working directory when available.
+`vibe task add` creates a time-triggered saved Agent message. Tasks created from an Avibe Agent shell continue this conversation by default. Use `--cron "<expr>"` for recurrence or `--at "<ISO-8601>"` for one-off delivery; if `--timezone` is omitted, Avibe uses the local system timezone at creation time. If `--cwd` is omitted for a task-created Session, Avibe follows the caller working directory when available. With `--shell '<cmd>'` or a trailing `-- <argv>` instead of `--message`, the task runs a command with no Agent turn: silent on success, a durable failure notice naming the command and exit code on failure, and `--timeout <seconds>` bounds each run (default 21600, 0 = none). Add `--on-failure agent --message '<instructions>'` to hand a failing run to an Agent instead: one Agent turn carrying the failure report replaces that run's notice. A pure command task takes no session, scope, or agent flags.
 
 `vibe watch add` creates a managed monitor, usually backed by a small script or command, for any observable condition that must be watched until true: product signals, business events, files, logs, CI/reviews/deploys, service health, data freshness, and similar signals. Watches created from an Avibe Agent shell follow up in this conversation by default. If `--cwd` is omitted, Avibe runs the waiter from the caller working directory when available.
 

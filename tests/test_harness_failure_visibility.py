@@ -3108,6 +3108,11 @@ def _drain_service(tmp_path: Path, controller, sqlite, requests):
     # service built without ``__init__`` still needs the handle the dispatcher keys its
     # single-flight check on.
     service._notice_drain_task = None
+    # The tick also observes cancellations requested against work THIS process runs, and
+    # that pass reads the in-flight registry first. Empty here: this service never claims
+    # a request, so the pass is a no-op — but the attribute has to exist, because an
+    # AttributeError inside the tick aborts every LATER pass in it.
+    service._inflight_executions = {}
     service.controller = controller
     service._owns_service_instance = lambda: True
     service.validate_platform = lambda platform: None
@@ -10126,8 +10131,9 @@ def test_the_last_success_read_is_one_bounded_indexed_seek(tmp_path: Path) -> No
     )
     assert "DEFINITION_ID = ?" in normalized, f"the definition is an equality term: {statement}"
     assert "STATUS IN" in normalized, f"the verdict filter is a SQL term: {statement}"
-    assert "RUN_TYPE !=" in normalized, (
-        f"the watch-supervisor exclusion is a SQL term too: {statement}"
+    assert "RUN_TYPE NOT IN" in normalized, (
+        "the non-verdict exclusion (watch supervisor, escalation turn) is a SQL term too: "
+        f"{statement}"
     )
 
     # And the answer is the real one: the newest succeeded row in the history above.
@@ -12243,4 +12249,542 @@ def test_the_workspace_card_carries_the_creation_origin(
     assert "C0123" in card and "1710000000.000100" in card
     assert _SLACK_ORIGIN_PERMALINK in card, (
         f"and give the user a way back to it: {card}"
+    )
+
+
+# --- command-task notice copy (tests/scenarios/harness_command_task) -------
+#
+# A command definition runs a subprocess and never prompts an Agent, so its failure
+# notice was the only place the user could learn a scheduled command broke — and it
+# named the definition and the error while never naming the COMMAND. These tests pin
+# the failed-lane copy (command line before the error, exit code after it, and only
+# when the row carries one) and the two closed-loop scenarios SCT-001/SCT-002.
+
+
+def _command_task(sqlite, definition_id: str, **overrides) -> None:
+    """One command definition: no prompt, a command, and a rung-(1) delivery key."""
+
+    payload = {
+        "name": definition_id,
+        "prompt": "",
+        "deliver_key": "slack::channel::C1",
+        "shell_command": "echo boom >&2; exit 7",
+    }
+    payload.update(overrides)
+    _task(sqlite, definition_id, **payload)
+
+
+def _command_run(definition_id: str, run_id: str = "run-cmd", **overrides) -> dict:
+    """The run row shape a settled command fire leaves behind."""
+
+    run = {
+        "id": run_id,
+        "task_id": definition_id,
+        "error": "command exited with status 7: boom",
+        "exit_code": 7,
+        "stdout": "",
+        "stderr": "boom\n",
+    }
+    run.update(overrides)
+    return run
+
+
+def _notice_prefix(key: str, language: str = "en") -> str:
+    from vibe.i18n import t as i18n_t
+
+    return i18n_t(key, language).split("{")[0].strip()
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_a_failed_command_notice_names_the_command_then_the_error_then_the_exit_code(
+    tmp_path: Path,
+    language: str,
+) -> None:
+    """The failed lane's command copy, in the order a reader needs it.
+
+    WHAT it ran, WHY it failed, and the exit status it failed with. Order is asserted
+    rather than mere membership: the command has to arrive before the error it explains,
+    and the exit code after it, or the three lines read as unrelated facts.
+
+    Both languages, through the REAL translator, for the same reason the failure-class
+    test does it: a ``_t`` that echoes keys proves which key was chosen and says nothing
+    about whether the sentence a user reads is translated.
+    """
+
+    from types import SimpleNamespace
+
+    sqlite, requests = _store(tmp_path)
+    _command_task(sqlite, "task-cmd")
+
+    service = _real_translator(
+        _drain_service(tmp_path, SimpleNamespace(), sqlite, requests), language
+    )
+    body = service._failure_notice_body(
+        _command_run("task-cmd"), {"failure_id": "run-cmd", "interrupt_reason": None}
+    )
+
+    command_line = _notice_prefix("harness.notice.commandLine", language)
+    error_line = _notice_prefix("harness.notice.error", language)
+    exit_line = _notice_prefix("harness.notice.commandExit", language)
+
+    assert "echo boom >&2; exit 7" in body, f"the notice must name the command: {body}"
+    assert command_line in body and exit_line in body, (
+        f"both command lines must be rendered through localized copy: {body}"
+    )
+    assert "7" in body.split(exit_line)[1].splitlines()[0], (
+        f"the exit line must carry the exit code: {body}"
+    )
+    assert body.index(command_line) < body.index(error_line) < body.index(exit_line), (
+        f"command, then error, then exit code: {body}"
+    )
+    assert "harness.notice." not in body, f"never a dotted key path: {body}"
+
+
+def test_an_argv_command_notice_renders_the_shell_joined_argv(tmp_path: Path) -> None:
+    """The ``-- argv`` form has no shell string, so the preview joins the list.
+
+    ``str(list)`` would print Python repr quoting at a user; ``shlex.join`` prints
+    something the user can paste back into a shell, which is the same choice
+    ``vibe task list`` already made.
+    """
+
+    from types import SimpleNamespace
+
+    sqlite, requests = _store(tmp_path)
+    _command_task(
+        sqlite,
+        "task-argv",
+        shell_command=None,
+        command=["/bin/sh", "-c", "echo hello world"],
+    )
+
+    service = _real_translator(
+        _drain_service(tmp_path, SimpleNamespace(), sqlite, requests), "en"
+    )
+    body = service._failure_notice_body(
+        _command_run("task-argv"), {"failure_id": "run-cmd", "interrupt_reason": None}
+    )
+
+    assert "/bin/sh -c 'echo hello world'" in body, (
+        f"the argv preview must be shell-joined, not a Python list: {body}"
+    )
+    assert "['/bin/sh'" not in body, f"and never a repr: {body}"
+
+
+def test_a_notice_names_the_command_the_run_actually_executed(tmp_path: Path) -> None:
+    """SCT-019 -- the command copy comes from the RUN, not from the live definition.
+
+    The notice drain is asynchronous and the definition is editable: between the fire
+    settling and the notice going out, the user can rewrite the command or delete the
+    task. Composing the line from ``get_task`` therefore reported the REPLACEMENT
+    command as the thing that failed -- and after a delete, dropped the line entirely --
+    while the run row itself kept only output and an exit code and could not say what
+    had run. Either way the user debugs the wrong command, or none.
+
+    So the fire snapshots its own command onto the run, and every later reader uses the
+    snapshot. The live definition stays the fallback for rows written before the
+    snapshot existed.
+    """
+
+    from types import SimpleNamespace
+
+    sqlite, requests = _store(tmp_path)
+    # The definition as it is NOW: already rewritten since the fire.
+    _command_task(sqlite, "task-edited", shell_command="./scripts/backup-v2.sh --fast")
+
+    service = _real_translator(
+        _drain_service(tmp_path, SimpleNamespace(), sqlite, requests), "en"
+    )
+    body = service._failure_notice_body(
+        _command_run(
+            "task-edited",
+            metadata={"command": {"shell": "./scripts/backup.sh", "argv": []}},
+        ),
+        {"failure_id": "run-cmd", "interrupt_reason": None},
+    )
+
+    assert "./scripts/backup.sh" in body, (
+        f"the notice must name the command the run actually executed: {body}"
+    )
+    assert "backup-v2" not in body, (
+        f"and never the replacement the user has since configured: {body}"
+    )
+
+    # And the harder half of the same defect: once the definition is DELETED,
+    # ``get_task`` has no answer at all, so the command line vanished from exactly the
+    # notice that needs it most -- a task the user can no longer inspect.
+    deleted = service._failure_notice_body(
+        _command_run(
+            "task-gone",
+            metadata={"command": {"shell": None, "argv": ["/bin/sh", "-c", "echo hi there"]}},
+        ),
+        {"failure_id": "run-cmd", "interrupt_reason": None},
+    )
+
+    assert "/bin/sh -c 'echo hi there'" in deleted, (
+        f"a removed definition's run still names its command, shell-joined: {deleted}"
+    )
+
+
+def test_a_command_that_never_spawned_carries_no_exit_code_line(tmp_path: Path) -> None:
+    """No exit code exists, so no exit line — the row is the only source of truth.
+
+    A missing working directory is refused BEFORE the spawn, so the run settles with
+    ``exit_code`` NULL. "Exit code: None", or a fabricated 0, would be a lie on the one
+    surface that has to be trusted. The command line still renders: the user still needs
+    to know which definition's command could not be run.
+    """
+
+    from types import SimpleNamespace
+
+    sqlite, requests = _store(tmp_path)
+    _command_task(sqlite, "task-nospawn")
+
+    service = _real_translator(
+        _drain_service(tmp_path, SimpleNamespace(), sqlite, requests), "en"
+    )
+    body = service._failure_notice_body(
+        _command_run(
+            "task-nospawn",
+            error="working directory does not exist: /nope/gone",
+            exit_code=None,
+        ),
+        {"failure_id": "run-cmd", "interrupt_reason": None},
+    )
+
+    assert _notice_prefix("harness.notice.commandLine") in body, (
+        f"a no-spawn failure still names its command: {body}"
+    )
+    assert "/nope/gone" in body, f"and still carries the error: {body}"
+    assert _notice_prefix("harness.notice.commandExit") not in body, (
+        f"a run with no exit code must get no exit line: {body}"
+    )
+    assert "None" not in body, f"and must never render the missing value: {body}"
+
+
+def test_a_long_command_is_truncated_in_the_notice(tmp_path: Path) -> None:
+    """A notice is a chat message: an uncapped pipeline would bury the error line.
+
+    Same 120-char cap and trailing ellipsis as the CLI preview, so the notice and
+    ``vibe task list`` show the same string for the same definition.
+    """
+
+    from types import SimpleNamespace
+
+    sqlite, requests = _store(tmp_path)
+    long_command = "echo " + ("x" * 200)
+    _command_task(sqlite, "task-long", shell_command=long_command)
+
+    service = _real_translator(
+        _drain_service(tmp_path, SimpleNamespace(), sqlite, requests), "en"
+    )
+    body = service._failure_notice_body(
+        _command_run("task-long"), {"failure_id": "run-cmd", "interrupt_reason": None}
+    )
+
+    rendered = [line for line in body.splitlines() if line.startswith(_notice_prefix("harness.notice.commandLine"))]
+    assert len(rendered) == 1, f"exactly one command line: {body}"
+    assert long_command not in body, f"the full command must not be rendered: {body}"
+    assert "…" in rendered[0], f"a truncated preview must say so: {rendered[0]}"
+    preview = rendered[0].split(":", 1)[1].strip()
+    assert len(preview) == 120, f"the cap is 120 characters: {len(preview)}"
+
+
+def test_a_message_task_notice_carries_no_command_copy(tmp_path: Path) -> None:
+    """The regression guard: an Agent-prompting task's notice is unchanged.
+
+    A message task has no command, so neither line may appear — not with an empty
+    value, and not at all.
+    """
+
+    from types import SimpleNamespace
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-message", name="daily report", deliver_key="slack::channel::C1")
+
+    service = _real_translator(
+        _drain_service(tmp_path, SimpleNamespace(), sqlite, requests), "en"
+    )
+    body = service._failure_notice_body(
+        {"id": "run-msg", "task_id": "task-message", "error": "backend exploded"},
+        {"failure_id": "run-msg", "interrupt_reason": None},
+    )
+
+    assert _notice_prefix("harness.notice.commandLine") not in body, (
+        f"a message task's notice must carry no command line: {body}"
+    )
+    assert _notice_prefix("harness.notice.commandExit") not in body, (
+        f"nor an exit line: {body}"
+    )
+    assert _notice_prefix("harness.notice.error") in body, f"the error line stays: {body}"
+
+
+def test_an_interrupted_command_run_keeps_the_generic_interruption_copy(
+    tmp_path: Path,
+) -> None:
+    """An interrupted command run is a fact about the SERVICE, not about the command.
+
+    The interrupted headline already says nothing is wrong with the definition itself;
+    printing the command and an exit code beside it would invite the user to go and
+    debug a command that was never given the chance to finish. So the command copy is
+    gated on the FAILED lane by the same predicate the rest of the body uses.
+    """
+
+    from types import SimpleNamespace
+
+    import core.failure_notices as failure_notices
+
+    sqlite, requests = _store(tmp_path)
+    _command_task(sqlite, "task-cmd-interrupted")
+
+    notice = {"failure_id": "run-cmd", "interrupt_reason": "restarted"}
+    assert failure_notices.is_interruption(notice), (
+        "the premise: this reason belongs to the interrupted lane"
+    )
+
+    service = _real_translator(
+        _drain_service(tmp_path, SimpleNamespace(), sqlite, requests), "en"
+    )
+    body = service._failure_notice_body(
+        _command_run(
+            "task-cmd-interrupted",
+            error="the service restarted",
+            exit_code=None,
+        ),
+        notice,
+    )
+
+    assert _notice_prefix("harness.notice.commandLine") not in body, (
+        f"the interrupted lane keeps generic copy: {body}"
+    )
+    assert _notice_prefix("harness.notice.commandExit") not in body, (
+        f"including no exit line: {body}"
+    )
+
+
+def _command_fire_service(tmp_path: Path, sqlite, requests):
+    """A REAL ``ScheduledTaskService`` over tmp-path stores that can fire a command.
+
+    Built through ``__init__`` rather than ``__new__``, because these two scenarios are
+    about the executor and the drain being CONNECTED: a fake settle would prove the copy
+    and nothing about whether a real command fire reaches it. Only the scheduler and the
+    two ownership guards are stubbed — the parts that would otherwise need a live
+    APScheduler and a service lease.
+    """
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+
+    controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
+    service = ScheduledTaskService(
+        controller=controller, store=store, request_store=requests
+    )
+    service.scheduler = SimpleNamespace(
+        get_job=lambda *_a, **_kw: None,
+        add_job=lambda *_a, **_kw: None,
+        remove_job=lambda *_a, **_kw: None,
+        get_jobs=lambda *_a, **_kw: [],
+        running=True,
+    )
+    service._owns_service_instance = lambda: True
+    service.validate_platform = lambda platform: None
+    return service
+
+
+def _fire_command_task(service, definition_id: str) -> dict:
+    """Run one real fire of *definition_id* through the claimed-request path."""
+
+    task = service.store.get_task(definition_id)
+    assert task is not None and task.has_command, "the premise: a command definition"
+    queued = service.request_store.enqueue_task_run(
+        definition_id, source_kind="scheduler", task=task
+    )
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    return run
+
+
+def _capture_notice_emissions(monkeypatch) -> list[dict]:
+    """Stub rung (1) delivery and record every notice body it is handed."""
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    emitted: list[dict] = []
+
+    async def _fake_emit(controller, context, backend, diagnostic, **kwargs):
+        emitted.append(
+            {
+                "platform": context.platform,
+                "channel_id": context.channel_id,
+                "body": kwargs.get("display_text"),
+                "failure_id": kwargs.get("failure_id"),
+            }
+        )
+        evidence = kwargs.get("delivery")
+        if evidence is not None:
+            evidence.delivered_id = "1717.42"
+            evidence.persisted_row = {"id": "msg-1"}
+        return False
+
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _fake_emit)
+    return emitted
+
+
+def test_a_failed_command_fire_delivers_exactly_one_command_aware_notice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-001 — closed loop: a real failing command fire, one command-aware notice.
+
+    Everything real except the outbound send: the subprocess actually runs and exits
+    nonzero, ``_execute_claimed_request`` settles the row through the executor's own
+    path (stamping ``exit_code``/``stderr`` and the owed notice), and
+    ``_drain_failure_notices`` walks the ladder to the definition's delivery key. ONE
+    notice, because the streak machinery is keyed on the definition and a second pass
+    must see the acknowledgement.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    _command_task(
+        sqlite,
+        "task-sct-001",
+        name="nightly sync",
+        shell_command="echo boom >&2; exit 7",
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+    )
+
+    emitted = _capture_notice_emissions(monkeypatch)
+    service = _real_translator(_command_fire_service(tmp_path, sqlite, requests), "en")
+
+    run = _fire_command_task(service, "task-sct-001")
+    assert run["status"] == "failed", f"the premise: the fire failed: {run['status']!r}"
+    assert run["exit_code"] == 7, f"the row must carry the exit code: {run['exit_code']!r}"
+
+    asyncio.run(service._drain_failure_notices())
+
+    assert len(emitted) == 1, f"exactly one notice for one failed fire: {emitted}"
+    assert (emitted[0]["platform"], emitted[0]["channel_id"]) == ("slack", "C1")
+
+    body = emitted[0]["body"]
+    assert "echo boom >&2; exit 7" in body, f"the delivered notice must name the command: {body}"
+    assert _notice_prefix("harness.notice.commandLine") in body, body
+    assert "7" in body.split(_notice_prefix("harness.notice.commandExit"))[1].splitlines()[0], (
+        f"and the exit code the fire actually produced: {body}"
+    )
+
+    emitted.clear()
+    asyncio.run(service._drain_failure_notices())
+    assert emitted == [], "an acknowledged notice must never be delivered twice"
+
+
+def test_a_successful_command_fire_notifies_nowhere(tmp_path: Path, monkeypatch) -> None:
+    """SCT-002 — silent success is the contract, not an omission.
+
+    ``--on-failure none`` is cron parity: a command task that succeeds is visible in
+    ``vibe task show`` (``last_exit_code``) and ``vibe runs show`` (stdout) and NOWHERE
+    else. So the guard is two-sided — nothing is owed, and the drain sends nothing —
+    because a success notification would turn every minute-ly command task into a
+    notification firehose.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    _command_task(
+        sqlite,
+        "task-sct-002",
+        name="nightly sync",
+        shell_command="echo fine",
+        cwd=str(tmp_path),
+    )
+
+    emitted = _capture_notice_emissions(monkeypatch)
+    service = _real_translator(_command_fire_service(tmp_path, sqlite, requests), "en")
+
+    run = _fire_command_task(service, "task-sct-002")
+    assert run["status"] == "succeeded", f"the premise: the fire succeeded: {run['error']!r}"
+    assert run["exit_code"] == 0
+
+    assert sqlite.owed_failure_notice(run["id"]) is None, (
+        "a succeeded command run must owe no notice"
+    )
+    assert sqlite.list_owed_failure_notices() == [], (
+        "and must not appear in the drain's work list"
+    )
+
+    asyncio.run(service._drain_failure_notices())
+    assert emitted == [], f"a successful command fire must notify nobody: {emitted}"
+
+
+def test_an_escalated_command_failure_is_never_delivered_a_notice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-003, drain half — the escalation IS the report, so the notice is suppressed.
+
+    A ``--on-failure agent`` fire queues one Agent turn carrying the failure report, in
+    the same transaction that stamps its definition. A notice as well would be the same
+    failure told twice — once as a turn the Agent acts on, once as an alert the user has
+    to. Asserted at the DRAIN, not just at the stamp: nothing must be owed, the row must
+    not appear in the drain's work list, and a real drain pass must send nothing.
+
+    The regression half is the second run: the identical failure WITHOUT the marker
+    still owes and still delivers, so the suppression cannot silence anything else.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    _command_task(sqlite, "task-sct-003", name="nightly sync")
+
+    escalated = requests.enqueue_task_run("task-sct-003", source_kind="scheduler")
+    claimed = requests.claim(escalated.id)
+    assert claimed is not None
+    requests.complete(
+        claimed,
+        ok=False,
+        error="command exited with status 7: boom",
+        task_id="task-sct-003",
+        exit_code=7,
+        stderr="boom\n",
+        escalation_run_id="esc-sct-003",
+    )
+
+    row = sqlite.get_run(escalated.id)
+    assert row is not None and row["status"] == "failed"
+    assert row["metadata"].get("escalation_run_id") == "esc-sct-003"
+    assert sqlite.owed_failure_notice(escalated.id) is None, (
+        "an escalated failure owes a notice as well; the report would arrive twice"
+    )
+    assert [item["id"] for item in sqlite.list_owed_failure_notices()] == [], (
+        "and it reached the drain's work list anyway"
+    )
+
+    emitted = _capture_notice_emissions(monkeypatch)
+    from types import SimpleNamespace
+
+    service = _real_translator(
+        _drain_service(tmp_path, SimpleNamespace(), sqlite, requests), "en"
+    )
+    asyncio.run(service._drain_failure_notices())
+    assert emitted == [], f"an escalated failure was delivered a notice: {emitted}"
+
+    plain = requests.enqueue_task_run("task-sct-003", source_kind="scheduler")
+    plain_claimed = requests.claim(plain.id)
+    assert plain_claimed is not None
+    requests.complete(
+        plain_claimed,
+        ok=False,
+        error="command exited with status 7: boom",
+        task_id="task-sct-003",
+        exit_code=7,
+        stderr="boom\n",
+    )
+    notice = sqlite.owed_failure_notice(plain.id)
+    assert notice is not None and notice.get("state"), (
+        "the suppression leaked to un-escalated failures; every failed command fire "
+        "would go silent"
     )
