@@ -349,6 +349,78 @@ def test_cursor_accepts_production_length_provider_message_ids(
     assert [entry["memcell_id"] for entry in second["entries"]] == ["mc_older"]
 
 
+def test_list_page_bounds_history_before_python_projection(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_memcell(insight_paths, "mc_visible", ALICE, timestamp_ms=10_000)
+    _insert_run(
+        insight_paths,
+        "run-visible",
+        "extract_atomic_facts",
+        {
+            "memcell_id": "mc_visible",
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "owner_id": ALICE,
+        },
+    )
+    _insert_call(
+        insight_paths,
+        "call-visible",
+        memcell_id="mc_visible",
+        app_id="avibe",
+        project_id=PROJECT,
+        owner_id=ALICE,
+    )
+    for index in range(75):
+        memcell_id = f"mc_foreign_{index:02d}"
+        _insert_memcell(insight_paths, memcell_id, BOB, timestamp_ms=20_000 + index)
+        _insert_run(
+            insight_paths,
+            f"run-foreign-{index:02d}",
+            "extract_atomic_facts",
+            {
+                "memcell_id": memcell_id,
+                "app_id": "avibe",
+                "project_id": PROJECT,
+                "owner_id": BOB,
+            },
+        )
+        _insert_call(
+            insight_paths,
+            f"call-foreign-{index:02d}",
+            memcell_id=memcell_id,
+            app_id="avibe",
+            project_id=PROJECT,
+            owner_id=BOB,
+        )
+
+    statements: list[str] = []
+    original_connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+
+    result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 1)
+
+    assert [entry["memcell_id"] for entry in result["entries"]] == ["mc_visible"]
+    assert result["entries"][0]["run_summary"] == {
+        "total": 1,
+        "statuses": {"success": 1},
+    }
+    assert result["entries"][0]["authorized_call_count"] == 1
+    selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == 4
+    assert "LIMIT 2" in selects[0]
+    assert "COUNT(*) AS total" in selects[2]
+    assert "COUNT(*) AS total" in selects[3]
+
+
 def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsightPaths) -> None:
     message_id = "m_session-a_5000_000"
     _insert_memcell(
@@ -382,6 +454,8 @@ def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsi
     detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_capture")
     assert [call["id"] for call in detail["calls"]] == ["good"]
     assert detail["capture"]["status"] == "available"
+    listed = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
+    assert listed["entries"][0]["authorized_call_count"] == 1
     encoded = json.dumps(detail)
     assert "flush-mixed" not in encoded
     assert "request-other" not in encoded
@@ -451,6 +525,13 @@ def test_run_owner_is_authoritative_and_ownerless_event_falls_back(
     assert profile_step["relation"] == "profile_trigger"
     assert [call["id"] for call in detail["calls"]] == ["ownerless-call"]
 
+    listed = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
+    assert listed["entries"][0]["run_summary"] == {
+        "total": 2,
+        "statuses": {"success": 2},
+    }
+    assert listed["entries"][0]["authorized_call_count"] == 1
+
 
 def test_direct_and_atomic_fact_cascades_require_exact_scope(
     insight_paths: MemoryInsightPaths,
@@ -464,6 +545,13 @@ def test_direct_and_atomic_fact_cascades_require_exact_scope(
         "owner_id": ALICE,
     }
     _insert_run(insight_paths, "run-episode", "extract_atomic_facts", event)
+    _insert_run(
+        insight_paths,
+        "run-wrong-topic-case",
+        "extract_atomic_facts",
+        {**event, "episode_entry_id": "episode-wrong-topic-case"},
+        topic="everos.memory.events:episodeextracted",
+    )
     _insert_call(
         insight_paths,
         "direct",
@@ -494,9 +582,21 @@ def test_direct_and_atomic_fact_cascades_require_exact_scope(
         parent_type="episode",
         parent_id="episode-1",
     )
+    _insert_call(
+        insight_paths,
+        "wrong-topic-case",
+        stage="cascade",
+        app_id="avibe",
+        project_id=PROJECT,
+        owner_id=ALICE,
+        parent_type="episode",
+        parent_id="episode-wrong-topic-case",
+    )
 
     detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_cascade")
     assert {call["id"] for call in detail["calls"]} == {"direct", "atomic"}
+    listed = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
+    assert listed["entries"][0]["authorized_call_count"] == 2
 
 
 def test_projection_scrubs_and_never_returns_raw_payload_or_paths(
@@ -584,6 +684,59 @@ def test_configured_provider_urls_are_scrubbed_from_runs_and_calls(
     assert "[PROVIDER_BASE_URL]" in encoded
 
 
+def test_configured_provider_keys_are_scrubbed_from_run_and_current_state_errors(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    llm_key = "opaqueLLMCredentialValue937"
+    embedding_key = f"{llm_key}EmbeddingSuffix"
+    _insert_memcell(insight_paths, "mc_exact_keys", ALICE, timestamp_ms=10_600)
+    event = {
+        "memcell_id": "mc_exact_keys",
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "owner_id": ALICE,
+    }
+    _insert_run(
+        insight_paths,
+        "run-exact-keys",
+        "extract_user_profile",
+        event,
+        status="failed",
+        error=f"LLM failed: {llm_key}; embedding: {embedding_key}",
+    )
+    with sqlite3.connect(insight_paths.system_db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO md_change_state (
+                md_path, kind, change_type, mtime, first_seen_at,
+                last_changed_at, lsn, status, retryable, last_attempt_at,
+                retry_count, error
+            ) VALUES (?, 'user_profile', 'modified', 1, ?, ?, 1, 'failed', 1, ?, 1, ?)
+            """,
+            (
+                f"avibe/{PROJECT}/users/{ALICE}/user.md",
+                "2026-08-04T00:00:01+00:00",
+                "2026-08-04T00:00:02+00:00",
+                "2026-08-04T00:00:03+00:00",
+                f"indexing failed with {embedding_key} and {llm_key}",
+            ),
+        )
+
+    detail = MemoryInsightReader(
+        insight_paths,
+        exact_redaction_values=(llm_key, embedding_key),
+    ).entry_detail((ALICE, PROJECT), "mc_exact_keys")
+
+    run = next(step for step in detail["steps"] if step.get("run_id") == "run-exact-keys")
+    assert run["error"] == "LLM failed: [REDACTED]; embedding: [REDACTED]"
+    assert detail["current_state"]["indexing"]["error"] == (
+        "indexing failed with [REDACTED] and [REDACTED]"
+    )
+    encoded = json.dumps(detail)
+    assert llm_key not in encoded
+    assert embedding_key not in encoded
+
+
 def test_missing_sources_degrade_independently(tmp_path: Path) -> None:
     root = tmp_path / "missing"
     reader = MemoryInsightReader(
@@ -611,6 +764,21 @@ def test_locked_optional_db_does_not_fail_everos_result(insight_paths: MemoryIns
         lock.close()
     assert [entry["memcell_id"] for entry in result["entries"]] == ["mc_locked"]
     assert result["sections"]["capture"] == {"status": "unavailable", "reason": "busy"}
+
+
+def test_list_keeps_direct_call_count_when_run_table_is_unavailable(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_partial", ALICE, timestamp_ms=11_500)
+    _insert_call(insight_paths, "call-partial", memcell_id="mc_partial")
+    with sqlite3.connect(insight_paths.ome_db_path) as conn:
+        conn.execute("DROP TABLE run_record")
+
+    result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
+
+    assert result["sections"]["everos"] == {"status": "partial", "reason": "runs_malformed"}
+    assert result["entries"][0]["run_summary"] is None
+    assert result["entries"][0]["authorized_call_count"] == 1
 
 
 def test_detail_has_fixed_bounds_omission_counts_and_response_ceiling(

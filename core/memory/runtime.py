@@ -230,6 +230,14 @@ class MemoryRuntime:
             )
             if value
         )
+        exact_redaction_values = tuple(
+            value
+            for value in (
+                config.processing.llm.api_key,
+                config.processing.embedding.api_key,
+            )
+            if value
+        )
         self._insight_reader = MemoryInsightReader(
             MemoryInsightPaths(
                 self._provider_root,
@@ -237,6 +245,7 @@ class MemoryRuntime:
                 self._call_log_db_path,
             ),
             provider_base_urls=base_urls,
+            exact_redaction_values=exact_redaction_values,
         )
 
     async def _reap_recorded_sidecar_if_unowned(self) -> bool:

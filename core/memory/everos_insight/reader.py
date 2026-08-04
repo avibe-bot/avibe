@@ -24,6 +24,11 @@ _MAX_DETAIL_RUNS = 50
 _MAX_PAYLOAD_FIELD_BYTES = 12_000
 _MAX_ERROR_BYTES = 1_024
 _MAX_RESPONSE_BYTES = 1_000_000
+_LIST_RUN_STATUSES = ("running", "success", "failed", "dead_letter", "crashed")
+_MEMCELL_TIMESTAMP_SQL = (
+    "MAX(0, COALESCE(CAST(ROUND((julianday(timestamp) - 2440587.5) "
+    "* 86400000) AS INTEGER), 0))"
+)
 _CURSOR_RE = re.compile(r"[A-Za-z0-9_-]+")
 _ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}")
 _PRINCIPAL_RE = re.compile(r"u-[0-9a-f]{32}")
@@ -66,13 +71,25 @@ class MemoryInsightReader:
         paths: MemoryInsightPaths,
         *,
         provider_base_urls: Sequence[str] = (),
+        exact_redaction_values: Sequence[str] = (),
     ) -> None:
         if isinstance(provider_base_urls, str) or any(
             not isinstance(url, str) for url in provider_base_urls
         ):
             raise TypeError("provider_base_urls must be a sequence of strings")
+        if isinstance(exact_redaction_values, str) or any(
+            not isinstance(value, str) for value in exact_redaction_values
+        ):
+            raise TypeError("exact_redaction_values must be a sequence of strings")
         self._paths = paths
         self._provider_base_urls = tuple(url.rstrip("/") for url in provider_base_urls if url)
+        self._exact_redaction_values = tuple(
+            sorted(
+                (value for value in exact_redaction_values if value),
+                key=len,
+                reverse=True,
+            )
+        )
 
     def list_entries(
         self,
@@ -85,10 +102,29 @@ class MemoryInsightReader:
             raise ValueError("limit must be between 1 and 50")
         cursor_key = _decode_cursor(cursor) if cursor is not None else None
 
-        memcells, everos_section = self._read_memcells(project_id=project_id)
-        queues, capture_section = self._read_capture_rows()
-        calls, call_section = self._read_call_rows()
-        runs, runs_section = self._read_run_rows()
+        memcells, everos_section = self._read_memcell_page(
+            principal_id=principal_id,
+            project_id=project_id,
+            cursor_key=cursor_key,
+            limit=limit + 1,
+        )
+        capture_section = self._probe_table(
+            self._paths.capture_db_path,
+            "memory_capture_queue",
+        )
+        page = (memcells or [])[:limit]
+        run_summaries, runs_section = self._read_run_summaries(
+            page,
+            principal_id=principal_id,
+            project_id=project_id,
+        )
+        call_counts, call_section = self._read_call_counts(
+            page,
+            principal_id=principal_id,
+            project_id=project_id,
+            capture_available=capture_section["status"] == "available",
+            runs_available=runs_section["status"] == "available",
+        )
         sections = {
             "everos": _combine_everos_section(everos_section, runs_section),
             "capture": capture_section,
@@ -102,31 +138,22 @@ class MemoryInsightReader:
                 "sections": sections,
             }
 
-        authorized = [
+        # SQL applies the exact singleton-owner predicate, while this second
+        # check keeps authorization fail-closed if the stored row shape drifts.
+        page = [
             row
-            for row in memcells
+            for row in page
             if _memcell_owned_by(row, principal_id=principal_id, project_id=project_id)
         ]
-        authorized.sort(key=lambda row: (_memcell_timestamp_ms(row), str(row["memcell_id"])), reverse=True)
-        if cursor_key is not None:
-            authorized = [
-                row
-                for row in authorized
-                if (_memcell_timestamp_ms(row), str(row["memcell_id"])) < cursor_key
-            ]
-
-        page = authorized[: limit + 1]
-        has_more = len(page) > limit
-        page = page[:limit]
+        has_more = len(memcells) > limit
         entries = [
             self._list_entry(
                 row,
-                principal_id=principal_id,
-                project_id=project_id,
-                queues=queues,
-                runs=runs,
-                calls=calls,
+                run_summary=(run_summaries or {}).get(str(row["memcell_id"])),
+                calls_available=call_counts is not None,
+                authorized_call_count=(call_counts or {}).get(str(row["memcell_id"]), 0),
                 base_urls=self._provider_base_urls,
+                exact_values=self._exact_redaction_values,
             )
             for row in page
         ]
@@ -205,21 +232,31 @@ class MemoryInsightReader:
             principal_id=principal_id,
             project_id=project_id,
             base_urls=self._provider_base_urls,
+            exact_values=self._exact_redaction_values,
         )
         steps = _steps_projection(
             row,
             capture,
             selected_runs,
             base_urls=self._provider_base_urls,
+            exact_values=self._exact_redaction_values,
         )
         current_state = self._current_state(principal_id, project_id, everos_section)
         result: dict[str, Any] = {
             "status": "ok",
-            "entry": _entry_projection(row, base_urls=self._provider_base_urls),
+            "entry": _entry_projection(
+                row,
+                base_urls=self._provider_base_urls,
+                exact_values=self._exact_redaction_values,
+            ),
             "capture": capture,
             "steps": steps,
             "calls": [
-                _call_projection(call, base_urls=self._provider_base_urls)
+                _call_projection(
+                    call,
+                    base_urls=self._provider_base_urls,
+                    exact_values=self._exact_redaction_values,
+                )
                 for call in selected_calls
             ],
             "omitted_call_count": len(owned_calls) - len(selected_calls),
@@ -239,35 +276,16 @@ class MemoryInsightReader:
         self,
         row: sqlite3.Row,
         *,
-        principal_id: str,
-        project_id: str,
-        queues: list[sqlite3.Row] | None,
-        runs: list[sqlite3.Row] | None,
-        calls: list[sqlite3.Row] | None,
+        run_summary: dict[str, Any] | None,
+        calls_available: bool,
+        authorized_call_count: int,
         base_urls: tuple[str, ...],
+        exact_values: tuple[str, ...],
     ) -> dict[str, Any]:
-        owned_runs = _authorized_runs(
-            runs or [],
-            memcell_id=str(row["memcell_id"]),
-            principal_id=principal_id,
-            project_id=project_id,
-        )
-        owned_calls = _authorized_calls(
-            calls or [],
-            memcell=row,
-            queues=queues or [],
-            runs=owned_runs,
-            principal_id=principal_id,
-            project_id=project_id,
-        )
-        statuses: dict[str, int] = {}
-        for run in owned_runs:
-            status = _bounded_string(_scrub(str(run["status"]), base_urls), 128)
-            statuses[status] = statuses.get(status, 0) + 1
         return {
-            **_entry_projection(row, base_urls=base_urls),
-            "run_summary": {"total": len(owned_runs), "statuses": statuses} if runs is not None else None,
-            "authorized_call_count": len(owned_calls) if calls is not None else None,
+            **_entry_projection(row, base_urls=base_urls, exact_values=exact_values),
+            "run_summary": run_summary,
+            "authorized_call_count": authorized_call_count if calls_available else None,
         }
 
     def _current_state(
@@ -301,12 +319,20 @@ class MemoryInsightReader:
         else:
             indexing = {
                 "status": _bounded_string(
-                    _scrub(str(row["status"]), self._provider_base_urls),
+                    _scrub(
+                        str(row["status"]),
+                        self._provider_base_urls,
+                        self._exact_redaction_values,
+                    ),
                     128,
                 ),
                 "updated_at_ms": _timestamp_ms(row["last_changed_at"]),
                 "error": _bounded_optional_string(
-                    _scrub_optional(row["error"], self._provider_base_urls),
+                    _scrub_optional(
+                        row["error"],
+                        self._provider_base_urls,
+                        self._exact_redaction_values,
+                    ),
                     _MAX_ERROR_BYTES,
                 ),
             }
@@ -319,6 +345,225 @@ class MemoryInsightReader:
             "indexing": indexing,
             "label": "current_state",
         }
+
+    def _read_memcell_page(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        cursor_key: tuple[int, str] | None,
+        limit: int,
+    ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
+        try:
+            with _read_only(self._paths.system_db_path) as conn:
+                sql = f"""
+                    SELECT memcell_id, app_id, project_id, message_ids_json,
+                           sender_ids_json, payload_json, timestamp, timestamp_ms
+                    FROM (
+                        SELECT memcell_id, app_id, project_id, message_ids_json,
+                               sender_ids_json, payload_json, timestamp,
+                               {_MEMCELL_TIMESTAMP_SQL} AS timestamp_ms
+                        FROM memcell
+                        WHERE app_id = ? AND project_id = ?
+                          AND CASE WHEN json_valid(sender_ids_json) THEN
+                                json_type(sender_ids_json) = 'array'
+                                AND json_array_length(sender_ids_json) = 1
+                                AND json_type(sender_ids_json, '$[0]') = 'text'
+                                AND json_extract(sender_ids_json, '$[0]') = ?
+                              ELSE 0 END
+                    )
+                """
+                args: list[object] = [_APP_ID, project_id, principal_id]
+                if cursor_key is not None:
+                    sql += " WHERE timestamp_ms < ? OR (timestamp_ms = ? AND memcell_id < ?)"
+                    args.extend((cursor_key[0], cursor_key[0], cursor_key[1]))
+                sql += " ORDER BY timestamp_ms DESC, memcell_id DESC LIMIT ?"
+                args.append(limit)
+                return list(conn.execute(sql, args)), {"status": "available"}
+        except _Unavailable as unavailable:
+            return None, {"status": "unavailable", "reason": unavailable.reason}
+
+    def _probe_table(self, path: Path, table: str) -> dict[str, str]:
+        try:
+            with _read_only(path) as conn:
+                conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            return {"status": "available"}
+        except _Unavailable as unavailable:
+            return {"status": "unavailable", "reason": unavailable.reason}
+
+    def _read_run_summaries(
+        self,
+        memcells: list[sqlite3.Row],
+        *,
+        principal_id: str,
+        project_id: str,
+    ) -> tuple[dict[str, dict[str, Any]] | None, dict[str, str]]:
+        try:
+            with _read_only(self._paths.ome_db_path) as conn:
+                if not memcells:
+                    conn.execute("SELECT 1 FROM run_record LIMIT 1").fetchone()
+                    return {}, {"status": "available"}
+                memcell_ids = [str(row["memcell_id"]) for row in memcells]
+                placeholders = ",".join("?" for _ in memcell_ids)
+                status_columns = ", ".join(
+                    f"SUM(status = '{status}') AS {status}" for status in _LIST_RUN_STATUSES
+                )
+                rows = conn.execute(
+                    f"""
+                    SELECT json_extract(event_payload, '$.memcell_id') AS memcell_id,
+                           COUNT(*) AS total, {status_columns}
+                    FROM run_record
+                    WHERE CASE WHEN json_valid(event_payload) THEN
+                            json_type(event_payload) = 'object'
+                            AND json_type(event_payload, '$.memcell_id') = 'text'
+                            AND json_extract(event_payload, '$.memcell_id') IN ({placeholders})
+                            AND json_extract(event_payload, '$.app_id') = ?
+                            AND json_extract(event_payload, '$.project_id') = ?
+                            AND (
+                                json_type(event_payload, '$.owner_id') IS NULL
+                                OR (
+                                    json_type(event_payload, '$.owner_id') = 'text'
+                                    AND json_extract(event_payload, '$.owner_id') = ?
+                                )
+                            )
+                          ELSE 0 END
+                    GROUP BY json_extract(event_payload, '$.memcell_id')
+                    """,
+                    (*memcell_ids, _APP_ID, project_id, principal_id),
+                )
+                summaries: dict[str, dict[str, Any]] = {}
+                for row in rows:
+                    total = int(row["total"])
+                    statuses = {
+                        status: int(row[status])
+                        for status in _LIST_RUN_STATUSES
+                        if int(row[status]) > 0
+                    }
+                    known_total = sum(statuses.values())
+                    if known_total < total:
+                        statuses["other"] = total - known_total
+                    summaries[str(row["memcell_id"])] = {
+                        "total": total,
+                        "statuses": statuses,
+                    }
+                for memcell_id in memcell_ids:
+                    summaries.setdefault(memcell_id, {"total": 0, "statuses": {}})
+                return summaries, {"status": "available"}
+        except _Unavailable as unavailable:
+            return None, {"status": "unavailable", "reason": unavailable.reason}
+
+    def _read_call_counts(
+        self,
+        memcells: list[sqlite3.Row],
+        *,
+        principal_id: str,
+        project_id: str,
+        capture_available: bool,
+        runs_available: bool,
+    ) -> tuple[dict[str, int] | None, dict[str, str]]:
+        try:
+            with _read_only(self._paths.call_log_db_path) as conn:
+                if capture_available:
+                    _attach_read_only(conn, self._paths.capture_db_path, "capture")
+                if runs_available:
+                    _attach_read_only(conn, self._paths.ome_db_path, "ome")
+                if not memcells:
+                    conn.execute("SELECT 1 FROM provider_call LIMIT 1").fetchone()
+                    return {}, {"status": "available"}
+
+                counts: dict[str, int] = {}
+                for memcell in memcells:
+                    memcell_id = str(memcell["memcell_id"])
+                    clauses = [
+                        "pc.memcell_id = :memcell_id",
+                        """
+                        (pc.stage = 'cascade' AND pc.app_id = :app_id
+                         AND pc.project_id = :project_id AND pc.owner_id = :owner_id
+                         AND pc.parent_type = 'memcell' AND pc.parent_id = :memcell_id)
+                        """,
+                    ]
+                    params: dict[str, object] = {
+                        "memcell_id": memcell_id,
+                        "app_id": _APP_ID,
+                        "project_id": project_id,
+                        "owner_id": principal_id,
+                    }
+                    if capture_available:
+                        params["message_ids_json"] = json.dumps(
+                            sorted(_message_ids(memcell)),
+                            separators=(",", ":"),
+                        )
+                        clauses.append(
+                            """
+                            (pc.request_id IS NOT NULL AND EXISTS (
+                                SELECT 1 FROM capture.memory_capture_queue AS owned_queue
+                                WHERE owned_queue.principal_id = :owner_id
+                                  AND owned_queue.project_ref = :project_id
+                                  AND (
+                                      owned_queue.add_request_id = pc.request_id
+                                      OR owned_queue.flush_request_id = pc.request_id
+                                  )
+                                  AND EXISTS (
+                                      SELECT 1 FROM json_each(:message_ids_json) AS message_id
+                                      WHERE message_id.type = 'text'
+                                        AND message_id.value =
+                                            'm_' || owned_queue.session_id || '_'
+                                            || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                                  )
+                            ) AND NOT EXISTS (
+                                SELECT 1 FROM capture.memory_capture_queue AS any_queue
+                                WHERE (
+                                    any_queue.add_request_id = pc.request_id
+                                    OR any_queue.flush_request_id = pc.request_id
+                                ) AND (
+                                    any_queue.principal_id != :owner_id
+                                    OR any_queue.project_ref != :project_id
+                                )
+                            ))
+                            """
+                        )
+                    if runs_available:
+                        run_scope = """
+                            CASE WHEN json_valid(rr.event_payload) THEN
+                                json_type(rr.event_payload) = 'object'
+                                AND json_type(rr.event_payload, '$.memcell_id') = 'text'
+                                AND json_extract(rr.event_payload, '$.memcell_id') = :memcell_id
+                                AND json_extract(rr.event_payload, '$.app_id') = :app_id
+                                AND json_extract(rr.event_payload, '$.project_id') = :project_id
+                                AND (
+                                    json_type(rr.event_payload, '$.owner_id') IS NULL
+                                    OR (
+                                        json_type(rr.event_payload, '$.owner_id') = 'text'
+                                        AND json_extract(rr.event_payload, '$.owner_id') = :owner_id
+                                    )
+                                )
+                            ELSE 0 END
+                        """
+                        clauses.append(
+                            f"pc.run_id IN (SELECT rr.run_id FROM ome.run_record AS rr WHERE {run_scope})"
+                        )
+                        clauses.append(
+                            f"""
+                            (pc.stage = 'cascade' AND pc.app_id = :app_id
+                             AND pc.project_id = :project_id AND pc.owner_id = :owner_id
+                             AND pc.parent_type = 'episode' AND pc.parent_id IN (
+                                SELECT json_extract(rr.event_payload, '$.episode_entry_id')
+                                FROM ome.run_record AS rr
+                                WHERE {run_scope}
+                                  AND substr(rr.event_topic, -length(':EpisodeExtracted'))
+                                      = ':EpisodeExtracted'
+                                  AND json_type(rr.event_payload, '$.episode_entry_id') = 'text'
+                             ))
+                            """
+                        )
+                    row = conn.execute(
+                        f"SELECT COUNT(*) AS total FROM provider_call AS pc WHERE {' OR '.join(clauses)}",
+                        params,
+                    ).fetchone()
+                    counts[memcell_id] = int(row["total"])
+                return counts, {"status": "available"}
+        except _Unavailable as unavailable:
+            return None, {"status": "unavailable", "reason": unavailable.reason}
 
     def _read_memcells(
         self,
@@ -408,6 +653,11 @@ def _read_only(path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _attach_read_only(conn: sqlite3.Connection, path: Path, schema: str) -> None:
+    uri = path.absolute().as_uri() + "?mode=ro"
+    conn.execute(f"ATTACH DATABASE ? AS {schema}", (uri,))
+
+
 def _sqlite_reason(exc: sqlite3.Error) -> str:
     message = str(exc).casefold()
     if "locked" in message or "busy" in message:
@@ -479,6 +729,10 @@ def _timestamp_ms(value: object) -> int:
 
 
 def _memcell_timestamp_ms(row: sqlite3.Row) -> int:
+    if "timestamp_ms" in row.keys():
+        value = row["timestamp_ms"]
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
     return _timestamp_ms(row["timestamp"])
 
 
@@ -664,19 +918,33 @@ def _authorized_calls(
     return accepted
 
 
-def _entry_projection(row: sqlite3.Row, *, base_urls: tuple[str, ...]) -> dict[str, Any]:
+def _entry_projection(
+    row: sqlite3.Row,
+    *,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> dict[str, Any]:
     return {
         "memcell_id": _bounded_string(
-            _scrub(str(row["memcell_id"]), base_urls),
+            _scrub(str(row["memcell_id"]), base_urls, exact_values),
             _MAX_MEMCELL_ID_BYTES,
         ),
         "timestamp_ms": _memcell_timestamp_ms(row),
-        "preview": _memcell_preview(row, base_urls=base_urls),
+        "preview": _memcell_preview(
+            row,
+            base_urls=base_urls,
+            exact_values=exact_values,
+        ),
         "message_count": len(_message_ids(row)),
     }
 
 
-def _memcell_preview(row: sqlite3.Row, *, base_urls: tuple[str, ...]) -> str:
+def _memcell_preview(
+    row: sqlite3.Row,
+    *,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> str:
     payload = _decode_json(row["payload_json"])
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         return ""
@@ -705,17 +973,26 @@ def _memcell_preview(row: sqlite3.Row, *, base_urls: tuple[str, ...]) -> str:
                 elif isinstance(kind, str) and kind.casefold() in _ATTACHMENT_TYPES:
                     name = part.get("name")
                     basename = (
-                        _safe_basename(name, base_urls=base_urls)
+                        _safe_basename(
+                            name,
+                            base_urls=base_urls,
+                            exact_values=exact_values,
+                        )
                         if isinstance(name, str)
                         else "attachment"
                     )
                     text.append(f"[{kind}: {basename}]")
-    return _bounded_string(_scrub(" ".join(text), base_urls), 512)
+    return _bounded_string(_scrub(" ".join(text), base_urls, exact_values), 512)
 
 
-def _safe_basename(value: str, *, base_urls: tuple[str, ...]) -> str:
+def _safe_basename(
+    value: str,
+    *,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> str:
     basename = value.replace("\\", "/").rsplit("/", 1)[-1] or "attachment"
-    return _bounded_string(_scrub(basename, base_urls), 128)
+    return _bounded_string(_scrub(basename, base_urls, exact_values), 128)
 
 
 def _capture_projection(
@@ -726,6 +1003,7 @@ def _capture_projection(
     principal_id: str,
     project_id: str,
     base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
 ) -> dict[str, Any]:
     if queues is None:
         return dict(section)
@@ -739,7 +1017,10 @@ def _capture_projection(
         return {"status": "unavailable", "reason": "expired"}
     states = sorted(
         {
-            _bounded_string(_scrub(str(row["state"]), base_urls), 128)
+            _bounded_string(
+                _scrub(str(row["state"]), base_urls, exact_values),
+                128,
+            )
             for row in related
         }
     )
@@ -756,6 +1037,7 @@ def _steps_projection(
     runs: list[sqlite3.Row],
     *,
     base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     if capture.get("status") == "available":
@@ -774,58 +1056,104 @@ def _steps_projection(
             "status": "created",
             "timestamp_ms": _memcell_timestamp_ms(memcell),
             "memcell_id": _bounded_string(
-                _scrub(str(memcell["memcell_id"]), base_urls),
+                _scrub(str(memcell["memcell_id"]), base_urls, exact_values),
                 _MAX_MEMCELL_ID_BYTES,
             ),
         }
     )
-    steps.extend(_run_projection(run, base_urls=base_urls) for run in runs)
+    steps.extend(
+        _run_projection(
+            run,
+            base_urls=base_urls,
+            exact_values=exact_values,
+        )
+        for run in runs
+    )
     steps.sort(key=lambda step: (int(step.get("started_at_ms", step.get("timestamp_ms", 0))), str(step.get("run_id", ""))))
     return steps
 
 
-def _run_projection(row: sqlite3.Row, *, base_urls: tuple[str, ...]) -> dict[str, Any]:
-    strategy = _bounded_string(_scrub(str(row["strategy_name"]), base_urls), 128)
+def _run_projection(
+    row: sqlite3.Row,
+    *,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> dict[str, Any]:
+    strategy = _bounded_string(
+        _scrub(str(row["strategy_name"]), base_urls, exact_values),
+        128,
+    )
     return {
         "type": "strategy",
-        "run_id": _bounded_string(_scrub(str(row["run_id"]), base_urls), 256),
+        "run_id": _bounded_string(
+            _scrub(str(row["run_id"]), base_urls, exact_values),
+            256,
+        ),
         "strategy": strategy,
         "relation": "profile_trigger" if strategy == "extract_user_profile" else "run",
-        "status": _bounded_string(_scrub(str(row["status"]), base_urls), 128),
+        "status": _bounded_string(
+            _scrub(str(row["status"]), base_urls, exact_values),
+            128,
+        ),
         "attempt": _optional_non_negative_int(row["attempt"]) or 0,
         "started_at_ms": _timestamp_ms(row["started_at"]),
         "finished_at_ms": _timestamp_ms(row["finished_at"]) if row["finished_at"] is not None else None,
         "error": _bounded_optional_string(
-            _scrub_optional(row["error"], base_urls),
+            _scrub_optional(row["error"], base_urls, exact_values),
             _MAX_ERROR_BYTES,
         ),
     }
 
 
-def _call_projection(row: sqlite3.Row, *, base_urls: tuple[str, ...]) -> dict[str, Any]:
-    request = _project_stored_json(row["request_json"], base_urls=base_urls)
+def _call_projection(
+    row: sqlite3.Row,
+    *,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> dict[str, Any]:
+    request = _project_stored_json(
+        row["request_json"],
+        base_urls=base_urls,
+        exact_values=exact_values,
+    )
     response = (
-        _project_stored_json(row["response_json"], base_urls=base_urls)
+        _project_stored_json(
+            row["response_json"],
+            base_urls=base_urls,
+            exact_values=exact_values,
+        )
         if row["response_json"] is not None
         else None
     )
     return {
-        "id": _bounded_string(_scrub(str(row["id"]), base_urls), 256),
+        "id": _bounded_string(
+            _scrub(str(row["id"]), base_urls, exact_values),
+            256,
+        ),
         "started_at_ms": _optional_non_negative_int(row["started_at_ms"]) or 0,
         "duration_ms": _optional_non_negative_int(row["duration_ms"]) or 0,
-        "kind": _bounded_string(_scrub(str(row["kind"]), base_urls), 128),
-        "stage": _bounded_string(_scrub(str(row["stage"]), base_urls), 128),
+        "kind": _bounded_string(
+            _scrub(str(row["kind"]), base_urls, exact_values),
+            128,
+        ),
+        "stage": _bounded_string(
+            _scrub(str(row["stage"]), base_urls, exact_values),
+            128,
+        ),
         "model": _bounded_optional_string(
-            _scrub_optional(row["model"], base_urls),
+            _scrub_optional(row["model"], base_urls, exact_values),
             1_024,
         ),
-        "status": _bounded_string(_scrub(str(row["status"]), base_urls), 128),
+        "status": _bounded_string(
+            _scrub(str(row["status"]), base_urls, exact_values),
+            128,
+        ),
         "error": _bounded_optional_string(
-            _scrub_optional(row["error"], base_urls),
+            _scrub_optional(row["error"], base_urls, exact_values),
             _MAX_ERROR_BYTES,
         ),
         "finish_reason": _bounded_optional_string(
-            _scrub_optional(row["finish_reason"], base_urls),
+            _scrub_optional(row["finish_reason"], base_urls, exact_values),
             128,
         ),
         "prompt_tokens": _optional_non_negative_int(row["prompt_tokens"]),
@@ -838,11 +1166,20 @@ def _call_projection(row: sqlite3.Row, *, base_urls: tuple[str, ...]) -> dict[st
     }
 
 
-def _project_stored_json(value: object, *, base_urls: tuple[str, ...]) -> Any:
+def _project_stored_json(
+    value: object,
+    *,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> Any:
     decoded = _decode_json(value)
     if decoded is None and value != "null":
         return {"status": "unavailable", "reason": "malformed"}
-    scrubbed = _scrub_json(decoded, base_urls=base_urls)
+    scrubbed = _scrub_json(
+        decoded,
+        base_urls=base_urls,
+        exact_values=exact_values,
+    )
     return _bounded_json(scrubbed, _MAX_PAYLOAD_FIELD_BYTES)
 
 
@@ -903,12 +1240,24 @@ def _optional_non_negative_int(value: object) -> int | None:
     return None
 
 
-def _scrub(value: str, base_urls: tuple[str, ...]) -> str:
-    return _scrub_text(value, base_urls=base_urls)
+def _scrub(
+    value: str,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> str:
+    return _scrub_text(
+        value,
+        base_urls=base_urls,
+        exact_values=exact_values,
+    )
 
 
-def _scrub_optional(value: object, base_urls: tuple[str, ...]) -> str | None:
-    return _scrub(str(value), base_urls) if value is not None else None
+def _scrub_optional(
+    value: object,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> str | None:
+    return _scrub(str(value), base_urls, exact_values) if value is not None else None
 
 
 def _encoded_size(value: Any) -> int:

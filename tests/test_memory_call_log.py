@@ -162,6 +162,47 @@ def test_multimodal_capture_omits_attachments_and_bounds_text_parts() -> None:
     assert "omitted_bytes" in serialized[0]
 
 
+def test_multimodal_capture_discards_large_attachments_before_scrubbing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attachment = "data:image/png;base64," + ("x" * (2 * 1024 * 1024))
+    provider_key = "plain-provider-credential"
+    scrubbed_values: list[str] = []
+    original_scrub_text = recorder._scrub_text
+
+    def scrub_text(value: str, **kwargs: object) -> str:
+        assert value is not attachment
+        scrubbed_values.append(value)
+        return original_scrub_text(value, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(recorder, "_scrub_text", scrub_text)
+
+    row = normalize_provider_call(
+        _call(
+            kind="multimodal_llm",
+            request={
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": f"prompt {provider_key}"},
+                            {"type": "image_url", "image_url": {"url": attachment}},
+                        ],
+                    }
+                ]
+            },
+            response={"audio": attachment, "content": f"answer {provider_key}"},
+        ),
+        exact_redaction_values=(provider_key,),
+    )
+
+    serialized = row.request_json + (row.response_json or "")
+    assert scrubbed_values
+    assert attachment not in serialized
+    assert provider_key not in serialized
+    assert serialized.count("[ATTACHMENT_OMITTED]") == 2
+
+
 def test_embedding_capture_stores_text_excerpts_and_vector_summary_only() -> None:
     vector_secret = 0.123456789
     inputs = [f"input-{index}-" + ("z" * 3_000) for index in range(20)]

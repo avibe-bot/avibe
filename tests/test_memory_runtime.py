@@ -2892,8 +2892,14 @@ def test_runtime_builds_insight_reader_from_injected_paths(
     store = MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite")
     config = MemoryConfig(
         processing=MemoryProcessingConfig(
-            llm=MemoryEndpointConfig(base_url="https://llm.example.test/v1"),
-            embedding=MemoryEndpointConfig(base_url="https://embed.example.test/v1"),
+            llm=MemoryEndpointConfig(
+                base_url="https://llm.example.test/v1",
+                api_key="opaque-llm-key",
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url="https://embed.example.test/v1",
+                api_key="opaque-embedding-key",
+            ),
         )
     )
 
@@ -2909,6 +2915,10 @@ def test_runtime_builds_insight_reader_from_injected_paths(
         "https://llm.example.test/v1",
         "https://embed.example.test/v1",
     )
+    assert set(runtime._insight_reader._exact_redaction_values) == {
+        "opaque-llm-key",
+        "opaque-embedding-key",
+    }
 
 
 def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes(

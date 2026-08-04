@@ -498,10 +498,16 @@ def normalize_provider_call(
     exact_values = tuple(
         sorted({value for value in exact_redaction_values if value}, key=len, reverse=True)
     )
-    request = _scrub_json(call.request, base_urls=base_urls, exact_values=exact_values)
+    raw_request = call.request
+    raw_response = call.response
+    if call.kind == "multimodal_llm":
+        raw_request = _sanitize_multimodal(raw_request, bound_strings=False)
+        if raw_response is not None:
+            raw_response = _sanitize_multimodal(raw_response, bound_strings=False)
+    request = _scrub_json(raw_request, base_urls=base_urls, exact_values=exact_values)
     response = (
-        _scrub_json(call.response, base_urls=base_urls, exact_values=exact_values)
-        if call.response is not None
+        _scrub_json(raw_response, base_urls=base_urls, exact_values=exact_values)
+        if raw_response is not None
         else None
     )
     request_bytes = _json_size(request)
@@ -945,11 +951,18 @@ def _response_schema_name(response_format: dict[str, JsonValue]) -> JsonValue:
     return {"name": None}
 
 
-def _sanitize_multimodal(value: JsonValue) -> JsonValue:
+def _sanitize_multimodal(
+    value: JsonValue,
+    *,
+    bound_strings: bool = True,
+) -> JsonValue:
     if isinstance(value, str):
-        return _bounded_json(value, _MULTIMODAL_STRING_BYTES)
+        return _bounded_json(value, _MULTIMODAL_STRING_BYTES) if bound_strings else value
     if isinstance(value, list):
-        return [_sanitize_multimodal(item) for item in value]
+        return [
+            _sanitize_multimodal(item, bound_strings=bound_strings)
+            for item in value
+        ]
     if not isinstance(value, dict):
         return value
     part_type = value.get("type")
@@ -960,7 +973,10 @@ def _sanitize_multimodal(value: JsonValue) -> JsonValue:
         if _normalized_key(key) in _ATTACHMENT_KEYS:
             result[key] = _ATTACHMENT_OMITTED
         else:
-            result[key] = _sanitize_multimodal(item)
+            result[key] = _sanitize_multimodal(
+                item,
+                bound_strings=bound_strings,
+            )
     return result
 
 
