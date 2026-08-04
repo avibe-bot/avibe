@@ -44,6 +44,11 @@ _RETENTION_ROWS = 5_000
 _SOFT_STORAGE_BYTES = 128 * 1024 * 1024
 _VACUUM_STEPS = 256
 _MAX_VACUUM_PASSES = 4
+_WRITER_BUSY_TIMEOUT_MS = 100
+_SQLITE_PROGRESS_OPCODES = 1_000
+_MAINTENANCE_INTERVAL_SECONDS = 6 * 60 * 60.0
+_MAINTENANCE_BATCHES = 64
+_CLOSE_INTERRUPT_GRACE_SECONDS = 0.1
 
 _SECRET_KEY_SUFFIXES = (
     "apikey",
@@ -165,7 +170,7 @@ class RecorderHandle:
         self._db_path = Path(db_path)
         self._provider_base_urls = tuple(provider_base_urls)
         self._condition = threading.Condition()
-        self._queue: deque[ProviderCallInput] = deque()
+        self._queue: deque[ProviderCallRow] = deque()
         self._pending_dropped = 0
         self._thread: threading.Thread | None = None
         self._started = False
@@ -176,6 +181,11 @@ class RecorderHandle:
         self._health_state = "disabled"
         self._health_reason: str | None = None
         self._consecutive_writer_failures = 0
+        self._consecutive_maintenance_failures = 0
+        self._batches_since_maintenance = 0
+        self._last_maintenance_monotonic: float | None = None
+        self._writer_connection: sqlite3.Connection | None = None
+        self._join_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def health(self) -> dict[str, str | None]:
@@ -203,27 +213,74 @@ class RecorderHandle:
             with self._condition:
                 if not self._running or self._closing or self._health_state == "disabled":
                     return
+            try:
+                row = normalize_provider_call(call, provider_base_urls=self._provider_base_urls)
+            except Exception:
+                with self._condition:
+                    if self._running and not self._closing:
+                        self._carry_drop_locked(1)
+                        self._set_health_locked("degraded", "serialization_failed")
+                return
+            with self._condition:
+                if not self._running or self._closing or self._health_state == "disabled":
+                    return
                 if len(self._queue) == _QUEUE_CAPACITY:
-                    self._queue.popleft()
-                    self._pending_dropped += 1
-                self._queue.append(call)
+                    dropped = self._queue.popleft()
+                    self._carry_drop_locked(1 + dropped.dropped_before)
+                if self._pending_dropped:
+                    row = replace(row, dropped_before=row.dropped_before + self._pending_dropped)
+                    self._pending_dropped = 0
+                self._queue.append(row)
                 self._condition.notify()
         except Exception:
             return
 
     async def close(self, timeout: float = 1.0) -> None:
+        budget = max(0.0, float(timeout))
+        interrupt_grace = min(_CLOSE_INTERRUPT_GRACE_SECONDS, budget)
+        graceful_budget = max(0.0, budget - interrupt_grace)
         try:
             with self._condition:
                 if not self._started:
                     return
                 if not self._closing:
                     self._closing = True
-                    self._close_deadline = time.monotonic() + max(0.0, timeout)
+                    self._close_deadline = time.monotonic() + graceful_budget
                     self._close_requested.set()
                     self._condition.notify_all()
                 thread = self._thread
             if thread is not None:
-                await asyncio.to_thread(thread.join)
+                join_task = asyncio.create_task(asyncio.to_thread(thread.join))
+                self._join_tasks.add(join_task)
+                join_task.add_done_callback(self._join_finished)
+                try:
+                    if graceful_budget:
+                        await asyncio.wait_for(
+                            asyncio.shield(join_task),
+                            timeout=graceful_budget,
+                        )
+                    elif join_task.done():
+                        await join_task
+                    else:
+                        raise TimeoutError
+                except TimeoutError:
+                    self._interrupt_writer()
+                    if interrupt_grace:
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(join_task),
+                                timeout=interrupt_grace,
+                            )
+                        except TimeoutError:
+                            with self._condition:
+                                self._set_health_locked("degraded", "writer_failures")
+                except asyncio.CancelledError:
+                    self._expire_close_deadline()
+                    self._interrupt_writer()
+                    await asyncio.shield(join_task)
+                    raise
+        except asyncio.CancelledError:
+            raise
         except Exception:
             with self._condition:
                 self._set_health_locked("degraded", "writer_failures")
@@ -231,14 +288,25 @@ class RecorderHandle:
     def _writer_main(self) -> None:
         try:
             with _database_connection(self._db_path) as conn:
-                _initialize_schema(conn)
-                self._writer_loop(conn)
+                with self._condition:
+                    self._writer_connection = conn
+                try:
+                    conn.set_progress_handler(
+                        lambda: int(self._past_close_deadline()),
+                        _SQLITE_PROGRESS_OPCODES,
+                    )
+                    _initialize_schema(conn)
+                    if self._perform_maintenance(conn):
+                        self._writer_loop(conn)
+                finally:
+                    conn.set_progress_handler(None, 0)
         except Exception as error:
             reason = "call_log_corrupt" if _is_corruption(error) else "writer_failures"
             with self._condition:
                 self._set_health_locked("degraded", reason)
         finally:
             with self._condition:
+                self._writer_connection = None
                 self._queue.clear()
                 self._pending_dropped = 0
                 self._running = False
@@ -251,61 +319,36 @@ class RecorderHandle:
             batch = self._next_batch()
             if batch is None:
                 return
-            calls, dropped_before = batch
-            rows, trailing_dropped = self._normalize_batch(calls, dropped_before)
-            if trailing_dropped:
-                with self._condition:
-                    self._pending_dropped += trailing_dropped
-            if not rows:
+            if not batch:
+                if not self._perform_maintenance(conn):
+                    return
                 continue
-            if not self._persist_batch(conn, rows):
+            if not self._persist_batch(conn, batch):
                 return
-            if self._queue_is_empty():
-                try:
-                    _maintain_storage(conn, self._db_path)
-                except Exception as error:
-                    if _is_corruption(error):
-                        with self._condition:
-                            self._set_health_locked("degraded", "call_log_corrupt")
-                        return
-                    if not self._record_writer_failure():
-                        return
+            self._record_writer_success()
+            self._batches_since_maintenance += 1
+            if (
+                not self._closing
+                and self._queue_is_empty()
+                and self._maintenance_due()
+                and not self._perform_maintenance(conn)
+            ):
+                return
 
-    def _next_batch(self) -> tuple[list[ProviderCallInput], int] | None:
+    def _next_batch(self) -> list[ProviderCallRow] | None:
         with self._condition:
             while not self._queue:
                 if self._closing:
                     return None
-                self._condition.wait()
+                maintenance_wait = self._seconds_until_maintenance()
+                if maintenance_wait <= 0:
+                    return []
+                self._condition.wait(timeout=maintenance_wait)
             if self._past_close_deadline_locked():
                 self._queue.clear()
                 self._pending_dropped = 0
                 return None
-            calls = [self._queue.popleft() for _ in range(min(_WRITE_BATCH_SIZE, len(self._queue)))]
-            dropped_before = self._pending_dropped
-            self._pending_dropped = 0
-            return calls, dropped_before
-
-    def _normalize_batch(
-        self,
-        calls: list[ProviderCallInput],
-        dropped_before: int,
-    ) -> tuple[list[ProviderCallRow], int]:
-        rows: list[ProviderCallRow] = []
-        gap = dropped_before
-        for call in calls:
-            try:
-                row = normalize_provider_call(call, provider_base_urls=self._provider_base_urls)
-            except Exception:
-                gap += 1
-                with self._condition:
-                    self._set_health_locked("degraded", "serialization_failed")
-                continue
-            if gap:
-                row = replace(row, dropped_before=row.dropped_before + gap)
-                gap = 0
-            rows.append(row)
-        return rows, gap
+            return [self._queue.popleft() for _ in range(min(_WRITE_BATCH_SIZE, len(self._queue)))]
 
     def _persist_batch(self, conn: sqlite3.Connection, rows: list[ProviderCallRow]) -> bool:
         while True:
@@ -314,6 +357,8 @@ class RecorderHandle:
             try:
                 committed = _write_batch(conn, rows, self._past_close_deadline)
             except Exception as error:
+                if self._past_close_deadline():
+                    return False
                 if _is_corruption(error):
                     with self._condition:
                         self._set_health_locked("degraded", "call_log_corrupt")
@@ -323,9 +368,6 @@ class RecorderHandle:
                 continue
             if not committed:
                 return False
-            with self._condition:
-                self._consecutive_writer_failures = 0
-                self._set_health_locked("active", None)
             return True
 
     def _record_writer_failure(self) -> bool:
@@ -338,6 +380,85 @@ class RecorderHandle:
                 return False
             self._set_health_locked("degraded", "writer_failures")
             return True
+
+    def _record_writer_success(self) -> None:
+        with self._condition:
+            self._consecutive_writer_failures = 0
+            if self._consecutive_maintenance_failures == 0:
+                self._set_health_locked("active", None)
+
+    def _record_maintenance_failure(self) -> bool:
+        with self._condition:
+            self._consecutive_maintenance_failures += 1
+            if self._consecutive_maintenance_failures >= _MAX_CONSECUTIVE_WRITER_FAILURES:
+                self._set_health_locked("disabled", "writer_failures")
+                self._queue.clear()
+                self._pending_dropped = 0
+                return False
+            self._set_health_locked("degraded", "writer_failures")
+            return True
+
+    def _perform_maintenance(self, conn: sqlite3.Connection) -> bool:
+        self._last_maintenance_monotonic = time.monotonic()
+        self._batches_since_maintenance = 0
+        try:
+            completed = _maintain_storage(
+                conn,
+                self._db_path,
+                should_abort=self._past_close_deadline,
+            )
+        except Exception as error:
+            if _is_corruption(error):
+                with self._condition:
+                    self._set_health_locked("degraded", "call_log_corrupt")
+                return False
+            if self._past_close_deadline():
+                return False
+            return self._record_maintenance_failure()
+        if not completed:
+            return False
+        with self._condition:
+            self._consecutive_maintenance_failures = 0
+            if self._consecutive_writer_failures == 0:
+                self._set_health_locked("active", None)
+        return True
+
+    def _maintenance_due(self) -> bool:
+        if self._batches_since_maintenance >= _MAINTENANCE_BATCHES:
+            return True
+        last = self._last_maintenance_monotonic
+        return last is None or time.monotonic() - last >= _MAINTENANCE_INTERVAL_SECONDS
+
+    def _seconds_until_maintenance(self) -> float:
+        last = self._last_maintenance_monotonic
+        if last is None:
+            return 0.0
+        return max(0.0, _MAINTENANCE_INTERVAL_SECONDS - (time.monotonic() - last))
+
+    def _carry_drop_locked(self, count: int) -> None:
+        if self._queue:
+            first = self._queue[0]
+            self._queue[0] = replace(first, dropped_before=first.dropped_before + count)
+        else:
+            self._pending_dropped += count
+
+    def _interrupt_writer(self) -> None:
+        with self._condition:
+            conn = self._writer_connection
+        if conn is not None:
+            try:
+                conn.interrupt()
+            except Exception:
+                pass
+
+    def _expire_close_deadline(self) -> None:
+        with self._condition:
+            self._close_deadline = time.monotonic()
+
+    def _join_finished(self, task: asyncio.Task[None]) -> None:
+        self._join_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     def _past_close_deadline(self) -> bool:
         with self._condition:
@@ -353,8 +474,6 @@ class RecorderHandle:
     def _set_health_locked(self, state: str, reason: str | None) -> None:
         self._health_state = state
         self._health_reason = reason
-
-
 def normalize_provider_call(
     call: ProviderCallInput,
     *,
@@ -519,7 +638,10 @@ def _maintain_storage(
     db_path: Path,
     *,
     now_ms: int | None = None,
-) -> None:
+    should_abort: Callable[[], bool] = lambda: False,
+) -> bool:
+    if should_abort():
+        return False
     reference_ms = int(time.time() * 1000) if now_ms is None else now_ms
     cutoff_ms = reference_ms - _RETENTION_AGE_MS
     conn.execute("BEGIN IMMEDIATE")
@@ -531,15 +653,22 @@ def _maintain_storage(
             "ORDER BY started_at_ms DESC, id DESC LIMIT -1 OFFSET ?)",
             (_RETENTION_ROWS,),
         )
+        if should_abort():
+            conn.execute("ROLLBACK")
+            return False
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
 
+    if should_abort():
+        return False
     conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
     previous_size = _call_log_size_bytes(db_path)
     for _ in range(_MAX_VACUUM_PASSES):
+        if should_abort():
+            return False
         if previous_size <= _SOFT_STORAGE_BYTES:
             break
         conn.execute(f"PRAGMA incremental_vacuum({_VACUUM_STEPS})")
@@ -548,6 +677,7 @@ def _maintain_storage(
         if current_size >= previous_size:
             break
         previous_size = current_size
+    return True
 
 
 def _call_log_size_bytes(db_path: Path) -> int:
@@ -589,7 +719,7 @@ def _database_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
             raise RuntimeError("Call-log database does not use incremental auto-vacuum")
         conn.execute("PRAGMA journal_mode = WAL")
         _validate_private_database_files(db_path)
-        conn.execute("PRAGMA busy_timeout = 1000")
+        conn.execute(f"PRAGMA busy_timeout = {_WRITER_BUSY_TIMEOUT_MS}")
         yield conn
     finally:
         conn.close()

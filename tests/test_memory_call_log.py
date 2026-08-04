@@ -436,6 +436,61 @@ async def test_recorder_batches_and_reports_oldest_queue_drops(tmp_path, monkeyp
     assert len(batch_sizes) < len(rows)
 
 
+async def test_submit_queues_only_bounded_rows_and_detaches_nested_input(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    original_connection = recorder._database_connection
+
+    @contextmanager
+    def gated_connection(path):
+        entered.set()
+        assert release.wait(2)
+        with original_connection(path) as conn:
+            yield conn
+
+    monkeypatch.setattr(recorder, "_database_connection", gated_connection)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    assert entered.wait(2)
+
+    secret = "sk-queue-secret-12345678"
+    raw_attachment = "raw-attachment-material"
+    request = {
+        "input": ["before"],
+        "authorization": secret,
+    }
+    vector = 0.987654321
+    response = {"data": [{"embedding": [vector]}]}
+    call = _call(kind="embedding", request=request, response=response)
+    handle.submit(call)
+    handle.submit(
+        _call(
+            id="multimodal",
+            kind="multimodal_llm",
+            request={"messages": [{"type": "image_url", "image_url": raw_attachment}]},
+        )
+    )
+    request["input"][0] = "after"  # type: ignore[index]
+    response["data"][0]["embedding"][0] = 0.123  # type: ignore[index]
+
+    assert len(handle._queue) == 2
+    assert all(isinstance(queued, recorder.ProviderCallRow) for queued in handle._queue)
+    queued_text = repr(handle._queue)
+    for raw_value in (secret, raw_attachment, str(vector), "after"):
+        assert raw_value not in queued_text
+
+    release.set()
+    await handle.close()
+    with sqlite3.connect(db_path) as conn:
+        request_json, response_json = conn.execute(
+            "SELECT request_json, response_json FROM provider_call WHERE kind = 'embedding'"
+        ).fetchone()
+    assert "before" in request_json
+    assert "after" not in request_json
+    assert "embedding" not in response_json
+
+
 async def test_recorder_swallows_bad_inputs_and_persists_the_next_call(tmp_path) -> None:
     db_path = _private_db_path(tmp_path)
     handle = RecorderHandle(db_path)
@@ -496,7 +551,56 @@ async def test_recorder_resets_writer_failure_health_after_success(tmp_path, mon
     await handle.close()
 
 
-async def test_close_deadline_rolls_back_and_connection_closes_on_writer_thread(tmp_path, monkeypatch) -> None:
+async def test_close_timeout_is_total_budget_and_closes_on_writer_thread(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    write_started = threading.Event()
+    created_threads: list[int] = []
+    closed_threads: list[int] = []
+    real_connect = sqlite3.connect
+    original_write_batch = recorder._write_batch
+
+    class TrackedConnection(sqlite3.Connection):
+        def close(self):
+            closed_threads.append(threading.get_ident())
+            return super().close()
+
+    def tracking_connect(*args, **kwargs):
+        created_threads.append(threading.get_ident())
+        return real_connect(*args, **kwargs, factory=TrackedConnection)
+
+    def observed_write_batch(conn, rows, should_abort):
+        write_started.set()
+        return original_write_batch(conn, rows, should_abort)
+
+    monkeypatch.setattr(recorder.sqlite3, "connect", tracking_connect)
+    monkeypatch.setattr(recorder, "_write_batch", observed_write_batch)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    deadline = time.monotonic() + 2
+    while handle._last_maintenance_monotonic is None and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+
+    lock = real_connect(db_path, isolation_level=None)
+    lock.execute("BEGIN IMMEDIATE")
+    handle.submit(_call())
+    assert write_started.wait(2)
+
+    started = time.monotonic()
+    await handle.close(timeout=0.5)
+    elapsed = time.monotonic() - started
+    lock.rollback()
+    lock.close()
+
+    assert created_threads == closed_threads
+    assert len(created_threads) == 1
+    assert created_threads[0] != threading.get_ident()
+    assert elapsed <= 0.65
+    assert handle._thread is not None and not handle._thread.is_alive()
+    with real_connect(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM provider_call").fetchone()[0] == 0
+
+
+async def test_close_cancellation_waits_for_writer_connection_to_close(tmp_path, monkeypatch) -> None:
     db_path = _private_db_path(tmp_path)
     insert_started = threading.Event()
     release_insert = threading.Event()
@@ -525,16 +629,64 @@ async def test_close_deadline_rolls_back_and_connection_closes_on_writer_thread(
     handle.submit(_call())
     assert insert_started.wait(2)
 
-    close_task = asyncio.create_task(handle.close(timeout=0.0))
+    close_task = asyncio.create_task(handle.close(timeout=5.0))
     assert await asyncio.to_thread(handle._close_requested.wait, 2)
+    close_task.cancel()
+    await asyncio.sleep(0.05)
+    assert not close_task.done()
     release_insert.set()
-    await close_task
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
 
+    assert handle._thread is not None and not handle._thread.is_alive()
     assert created_threads == closed_threads
     assert len(created_threads) == 1
-    assert created_threads[0] != threading.get_ident()
     with real_connect(db_path) as conn:
         assert conn.execute("SELECT count(*) FROM provider_call").fetchone()[0] == 0
+
+
+async def test_close_timeout_tracks_eventual_writer_owned_cleanup(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    insert_started = threading.Event()
+    release_insert = threading.Event()
+    created_threads: list[int] = []
+    closed_threads: list[int] = []
+    real_connect = sqlite3.connect
+
+    class BlockingConnection(sqlite3.Connection):
+        def executemany(self, sql, parameters):
+            result = super().executemany(sql, parameters)
+            insert_started.set()
+            assert release_insert.wait(2)
+            return result
+
+        def close(self):
+            closed_threads.append(threading.get_ident())
+            return super().close()
+
+    def tracking_connect(*args, **kwargs):
+        created_threads.append(threading.get_ident())
+        return real_connect(*args, **kwargs, factory=BlockingConnection)
+
+    monkeypatch.setattr(recorder.sqlite3, "connect", tracking_connect)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    handle.submit(_call())
+    assert insert_started.wait(2)
+
+    started = time.monotonic()
+    await handle.close(timeout=0.05)
+    assert time.monotonic() - started <= 0.15
+    assert handle._thread is not None and handle._thread.is_alive()
+    assert len(handle._join_tasks) == 1
+
+    release_insert.set()
+    await handle.close(timeout=1.0)
+    await asyncio.sleep(0)
+    assert handle._thread is not None and not handle._thread.is_alive()
+    assert not handle._join_tasks
+    assert created_threads == closed_threads
+    assert len(created_threads) == 1
 
 
 def test_host_maintenance_prunes_age_and_count(tmp_path) -> None:
@@ -588,6 +740,107 @@ def test_host_maintenance_bounds_checkpoint_and_vacuum_passes(tmp_path, monkeypa
     assert len(vacuum) == recorder._MAX_VACUUM_PASSES
     assert len(checkpoints) == recorder._MAX_VACUUM_PASSES + 1
     assert size_reads == recorder._MAX_VACUUM_PASSES + 1
+
+
+async def test_writer_throttles_maintenance_after_immediate_startup(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    maintenance_calls = 0
+    maintenance_finished = threading.Condition()
+    original_connection = recorder._database_connection
+    original_maintenance = recorder._maintain_storage
+
+    @contextmanager
+    def gated_connection(path):
+        entered.set()
+        assert release.wait(2)
+        with original_connection(path) as conn:
+            yield conn
+
+    def observed_maintenance(*args, **kwargs):
+        nonlocal maintenance_calls
+        result = original_maintenance(*args, **kwargs)
+        with maintenance_finished:
+            maintenance_calls += 1
+            maintenance_finished.notify_all()
+        return result
+
+    monkeypatch.setattr(recorder, "_database_connection", gated_connection)
+    monkeypatch.setattr(recorder, "_maintain_storage", observed_maintenance)
+    monkeypatch.setattr(recorder, "_WRITE_BATCH_SIZE", 1)
+    monkeypatch.setattr(recorder, "_MAINTENANCE_BATCHES", 3)
+    monkeypatch.setattr(recorder, "_MAINTENANCE_INTERVAL_SECONDS", 60 * 60)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    assert entered.wait(2)
+    for index in range(7):
+        handle.submit(_call(id=f"call-{index}", started_at_ms=int(time.time() * 1000) + index))
+    release.set()
+
+    with maintenance_finished:
+        assert maintenance_finished.wait_for(lambda: maintenance_calls >= 2, timeout=2)
+    await handle.close()
+    assert maintenance_calls == 2
+
+
+async def test_idle_writer_wakes_for_time_based_maintenance(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    maintenance_calls = 0
+    maintenance_finished = threading.Condition()
+    original_maintenance = recorder._maintain_storage
+
+    def observed_maintenance(*args, **kwargs):
+        nonlocal maintenance_calls
+        result = original_maintenance(*args, **kwargs)
+        with maintenance_finished:
+            maintenance_calls += 1
+            maintenance_finished.notify_all()
+        return result
+
+    monkeypatch.setattr(recorder, "_maintain_storage", observed_maintenance)
+    monkeypatch.setattr(recorder, "_MAINTENANCE_INTERVAL_SECONDS", 0.01)
+    handle = RecorderHandle(db_path)
+    handle.start()
+
+    with maintenance_finished:
+        assert maintenance_finished.wait_for(lambda: maintenance_calls >= 2, timeout=2)
+    await handle.close()
+    assert maintenance_calls >= 2
+
+
+async def test_twenty_maintenance_failures_disable_recorder(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    maintenance_calls = 0
+    maintenance_failed = threading.Condition()
+
+    def failing_maintenance(*_args, **_kwargs):
+        nonlocal maintenance_calls
+        with maintenance_failed:
+            maintenance_calls += 1
+            maintenance_failed.notify_all()
+        raise OSError("maintenance unavailable")
+
+    monkeypatch.setattr(recorder, "_maintain_storage", failing_maintenance)
+    monkeypatch.setattr(recorder, "_MAINTENANCE_BATCHES", 1)
+    monkeypatch.setattr(recorder, "_MAINTENANCE_INTERVAL_SECONDS", 60 * 60)
+    handle = RecorderHandle(db_path)
+    handle.start()
+
+    with maintenance_failed:
+        assert maintenance_failed.wait_for(lambda: maintenance_calls >= 1, timeout=2)
+    for index in range(recorder._MAX_CONSECUTIVE_WRITER_FAILURES - 1):
+        handle.submit(_call(id=f"call-{index}", started_at_ms=int(time.time() * 1000) + index))
+        with maintenance_failed:
+            assert maintenance_failed.wait_for(
+                lambda: maintenance_calls >= index + 2,
+                timeout=2,
+            )
+
+    assert maintenance_calls == recorder._MAX_CONSECUTIVE_WRITER_FAILURES
+    assert handle.health == {"state": "disabled", "reason": "writer_failures"}
+    await handle.close()
+    assert handle._thread is not None and not handle._thread.is_alive()
 
 
 async def test_corrupt_call_log_stays_degraded_and_is_never_recreated(tmp_path) -> None:
