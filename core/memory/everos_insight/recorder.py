@@ -935,7 +935,9 @@ def _embedding_response(value: JsonValue | None) -> JsonValue | None:
         return None
     source = value if isinstance(value, dict) else {}
     vectors = source.get("vectors", source.get("data", []))
-    vector_count = len(vectors) if isinstance(vectors, list) else 0
+    vector_count = source.get("vector_count")
+    if not isinstance(vector_count, int) or isinstance(vector_count, bool) or vector_count < 0:
+        vector_count = len(vectors) if isinstance(vectors, list) else 0
     dimension = source.get("dimension")
     if not isinstance(dimension, int) and isinstance(vectors, list) and vectors:
         first = vectors[0]

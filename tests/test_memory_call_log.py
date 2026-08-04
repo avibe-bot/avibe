@@ -176,6 +176,22 @@ def test_embedding_capture_stores_text_excerpts_and_vector_summary_only() -> Non
     assert "embedding" not in row.response_json
 
 
+def test_embedding_capture_preserves_an_upstream_vector_summary() -> None:
+    row = normalize_provider_call(
+        _call(
+            kind="embedding",
+            request={"model": "embed", "inputs": ["hello"]},
+            response={"vector_count": 2, "dimension": 3},
+        )
+    )
+
+    assert json.loads(row.response_json or "null") == {
+        "dimension": 3,
+        "usage": None,
+        "vector_count": 2,
+    }
+
+
 def test_normalized_row_bounds_large_scalars_usage_and_escaped_text(monkeypatch) -> None:
     huge = "x" * (2 * 1024 * 1024)
     escaped = '\\"\n\t' * (512 * 1024)
