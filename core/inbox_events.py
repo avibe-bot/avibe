@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 RUNS_UPDATED_EVENT = "runs.updated"
 VAULTS_UPDATED_EVENT = "vaults.updated"
 QUEUE_UPDATED_EVENT = "queue.updated"
+DEFINITIONS_UPDATED_EVENT = "definitions.updated"
 WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT = "workbench.events.bridge.status"
 _CONTROLLER_PROCESS = False
 
@@ -157,3 +158,22 @@ def vaults_updated_payload(
 
 def publish_run_updated(**kwargs: Any) -> None:
     bus.publish(RUNS_UPDATED_EVENT, run_updated_payload(**kwargs))
+
+
+def publish_definitions_updated(*, definition_type: str) -> None:
+    """Publish a payload-free scheduling hint after a definition commit."""
+
+    payload = {"definition_type": str(definition_type or "")}
+    bus.publish(DEFINITIONS_UPDATED_EVENT, payload)
+    if is_controller_process():
+        return
+    try:
+        from vibe import internal_client
+
+        internal_client.publish_event_sync(
+            DEFINITIONS_UPDATED_EVENT,
+            payload,
+            timeout=1.5,
+        )
+    except Exception:
+        logger.debug("definitions.updated bridge publish failed", exc_info=True)

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+from collections import deque
 
 from core.inbox_events import WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT
 from vibe import internal_client
@@ -32,6 +34,38 @@ logger = logging.getLogger(__name__)
 _BACKOFF_INITIAL = 1.0
 _BACKOFF_MAX = 15.0
 _bridge_connected = False
+_LOCAL_EVENT_IDS_MAX = 256
+_local_event_ids: set[str] = set()
+_local_event_order: deque[str] = deque()
+_local_event_lock = threading.Lock()
+
+
+def remember_local_event(event_id: str) -> None:
+    identity = str(event_id or "").strip()
+    if not identity:
+        return
+    with _local_event_lock:
+        if identity in _local_event_ids:
+            return
+        _local_event_ids.add(identity)
+        _local_event_order.append(identity)
+        while len(_local_event_order) > _LOCAL_EVENT_IDS_MAX:
+            _local_event_ids.discard(_local_event_order.popleft())
+
+
+def _consume_local_event(event_id: str) -> bool:
+    identity = str(event_id or "").strip()
+    if not identity:
+        return False
+    with _local_event_lock:
+        if identity not in _local_event_ids:
+            return False
+        _local_event_ids.discard(identity)
+        try:
+            _local_event_order.remove(identity)
+        except ValueError:
+            pass
+        return True
 
 
 def is_bridge_connected() -> bool:
@@ -63,6 +97,13 @@ async def run_inbox_bridge() -> None:
                 backoff = _BACKOFF_INITIAL
                 if event_type == "connected":
                     _set_bridge_connected(True)
+                event_id = (
+                    str(data.get("_event_id") or "")
+                    if isinstance(data, dict)
+                    else ""
+                )
+                if _consume_local_event(event_id):
+                    continue
                 broker.publish(event_type, data)
         except asyncio.CancelledError:
             _set_bridge_connected(False)

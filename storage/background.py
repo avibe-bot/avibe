@@ -1814,7 +1814,7 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
                 cancel_requested=bool(row.get("cancel_requested")),
             )
             bus.publish(RUNS_UPDATED_EVENT, payload)
-            if bus.subscriber_count() == 0 and not is_controller_process():
+            if not is_controller_process():
                 try:
                     from vibe import internal_client
 
@@ -1841,7 +1841,7 @@ def _publish_queue_updated(session_id: str) -> None:
     payload = {"session_id": normalized_session_id}
     try:
         bus.publish(QUEUE_UPDATED_EVENT, payload)
-        if bus.subscriber_count() == 0 and not is_controller_process():
+        if not is_controller_process():
             try:
                 from vibe import internal_client
 
@@ -2958,7 +2958,12 @@ class SQLiteBackgroundTaskStore:
                 values["agent_backend"] = identity["backend"]
             enqueue_run_in_connection(conn, values)
 
-    def enqueue_definition_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def enqueue_definition_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        suppress_scheduler_successor: bool = False,
+    ) -> Optional[dict[str, Any]]:
         """Enqueue one internally consistent snapshot of a live definition."""
 
         values = self._run_values(payload)
@@ -2967,6 +2972,29 @@ class SQLiteBackgroundTaskStore:
             raise ValueError("definition id is required")
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
+            if suppress_scheduler_successor:
+                unstarted = conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.definition_id == definition_id)
+                    .where(agent_runs.c.source_kind == "scheduler")
+                    .where(
+                        or_(
+                            agent_runs.c.status.in_(_status_query_values("queued")),
+                            and_(
+                                agent_runs.c.status.in_(_status_query_values("running")),
+                                agent_runs.c.delivery_id.is_(None),
+                                agent_runs.c.pid.is_(None),
+                                func.json_extract(
+                                    agent_runs.c.metadata_json,
+                                    f"$.{COMMAND_WORKER_METADATA_KEY}",
+                                ).is_(None),
+                            ),
+                        )
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
+                if unstarted is not None:
+                    return None
             definition = conn.execute(
                 select(
                     run_definitions.c.definition_type,
@@ -3081,8 +3109,25 @@ class SQLiteBackgroundTaskStore:
                 _defer_run_ids_updated_from_connection(conn, [cleaned_run_id])
             return {"agent_id": canonical_id, "agent_name": canonical_name}
 
-    def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
+    def list_runs(
+        self,
+        *,
+        status: Optional[str] = None,
+        run_types: Optional[Sequence[str]] = None,
+        after: tuple[str, str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         stmt = self._runs_query(status=status).order_by(agent_runs.c.created_at, agent_runs.c.id)
+        included = [value for value in (run_types or ()) if value]
+        if included:
+            stmt = stmt.where(agent_runs.c.run_type.in_(included))
+        if after is not None:
+            stmt = stmt.where(
+                tuple_(agent_runs.c.created_at, agent_runs.c.id)
+                > tuple_(str(after[0]), str(after[1]))
+            )
+        if limit is not None:
+            stmt = stmt.limit(max(0, int(limit)))
         with self.engine.connect() as conn:
             return [self._run_from_row(row) for row in conn.execute(stmt).mappings()]
 
@@ -3490,21 +3535,29 @@ class SQLiteBackgroundTaskStore:
                 deferred.append(self._run_from_row(row))
         return deferred
 
-    def list_pending_callbacks(self, *, limit: int = 20) -> list[dict[str, Any]]:
+    def list_pending_callbacks(
+        self,
+        *,
+        limit: int = 20,
+        after: tuple[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
         terminal_statuses = _status_query_values("succeeded") + _status_query_values("failed") + _status_query_values("canceled")
-        with self.engine.connect() as conn:
-            rows = list(
-                conn.execute(
-                    select(agent_runs)
-                    .where(agent_runs.c.callback_session_id.is_not(None))
-                    .where(agent_runs.c.callback_session_id != "")
-                    .where(agent_runs.c.callback_status == "pending")
-                    .where(agent_runs.c.completed_at.is_not(None))
-                    .where(agent_runs.c.status.in_(terminal_statuses))
-                    .order_by(agent_runs.c.completed_at, agent_runs.c.id)
-                    .limit(limit)
-                ).mappings()
+        stmt = (
+            select(agent_runs)
+            .where(agent_runs.c.callback_session_id.is_not(None))
+            .where(agent_runs.c.callback_session_id != "")
+            .where(agent_runs.c.callback_status == "pending")
+            .where(agent_runs.c.completed_at.is_not(None))
+            .where(agent_runs.c.status.in_(terminal_statuses))
+        )
+        if after is not None:
+            stmt = stmt.where(
+                tuple_(agent_runs.c.completed_at, agent_runs.c.id)
+                > tuple_(str(after[0]), str(after[1]))
             )
+        stmt = stmt.order_by(agent_runs.c.completed_at, agent_runs.c.id).limit(limit)
+        with self.engine.connect() as conn:
+            rows = list(conn.execute(stmt).mappings())
             return [self._run_from_row(row) for row in rows]
 
     def cancel_run(self, run_id: str, *, requested_at: Optional[str] = None) -> bool:
@@ -4035,8 +4088,12 @@ class SQLiteBackgroundTaskStore:
         }
         if callback_run_id is not None:
             values["callback_run_id"] = callback_run_id
-        with self.engine.begin() as conn:
-            conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
+        with run_update_event_transaction(self.engine) as conn:
+            result = conn.execute(
+                update(agent_runs).where(agent_runs.c.id == run_id).values(**values)
+            )
+            if result.rowcount:
+                _defer_run_ids_updated_from_connection(conn, [run_id])
 
     def mark_callback_pending(self, run_id: str, *, updated_at: Optional[str] = None) -> None:
         now = updated_at or _utc_now_iso()
@@ -4046,8 +4103,12 @@ class SQLiteBackgroundTaskStore:
             "callback_completed_at": None,
             "updated_at": now,
         }
-        with self.engine.begin() as conn:
-            conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
+        with run_update_event_transaction(self.engine) as conn:
+            result = conn.execute(
+                update(agent_runs).where(agent_runs.c.id == run_id).values(**values)
+            )
+            if result.rowcount:
+                _defer_run_ids_updated_from_connection(conn, [run_id])
 
     def mark_run_queued_from_running(
         self,
@@ -4094,13 +4155,7 @@ class SQLiteBackgroundTaskStore:
 
         page_limit = max(1, int(limit))
         query = (
-            select(
-                agent_runs.c.id,
-                agent_runs.c.status,
-                agent_runs.c.updated_at,
-                agent_runs.c.delivery_id,
-                agent_runs.c.pid,
-            )
+            select(agent_runs)
             .where(agent_runs.c.status.in_(_status_query_values("running")))
             .where(agent_runs.c.pid.is_(None))
             .where(agent_runs.c.delivery_id.is_(None))
@@ -4113,7 +4168,10 @@ class SQLiteBackgroundTaskStore:
         if occupied:
             query = query.where(~agent_runs.c.id.in_(occupied))
         with self.engine.connect() as conn:
-            rows = [dict(row) for row in conn.execute(query).mappings()]
+            rows = [
+                self._run_from_row(row)
+                for row in conn.execute(query).mappings()
+            ]
         return rows[:page_limit], len(rows) > page_limit
 
     def recover_claimed_pre_execution_run(
@@ -5192,7 +5250,13 @@ class SQLiteBackgroundTaskStore:
 
     # --- owed failure notices -------------------------------------------------
 
-    def list_owed_failure_notices(self, *, limit: int = 20, now: Optional[str] = None) -> list[dict[str, Any]]:
+    def list_owed_failure_notices(
+        self,
+        *,
+        limit: int = 20,
+        now: Optional[str] = None,
+        after: tuple[str, str, str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Runs owing a user-visible failure notice whose backoff has elapsed.
 
         Ordered by ``(created_at, id)`` so the drain sees a streak's earliest row
@@ -5282,8 +5346,13 @@ class SQLiteBackgroundTaskStore:
             # canonical notice is chosen by ``failure_streak_decision``, not by arrival
             # order — and least-recently-deferred-first is the fairer sequence anyway.
             .order_by(next_attempt_at, agent_runs.c.created_at, agent_runs.c.id)
-            .limit(max(1, limit))
         )
+        if after is not None:
+            stmt = stmt.where(
+                tuple_(next_attempt_at, agent_runs.c.created_at, agent_runs.c.id)
+                > tuple_(str(after[0]), str(after[1]), str(after[2]))
+            )
+        stmt = stmt.limit(max(1, limit))
         with self.engine.connect() as conn:
             for row in conn.execute(stmt).mappings():
                 notice = _json_loads(row["metadata_json"], {})
@@ -5300,6 +5369,41 @@ class SQLiteBackgroundTaskStore:
                 if len(owed) >= max(1, limit):
                     break
         return owed
+
+    def next_owed_failure_notice_at(self, *, now: Optional[str] = None) -> Optional[str]:
+        """Earliest future retry deadline for an otherwise deliverable notice."""
+
+        instant = now or _utc_now_iso()
+        notice_state = literal_column(OWED_NOTICE_STATE_SQL)
+        notice_kind = literal_column(OWED_NOTICE_KIND_SQL)
+        next_attempt_at = literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL)
+        stmt = (
+            select(next_attempt_at)
+            .where(
+                or_(
+                    agent_runs.c.status.in_(
+                        [*_status_query_values("failed"), *_status_query_values("succeeded")]
+                    ),
+                    and_(
+                        agent_runs.c.status.in_(_status_query_values("canceled")),
+                        notice_kind == NOTICE_KIND_BINDING_CHANGE,
+                    ),
+                )
+            )
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(notice_state == NOTICE_PENDING)
+            .where(next_attempt_at > instant)
+            .order_by(next_attempt_at)
+            .limit(1)
+        )
+        with self.engine.connect() as conn:
+            value = conn.execute(stmt).scalar_one_or_none()
+        return str(value) if value else None
 
     def stamp_binding_change_notice(
         self,

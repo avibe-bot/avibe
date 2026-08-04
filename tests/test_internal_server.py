@@ -427,22 +427,34 @@ async def _publish_event_round_trip():
                     "data": {"session_id": "ses_queue"},
                 },
             )
+            definitions_resp = await client.post(
+                "/internal/events",
+                json={
+                    "type": "definitions.updated",
+                    "data": {"definition_type": "scheduled"},
+                },
+            )
             bad_resp = await client.post("/internal/events", json={"type": "unsupported", "data": {}})
         events = [
             await asyncio.wait_for(queue.get(), timeout=1.0),
             await asyncio.wait_for(queue.get(), timeout=1.0),
+            await asyncio.wait_for(queue.get(), timeout=1.0),
         ]
-        return resp, queue_resp, bad_resp, events
+        return resp, queue_resp, definitions_resp, bad_resp, events
     finally:
         inbox_events.bus.unsubscribe(sub_id)
 
 
 def test_publish_event_endpoint_emits_allowlisted_bus_event():
-    resp, queue_resp, bad_resp, events = asyncio.run(_publish_event_round_trip())
+    resp, queue_resp, definitions_resp, bad_resp, events = asyncio.run(
+        _publish_event_round_trip()
+    )
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
     assert queue_resp.status_code == 200
     assert queue_resp.json() == {"ok": True}
+    assert definitions_resp.status_code == 200
+    assert definitions_resp.json() == {"ok": True}
     assert bad_resp.status_code == 400
     assert events == [
         (
@@ -450,6 +462,7 @@ def test_publish_event_endpoint_emits_allowlisted_bus_event():
             {"scope": "request", "request_id": "vreq_1", "request_status": "pending"},
         ),
         ("queue.updated", {"session_id": "ses_queue"}),
+        ("definitions.updated", {"definition_type": "scheduled"}),
     ]
 
 

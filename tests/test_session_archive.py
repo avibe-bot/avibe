@@ -250,6 +250,71 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         assert request_statuses[other_req["id"]] == "pending"
 
 
+def test_hfr_287_new_session_teardown_publishes_run_updates_after_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from storage import background
+
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    published: list[tuple[set[str], dict[str, tuple[str, bool]]]] = []
+    try:
+        session_id = _bind_session(
+            service,
+            channel="C_NEW_WAKE",
+            anchor="slack_new_wake",
+            native="native-new-wake",
+        )
+        with service.engine.begin() as conn:
+            _insert_run(
+                conn,
+                run_id="run-running",
+                session_id=session_id,
+                status="running",
+            )
+            _insert_run(
+                conn,
+                run_id="run-queued",
+                session_id=session_id,
+                status="queued",
+            )
+
+        def _capture(rows) -> None:  # noqa: ANN001
+            with service.engine.connect() as conn:
+                committed = {
+                    str(row.id): (str(row.status), bool(row.cancel_requested))
+                    for row in conn.execute(
+                        select(
+                            agent_runs.c.id,
+                            agent_runs.c.status,
+                            agent_runs.c.cancel_requested,
+                        ).where(
+                            agent_runs.c.id.in_(("run-running", "run-queued"))
+                        )
+                    )
+                }
+            published.append(({str(row["id"]) for row in rows}, committed))
+
+        monkeypatch.setattr(background, "_publish_run_rows_updated", _capture)
+
+        assert service.delete_agent_sessions(
+            scope_key="slack::channel::C_NEW_WAKE",
+            agent_name="claude",
+        ) == 1
+    finally:
+        service.close()
+
+    assert published == [
+        (
+            {"run-running", "run-queued"},
+            {
+                "run-running": ("running", True),
+                "run-queued": ("canceled", True),
+            },
+        )
+    ]
+
+
 def test_archive_release_vault_scopes_runs_in_threadpool(monkeypatch) -> None:
     from vibe import api, ui_server
 
