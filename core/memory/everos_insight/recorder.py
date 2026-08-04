@@ -166,9 +166,16 @@ class ProviderCallRow:
 class RecorderHandle:
     """Own one nonblocking provider-call queue and its SQLite writer thread."""
 
-    def __init__(self, db_path: Path, *, provider_base_urls: Sequence[str] = ()) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        provider_base_urls: Sequence[str] = (),
+        exact_redaction_values: Sequence[str] = (),
+    ) -> None:
         self._db_path = Path(db_path)
         self._provider_base_urls = tuple(provider_base_urls)
+        self._exact_redaction_values = tuple(exact_redaction_values)
         self._condition = threading.Condition()
         self._queue: deque[ProviderCallRow] = deque()
         self._pending_dropped = 0
@@ -214,7 +221,11 @@ class RecorderHandle:
                 if not self._running or self._closing or self._health_state == "disabled":
                     return
             try:
-                row = normalize_provider_call(call, provider_base_urls=self._provider_base_urls)
+                row = normalize_provider_call(
+                    call,
+                    provider_base_urls=self._provider_base_urls,
+                    exact_redaction_values=self._exact_redaction_values,
+                )
             except Exception:
                 with self._condition:
                     if self._running and not self._closing:
@@ -478,13 +489,21 @@ def normalize_provider_call(
     call: ProviderCallInput,
     *,
     provider_base_urls: Sequence[str] = (),
+    exact_redaction_values: Sequence[str] = (),
 ) -> ProviderCallRow:
     """Turn primitive provider data into one bounded, storage-ready row."""
 
     _validate_call(call)
     base_urls = tuple(url.rstrip("/") for url in provider_base_urls if url)
-    request = _scrub_json(call.request, base_urls=base_urls)
-    response = _scrub_json(call.response, base_urls=base_urls) if call.response is not None else None
+    exact_values = tuple(
+        sorted({value for value in exact_redaction_values if value}, key=len, reverse=True)
+    )
+    request = _scrub_json(call.request, base_urls=base_urls, exact_values=exact_values)
+    response = (
+        _scrub_json(call.response, base_urls=base_urls, exact_values=exact_values)
+        if call.response is not None
+        else None
+    )
     request_bytes = _json_size(request)
     response_bytes = _json_size(response) if response is not None else None
 
@@ -498,7 +517,11 @@ def normalize_provider_call(
         request = _llm_request(request)
         response = _bounded_json(response, _LLM_PAYLOAD_BYTES) if response is not None else None
 
-    scrub = lambda value: _scrub_optional_text(value, base_urls=base_urls)
+    scrub = lambda value: _scrub_optional_text(
+        value,
+        base_urls=base_urls,
+        exact_values=exact_values,
+    )
     row = ProviderCallRow(
         id=_required_bounded_text(scrub(call.id), _IDENTITY_BYTES, "id"),
         started_at_ms=call.started_at_ms,
@@ -816,29 +839,61 @@ def _validate_json(value: JsonValue, *, depth: int = 0) -> None:
     raise TypeError("provider payload must contain only JSON-compatible primitives")
 
 
-def _scrub_json(value: JsonValue, *, base_urls: tuple[str, ...]) -> JsonValue:
+def _scrub_json(
+    value: JsonValue,
+    *,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> JsonValue:
     if isinstance(value, str):
-        return _scrub_text(value, base_urls=base_urls)
+        return _scrub_text(value, base_urls=base_urls, exact_values=exact_values)
     if isinstance(value, list):
-        return [_scrub_json(item, base_urls=base_urls) for item in value]
+        return [
+            _scrub_json(item, base_urls=base_urls, exact_values=exact_values)
+            for item in value
+        ]
     if isinstance(value, dict):
         scrubbed: dict[str, JsonValue] = {}
         for key, item in value.items():
-            clean_key = _scrub_text(key, base_urls=base_urls)
+            clean_key = _scrub_text(
+                key,
+                base_urls=base_urls,
+                exact_values=exact_values,
+            )
             if _is_secret_key(key):
                 scrubbed[clean_key] = _REDACTED
             else:
-                scrubbed[clean_key] = _scrub_json(item, base_urls=base_urls)
+                scrubbed[clean_key] = _scrub_json(
+                    item,
+                    base_urls=base_urls,
+                    exact_values=exact_values,
+                )
         return scrubbed
     return value
 
 
-def _scrub_optional_text(value: str | None, *, base_urls: tuple[str, ...]) -> str | None:
-    return _scrub_text(value, base_urls=base_urls) if value is not None else None
+def _scrub_optional_text(
+    value: str | None,
+    *,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> str | None:
+    return (
+        _scrub_text(value, base_urls=base_urls, exact_values=exact_values)
+        if value is not None
+        else None
+    )
 
 
-def _scrub_text(value: str, *, base_urls: tuple[str, ...]) -> str:
+def _scrub_text(
+    value: str,
+    *,
+    base_urls: tuple[str, ...],
+    exact_values: tuple[str, ...],
+) -> str:
     scrubbed = value
+    for exact_value in exact_values:
+        scrubbed = scrubbed.replace(exact_value, _REDACTED)
     for base_url in sorted(base_urls, key=len, reverse=True):
         scrubbed = scrubbed.replace(base_url, _PROVIDER_BASE_URL)
     scrubbed = _AUTHORIZATION_VALUE_RE.sub(lambda match: match.group(1) + _REDACTED, scrubbed)

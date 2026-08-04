@@ -3618,6 +3618,7 @@
         "delivered": "Delivered",
         "dead": "Stopped",
         "running": "Running",
+        "ok": "Succeeded",
         "success": "Succeeded",
         "failed": "Failed",
         "error": "Error",

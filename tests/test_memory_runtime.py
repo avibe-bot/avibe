@@ -995,6 +995,65 @@ def test_recorded_orphan_recovery_runs_on_boots_that_never_launch_a_sidecar(
     ]
 
 
+def test_store_reopen_failure_maintains_call_log_after_orphan_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    maintained = threading.Event()
+
+    def maintain(path: Path) -> None:
+        assert path == db_path
+        maintained.set()
+
+    monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
+    _recording_ownership(monkeypatch)
+    config = MemoryConfig(enabled=True)
+
+    async def run() -> None:
+        runtime = MemoryRuntime(config, effective_home=tmp_path)
+        runtime._module = None
+        monkeypatch.setattr(runtime, "_open_store", lambda: False)
+
+        assert await runtime.reconcile(config) == {
+            "ok": False,
+            "error": "memory_store_unavailable",
+        }
+        assert await asyncio.to_thread(maintained.wait, 1)
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_store_reopen_failure_does_not_maintain_call_log_beside_unreaped_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    _recording_ownership(monkeypatch, failure=RuntimeError("orphan still owns call log"))
+    config = MemoryConfig(enabled=True)
+
+    async def run() -> None:
+        runtime = MemoryRuntime(config, effective_home=tmp_path)
+        runtime._module = None
+        monkeypatch.setattr(runtime, "_open_store", lambda: False)
+
+        assert await runtime.reconcile(config) == {
+            "ok": False,
+            "error": "memory_store_unavailable",
+        }
+        assert runtime._call_log_retention_task is None
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_disabled_boot_retires_the_record_of_a_sidecar_that_is_already_gone(
     tmp_path: Path,
 ) -> None:
@@ -2805,6 +2864,24 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
     # Status is not scoped to a principal, so it must not expose a field whose
     # only possible value is some other principal's last profile read.
     assert "profile_warning" not in payload
+
+
+def test_status_data_exists_ignores_an_empty_diagnostic_call_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+
+    async def run() -> None:
+        assert (await runtime.status_payload())["data_exists"] is False
+        await runtime.close()
+
+    asyncio.run(run())
 
 
 def test_runtime_builds_insight_reader_from_injected_paths(

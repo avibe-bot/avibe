@@ -239,7 +239,7 @@ class MemoryRuntime:
             provider_base_urls=base_urls,
         )
 
-    async def _reap_recorded_sidecar_if_unowned(self) -> None:
+    async def _reap_recorded_sidecar_if_unowned(self) -> bool:
         """Reap a previous run's sidecar when this runtime supervises none.
 
         ``EverOSProcess`` reaps a recorded orphan on its way to spawning a
@@ -279,7 +279,7 @@ class MemoryRuntime:
 
         async with self._reconcile_lock:
             if self._process is not None:
-                return
+                return False
             ownership = SidecarOwnership(
                 record_path=sidecar_record_path(self._memory_dir),
                 socket_path=self._socket_path,
@@ -289,6 +289,8 @@ class MemoryRuntime:
                 await ownership.reap()
             except Exception as exc:
                 logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
+                return False
+            return True
 
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
@@ -297,13 +299,17 @@ class MemoryRuntime:
         # sidecar is exactly the boot that may face one from the run before it.
         # Takes and releases the reconcile lock itself; the lock this method
         # acquires later is a separate, sequential acquisition.
-        await self._reap_recorded_sidecar_if_unowned()
+        if await self._reap_recorded_sidecar_if_unowned():
+            # Retention may run while artifact/store/credential preflight is
+            # failing, but only after recovery proved no previous recorder can
+            # still own the database. A recorder launch fences this task again
+            # through ``before_recorder_start`` below.
+            self._ensure_call_log_retention()
         if not self.available:
             # A transient store failure must not close Memory forever: every
             # reconciliation is another chance to open it.
             self._config = config
             if not config.enabled:
-                self._ensure_call_log_retention()
                 return {"ok": True, "state": "disabled"}
             if not self._open_store():
                 logger.warning("Memory store remains unavailable during reconciliation")
@@ -344,14 +350,16 @@ class MemoryRuntime:
             # artifact replacement may retain the old functional settings, but
             # it must never retain a child that can append diagnostic payloads.
             await self._stop_worker()
-            if self._process is not None:
+            stopped_process = self._process is not None
+            if stopped_process:
                 await self._process.stop()
                 self._process = None
             self._process_records_calls = False
             self._config = replace(self._config, diagnostics=config.diagnostics)
             self._configure_insight_reader(self._config)
             self._reset_recorder_health_unless_corrupt()
-            self._ensure_call_log_retention()
+            if stopped_process:
+                self._ensure_call_log_retention()
 
         embedding_changed = not skip_embedding_guard and (
             config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
@@ -406,12 +414,14 @@ class MemoryRuntime:
             self._provider = EverOSPort(self._socket_path)
             self.module._replace_provider(self._provider)
             await self._stop_worker()
-            if self._process is not None:
+            stopped_process = self._process is not None
+            if stopped_process:
                 await self._process.stop()
                 self._process = None
             self._process_records_calls = False
             self._reset_recorder_health_unless_corrupt()
-            self._ensure_call_log_retention()
+            if stopped_process:
+                self._ensure_call_log_retention()
             self._runtime_error = None
             if claims_paused:
                 self.module._worker.resume_claims()
@@ -1093,10 +1103,10 @@ class MemoryRuntime:
             await asyncio.sleep(1.0)
 
     def _data_exists(self) -> bool:
-        """Return a conservative status projection of provider, queue, and diagnostics."""
+        """Return a conservative status projection of vector-bearing state."""
 
         try:
-            return self._provider_data_exists_strict() or self._call_log_exists()
+            return self._provider_data_exists_strict()
         except Exception:
             return True
 

@@ -69,7 +69,7 @@ const listResult = (entries: MemoryLogEntry[], nextCursor: string | null = null)
   sections,
 });
 
-const detailResult = (): MemoryLogDetailResult => ({
+const detailResult = (providerCallStatus = 'ok'): MemoryLogDetailResult => ({
   status: 'ok',
   entry: entry('mc-alpha', 'Alpha detail'),
   capture: { status: 'available', delivery_states: ['delivered'], matched_message_count: 1 },
@@ -93,7 +93,7 @@ const detailResult = (): MemoryLogDetailResult => ({
       kind: 'llm',
       stage: 'strategy',
       model: 'model-1',
-      status: 'success',
+      status: providerCallStatus,
       error: null,
       finish_reason: 'stop',
       prompt_tokens: 4,
@@ -204,6 +204,17 @@ describe('MemoryLogPanel', () => {
 
     await user.click(screen.getByRole('button', { name: 'memory.log.back' }));
     expect(await screen.findByText('Alpha')).toBeTruthy();
+  });
+
+  it.each(['ok', 'success'])('renders provider call status %s as successful', async (providerCallStatus) => {
+    api.getMemoryLog.mockResolvedValue(listResult([entry('mc-alpha', 'Alpha')]));
+    api.getMemoryLogEntry.mockResolvedValue(detailResult(providerCallStatus));
+    const user = userEvent.setup();
+
+    renderPanel();
+    await user.click(await screen.findByText('Alpha'));
+
+    expect((await screen.findByText('memory.log.callSummary')).classList.contains('bg-mint-soft')).toBe(true);
   });
 
   it('ignores a slow refresh once a newer refresh has completed', async () => {
@@ -367,6 +378,7 @@ describe('Memory Log bounded helpers and static states', () => {
   it('localizes known enums and leaves future values as inert fallback text', () => {
     expect(memoryLogEnumLabel(translate as never, 'reason', 'runs_missing'))
       .toBe('memory.log.reason.runsMissing');
+    expect(memoryLogEnumLabel(translate as never, 'status', 'ok')).toBe('memory.log.status.ok');
     expect(memoryLogEnumLabel(translate as never, 'status', 'future_status')).toBe('future_status');
   });
 });

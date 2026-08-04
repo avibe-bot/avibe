@@ -48,12 +48,16 @@ def _private_db_path(tmp_path: Path) -> Path:
 def test_normalize_provider_call_scrubs_every_serialized_column() -> None:
     secret = "sk-super-secret-value"
     unprefixed_secret = "plain-provider-credential"
+    echoed_provider_key = "arbitrary-provider-key"
     local_path = "/Users/alice/private/prompt.txt"
     base_url = "https://provider.example.test/v1"
     row = normalize_provider_call(
         _call(
             model=f"model via {base_url}",
-            error=f"Authorization: Bearer token-value at {local_path}",
+            error=(
+                f"Authorization: Bearer token-value at {local_path}; "
+                f"provider echoed {echoed_provider_key}"
+            ),
             request={
                 "Authorization": f"Bearer {secret}",
                 "x-api-key": unprefixed_secret,
@@ -64,17 +68,24 @@ def test_normalize_provider_call_scrubs_every_serialized_column() -> None:
                 "signing_private_key": unprefixed_secret,
                 "provider_credentials": unprefixed_secret,
                 "nested": [f"api_key={secret}", local_path, base_url],
+                "provider_debug": f"upstream echoed {echoed_provider_key}",
             },
-            response={"access_token": secret, "content": f"read file://{local_path}"},
+            response={
+                "access_token": secret,
+                "content": f"read file://{local_path} with {echoed_provider_key}",
+            },
             md_path=local_path,
-            request_id=f"request-{secret}",
+            request_id=f"request-{echoed_provider_key}",
+            strategy_name=f"strategy-{echoed_provider_key}",
         ),
         provider_base_urls=(base_url,),
+        exact_redaction_values=(echoed_provider_key,),
     )
 
     serialized = json.dumps(asdict(row), sort_keys=True)
     assert secret not in serialized
     assert unprefixed_secret not in serialized
+    assert echoed_provider_key not in serialized
     assert local_path not in serialized
     assert base_url not in serialized
     assert "token-value" not in serialized

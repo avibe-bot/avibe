@@ -58,6 +58,7 @@ const ENUM_LABEL_KEYS = {
     delivered: 'delivered',
     dead: 'dead',
     running: 'running',
+    ok: 'ok',
     success: 'success',
     failed: 'failed',
     error: 'error',
@@ -333,6 +334,7 @@ const StepRow: React.FC<{ step: MemoryLogStep }> = ({ step }) => {
 const ProviderCallRow: React.FC<{ call: MemoryProviderCall }> = ({ call }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  const succeeded = call.status === 'ok' || call.status === 'success';
   const usage = [call.prompt_tokens, call.completion_tokens].filter((value) => value !== null).join(' / ');
   const copy = () => {
     const payload = JSON.stringify({ request: call.request, response: call.response }, null, 2);
@@ -354,7 +356,7 @@ const ProviderCallRow: React.FC<{ call: MemoryProviderCall }> = ({ call }) => {
           onClick={() => setExpanded((value) => !value)}
         >
           {expanded ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
-          <Badge variant={call.status === 'success' ? 'success' : 'destructive'}>
+          <Badge variant={succeeded ? 'success' : 'destructive'}>
             {t('memory.log.callSummary', {
               kind: memoryLogEnumLabel(t, 'callKind', call.kind),
               status: memoryLogEnumLabel(t, 'status', call.status),

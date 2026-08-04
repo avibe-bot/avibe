@@ -3618,6 +3618,7 @@
         "delivered": "已投递",
         "dead": "已停止",
         "running": "运行中",
+        "ok": "成功",
         "success": "成功",
         "failed": "失败",
         "error": "错误",

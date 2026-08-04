@@ -225,6 +225,27 @@ def test_prepare_call_recorder_is_diagnostic_only_on_patch_failure(
     assert patches.prepare_call_recorder(tmp_path / "call-log.db") is None
 
 
+def test_prepare_call_recorder_passes_configured_provider_keys_to_scrubber(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("EVEROS_LLM__API_KEY", "plain-llm-credential")
+    monkeypatch.setenv("EVEROS_MULTIMODAL__API_KEY", "plain-llm-credential")
+    monkeypatch.setenv("EVEROS_EMBEDDING__API_KEY", "plain-embedding-credential")
+    monkeypatch.setattr(patches, "_install_patches", lambda: None)
+    previous = patches._active_handle
+
+    try:
+        handle = patches.prepare_call_recorder(tmp_path / "call-log.db")
+        assert handle is not None
+        assert handle._writer._exact_redaction_values == (
+            "plain-llm-credential",
+            "plain-llm-credential",
+            "plain-embedding-credential",
+        )
+    finally:
+        patches._active_handle = previous
+
+
 def test_pinned_everos_patch_contract(monkeypatch, tmp_path: Path) -> None:
     """Exercise the patched, public EverOS 1.2.1 call surfaces offline.
 

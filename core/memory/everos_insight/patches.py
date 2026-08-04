@@ -51,10 +51,16 @@ class RecorderHandle:
     """Small sidecar-facing facade over the recorder worker."""
 
     def __init__(
-        self, db_path: Path, *, provider_base_urls: Sequence[str] = ()
+        self,
+        db_path: Path,
+        *,
+        provider_base_urls: Sequence[str] = (),
+        exact_redaction_values: Sequence[str] = (),
     ) -> None:
         self._writer = _WriterHandle(
-            db_path, provider_base_urls=provider_base_urls
+            db_path,
+            provider_base_urls=provider_base_urls,
+            exact_redaction_values=exact_redaction_values,
         )
 
     @property
@@ -81,7 +87,9 @@ def prepare_call_recorder(db_path: Path) -> RecorderHandle | None:
     previous = _active_handle
     try:
         handle = RecorderHandle(
-            Path(db_path), provider_base_urls=_provider_base_urls()
+            Path(db_path),
+            provider_base_urls=_provider_base_urls(),
+            exact_redaction_values=_provider_api_keys(),
         )
         _install_patches()
         _active_handle = handle
@@ -530,6 +538,20 @@ def _provider_base_urls() -> tuple[str, ...]:
             "EVEROS_LLM__BASE_URL",
             "EVEROS_MULTIMODAL__BASE_URL",
             "EVEROS_EMBEDDING__BASE_URL",
+        )
+        if (value := os.environ.get(name))
+    )
+
+
+def _provider_api_keys() -> tuple[str, ...]:
+    import os
+
+    return tuple(
+        value
+        for name in (
+            "EVEROS_LLM__API_KEY",
+            "EVEROS_MULTIMODAL__API_KEY",
+            "EVEROS_EMBEDDING__API_KEY",
         )
         if (value := os.environ.get(name))
     )
