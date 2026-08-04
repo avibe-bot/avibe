@@ -5228,12 +5228,12 @@ class SessionTurnManager:
         )
         if result.state in {"waiting_terminal", "interrupt_waiting"}:
             return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
-        if result.state == "settled" and result.reason == "not_active":
+        if result.state == "settled":
             return {
                 "ok": True,
                 "session_id": session_id,
                 "status": "stale_released",
-                "reason": "not_active",
+                "reason": result.reason or "already_terminal",
             }
         return {
             "ok": False,
