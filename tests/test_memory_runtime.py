@@ -1724,6 +1724,23 @@ def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) 
     assert runtime._config.enabled is False
 
 
+def test_runtime_install_artifact_converts_background_ensure_exception(
+    tmp_path: Path,
+) -> None:
+    artifact = _installed_artifact(ensure_failure=RuntimeError("install failed"))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+
+    assert asyncio.run(runtime.install_artifact()) == {
+        "ok": False,
+        "reason": "memory_runtime_install_failed",
+        "download_error": None,
+    }
+
+
 def test_distribution_metadata_bundles_only_the_memory_runtime_manifest() -> None:
     try:
         import tomllib
@@ -2427,6 +2444,10 @@ def test_disabling_diagnostics_stops_recorder_before_fallible_preflight(
         assert runtime._config.processing == initial.processing
         assert runtime._config.diagnostics.log_provider_calls is False
         assert factory.created[-1].settings.call_log_db_path is None
+
+        assert await runtime.restart() == {"ok": True, "state": "ready"}
+        assert factory.supervised[-1].settings.call_log_db_path is None
+        assert runtime._config.diagnostics.log_provider_calls is False
         await runtime.close()
 
     asyncio.run(run())
@@ -3626,7 +3647,7 @@ def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery
     asyncio.run(run())
 
 
-def test_ready_callback_activates_only_the_current_process_generation(
+def test_ready_callback_activates_only_the_current_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3675,8 +3696,41 @@ def test_ready_callback_activates_only_the_current_process_generation(
     asyncio.run(run())
 
 
+def test_ready_callback_survives_rejected_artifact_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    process = FakeEverOSProcess()
+    runtime._process = process
+    activated = asyncio.Event()
+    monkeypatch.setattr(runtime, "_ensure_worker", activated.set)
+
+    async def run() -> None:
+        runtime._activation_loop = asyncio.get_running_loop()
+        process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
+
+        await process.ready()
+        assert await runtime.install_artifact() == {
+            "ok": False,
+            "reason": "memory_runtime_install_requires_disabled_memory",
+            "download_error": None,
+        }
+
+        await asyncio.wait_for(activated.wait(), timeout=1.0)
+        assert runtime.module._worker._claims_paused is False
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("lifecycle", ["clear", "reconcile", "artifact"])
-def test_ready_callback_cannot_activate_inside_runtime_lifecycle(
+def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     lifecycle: str,
@@ -3750,7 +3804,7 @@ def test_ready_callback_cannot_activate_inside_runtime_lifecycle(
         ready_task = runtime._ready_activation_task
         if ready_task is not None:
             await asyncio.wait_for(asyncio.shield(ready_task), timeout=1.0)
-        assert activations == []
+        assert activations == ([] if lifecycle == "artifact" else [None])
         await runtime.close()
 
     asyncio.run(run())

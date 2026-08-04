@@ -129,9 +129,8 @@ class MemoryRuntime:
         self._runtime_error: str | None = None
         self._reconcile_lock = asyncio.Lock()
         self._restart_task: asyncio.Task[dict[str, Any]] | None = None
-        self._lifecycle_generation = 0
         self._ready_activation_task: asyncio.Task[None] | None = None
-        self._ready_event: tuple[EverOSProcessPort, int] | None = None
+        self._ready_event: EverOSProcessPort | None = None
         # Single-flight state for the drain-side processing gate. Deliberately a
         # flag and a cached verdict rather than a lock: the gate must answer
         # without waiting, see ``_processing_healthy``.
@@ -310,10 +309,7 @@ class MemoryRuntime:
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
 
-        try:
-            return await self._reconcile(config)
-        finally:
-            self._lifecycle_generation += 1
+        return await self._reconcile(config)
 
     async def _reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Run one reconciliation owned by the public lifecycle operation."""
@@ -383,6 +379,10 @@ class MemoryRuntime:
                 self._process = None
             self._process_records_calls = False
             self._config = replace(self._config, diagnostics=config.diagnostics)
+            self._restart_config = replace(
+                self._restart_config,
+                diagnostics=config.diagnostics,
+            )
             self._configure_insight_reader(self._config)
             self._reset_recorder_health_unless_corrupt()
             if stopped_process:
@@ -556,6 +556,8 @@ class MemoryRuntime:
             self._ensure_call_log_retention()
             self._runtime_error = "memory_sidecar_unavailable"
             return {"ok": False, "error": self._runtime_error}
+        if self._ready_event is sidecar:
+            self._ready_event = None
         if records_calls:
             self._recorder_health = dict(_RECORDER_DEGRADED)
         else:
@@ -702,34 +704,28 @@ class MemoryRuntime:
                 raise
 
     async def clear(self) -> dict[str, Any]:
-        try:
-            if not self.available:
-                raise self._unavailable()
-            async with self._reconcile_lock:
-                self._activation_loop = asyncio.get_running_loop()
-                result = await self.module.clear()
-                if isinstance(result, ClearCompleted) and self._config.enabled:
-                    try:
-                        async with self.module._lifecycle_lock:
-                            reconciled = await self._reconcile_locked(self._config)
-                            if reconciled.get("ok") is True:
-                                self._restart_config = deepcopy(self._config)
-                    except Exception:
-                        # The durable clear already completed. A subsequent
-                        # startup problem is represented by status, never by
-                        # rewriting the completed clear receipt into a failure.
-                        self._runtime_error = "memory_sidecar_unavailable"
-                return _clear_payload(result)
-        finally:
-            self._lifecycle_generation += 1
+        if not self.available:
+            raise self._unavailable()
+        async with self._reconcile_lock:
+            self._activation_loop = asyncio.get_running_loop()
+            result = await self.module.clear()
+            if isinstance(result, ClearCompleted) and self._config.enabled:
+                try:
+                    async with self.module._lifecycle_lock:
+                        reconciled = await self._reconcile_locked(self._config)
+                        if reconciled.get("ok") is True:
+                            self._restart_config = deepcopy(self._config)
+                except Exception:
+                    # The durable clear already completed. A subsequent
+                    # startup problem is represented by status, never by
+                    # rewriting the completed clear receipt into a failure.
+                    self._runtime_error = "memory_sidecar_unavailable"
+            return _clear_payload(result)
 
     async def install_artifact(self) -> dict[str, Any]:
         """Install or repair EverOS through this controller-owned lifecycle."""
 
-        try:
-            return await self._install_artifact()
-        finally:
-            self._lifecycle_generation += 1
+        return await self._install_artifact()
 
     async def _install_artifact(self) -> dict[str, Any]:
         """Run one artifact install while retaining its blocking ensure call."""
@@ -798,6 +794,10 @@ class MemoryRuntime:
                     await asyncio.shield(ensure_task)
                 except asyncio.CancelledError as error:
                     cancellation = cancellation or error
+                except Exception:
+                    # Interpret the settled task below so installer failures
+                    # stay inside the public result contract.
+                    pass
             if cancellation is not None:
                 try:
                     ensure_task.result()
@@ -855,10 +855,7 @@ class MemoryRuntime:
     async def _restart_once(self) -> dict[str, Any]:
         try:
             async with self._reconcile_lock:
-                try:
-                    return await self._restart_locked()
-                finally:
-                    self._lifecycle_generation += 1
+                return await self._restart_locked()
         except Exception:
             logger.exception("Memory sidecar restart failed")
             return {"ok": False, "error": "memory_restart_failed"}
@@ -980,6 +977,8 @@ class MemoryRuntime:
                 self._ensure_call_log_retention()
                 self._runtime_error = "memory_sidecar_unavailable"
                 return {"ok": False, "error": self._runtime_error}
+            if self._ready_event is sidecar:
+                self._ready_event = None
 
             if records_calls:
                 self._recorder_health = dict(_RECORDER_DEGRADED)
@@ -1004,7 +1003,6 @@ class MemoryRuntime:
         # before the first shutdown await so a late supervisor notification
         # cannot create a new drain task behind this close operation.
         self._activation_loop = None
-        self._lifecycle_generation += 1
         self._ready_event = None
         ready_task = self._ready_activation_task
         if ready_task is not None and ready_task is not asyncio.current_task():
@@ -1194,9 +1192,9 @@ class MemoryRuntime:
     def _schedule_sidecar_ready(self, process: EverOSProcessPort) -> None:
         """Coalesce a supervisor notification into Runtime-owned lock work."""
 
-        if self._activation_loop is None:
+        if self._activation_loop is None or process is not self._process:
             return
-        self._ready_event = (process, self._lifecycle_generation)
+        self._ready_event = process
         task = self._ready_activation_task
         if task is not None and not task.done():
             return
@@ -1214,20 +1212,19 @@ class MemoryRuntime:
 
     async def _activate_ready_events(self) -> None:
         while True:
-            event = self._ready_event
-            self._ready_event = None
-            if event is None:
-                return
-            process, generation = event
             async with self._reconcile_lock:
                 async with self.module._lifecycle_lock:
-                    if not self._ready_event_is_current(process, generation):
+                    process = self._ready_event
+                    self._ready_event = None
+                    if process is None:
+                        return
+                    if not self._ready_event_is_current(process):
                         continue
                     recovery = await self.module._recover_interrupted_clear_locked()
                     if isinstance(recovery, OperationFailed):
                         self._runtime_error = recovery.error
                         continue
-                    if not self._ready_event_is_current(process, generation):
+                    if not self._ready_event_is_current(process):
                         continue
                     if self._config.diagnostics.log_provider_calls:
                         self._process_records_calls = True
@@ -1235,7 +1232,7 @@ class MemoryRuntime:
                     else:
                         self._process_records_calls = False
                         self._ensure_call_log_retention()
-                    if not self._ready_event_is_current(process, generation):
+                    if not self._ready_event_is_current(process):
                         continue
                     self._runtime_error = None
                     self.module._worker.resume_claims()
@@ -1244,11 +1241,9 @@ class MemoryRuntime:
     def _ready_event_is_current(
         self,
         process: EverOSProcessPort,
-        generation: int,
     ) -> bool:
         return bool(
             self._activation_loop is not None
-            and generation == self._lifecycle_generation
             and process is self._process
             and process.running
             and self._config.enabled
