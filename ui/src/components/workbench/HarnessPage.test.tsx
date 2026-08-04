@@ -6,6 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
+import zh from '../../i18n/zh.json';
 import type {
   ApiContextType,
   HarnessRun,
@@ -579,6 +580,16 @@ describe('TaskDetail command task', () => {
 
     const unbound = detail(task({ shell_command: 'make test', session_id: null, cwd: null }));
     expect(unbound).toContain(i18n.t('harness.detail.cwdRuntimeDefault'));
+
+    // Asserted on the copy itself because that is where the claim lives. The chain does
+    // not end at ``runtime.default_cwd`` — it is unset on a fresh install and
+    // revalidated on every fire, and ``_execute_command_task`` then falls through to the
+    // Avibe state directory. Naming only the config key is the same overclaim as naming
+    // the Session, one link further down.
+    expect(en.harness.detail.cwdRuntimeDefault).toMatch(/Avibe/);
+    expect(en.harness.detail.cwdFromSession).toMatch(/Avibe/);
+    expect(zh.harness.detail.cwdRuntimeDefault).toMatch(/Avibe/);
+    expect(zh.harness.detail.cwdFromSession).toMatch(/Avibe/);
   });
 
   it('states the failure policy before the routing it governs, not after it', () => {

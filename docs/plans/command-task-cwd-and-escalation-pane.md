@@ -337,4 +337,23 @@ lane that still read `task.cwd` for the Session's answer.
   command task versus a message task. (`docs/COMMANDS*.md` covers IM slash
   commands, not the `vibe` CLI, so nothing there applies.)
 
+### Fourth review pass
+
+Two findings, both taken, both about a claim rather than the code.
+
+- **The new `docs/CLI.md` paragraph overstated the split.** "On a command task
+  `--cwd` means only where the command runs" is true for a binding — existing, or
+  a reusable Session already reserved — and false for `--create-session*`, where
+  `_resolve_definition_session_cwd` folds the flag into `session_workdir` on
+  purpose: a Session created by this edit and its command run in the same place.
+  Documented as the two cases it is, EN and ZH, with the way to opt out (pass a
+  scope, omit `--cwd`).
+- **"Runtime default" named a config key the run may never reach.** Past
+  `_runtime_default_workdir()` — unset on a fresh install, and `isdir`-revalidated
+  on every fire — `_execute_command_task` falls through to the Avibe state
+  directory. Same overclaim SCT-055 fixed, one link further down. Both strings now
+  name the terminal fallback, asserted on the `en` and `zh` copy directly, since
+  the copy is where the claim lives. Folded into **SCT-055** rather than given its
+  own ID: same invariant, same field.
+
 Scenario catalogue: SCT-050 – SCT-058.

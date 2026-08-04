@@ -2888,8 +2888,8 @@
       "lastExitCode": "Last exit code",
       "escalation": "On failure → escalation",
       "triagePrompt": "Triage prompt",
-      "cwdFromSession": "Bound session, else runtime default",
-      "cwdRuntimeDefault": "Runtime default"
+      "cwdFromSession": "Bound session, else runtime default or Avibe state dir",
+      "cwdRuntimeDefault": "Runtime default, else Avibe state dir"
     },
     "taskKind": {
       "command": "Command"

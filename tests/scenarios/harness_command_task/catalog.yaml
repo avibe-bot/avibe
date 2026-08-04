@@ -604,7 +604,13 @@ scenarios:
     # on the runtime default while the pane points at a Session -- next to the "Session
     # deleted" the Session field prints two rows up, in the case the UI can already see.
     # The field names the CHAIN the fire walks instead, and drops the Session term where
-    # the binding is visibly gone or absent.
+    # the binding is visibly gone or absent. The chain does not stop at
+    # ``runtime.default_cwd`` either: it is unset on a fresh install and revalidated on
+    # every fire, and ``_execute_command_task`` then falls through to the Avibe state
+    # directory -- so "Runtime default" alone named a specific config key the run may
+    # never reach, which is the same overclaim one link further down. Both strings name
+    # the terminal fallback, asserted on the copy in ``en`` and ``zh`` because that is
+    # where the claim lives.
   - id: SCT-056
     name: a replacement reusable Session is reserved where the Session belongs, not where the command runs
     status: covered

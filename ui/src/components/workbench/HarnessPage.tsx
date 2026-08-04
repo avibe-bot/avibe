@@ -1212,11 +1212,14 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
 /** What to print for a command task that stores no working directory of its own.
  *
  * Names the CHAIN the fire actually walks (``_execute_command_task``) -- the bound
- * Session's workdir, read live, then the runtime default -- rather than an outcome the
- * pane cannot verify. "Session working directory" was the wrong promise:
- * ``_bound_session_workdir`` answers ``None`` for a deleted row, a NULL workdir or a
- * failed read, and every fallback is ``isdir``-validated besides, so the command can
- * land on the runtime default while the pane names a Session.
+ * Session's workdir read live, then ``runtime.default_cwd``, then the Avibe state
+ * directory -- rather than an outcome the pane cannot verify. "Session working
+ * directory" was the wrong promise: ``_bound_session_workdir`` answers ``None`` for a
+ * deleted row, a NULL workdir or a failed read, and every fallback is
+ * ``isdir``-validated besides, so the command can land further down the chain while the
+ * pane names a Session. The last term is not decoration either -- ``default_cwd`` is
+ * unset on a fresh install and revalidated on every fire, so "Runtime default" alone
+ * named a specific config key that the run may never reach.
  *
  * Where the pane can already see the first term is impossible -- no binding at all, or
  * one whose Session row is gone (the same ``deleted`` state the Session field prints
