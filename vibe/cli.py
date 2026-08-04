@@ -1204,8 +1204,10 @@ def _watch_add_examples_text() -> str:
           Terminal failures also send a follow-up and disable the watch.
           In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
           Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and sends a timeout follow-up;
-          64 means the cycle ran and found nothing worth reporting, so the watch ends or re-arms WITHOUT an Agent turn;
-          any other non-zero is a failure. Use 64 in waiters whose normal outcome is uninteresting, such as green CI.
+          64 PLUS the line 'avibe-watch: no-event' on stderr means the cycle ran and found nothing worth reporting,
+          so the watch ends or re-arms WITHOUT an Agent turn; any other non-zero is a failure.
+          The marker is required: 64 alone is also sysexits EX_USAGE, so a bare 64 stays a failure and stops the watch.
+          Use it in waiters whose normal outcome is uninteresting, such as green CI.
           Pass either --shell '<command>' or a command after '--'.
           --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
 

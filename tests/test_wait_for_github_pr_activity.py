@@ -8,6 +8,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 def _load_module():
     script_path = (
@@ -798,6 +800,55 @@ def test_render_activity_actionable_only_drops_bot_trigger_comment_but_advances_
 
     assert output is None
     # Dropped once, never re-examined.
+    assert issue_comment_cursor == 301
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@author fix the timeout handling",
+        "@alice review the migration assumptions",
+        "@bob merge after the release freeze",
+    ],
+)
+def test_render_activity_actionable_only_keeps_a_human_request_that_opens_with_a_command_word(body: str) -> None:
+    """A mention plus a command word is only noise when that is the whole comment.
+
+    Suppressing one of these still advances the cursor, so the request would not be
+    delayed — it would be lost, and the review-fix loop would never answer it.
+    """
+    module = _load_module()
+    state = {
+        "pull_request": {"number": 153, "state": "open", "draft": False},
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [
+            {
+                "id": 301,
+                "body": body,
+                "html_url": "https://github.com/example/repo/pull/1#issuecomment-301",
+                "user": {"login": "teammate"},
+            }
+        ],
+        "reactions": [],
+    }
+
+    output, _review_cursor, _review_comment_cursor, issue_comment_cursor, _reaction_cursor, _pr_status = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        actionable_only=True,
+        ignore_patterns=module._compile_ignore_patterns(None, actionable_only=True),
+    )
+
+    assert output is not None
+    assert body in output
     assert issue_comment_cursor == 301
 
 

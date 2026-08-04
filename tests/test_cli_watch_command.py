@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core import watches
 from core.watches import ManagedWatchStore, WatchRuntimeStateStore
 from vibe import cli
 
@@ -2009,3 +2010,16 @@ def test_watch_add_refuses_the_reserved_session_with_no_side_effects(
     assert started == [accepted["definition"]["id"]], (
         f"and an admitted watch really does start: {started}"
     )
+
+
+def test_watch_add_help_states_the_no_event_marker_contract() -> None:
+    """The help is a live caller of the waiter contract, not a description of it.
+
+    A custom waiter written from this text is what the supervisor then judges, so
+    guidance that named the exit code but not the marker sent people straight into
+    a watch that reports a failure and disables itself.
+    """
+    text = cli._watch_add_examples_text()
+
+    assert str(watches.NO_EVENT_EXIT_CODE) in text
+    assert watches.NO_EVENT_MARKER in text

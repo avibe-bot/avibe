@@ -42,8 +42,12 @@ CODEX_REVIEW_PASS_REACTION_CONTENT = "+1"
 
 # Comments that only drive the review loop rather than report its result. On a
 # busy PR these outnumber the real findings, and each one costs a full Agent turn.
+# Anchored at BOTH ends: a trigger comment is only the command. "@codex review" is
+# noise; "@author fix the timeout handling" is a person asking for work and must
+# survive, because suppressing it still advances the cursor and the request would be
+# lost for good rather than merely delayed.
 DEFAULT_NOISE_COMMENT_PATTERNS = (
-    r"^@[\w\[\]-]+\s+(review|fix|rebase|merge)\b",
+    r"^@[\w\[\]-]+\s+(review|fix|rebase|merge)\s*$",
     r"^/[\w-]+\s*$",
 )
 # Lifecycle transitions worth interrupting for. Draft toggles are usually the
