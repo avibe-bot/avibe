@@ -756,6 +756,7 @@ describe('read-only transcript locks the secret-request cards', () => {
 
 describe('Agent result metrics tail', () => {
   const footer = '✅ ⏱️ 5s · 🪙 1.2k tok';
+  const displayedFooter = '⏱️ 5s · 🪙 1.2k tok';
 
   it('renders structured duration and token usage once, after the timestamp', () => {
     const markup = render(
@@ -766,9 +767,12 @@ describe('Agent result metrics tail', () => {
       />,
     );
 
-    expect(markup.split(footer)).toHaveLength(2);
-    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
-    expect(markup).toContain('opacity-100');
+    expect(markup).not.toContain(footer);
+    expect(markup.split(displayedFooter)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
+    expect(markup).toContain(
+      'opacity-0 transition-opacity duration-150 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100',
+    );
     expect(markup).toContain('flex-wrap');
   });
 
@@ -783,8 +787,9 @@ describe('Agent result metrics tail', () => {
     );
 
     expect(markup).toContain('Answer body');
-    expect(markup.split(footer)).toHaveLength(2);
-    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
+    expect(markup).not.toContain(footer);
+    expect(markup.split(displayedFooter)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
   });
 
   it('renders a footer-only completion in metadata without an empty bubble', () => {
@@ -797,8 +802,9 @@ describe('Agent result metrics tail', () => {
       <MessageRow message={footerOnly} session={session()} messageFontSize={13} />,
     );
 
-    expect(markup.split(footer)).toHaveLength(2);
-    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
+    expect(markup).not.toContain(footer);
+    expect(markup.split(displayedFooter)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
     expect(markup).not.toContain('vr-markdown--inherit-size');
   });
 
@@ -814,8 +820,9 @@ describe('Agent result metrics tail', () => {
     );
 
     expect(markup).toContain('Failed to finish');
-    expect(markup.split(footer)).toHaveLength(2);
-    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
+    expect(markup).not.toContain(footer);
+    expect(markup.split(displayedFooter)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
   });
 });
 

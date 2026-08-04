@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -3119,6 +3120,9 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
             transport = Transport(binary="codex", cwd="/tmp/work")
             await transport.start()
             await transport.stop()
+            initialize_request = json.loads(writes[0])
+            self.assertEqual(initialize_request["method"], "initialize")
+            self.assertEqual(initialize_request["params"]["clientInfo"]["name"], "avibe")
             transport = Transport(
                 binary="codex",
                 cwd="/tmp/work",
