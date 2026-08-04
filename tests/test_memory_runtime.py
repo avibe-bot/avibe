@@ -2623,6 +2623,7 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
     db_path.parent.mkdir(parents=True, mode=0o700)
     initialize_call_log(db_path)
     maintained = threading.Event()
+    release_maintenance = threading.Event()
     maintenance_calls = 0
 
     def maintain(path: Path) -> str:
@@ -2630,6 +2631,7 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
         assert path == db_path
         maintenance_calls += 1
         maintained.set()
+        assert release_maintenance.wait(timeout=2)
         return "call_log_corrupt"
 
     monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
@@ -2643,6 +2645,8 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
         assert await asyncio.to_thread(maintained.wait, 1)
         task = runtime._call_log_retention_task
         assert task is not None
+        assert not task.done()
+        release_maintenance.set()
         for _ in range(20):
             if runtime._recorder_health["reason"] == "call_log_corrupt":
                 break
