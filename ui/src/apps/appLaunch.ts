@@ -92,14 +92,28 @@ export interface AppTabTarget {
 const STANDALONE_BUILTIN_ROUTES = new Set(['files', 'terminal', 'editor']);
 
 /**
+ * Marks a tab that was opened to show ONE app, so `AppShell` mounts without the
+ * persisted workbench window layout (`WindowManagerProvider` otherwise restores
+ * `avibe.workbench.windows.v1` on every desktop mount, and `WindowLayer` floats those
+ * windows above the route outlet — a ⌘-clicked Files tab would open underneath a
+ * restored Library window, and a maximized one would hide it outright).
+ *
+ * A URL param rather than shell state, so the mode survives a reload/bookmark of the
+ * tab and stays invisible to the in-shell navigations (the sidebar Apps launcher, a
+ * chat's "open in editor") that legitimately WANT the workbench layout.
+ */
+export const APP_TAB_PARAM = 'standalone';
+
+/**
  * The URL that shows an app on its OWN browser tab, or null when it has no
  * standalone surface (so the caller can fall back to a window).
  *
  *  - a Show Page → its private `/show/<sid>/` page, the SAME target as the tile's
  *    "Open in New Tab" menu item and the window titlebar's external-open button
  *    (`registry.externalHref`): the page itself, full viewport, no workbench chrome.
- *  - a built-in → its in-shell `/apps/<id>` route, but only the ones that stand alone
- *    on desktop (see `STANDALONE_BUILTIN_ROUTES`).
+ *  - a built-in → its in-shell `/apps/<id>` route — only the ones that stand alone on
+ *    desktop (see `STANDALONE_BUILTIN_ROUTES`) — flagged with `APP_TAB_PARAM` so the
+ *    shell suppresses the restored window layer over it.
  *
  * Pure.
  */
@@ -109,7 +123,24 @@ export function appTabHref(target: AppTabTarget): string | null {
     return sessionId ? showPagePrivatePath(sessionId) : null;
   }
   const appId = target.appId.trim();
-  return STANDALONE_BUILTIN_ROUTES.has(appId) ? `/apps/${appId}` : null;
+  return STANDALONE_BUILTIN_ROUTES.has(appId) ? `/apps/${appId}?${APP_TAB_PARAM}=1` : null;
+}
+
+/**
+ * Whether THIS document was opened as a standalone app tab (`appTabHref` above).
+ * Read once at shell mount: the answer must not flip while the tab lives, or a later
+ * in-tab navigation would re-restore the layout the tab was opened to avoid — and,
+ * worse, a suppressed-then-enabled save would clobber the real layout with `[]`.
+ *
+ * Takes the raw `location.search` so it stays pure and testable.
+ */
+export function isStandaloneAppTab(search: string): boolean {
+  if (!search) return false;
+  try {
+    return new URLSearchParams(search).get(APP_TAB_PARAM) === '1';
+  } catch {
+    return false;
+  }
 }
 
 /** `appTabHref` for a persisted Dock id (`files` / `show:<session_id>`). Pure. */

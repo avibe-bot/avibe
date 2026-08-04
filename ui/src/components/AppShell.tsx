@@ -4,6 +4,7 @@ import { ArrowLeft, Bot, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inb
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
+import { isStandaloneAppTab } from '../apps/appLaunch';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
@@ -228,6 +229,13 @@ export const AppShell: React.FC = () => {
   // The mobile Dock drawer (opened from the workbench Apps tab). Like the admin
   // sheet it closes on any route change — tapping a tile navigates + dismisses.
   const [appsDrawerOpen, setAppsDrawerOpen] = useState(false);
+  // Whether this DOCUMENT was opened as a single-app tab (⌘/Ctrl-click on an app icon,
+  // §7.1m). Frozen at mount from the landing URL rather than tracked off `location`, so
+  // navigating deeper inside the tab can't suddenly restore the workbench window layout
+  // this tab exists to stay out of — nor re-enable the save that would clobber it.
+  const [standaloneAppTab] = useState(() =>
+    typeof window === 'undefined' ? false : isStandaloneAppTab(window.location.search),
+  );
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
   // static locked column that does NOT read it (resizing the shell mid-focus
   // fought iOS's scroll-into-view and flung the input off-screen); only the md+
@@ -401,7 +409,7 @@ export const AppShell: React.FC = () => {
     // fought iOS's own scroll-into-view and threw the input off-screen. iOS instead
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
-    <WindowManagerProvider>
+    <WindowManagerProvider standalone={standaloneAppTab}>
     <DockProvider>
     <ShowPageDragProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">

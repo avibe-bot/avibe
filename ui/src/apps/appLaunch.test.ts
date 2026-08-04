@@ -5,6 +5,7 @@ import {
   appTabHref,
   appTabHrefForDockId,
   isAppleContextClick,
+  isStandaloneAppTab,
   tabModifierLabel,
 } from './appLaunch';
 import { showDockId } from '../context/dockDoc';
@@ -81,10 +82,19 @@ describe('tabModifierLabel', () => {
 });
 
 describe('appTabHref', () => {
-  it('maps a built-in that stands alone to its /apps/<id> route', () => {
-    expect(appTabHref({ appId: 'files' })).toBe('/apps/files');
-    expect(appTabHref({ appId: 'terminal' })).toBe('/apps/terminal');
-    expect(appTabHref({ appId: 'editor' })).toBe('/apps/editor');
+  it('maps a built-in that stands alone to its /apps/<id> route, flagged as a single-app tab', () => {
+    expect(appTabHref({ appId: 'files' })).toBe('/apps/files?standalone=1');
+    expect(appTabHref({ appId: 'terminal' })).toBe('/apps/terminal?standalone=1');
+    expect(appTabHref({ appId: 'editor' })).toBe('/apps/editor?standalone=1');
+  });
+
+  it('emits a flag the shell actually recognizes', () => {
+    // The href and the shell-side reader must not drift: a silently-unread param
+    // would restore the saved windows over the very app the tab was opened for.
+    for (const appId of ['files', 'terminal', 'editor']) {
+      const href = appTabHref({ appId })!;
+      expect(isStandaloneAppTab(href.slice(href.indexOf('?')))).toBe(true);
+    }
   });
 
   it('has no tab surface for a built-in whose route is not standalone on desktop', () => {
@@ -110,9 +120,26 @@ describe('appTabHref', () => {
   });
 });
 
+describe('isStandaloneAppTab', () => {
+  it('recognizes only the tab flag', () => {
+    expect(isStandaloneAppTab('?standalone=1')).toBe(true);
+    expect(isStandaloneAppTab('?view=pages&standalone=1')).toBe(true);
+    expect(isStandaloneAppTab('?standalone=0')).toBe(false);
+    expect(isStandaloneAppTab('?standalone')).toBe(false);
+    expect(isStandaloneAppTab('?view=pages')).toBe(false);
+    expect(isStandaloneAppTab('')).toBe(false);
+  });
+
+  it('is false for an in-shell navigation to the same route', () => {
+    // The sidebar Apps launcher and a chat's "open in editor" land on /apps/editor
+    // WITHOUT the flag; those must keep the workbench windows they navigated from.
+    expect(isStandaloneAppTab(new URL('http://x/apps/editor').search)).toBe(false);
+  });
+});
+
 describe('appTabHrefForDockId', () => {
   it('resolves both Dock id kinds', () => {
-    expect(appTabHrefForDockId('terminal')).toBe('/apps/terminal');
+    expect(appTabHrefForDockId('terminal')).toBe('/apps/terminal?standalone=1');
     expect(appTabHrefForDockId(showDockId('sess42'))).toBe('/show/sess42/');
     expect(appTabHrefForDockId('library')).toBeNull();
   });

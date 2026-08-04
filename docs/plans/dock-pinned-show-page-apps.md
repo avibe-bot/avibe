@@ -800,6 +800,25 @@ behaves identically instead of re-deriving it):
     fall back to a window, and the Library tile's menu drops "Open in New Tab"
     accordingly (Codex review 2026-08-04, High). A new app opts in there once its
     standalone route exists.
+  - The built-in href carries **`?standalone=1`** (`APP_TAB_PARAM`), and `AppShell`
+    freezes `isStandaloneAppTab(location.search)` **at mount** into
+    `<WindowManagerProvider standalone>`. Without it the tab was not standalone at all:
+    `/apps/*` live INSIDE `AppShell`, which restores `avibe.workbench.windows.v1` on
+    every desktop mount and always renders the higher-z `WindowLayer` — so a ⌘-clicked
+    Files tab came up underneath a restored Library window, and a persisted **maximized**
+    window hid it completely (Codex bot review on PR #1168, P2).
+    - Restore and persist are ONE predicate, `sharesWorkbenchLayout(standalone,
+      isDesktop)` in `workbenchPersistence`: a shell that skips the restore starts with
+      an empty list, so letting it save would clobber the real layout with `[]` in every
+      other tab. It also expresses the pre-existing below-md opt-out, unchanged.
+    - The flag is read from the LANDING url and frozen, never tracked off `location`:
+      navigating deeper inside the tab must not suddenly restore the layout the tab
+      exists to stay out of, nor re-enable that clobbering save.
+    - `WindowLayer` stays mounted (empty) in such a tab, so a window opened later from
+      inside it still renders — it just lives and dies with the tab.
+    - In-shell navigations to the same routes (the sidebar Apps launcher, a chat's
+      "open in editor", the mobile `/apps/*` tap paths) carry no flag and keep the
+      workbench layout exactly as before.
 - Applies to every app-icon surface: the desktop **Dock** tiles, the **App Library**
   rows (Apps + AI tabs), and the **⌘K / Search** app results — where ⌘/Ctrl+**Enter**
   works too, since the intent reads modifiers off mouse AND keyboard events alike.
