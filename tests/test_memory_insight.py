@@ -1,0 +1,644 @@
+from __future__ import annotations
+
+import base64
+import json
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
+
+
+ALICE = "u-" + "a" * 32
+BOB = "u-" + "b" * 32
+PROJECT = "p-" + "1" * 32
+OTHER_PROJECT = "p-" + "2" * 32
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"))
+
+
+def _connect(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(path)
+
+
+@pytest.fixture
+def insight_paths(tmp_path: Path) -> MemoryInsightPaths:
+    root = tmp_path / "everos"
+    system_db = root / ".index" / "sqlite" / "system.db"
+    with _connect(system_db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE memcell (
+                memcell_id TEXT PRIMARY KEY,
+                app_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                track TEXT NOT NULL,
+                raw_type TEXT NOT NULL,
+                message_ids_json TEXT NOT NULL,
+                sender_ids_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                timestamp TIMESTAMP NOT NULL
+            );
+            CREATE TABLE md_change_state (
+                md_path TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                mtime REAL NOT NULL,
+                first_seen_at TIMESTAMP NOT NULL,
+                last_changed_at TIMESTAMP NOT NULL,
+                lsn INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                retryable INTEGER,
+                last_attempt_at TIMESTAMP,
+                retry_count INTEGER NOT NULL,
+                error TEXT
+            );
+            """
+        )
+
+    ome_db = root / ".index" / "sqlite" / "ome.db"
+    with _connect(ome_db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE run_record (
+                run_id TEXT PRIMARY KEY,
+                strategy_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt INTEGER NOT NULL DEFAULT 0,
+                started_at TIMESTAMP NOT NULL,
+                finished_at TIMESTAMP,
+                error TEXT,
+                event_topic TEXT NOT NULL,
+                event_payload TEXT NOT NULL,
+                max_retries_snapshot INTEGER NOT NULL,
+                event_id TEXT NOT NULL
+            );
+            """
+        )
+
+    capture_db = tmp_path / "capture.db"
+    with _connect(capture_db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE memory_capture_queue (
+                source_message_digest TEXT PRIMARY KEY,
+                epoch INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                project_ref TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                payload_text TEXT,
+                payload_attachments TEXT,
+                occurred_at_ms INTEGER NOT NULL,
+                provider_timestamp_ms INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                next_retry_at TEXT,
+                lease_owner TEXT,
+                lease_at TEXT,
+                last_error TEXT,
+                add_request_id TEXT,
+                flush_observation TEXT,
+                flush_status TEXT,
+                flush_error_code TEXT,
+                flush_request_id TEXT,
+                flush_observed_at TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            """
+        )
+
+    call_db = tmp_path / "call-log.db"
+    with _connect(call_db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE provider_call (
+                id TEXT PRIMARY KEY NOT NULL,
+                started_at_ms INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                model TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                finish_reason TEXT,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                request_json TEXT NOT NULL,
+                response_json TEXT,
+                request_bytes INTEGER NOT NULL,
+                response_bytes INTEGER,
+                request_id TEXT,
+                strategy_name TEXT,
+                run_id TEXT,
+                attempt INTEGER,
+                memcell_id TEXT,
+                app_id TEXT,
+                project_id TEXT,
+                owner_id TEXT,
+                md_path TEXT,
+                entry_id TEXT,
+                parent_type TEXT,
+                parent_id TEXT,
+                dropped_before INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+    return MemoryInsightPaths(root, capture_db, call_db)
+
+
+def _insert_memcell(
+    paths: MemoryInsightPaths,
+    memcell_id: str,
+    owner: object,
+    *,
+    timestamp_ms: int,
+    project: str = PROJECT,
+    message_ids: object | None = None,
+    payload: object | None = None,
+) -> None:
+    value = payload or {
+        "items": [
+            {
+                "role": "user",
+                "sender_id": owner if isinstance(owner, str) else ALICE,
+                "content": f"preview {memcell_id}",
+            }
+        ],
+        "raw_secret": "never-project-this",
+    }
+    timestamp = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
+    with sqlite3.connect(paths.everos_root / ".index" / "sqlite" / "system.db") as conn:
+        conn.execute(
+            "INSERT INTO memcell VALUES (?, 'avibe', ?, 'session', 'user', 'message', ?, ?, ?, ?)",
+            (
+                memcell_id,
+                project,
+                _json(message_ids if message_ids is not None else []),
+                _json(owner if isinstance(owner, list) else [owner]),
+                _json(value),
+                timestamp,
+            ),
+        )
+
+
+def _insert_queue(
+    paths: MemoryInsightPaths,
+    digest: str,
+    owner: str,
+    *,
+    session: str,
+    timestamp_ms: int,
+    project: str = PROJECT,
+    add_request_id: str | None = None,
+    flush_request_id: str | None = None,
+) -> None:
+    with sqlite3.connect(paths.capture_db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id, principal_id,
+                project_ref, provenance, occurred_at_ms, provider_timestamp_ms,
+                state, attempts, add_request_id, flush_request_id, created_at,
+                completed_at
+            ) VALUES (?, 1, ?, ?, ?, 'user_input', ?, ?, 'delivered', 1, ?, ?, ?, ?)
+            """,
+            (
+                digest,
+                session,
+                owner,
+                project,
+                timestamp_ms,
+                timestamp_ms,
+                add_request_id,
+                flush_request_id,
+                "2026-08-04T00:00:00Z",
+                "2026-08-04T00:00:01Z",
+            ),
+        )
+
+
+def _insert_run(
+    paths: MemoryInsightPaths,
+    run_id: str,
+    strategy: str,
+    event: object,
+    *,
+    started_at: str = "2026-08-04T00:00:02+00:00",
+    status: str = "success",
+    error: str | None = None,
+    topic: str = "everos.memory.events:EpisodeExtracted",
+) -> None:
+    finished_at = None if status == "running" else "2026-08-04T00:00:03+00:00"
+    with sqlite3.connect(paths.everos_root / ".index" / "sqlite" / "ome.db") as conn:
+        conn.execute(
+            "INSERT INTO run_record VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, 2, 'event')",
+            (
+                run_id,
+                strategy,
+                status,
+                started_at,
+                finished_at,
+                error,
+                topic,
+                _json(event) if not isinstance(event, str) else event,
+            ),
+        )
+
+
+def _insert_call(paths: MemoryInsightPaths, call_id: str, **values: object) -> None:
+    columns = {
+        "id": call_id,
+        "started_at_ms": 1_722_816_004_000,
+        "duration_ms": 12,
+        "kind": "llm",
+        "stage": "strategy",
+        "model": "model",
+        "status": "success",
+        "error": None,
+        "finish_reason": "stop",
+        "prompt_tokens": 1,
+        "completion_tokens": 2,
+        "request_json": _json({"prompt": "hello"}),
+        "response_json": _json({"answer": "world"}),
+        "request_bytes": 18,
+        "response_bytes": 18,
+        "request_id": None,
+        "strategy_name": None,
+        "run_id": None,
+        "attempt": None,
+        "memcell_id": None,
+        "app_id": None,
+        "project_id": None,
+        "owner_id": None,
+        "md_path": None,
+        "entry_id": None,
+        "parent_type": None,
+        "parent_id": None,
+        "dropped_before": 0,
+    }
+    columns.update(values)
+    names = list(columns)
+    with sqlite3.connect(paths.call_log_db_path) as conn:
+        conn.execute(
+            f"INSERT INTO provider_call ({','.join(names)}) VALUES ({','.join('?' for _ in names)})",
+            tuple(columns[name] for name in names),
+        )
+
+
+def test_list_is_owner_scoped_and_omits_malformed_or_multi_owner(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_alice", ALICE, timestamp_ms=3_000)
+    _insert_memcell(insight_paths, "mc_bob", BOB, timestamp_ms=2_000)
+    _insert_memcell(insight_paths, "mc_multi", [ALICE, BOB], timestamp_ms=4_000)
+    _insert_memcell(insight_paths, "mc_wrong_project", ALICE, timestamp_ms=5_000, project=OTHER_PROJECT)
+    _insert_memcell(insight_paths, "mc_bad", ALICE, timestamp_ms=6_000)
+    with sqlite3.connect(insight_paths.everos_root / ".index" / "sqlite" / "system.db") as conn:
+        conn.execute("UPDATE memcell SET sender_ids_json='not-json' WHERE memcell_id='mc_bad'")
+
+    reader = MemoryInsightReader(insight_paths)
+    assert [row["memcell_id"] for row in reader.list_entries((ALICE, PROJECT), None, 50)["entries"]] == [
+        "mc_alice"
+    ]
+    assert [row["memcell_id"] for row in reader.list_entries((BOB, PROJECT), None, 50)["entries"]] == [
+        "mc_bob"
+    ]
+    assert reader.entry_detail((BOB, PROJECT), "mc_alice") == {"status": "not_found"}
+
+
+def test_cursor_is_canonical_and_orders_duplicate_timestamps(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    for memcell_id, timestamp in (("mc_c", 3_000), ("mc_b", 2_000), ("mc_a", 2_000)):
+        _insert_memcell(insight_paths, memcell_id, ALICE, timestamp_ms=timestamp)
+    reader = MemoryInsightReader(insight_paths)
+
+    first = reader.list_entries((ALICE, PROJECT), None, 2)
+    assert [item["memcell_id"] for item in first["entries"]] == ["mc_c", "mc_b"]
+    second = reader.list_entries((ALICE, PROJECT), first["next_cursor"], 2)
+    assert [item["memcell_id"] for item in second["entries"]] == ["mc_a"]
+    assert second["next_cursor"] is None
+
+    malformed = ["!", "a" * 89, base64.urlsafe_b64encode(b"{}").decode().rstrip("=")]
+    for cursor in malformed:
+        with pytest.raises(ValueError, match="cursor"):
+            reader.list_entries((ALICE, PROJECT), cursor, 2)
+
+
+def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsightPaths) -> None:
+    message_id = "m_session-a_5000_000"
+    _insert_memcell(
+        insight_paths,
+        "mc_capture",
+        ALICE,
+        timestamp_ms=5_100,
+        message_ids=[message_id],
+    )
+    _insert_queue(
+        insight_paths,
+        "alice",
+        ALICE,
+        session="session-a",
+        timestamp_ms=5_000,
+        add_request_id="request-good",
+        flush_request_id="flush-mixed",
+    )
+    _insert_queue(
+        insight_paths,
+        "bob",
+        BOB,
+        session="session-b",
+        timestamp_ms=5_001,
+        flush_request_id="flush-mixed",
+    )
+    _insert_call(insight_paths, "good", request_id="request-good", stage="boundary")
+    _insert_call(insight_paths, "mixed", request_id="flush-mixed", stage="boundary")
+    _insert_call(insight_paths, "unlinked", request_id="request-other", stage="boundary")
+
+    detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_capture")
+    assert [call["id"] for call in detail["calls"]] == ["good"]
+    assert detail["capture"]["status"] == "available"
+    encoded = json.dumps(detail)
+    assert "flush-mixed" not in encoded
+    assert "request-other" not in encoded
+
+
+def test_capture_message_id_collision_with_foreign_scope_fails_closed(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    message_id = "m_collision_6100_000"
+    _insert_memcell(
+        insight_paths,
+        "mc_collision",
+        ALICE,
+        timestamp_ms=6_200,
+        message_ids=[message_id],
+    )
+    _insert_queue(
+        insight_paths,
+        "foreign-collision",
+        BOB,
+        session="collision",
+        timestamp_ms=6_100,
+        add_request_id="foreign-request",
+    )
+    _insert_call(insight_paths, "foreign-boundary", request_id="foreign-request")
+
+    detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_collision")
+    assert detail["capture"] == {"status": "unavailable", "reason": "expired"}
+    assert detail["calls"] == []
+
+
+def test_expired_queue_link_is_explicit_and_has_no_fallback(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(
+        insight_paths,
+        "mc_expired",
+        ALICE,
+        timestamp_ms=7_000,
+        message_ids=["m_expired-session_6999_000"],
+    )
+    _insert_call(insight_paths, "shared", request_id="shared-flush", stage="boundary")
+
+    detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_expired")
+    assert detail["capture"] == {"status": "unavailable", "reason": "expired"}
+    assert detail["calls"] == []
+
+
+def test_run_owner_is_authoritative_and_ownerless_event_falls_back(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_run", ALICE, timestamp_ms=8_000)
+    base = {"memcell_id": "mc_run", "app_id": "avibe", "project_id": PROJECT}
+    _insert_run(insight_paths, "run-mismatch", "extract_atomic_facts", {**base, "owner_id": BOB})
+    _insert_run(insight_paths, "run-ownerless", "extract_atomic_facts", base)
+    _insert_run(insight_paths, "run-profile", "extract_user_profile", {**base, "owner_id": ALICE})
+    _insert_run(insight_paths, "run-bad-json", "extract_atomic_facts", "not-json")
+    _insert_call(insight_paths, "ownerless-call", run_id="run-ownerless")
+    _insert_call(insight_paths, "mismatch-call", run_id="run-mismatch")
+
+    detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_run")
+    assert {step["run_id"] for step in detail["steps"] if "run_id" in step} == {
+        "run-ownerless",
+        "run-profile",
+    }
+    profile_step = next(step for step in detail["steps"] if step.get("run_id") == "run-profile")
+    assert profile_step["relation"] == "profile_trigger"
+    assert [call["id"] for call in detail["calls"]] == ["ownerless-call"]
+
+
+def test_direct_and_atomic_fact_cascades_require_exact_scope(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_cascade", ALICE, timestamp_ms=9_000)
+    event = {
+        "memcell_id": "mc_cascade",
+        "episode_entry_id": "episode-1",
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "owner_id": ALICE,
+    }
+    _insert_run(insight_paths, "run-episode", "extract_atomic_facts", event)
+    _insert_call(
+        insight_paths,
+        "direct",
+        stage="cascade",
+        app_id="avibe",
+        project_id=PROJECT,
+        owner_id=ALICE,
+        parent_type="memcell",
+        parent_id="mc_cascade",
+    )
+    _insert_call(
+        insight_paths,
+        "atomic",
+        stage="cascade",
+        app_id="avibe",
+        project_id=PROJECT,
+        owner_id=ALICE,
+        parent_type="episode",
+        parent_id="episode-1",
+    )
+    _insert_call(
+        insight_paths,
+        "foreign",
+        stage="cascade",
+        app_id="avibe",
+        project_id=PROJECT,
+        owner_id=BOB,
+        parent_type="episode",
+        parent_id="episode-1",
+    )
+
+    detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_cascade")
+    assert {call["id"] for call in detail["calls"]} == {"direct", "atomic"}
+
+
+def test_projection_scrubs_and_never_returns_raw_payload_or_paths(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    secret = "sk-1234567890abcdef"
+    raw_path = "/Users/alice/private/secret.txt"
+    payload = {
+        "items": [
+            {
+                "role": "user",
+                "sender_id": ALICE,
+                "content": [
+                    {"type": "text", "text": f"hello {secret} {raw_path}"},
+                    {"type": "image", "name": raw_path, "uri": "file:///private/image.png"},
+                ],
+            },
+            {
+                "role": "user",
+                "sender_id": BOB,
+                "content": "corrupt-foreign-preview",
+            },
+        ],
+        "raw_payload_marker": "must-not-leak",
+    }
+    _insert_memcell(insight_paths, "mc_safe", ALICE, timestamp_ms=10_000, payload=payload)
+    _insert_run(
+        insight_paths,
+        "run-safe",
+        "extract_atomic_facts",
+        {
+            "memcell_id": "mc_safe",
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "owner_id": ALICE,
+            "event_secret": "must-not-leak-event",
+        },
+        status="failed",
+        error=f"Authorization: Bearer {secret} at {raw_path}",
+    )
+
+    result = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_safe")
+    encoded = json.dumps(result)
+    assert "must-not-leak" not in encoded
+    assert "corrupt-foreign-preview" not in encoded
+    assert secret not in encoded
+    assert raw_path not in encoded
+    assert "file:///private" not in encoded
+    assert "[REDACTED]" in encoded
+    assert "[LOCAL_PATH]" in encoded
+
+
+def test_configured_provider_urls_are_scrubbed_from_runs_and_calls(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    provider_url = "https://llm.internal.example/v1"
+    _insert_memcell(insight_paths, "mc_url", ALICE, timestamp_ms=10_500)
+    event = {
+        "memcell_id": "mc_url",
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "owner_id": ALICE,
+    }
+    _insert_run(
+        insight_paths,
+        "run-url",
+        "extract_atomic_facts",
+        event,
+        status="failed",
+        error=f"provider failed at {provider_url}/chat",
+    )
+    _insert_call(
+        insight_paths,
+        "call-url",
+        memcell_id="mc_url",
+        request_json=_json({"endpoint": f"{provider_url}/chat"}),
+    )
+
+    detail = MemoryInsightReader(
+        insight_paths,
+        provider_base_urls=(provider_url,),
+    ).entry_detail((ALICE, PROJECT), "mc_url")
+    encoded = json.dumps(detail)
+    assert "llm.internal.example" not in encoded
+    assert "[PROVIDER_BASE_URL]" in encoded
+
+
+def test_missing_sources_degrade_independently(tmp_path: Path) -> None:
+    root = tmp_path / "missing"
+    reader = MemoryInsightReader(
+        MemoryInsightPaths(root, tmp_path / "missing-capture.db", tmp_path / "missing-call.db")
+    )
+    result = reader.list_entries((ALICE, PROJECT), None, 10)
+    assert result["status"] == "ok"
+    assert result["entries"] == []
+    assert result["sections"] == {
+        "everos": {"status": "unavailable", "reason": "missing"},
+        "capture": {"status": "unavailable", "reason": "missing"},
+        "calls": {"status": "unavailable", "reason": "missing"},
+    }
+
+
+def test_locked_optional_db_does_not_fail_everos_result(insight_paths: MemoryInsightPaths) -> None:
+    lock = sqlite3.connect(insight_paths.capture_db_path, isolation_level=None)
+    lock.execute("PRAGMA journal_mode=DELETE")
+    lock.execute("BEGIN EXCLUSIVE")
+    try:
+        _insert_memcell(insight_paths, "mc_locked", ALICE, timestamp_ms=11_000)
+        result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
+    finally:
+        lock.rollback()
+        lock.close()
+    assert [entry["memcell_id"] for entry in result["entries"]] == ["mc_locked"]
+    assert result["sections"]["capture"] == {"status": "unavailable", "reason": "busy"}
+
+
+def test_detail_has_fixed_bounds_omission_counts_and_response_ceiling(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_large", ALICE, timestamp_ms=12_000)
+    huge = "\\\"" * 20_000
+    for index in range(55):
+        _insert_run(
+            insight_paths,
+            f"run-{index:02d}",
+            "extract_atomic_facts",
+            {
+                "memcell_id": "mc_large",
+                "app_id": "avibe",
+                "project_id": PROJECT,
+                "owner_id": ALICE,
+            },
+            started_at=f"2026-08-04T00:{index:02d}:00+00:00",
+            status="failed",
+            error=huge,
+        )
+    for index in range(25):
+        _insert_call(
+            insight_paths,
+            f"call-{index:02d}",
+            started_at_ms=1_722_816_000_000 + index,
+            memcell_id="mc_large",
+            request_json=_json({"prompt": huge}),
+            response_json=_json({"answer": huge}),
+            request_bytes=len(huge),
+            response_bytes=len(huge),
+            error=huge,
+        )
+
+    detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_large")
+    assert len([step for step in detail["steps"] if "run_id" in step]) == 50
+    assert detail["omitted_step_count"] == 5
+    assert len(detail["calls"]) == 20
+    assert detail["omitted_call_count"] == 5
+    for call in detail["calls"]:
+        assert len(_json(call["request"]).encode()) <= 12_000
+        assert len(_json(call["response"]).encode()) <= 12_000
+        assert len(_json(call["error"]).encode()) <= 1_024
+        assert set(call["request"]) == {"excerpt", "omitted_bytes"}
+        assert set(call["response"]) == {"excerpt", "omitted_bytes"}
+    assert len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode()) <= 1_000_000
