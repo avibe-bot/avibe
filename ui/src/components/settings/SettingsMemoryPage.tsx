@@ -21,7 +21,7 @@ import type {
   MemoryStatus,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { memoryRuntimeRecoveryAvailable, memorySetupStage } from '../../lib/memorySettings';
+import { memoryDiagnostics, memoryRuntimeRecoveryAvailable, memorySetupStage } from '../../lib/memorySettings';
 import { memoryErrorMessage } from '../../lib/memoryRead';
 
 type MemoryTab = 'status' | 'profile' | 'search' | 'log' | 'settings';
@@ -48,6 +48,7 @@ export const SettingsMemoryPage: React.FC = () => {
   const [dependencyReady, setDependencyReady] = useState(true);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [restarting, setRestarting] = useState(false);
+  const [logGeneration, setLogGeneration] = useState(0);
 
   const settingsRead = useMemoryResource<MemorySettingsOk>({
     read: api.getMemorySettings,
@@ -124,6 +125,9 @@ export const SettingsMemoryPage: React.FC = () => {
       if (res.status === 'completed') {
         showToast(t('memory.clear.cleared'), 'success');
         setClearOpen(false);
+        // Remount with the successful clear render so cleared payloads cannot
+        // remain expandable or copyable from stale component state.
+        setLogGeneration((generation) => generation + 1);
         void loadStatus();
         void loadSettings();
       } else {
@@ -266,8 +270,9 @@ export const SettingsMemoryPage: React.FC = () => {
 
           {tab === 'log' && settings ? (
             <MemoryLogPanel
+              key={logGeneration}
               enabled={settings.enabled}
-              loggingEnabled={settings.diagnostics.log_provider_calls}
+              loggingEnabled={memoryDiagnostics(settings).logProviderCalls}
               status={status}
               onRestartRuntime={() => void restartEngine()}
               restarting={restarting}

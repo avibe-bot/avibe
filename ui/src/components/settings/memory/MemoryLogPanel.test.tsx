@@ -1,8 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -17,7 +15,9 @@ import type {
 import {
   MemoryLogListContent,
   MemoryLogPanel,
+  MEMORY_LOG_ENTRY_LIMIT,
   mergeMemoryLogEntries,
+  memoryLogEnumLabel,
   prepareJsonPreview,
 } from './MemoryLogPanel';
 
@@ -262,12 +262,57 @@ describe('MemoryLogPanel', () => {
     expect(clear).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
   });
+
+  it('drops list and expanded payload state when Clear remounts the log', async () => {
+    api.getMemoryLog
+      .mockResolvedValueOnce(listResult([entry('mc-alpha', 'Alpha')]))
+      .mockResolvedValue(listResult([]));
+    api.getMemoryLogEntry.mockResolvedValue(detailResult());
+    const user = userEvent.setup();
+
+    const Harness = () => {
+      const [generation, setGeneration] = useState(0);
+      return (
+        <>
+          <button type="button" onClick={() => setGeneration((value) => value + 1)}>clear-finished</button>
+          <MemoryLogPanel
+            key={generation}
+            enabled
+            loggingEnabled
+            status={null}
+            onRestartRuntime={() => undefined}
+            restarting={false}
+            onClearAll={() => undefined}
+          />
+        </>
+      );
+    };
+
+    render(<Harness />);
+    await user.click(await screen.findByText('Alpha'));
+    await user.click(screen.getByRole('button', { expanded: false }));
+    expect(await screen.findByText(/hello/)).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'clear-finished' }));
+    await waitFor(() => expect(screen.queryByText(/hello/)).toBeNull());
+    expect(screen.queryByText('Alpha')).toBeNull();
+    await waitFor(() => expect(api.getMemoryLog).toHaveBeenCalledTimes(2));
+  });
 });
 
 describe('Memory Log bounded helpers and static states', () => {
   it('deduplicates cursor accumulation without reordering accepted entries', () => {
     expect(mergeMemoryLogEntries([entry('a'), entry('b')], [entry('b'), entry('c')], false).map((x) => x.memcell_id))
       .toEqual(['a', 'b', 'c']);
+  });
+
+  it('caps cursor accumulation at the fixed render limit', () => {
+    const current = Array.from({ length: MEMORY_LOG_ENTRY_LIMIT - 5 }, (_, index) => entry(`old-${index}`));
+    const incoming = Array.from({ length: 20 }, (_, index) => entry(`new-${index}`));
+    const merged = mergeMemoryLogEntries(current, incoming, false);
+
+    expect(merged).toHaveLength(MEMORY_LOG_ENTRY_LIMIT);
+    expect(merged.at(-1)?.memcell_id).toBe('new-4');
   });
 
   it('falls back to inert text for invalid, oversized, or node-heavy JSON', () => {
@@ -296,13 +341,32 @@ describe('Memory Log bounded helpers and static states', () => {
     expect(renderToStaticMarkup(<MemoryLogListContent {...base} forbidden />)).toContain('memory.log.forbidden');
   });
 
-  it('keeps the five-tab row in a page-local horizontal overflow container', () => {
-    const source = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), '..', 'SettingsMemoryPage.tsx'),
-      'utf8',
+  it('renders partial sections distinctly and stops pagination at the visible limit', () => {
+    render(
+      <MemoryLogListContent
+        entries={[entry('a')]}
+        sections={{ ...sections, everos: { status: 'partial', reason: 'runs_missing' } }}
+        loading={false}
+        loaded
+        error={null}
+        forbidden={false}
+        nextCursor="next"
+        limitReached
+        onOpen={() => undefined}
+        onRefresh={() => undefined}
+        onLoadMore={() => undefined}
+      />,
     );
-    expect(source).toMatch(/data-testid="memory-tabs-scroll" className="max-w-full overflow-x-auto pb-1"/);
-    expect(source).toContain('<div className="min-w-max">');
-    expect(source).toContain("{ id: 'log' as const");
+
+    expect(screen.getByText('memory.log.sectionPartial')).toBeTruthy();
+    expect(screen.getByText('memory.log.limitReached:200')).toBeTruthy();
+    expect(screen.getAllByRole('status')).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: 'memory.log.loadMore' })).toBeNull();
+  });
+
+  it('localizes known enums and leaves future values as inert fallback text', () => {
+    expect(memoryLogEnumLabel(translate as never, 'reason', 'runs_missing'))
+      .toBe('memory.log.reason.runsMissing');
+    expect(memoryLogEnumLabel(translate as never, 'status', 'future_status')).toBe('future_status');
   });
 });

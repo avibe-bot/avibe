@@ -1,4 +1,5 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
@@ -36,6 +37,59 @@ const PreviewJson = React.lazy(() => import('../../ui/preview-json'));
 type MemoryLogListOk = Extract<MemoryLogListResult, { status: 'ok' }>;
 type MemoryLogDetailOk = Extract<MemoryLogDetailResult, { status: 'ok' }>;
 type MemoryLogPage = MemoryLogListOk & { requested_cursor: string | null };
+
+export const MEMORY_LOG_ENTRY_LIMIT = 200;
+
+const ENUM_LABEL_KEYS = {
+  reason: {
+    missing: 'missing',
+    busy: 'busy',
+    malformed: 'malformed',
+    expired: 'expired',
+    runs_missing: 'runsMissing',
+    runs_busy: 'runsBusy',
+    runs_malformed: 'runsMalformed',
+  },
+  status: {
+    created: 'created',
+    mixed: 'mixed',
+    pending: 'pending',
+    processing: 'processing',
+    delivered: 'delivered',
+    dead: 'dead',
+    running: 'running',
+    success: 'success',
+    failed: 'failed',
+    error: 'error',
+    present: 'present',
+    missing: 'missing',
+    not_seen: 'notSeen',
+    indexed: 'indexed',
+  },
+  callKind: {
+    llm: 'llm',
+    multimodal_llm: 'multimodalLlm',
+    embedding: 'embedding',
+  },
+  callStage: {
+    boundary: 'boundary',
+    strategy: 'strategy',
+    cascade: 'cascade',
+    episode_extract: 'episodeExtract',
+    parse: 'parse',
+  },
+} as const;
+
+type EnumLabelGroup = keyof typeof ENUM_LABEL_KEYS;
+
+// Backend enums are closed for known versions. A future value stays inert text
+// instead of being mistaken for an i18n key or interpreted as markup.
+// eslint-disable-next-line react-refresh/only-export-components
+export function memoryLogEnumLabel(t: TFunction, group: EnumLabelGroup, value: string): string {
+  const labels = ENUM_LABEL_KEYS[group] as Record<string, string>;
+  const key = labels[value];
+  return key ? t(`memory.log.${group}.${key}`) : value;
+}
 
 export type JsonPreview =
   | { mode: 'tree'; value: object; text: string }
@@ -94,9 +148,10 @@ export function mergeMemoryLogEntries(
   incoming: MemoryLogEntry[],
   replace: boolean,
 ): MemoryLogEntry[] {
-  if (replace) return incoming;
+  if (replace) return incoming.slice(0, MEMORY_LOG_ENTRY_LIMIT);
   const seen = new Set(current.map((entry) => entry.memcell_id));
-  return [...current, ...incoming.filter((entry) => !seen.has(entry.memcell_id))];
+  return [...current, ...incoming.filter((entry) => !seen.has(entry.memcell_id))]
+    .slice(0, MEMORY_LOG_ENTRY_LIMIT);
 }
 
 const JsonPayload: React.FC<{ value: unknown; label: string }> = ({ value, label }) => {
@@ -124,15 +179,20 @@ const formatTimestamp = (timestampMs: number | null | undefined): string =>
 
 const SectionNotices: React.FC<{ sections: MemoryLogSections }> = ({ sections }) => {
   const { t } = useTranslation();
-  const unavailable = Object.entries(sections).filter(([, value]) => value.status !== 'available');
-  if (unavailable.length === 0) return null;
+  const notices = Object.entries(sections).filter(([, value]) => value.status !== 'available');
+  if (notices.length === 0) return null;
   return (
-    <div className="flex flex-col gap-1 rounded-md border border-gold/30 bg-gold/[0.06] px-3 py-2 text-[11.5px] text-muted">
-      {unavailable.map(([name, value]) => (
-        <span key={name}>
-          {t('memory.log.sectionUnavailable', {
+    <div className="flex flex-col gap-1.5" role="status">
+      {notices.map(([name, value]) => (
+        <span
+          key={name}
+          className={value.status === 'partial'
+            ? 'rounded-md border border-gold/30 bg-gold/[0.06] px-3 py-2 text-[11.5px] text-muted'
+            : 'rounded-md border border-destructive/30 bg-destructive/[0.06] px-3 py-2 text-[11.5px] text-muted'}
+        >
+          {t(value.status === 'partial' ? 'memory.log.sectionPartial' : 'memory.log.sectionUnavailable', {
             section: t(`memory.log.section.${name}`),
-            reason: value.reason ?? value.status,
+            reason: memoryLogEnumLabel(t, 'reason', value.reason ?? value.status),
           })}
         </span>
       ))}
@@ -148,10 +208,11 @@ export const MemoryLogListContent: React.FC<{
   error: string | null;
   forbidden: boolean;
   nextCursor: string | null;
+  limitReached?: boolean;
   onOpen: (memcellId: string) => void;
   onRefresh: () => void;
   onLoadMore: () => void;
-}> = ({ entries, sections, loading, loaded, error, forbidden, nextCursor, onOpen, onRefresh, onLoadMore }) => {
+}> = ({ entries, sections, loading, loaded, error, forbidden, nextCursor, limitReached = false, onOpen, onRefresh, onLoadMore }) => {
   const { t } = useTranslation();
   if (forbidden) {
     return (
@@ -219,7 +280,11 @@ export const MemoryLogListContent: React.FC<{
           ))}
         </div>
       )}
-      {nextCursor ? (
+      {limitReached ? (
+        <div className="rounded-md border border-border bg-surface px-3 py-2 text-center text-[11.5px] text-muted" role="status">
+          {t('memory.log.limitReached', { count: MEMORY_LOG_ENTRY_LIMIT })}
+        </div>
+      ) : nextCursor ? (
         <Button variant="secondary" size="sm" className="self-center" onClick={onLoadMore} disabled={loading}>
           {loading ? <Loader2 className="animate-spin" /> : null}
           {t('memory.log.loadMore')}
@@ -244,7 +309,9 @@ const StepRow: React.FC<{ step: MemoryLogStep }> = ({ step }) => {
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="break-words text-[12.5px] font-semibold text-foreground">{title}</span>
-          <Badge variant={step.status === 'failed' ? 'destructive' : 'secondary'}>{step.status}</Badge>
+          <Badge variant={step.status === 'failed' ? 'destructive' : 'secondary'}>
+            {memoryLogEnumLabel(t, 'status', step.status)}
+          </Badge>
           {step.relation === 'profile_trigger' ? (
             <Badge variant="info">{t('memory.log.profileTrigger')}</Badge>
           ) : null}
@@ -252,7 +319,11 @@ const StepRow: React.FC<{ step: MemoryLogStep }> = ({ step }) => {
         {timestamp !== undefined ? (
           <div className="mt-1 font-mono text-[10.5px] text-muted">{formatTimestamp(timestamp)}</div>
         ) : null}
-        {step.reason ? <div className="mt-1 text-[11.5px] text-muted">{t('memory.log.unavailable', { reason: step.reason })}</div> : null}
+        {step.reason ? (
+          <div className="mt-1 text-[11.5px] text-muted">
+            {t('memory.log.unavailable', { reason: memoryLogEnumLabel(t, 'reason', step.reason) })}
+          </div>
+        ) : null}
         {step.error ? <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-destructive">{step.error}</pre> : null}
       </div>
     </div>
@@ -283,8 +354,15 @@ const ProviderCallRow: React.FC<{ call: MemoryProviderCall }> = ({ call }) => {
           onClick={() => setExpanded((value) => !value)}
         >
           {expanded ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
-          <Badge variant={call.status === 'success' ? 'success' : 'destructive'}>{call.kind}</Badge>
-          <span className="truncate text-[12px] text-foreground">{call.stage}</span>
+          <Badge variant={call.status === 'success' ? 'success' : 'destructive'}>
+            {t('memory.log.callSummary', {
+              kind: memoryLogEnumLabel(t, 'callKind', call.kind),
+              status: memoryLogEnumLabel(t, 'status', call.status),
+            })}
+          </Badge>
+          <span className="truncate text-[12px] text-foreground">
+            {memoryLogEnumLabel(t, 'callStage', call.stage)}
+          </span>
           {call.model ? <span className="hidden truncate font-mono text-[10.5px] text-muted sm:inline">{call.model}</span> : null}
         </button>
         <span className="shrink-0 font-mono text-[10.5px] text-muted">{call.duration_ms} ms</span>
@@ -360,11 +438,17 @@ const MemoryLogDetail: React.FC<{
       <div className="rounded-md border border-border bg-surface px-4 py-3 text-[11.5px] text-muted">
         <div className="mb-1 font-semibold text-foreground">{t('memory.log.currentState')}</div>
         {detail.current_state.status === 'unavailable' ? (
-          t('memory.log.unavailable', { reason: detail.current_state.reason })
+          t('memory.log.unavailable', {
+            reason: memoryLogEnumLabel(t, 'reason', detail.current_state.reason),
+          })
         ) : (
           <div className="flex flex-wrap gap-x-5 gap-y-1">
-            <span>{t('memory.log.currentProfile')}: {detail.current_state.profile.status}</span>
-            <span>{t('memory.log.currentIndexing')}: {detail.current_state.indexing.status}</span>
+            <span>
+              {t('memory.log.currentProfile')}: {memoryLogEnumLabel(t, 'status', detail.current_state.profile.status)}
+            </span>
+            <span>
+              {t('memory.log.currentIndexing')}: {memoryLogEnumLabel(t, 'status', detail.current_state.indexing.status)}
+            </span>
           </div>
         )}
         <div className="mt-1">{t('memory.log.currentStateOnly')}</div>
@@ -496,10 +580,11 @@ export const MemoryLogPanel: React.FC<{
           error={listRead.error}
           forbidden={listRead.forbidden}
           nextCursor={nextCursor}
+          limitReached={entries.length >= MEMORY_LOG_ENTRY_LIMIT && nextCursor !== null}
           onOpen={openDetail}
           onRefresh={() => void listRead.reload(null)}
           onLoadMore={() => {
-            if (nextCursor) void listRead.reload(nextCursor);
+            if (nextCursor && entries.length < MEMORY_LOG_ENTRY_LIMIT) void listRead.reload(nextCursor);
           }}
         />
       )}

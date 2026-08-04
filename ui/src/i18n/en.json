@@ -3577,6 +3577,7 @@
       "empty": "No processed Memory entries yet.",
       "refresh": "Refresh",
       "loadMore": "Load more",
+      "limitReached": "Showing the first {{count}} entries. Refresh to see the newest processing activity.",
       "back": "Back to processing log",
       "messages": "{{count}} messages",
       "runs": "{{count}} runs",
@@ -3588,6 +3589,7 @@
       "restartAction": "Restart Memory engine",
       "clearAction": "Open Clear all",
       "sectionUnavailable": "{{section}} is unavailable ({{reason}}). Other sections may still be complete.",
+      "sectionPartial": "{{section}} is partially available ({{reason}}).",
       "section": {
         "everos": "Timeline data",
         "capture": "Capture attribution",
@@ -3599,6 +3601,44 @@
         "memcell": "Memcell created",
         "strategy": "Memory strategy"
       },
+      "reason": {
+        "missing": "source data is missing",
+        "busy": "source data is busy",
+        "malformed": "source data is malformed",
+        "expired": "attribution has expired",
+        "runsMissing": "processing runs are missing",
+        "runsBusy": "processing runs are busy",
+        "runsMalformed": "processing runs are malformed"
+      },
+      "status": {
+        "created": "Created",
+        "mixed": "Mixed",
+        "pending": "Pending",
+        "processing": "Processing",
+        "delivered": "Delivered",
+        "dead": "Stopped",
+        "running": "Running",
+        "success": "Succeeded",
+        "failed": "Failed",
+        "error": "Error",
+        "present": "Present",
+        "missing": "Missing",
+        "notSeen": "Not seen",
+        "indexed": "Indexed"
+      },
+      "callKind": {
+        "llm": "LLM",
+        "multimodalLlm": "Multimodal LLM",
+        "embedding": "Embedding"
+      },
+      "callStage": {
+        "boundary": "Request boundary",
+        "strategy": "Strategy",
+        "cascade": "Cascade",
+        "episodeExtract": "Episode extraction",
+        "parse": "Multimodal parsing"
+      },
+      "callSummary": "{{kind}} · {{status}}",
       "profileTrigger": "Triggered profile run",
       "unavailable": "Unavailable: {{reason}}",
       "omittedSteps": "{{count}} older timeline steps omitted.",

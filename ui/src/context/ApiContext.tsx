@@ -1601,11 +1601,12 @@ export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
   processing: MemoryProcessingConfig;
-  diagnostics: {
-    log_provider_calls: boolean;
+  // Optional for rolling upgrades: older daemons do not project diagnostics.
+  diagnostics?: {
+    log_provider_calls?: boolean;
     // Response-only. The backend derives this from direct-loopback admission;
     // clients must not infer administrative authority from their hostname.
-    mutable: boolean;
+    mutable?: boolean;
   };
 };
 

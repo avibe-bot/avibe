@@ -3577,6 +3577,7 @@
       "empty": "还没有已处理的记忆条目。",
       "refresh": "刷新",
       "loadMore": "加载更多",
+      "limitReached": "当前显示前 {{count}} 条记录。刷新后可查看最新处理活动。",
       "back": "返回处理日志",
       "messages": "{{count}} 条消息",
       "runs": "{{count}} 次运行",
@@ -3588,6 +3589,7 @@
       "restartAction": "重启记忆引擎",
       "clearAction": "打开「清除全部」",
       "sectionUnavailable": "{{section}}不可用（{{reason}}），其他部分可能仍然完整。",
+      "sectionPartial": "{{section}}部分可用（{{reason}}）。",
       "section": {
         "everos": "时间线数据",
         "capture": "捕获关联",
@@ -3599,6 +3601,44 @@
         "memcell": "已创建 Memcell",
         "strategy": "记忆策略"
       },
+      "reason": {
+        "missing": "来源数据缺失",
+        "busy": "来源数据正忙",
+        "malformed": "来源数据格式异常",
+        "expired": "关联信息已过期",
+        "runsMissing": "处理运行记录缺失",
+        "runsBusy": "处理运行记录正忙",
+        "runsMalformed": "处理运行记录格式异常"
+      },
+      "status": {
+        "created": "已创建",
+        "mixed": "多种状态",
+        "pending": "等待中",
+        "processing": "处理中",
+        "delivered": "已投递",
+        "dead": "已停止",
+        "running": "运行中",
+        "success": "成功",
+        "failed": "失败",
+        "error": "错误",
+        "present": "已存在",
+        "missing": "缺失",
+        "notSeen": "尚未发现",
+        "indexed": "已索引"
+      },
+      "callKind": {
+        "llm": "LLM",
+        "multimodalLlm": "多模态 LLM",
+        "embedding": "Embedding"
+      },
+      "callStage": {
+        "boundary": "请求边界",
+        "strategy": "处理策略",
+        "cascade": "级联处理",
+        "episodeExtract": "事件提取",
+        "parse": "多模态解析"
+      },
+      "callSummary": "{{kind}} · {{status}}",
       "profileTrigger": "触发画像运行",
       "unavailable": "不可用：{{reason}}",
       "omittedSteps": "已省略 {{count}} 个较早的时间线步骤。",
