@@ -1,6 +1,6 @@
-# Add a forced sidecar restart action to Memory settings (rev17)
+# Add a forced sidecar restart action to Memory settings (rev18)
 
-> Rev17 keeps one public recovery action and a focused set of internal fixes:
+> Rev18 keeps one public recovery action and a focused set of internal fixes:
 > replayable configuration, config-wide write serialization, restart-specific
 > and lifecycle-intent admission, generation-fenced ready activation, complete
 > supervisor quiescing, bounded orphan recovery, disk/live replay convergence,
@@ -9,8 +9,9 @@
 > authoritative controller/UI settings refresh, queued-operation exclusion, and
 > disabled/fail-closed replay handling, explicit worker activation, post-lock
 > retained-owner admission, complete root/installer/probe ownership, lifecycle
-> abort reactivation, store-unavailable retry, shutdown joining, and disabled
-> recovery projection alongside processing-probe/module-store ownership.
+> abort reactivation, under-lock generation changes, retained config writers,
+> store-unavailable retry, shutdown joining, and durable retry eligibility
+> alongside processing-probe/module-store ownership.
 > Timed-out work remains owned until it is either joined or proven unable to
 > mutate state. It does not add a lifecycle coordinator, explicit state machine,
 > provider/store port, or frontend DOM test framework.
@@ -226,10 +227,21 @@ Memory-only serialization is insufficient.
   fields into the transaction's freshly loaded working object.
 - Every asynchronous caller, including controller-side IM settings, model-hub,
   agent-auth, startup/runtime, and UI/server paths, offloads the complete
-  `mutate_v2_config()` call to one `asyncio.to_thread()` invocation. No async
-  caller may acquire the synchronous file lock or run load/merge/save inline on
-  its event loop. Awaited external I/O happens before the transaction; the
-  synchronous mutator then revalidates against the freshly loaded state.
+  `mutate_v2_config()` call to one named `asyncio.to_thread()` task and awaits it
+  through `shield()`. No async caller may acquire the synchronous file lock or
+  run load/merge/save inline on its event loop. Caller cancellation retains and
+  joins that exact task before releasing the caller's route/service intent or
+  lock, then re-raises only after any required post-commit work finishes. Awaited
+  external I/O happens before the transaction; the synchronous mutator then
+  revalidates against the freshly loaded state.
+- In particular, Memory PATCH keeps `_memory_settings_write_pending_count` and
+  `_memory_settings_write_lock()` owned across the shielded writer task and, if
+  the thread committed, its complete controller reconcile or rollback even when
+  the HTTP request was cancelled. Cancellation is remembered, not allowed to
+  skip live convergence: after disk/live state reaches the same terminal result,
+  re-raise `CancelledError` and only then decrement/release admission. A failed
+  writer that committed nothing needs no reconcile but is still joined before
+  ownership is released.
 - Controller convergence uses that mutation API, compares the fresh working
   object's complete Memory block with `_persisted_memory_snapshot`, then replaces
   only that block with `_restart_config` and clears its marker when the root
@@ -263,6 +275,12 @@ deadline. In the expired case, prove the request and transaction locks remain
 owned until the retained thread finishes. Both writers must then preserve the
 settled marker and the generic writer's unrelated C1 fields without either side
 publishing a stale whole-document snapshot.
+Cancel a Memory PATCH while its real config mutation thread is blocked before
+commit, then release it. Prove the pending count and settings lock stay owned,
+restart remains busy, and a committed C1 still completes controller reconcile or
+rollback before cancellation is re-raised; disk and live Runtime cannot split.
+Apply the same shield/join assertion to a representative non-Memory async writer,
+which may release its service intent only after the exact mutation task ends.
 For a failed Memory C1 plus failed UI rollback, prove restart conditionally
 replaces only the expected C1 Memory block with replay C0 before reporting ready;
 settings reads and a fresh `V2Config.load()` must match the live runtime. An
@@ -586,9 +604,12 @@ runtime is enabled, the process is still current and ready, the generation is
 unchanged, and no explicit restart or artifact installation owns admission. It
 then keeps claims paused and awaits the worker's exact activation-generation
 future under the same worker-activation bound before resuming them.
-Every Clear, reconcile, artifact activation, restart, and close operation bumps
-the generation at its serialized lifecycle entry, before its first lifecycle
-await, and uses that value for any process it creates. Consequently an
+Every Clear, reconcile, artifact activation, restart, and close operation first
+registers its synchronous pending intent, then acquires the established
+`_reconcile_lock -> module._lifecycle_lock` order. Only after both locks are held,
+with no intervening await before the update, does it bump the generation and use
+that value for any process it creates. A waiter cancelled before lock ownership
+therefore cannot invalidate the active lifecycle. Consequently an
 activation delayed behind later lifecycle work observes a stale token and exits
 without resuming claims or creating a worker. Current-generation activation
 failures set the visible runtime error and leave claims fenced; task completion
@@ -737,14 +758,18 @@ exceptions use the transport-only `memory_restart_failed`.
    the target path and working object to an opaque session token, derive one
    lock per normalized default/custom path, always acquire that file lock before
    `CONFIG_LOCK`, and offload the complete mutation from every asynchronous
-   caller.
+   caller through a shared shielded task helper that joins cancellation before
+   releasing caller intent. Memory PATCH additionally finishes reconcile or
+   rollback after a committed cancelled write while its route lock/count remain
+   owned.
 2. `core/memory/runtime.py`: add `_restart_config`,
    `_persisted_memory_snapshot`, `_explicit_restart_active`,
    `_clear_pending_count`, `_reconcile_pending_count`,
    `_retained_ownership_active`, a retained artifact-install task, a Runtime
    preflight-supervisor registry, lifecycle generation, the active explicit
    restart task, and a retained ready activation task, and fail-fast `restart()`;
-   recheck retained ownership under acquired lifecycle locks; refresh the
+   recheck retained ownership and bump lifecycle generation only under acquired
+   lifecycle locks; refresh the
    persisted snapshot after every successful runtime-owned V2 mutation and
    rebase a successfully reconciled
    live/replay candidate from marker settlement's exact return; conditionally
@@ -833,8 +858,14 @@ exceptions use the transport-only `memory_restart_failed`.
    settings reload. After a failed operation, show its localized reason plus
    literal error code only after the required reload settles; when no config was
    committed, keep the existing settings payload and use the generic fallback
-   when no code exists. Also render the same single recovery action when either
-   the latest restart response or pure runtime status reports
+   when no code exists. Before invalidating an enabled settings payload, preserve
+   a separate non-editable `restartRetryEligible` bit. Keep it through a failed
+   authoritative settings reload so a `config_committed=true` lifecycle failure
+   cannot remove the only retry action. Clear it only when a successful settings
+   reload, together with status/restart recovery projection, proves Memory is
+   disabled with no retained owner; a read error or absent payload is not proof
+   of disablement. Also render the same single recovery action when this bit is
+   set, or when the latest restart response or pure runtime status reports
    `restart_recovery_required=true`, even if the authoritative settings reload
    now says disabled. Retain that local flag across the required settings/status
    refresh and clear it only when a successful retry or a later status proves no
@@ -960,6 +991,10 @@ exceptions use the transport-only `memory_restart_failed`.
     and ready, its abort compensation rebinds current generation and completes
     locked worker activation before releasing claims. A stale callback alone
     cannot strand draining; a changed/unready supervisor remains fenced.
+    Start a second lifecycle operation while the first owns both locks, then
+    cancel the waiter before acquisition. The generation must remain unchanged;
+    the first operation's supervisor callback stays current and activates
+    normally, and abort compensation is never invoked for the non-owner.
   - The old watcher or safety monitor enters child-tree cleanup immediately
     before restart. Handoff joins that exact owner under the process-owner bound
     before calling `stop()`; timeout stays fail-closed, and the successful case
@@ -1026,6 +1061,9 @@ exceptions use the transport-only `memory_restart_failed`.
   busy without acquiring the lock. After every writer exits, restart may acquire
   admission normally. A `config_committed=true` failure invalidates C1 and reloads
   C0 before showing the lifecycle error; a pre-convergence failure keeps C1.
+  Cancellation during the off-thread Memory mutation retains the pending count
+  and route lock through writer completion plus reconcile/rollback, then
+  re-raises without leaving disk and Runtime split.
 - `tests/test_v2_config.py` / config route tests: a generic non-Memory save in a
   second process waits before loading while settlement owns the config
   transaction, then preserves both its C1 change and the cleared marker. Saving
@@ -1082,8 +1120,11 @@ exceptions use the transport-only `memory_restart_failed`.
   preserves C1. When that C0 is disabled but cleanup is retained, prove the one
   recovery action remains after settings/status reload and disappears only after
   a successful retry or status clears the recovery flag. Ordinary disabled state
-  still renders no action. Keep click/toast behavior in the single manual
-  scenario below.
+  still renders no action. For an enabled `config_committed=true` lifecycle
+  failure followed by settings reload failure, the editable payload remains
+  absent but `restartRetryEligible` keeps exactly one retry action until a later
+  authoritative disabled/no-owner result clears it. Keep click/toast behavior in
+  the single manual scenario below.
 
 ## Validation
 
@@ -1111,8 +1152,9 @@ failed candidates cannot replace last-good config, and successful replay must
 conditionally converge the known persisted Memory block to that same config;
 config mutation cannot race any whole-file V2 writer, start from an unlocked
 baseline, lose a custom target path, hold `CONFIG_LOCK` during a file-lock wait,
-block an async event loop, or outlive its transaction; every successful
-runtime-owned mutation refreshes the exact persisted snapshot and successful
+block an async event loop, or outlive its caller intent; cancelled Memory writers
+finish required live reconcile/rollback before route ownership ends; every
+successful runtime-owned mutation refreshes the exact persisted snapshot and successful
 settlement propagates the same exact block into controller shared config;
 explicit restart cannot queue behind or leapfrog any active or queued module
 lifecycle operation, while reads and destructive Clear retain their existing
@@ -1124,7 +1166,8 @@ recovery has one complete cap; every active process lifecycle
 owner is settled and budgeted before stop; readiness, including the final health
 request, has one hard cap; delayed automatic activation and re-armed supervision
 are bound to the current lifecycle generation and both runtime locks, with locked
-abort compensation for an unchanged ready supervisor; pending
+generation updates that exclude cancelled waiters and abort compensation for an
+unchanged ready supervisor; pending
 embeddings cannot bypass the root guard or remain in a successful replay
 snapshot; claimed rows require a new lease only after the old worker and every
 shielded worker/module store thread exit; activation success is observable and
@@ -1133,8 +1176,9 @@ still propagates the committed block to Controller and UI; retained ownership
 excludes every other mutating lifecycle; replacement cleanup fences supervision
 before awaiting; disabled retained cleanup keeps its explicit recovery action;
 Runtime retains throwaway preflight supervisors; shutdown joins active restart
-ownership beyond the generic five-second close; and clear markers serialize with
-root/child lifecycle. The
+ownership beyond the generic five-second close; enabled retry eligibility survives
+settings invalidation/read failure; and clear markers serialize with root/child
+lifecycle. The
 implementation adds two private snapshots, focused intent counters, one narrow
 retained-owner gate, focused helpers, and two precise transport-only error codes
 while reusing existing locks, guards, recovery SQL, supervision, and UI
@@ -1152,6 +1196,7 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] Settings/restart serialization and stale-C0 overwrite regression
 - [ ] Path-aware token-bound config mutation and custom-target regression
 - [ ] File-lock-first order, async writers off-thread, inline-reader responsiveness
+- [ ] Shielded async config-writer cancellation and Memory live convergence
 - [ ] Timed-out settlement ownership and retained-request regression
 - [ ] Worker lease rotation and add/flush recovery tests
 - [ ] Retained worker cancellation fail-closed state and retry
@@ -1167,6 +1212,7 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] Runtime-owned preflight-probe supervisors and cancellation settlement
 - [ ] Supervisor handoff/rebind, lifecycle-owner settlement, readiness/deadline contract
 - [ ] Lifecycle-generation ready activation and Clear/reconcile race regression
+- [ ] Under-lock generation bump and cancelled-waiter regression
 - [ ] Lifecycle-abort compensation for unchanged ready supervisor activation
 - [ ] Complete orphan/start budgets, explicit activation, failed-start cleanup
 - [ ] Shielded activation handshake and fenced replacement-activation cleanup
@@ -1174,5 +1220,6 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] UI route and response normalizer
 - [ ] Page action, deduplicated banner, success/failure settings reload, toast/i18n
 - [ ] Disabled retained-cleanup recovery projection and persistent retry action
+- [ ] Known-enabled retry eligibility across authoritative reload failure
 - [ ] Memory-specific shutdown allowance and active-restart ownership join
 - [ ] Focused Python/TypeScript validation and Incus `SIGSTOP` scenario
