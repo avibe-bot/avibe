@@ -377,7 +377,9 @@ async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> Non
         assert agent.receiver_tasks == {"runtime-key": receiver_task}
         assert agent._pending_requests["runtime-key"] is primary_requests
         assert agent._pending_requests["runtime-key"] == [primary]
-        assert agent.session_handler.activity_touches == ["runtime-key"]
+        # Steering admission is not execution progress and must not refresh the
+        # stuck-runtime clock before assistant/tool output arrives.
+        assert agent.session_handler.activity_touches == []
         assert not gate_task.done()
         assert not receiver_task.done()
     finally:
@@ -415,10 +417,7 @@ async def test_claude_maps_query_failures_at_the_write_boundary(
         assert receipt.outcome is expected
         assert agent._pending_requests["runtime-key"] == [primary]
         assert agent.receiver_tasks["runtime-key"] is receiver_task
-        if expected is SteerOutcome.UNKNOWN:
-            assert agent.session_handler.activity_touches == ["runtime-key"]
-        else:
-            assert agent.session_handler.activity_touches == []
+        assert agent.session_handler.activity_touches == []
     finally:
         await _cancel_tasks(gate_task, receiver_task)
 
@@ -818,6 +817,9 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         def set_request_session(self, base_session_id, session_id, directory, session_key):
             self.request_session = (session_id, directory, session_key)
 
+        def set_agent_session_id(self, base_session_id, agent_session_id):
+            return None
+
         def get_request_session(self, base_session_id):
             return self.request_session
 
@@ -868,7 +870,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     agent._delete_ack = AsyncMock()
     agent._remove_ack_reaction = AsyncMock()
     agent._prepare_message_with_files = lambda request: request.message
-    agent.mark_runtime_turn_started = lambda context: None
+    agent.mark_runtime_turn_started = lambda context, **kwargs: None
     agent.record_model_hub_native_failure = AsyncMock()
     monkeypatch.setattr(
         "modules.agents.opencode.agent.build_system_prompt_injection",
@@ -959,6 +961,9 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
             return "opencode-session"
 
         def set_request_session(self, base_session_id, session_id, directory, session_key):
+            return None
+
+        def set_agent_session_id(self, base_session_id, agent_session_id):
             return None
 
         def mark_initialized(self, session_id):
@@ -1084,6 +1089,9 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
             return "opencode-session"
 
         def set_request_session(self, base_session_id, session_id, directory, session_key):
+            return None
+
+        def set_agent_session_id(self, base_session_id, agent_session_id):
             return None
 
         def mark_initialized(self, session_id):
