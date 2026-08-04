@@ -69,7 +69,11 @@ const listResult = (entries: MemoryLogEntry[], nextCursor: string | null = null)
   sections,
 });
 
-const detailResult = (providerCallStatus = 'ok', strategyStatus = 'success'): MemoryLogDetailResult => ({
+const detailResult = (
+  providerCallStatus = 'ok',
+  strategyStatus = 'success',
+  indexingError: string | null = null,
+): MemoryLogDetailResult => ({
   status: 'ok',
   entry: entry('mc-alpha', 'Alpha detail'),
   capture: { status: 'available', delivery_states: ['delivered'], matched_message_count: 1 },
@@ -110,7 +114,7 @@ const detailResult = (providerCallStatus = 'ok', strategyStatus = 'success'): Me
   current_state: {
     status: 'available',
     profile: { status: 'present', updated_at_ms: 1_722_816_002_000 },
-    indexing: { status: 'indexed', updated_at_ms: 1_722_816_002_000 },
+    indexing: { status: indexingError ? 'failed' : 'indexed', updated_at_ms: 1_722_816_002_000, error: indexingError },
     label: 'current_state',
   },
   sections,
@@ -221,6 +225,18 @@ describe('MemoryLogPanel', () => {
     expect(await screen.findByText('Alpha')).toBeTruthy();
   });
 
+  it('renders the scrubbed current indexing error with the indexing status', async () => {
+    api.getMemoryLog.mockResolvedValue(listResult([entry('mc-alpha', 'Alpha')]));
+    api.getMemoryLogEntry.mockResolvedValue(detailResult('ok', 'success', 'indexing failed: provider unavailable'));
+    const user = userEvent.setup();
+
+    renderPanel();
+    await user.click(await screen.findByText('Alpha'));
+
+    expect(await screen.findByText(/memory\.log\.currentIndexing: memory\.log\.status\.failed/)).toBeTruthy();
+    expect(screen.getByText('indexing failed: provider unavailable')).toBeTruthy();
+  });
+
   it.each(['ok', 'success'])('renders provider call status %s as successful', async (providerCallStatus) => {
     api.getMemoryLog.mockResolvedValue(listResult([entry('mc-alpha', 'Alpha')]));
     api.getMemoryLogEntry.mockResolvedValue(detailResult(providerCallStatus));
@@ -264,10 +280,11 @@ describe('MemoryLogPanel', () => {
     api.getMemoryLog.mockResolvedValue(listResult([]));
     const restart = vi.fn();
     const user = userEvent.setup();
-    renderPanel({ status: status('writer_failures'), onRestartRuntime: restart });
+    renderPanel({ loggingEnabled: false, status: status('writer_failures'), onRestartRuntime: restart });
 
     await user.click(await screen.findByRole('button', { name: 'memory.log.restartAction' }));
     expect(restart).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('memory.log.loggingOff')).toBeTruthy();
   });
 
   it('keeps the normal timeline visible when provider payload logging is off', async () => {
@@ -282,7 +299,7 @@ describe('MemoryLogPanel', () => {
     api.getMemoryLog.mockResolvedValue(listResult([]));
     const clear = vi.fn();
     const user = userEvent.setup();
-    renderPanel({ status: status('call_log_corrupt'), onClearAll: clear });
+    renderPanel({ loggingEnabled: false, status: status('call_log_corrupt'), onClearAll: clear });
 
     await user.click(await screen.findByRole('button', { name: 'memory.log.clearAction' }));
     expect(clear).toHaveBeenCalledTimes(1);

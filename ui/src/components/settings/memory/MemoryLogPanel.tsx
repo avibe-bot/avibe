@@ -446,13 +446,20 @@ const MemoryLogDetail: React.FC<{
             reason: memoryLogEnumLabel(t, 'reason', detail.current_state.reason),
           })
         ) : (
-          <div className="flex flex-wrap gap-x-5 gap-y-1">
-            <span>
-              {t('memory.log.currentProfile')}: {memoryLogEnumLabel(t, 'status', detail.current_state.profile.status)}
-            </span>
-            <span>
-              {t('memory.log.currentIndexing')}: {memoryLogEnumLabel(t, 'status', detail.current_state.indexing.status)}
-            </span>
+          <div className="flex flex-col gap-1">
+            <div className="flex flex-wrap gap-x-5 gap-y-1">
+              <span>
+                {t('memory.log.currentProfile')}: {memoryLogEnumLabel(t, 'status', detail.current_state.profile.status)}
+              </span>
+              <span>
+                {t('memory.log.currentIndexing')}: {memoryLogEnumLabel(t, 'status', detail.current_state.indexing.status)}
+              </span>
+            </div>
+            {detail.current_state.indexing.error ? (
+              <div className="whitespace-pre-wrap break-words text-destructive">
+                {detail.current_state.indexing.error}
+              </div>
+            ) : null}
           </div>
         )}
         <div className="mt-1">{t('memory.log.currentStateOnly')}</div>
@@ -518,7 +525,7 @@ export const MemoryLogPanel: React.FC<{
     );
   }
 
-  const recorderFault = loggingEnabled && status?.recorder?.state === 'degraded';
+  const recorderFault = status?.recorder?.state === 'degraded';
   const corrupt = recorderFault && status?.recorder?.reason === 'call_log_corrupt';
   const openDetail = (memcellId: string) => {
     setSelected(memcellId);

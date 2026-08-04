@@ -120,14 +120,14 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const confirmClear = async () => {
     setClearing(true);
+    // Clear can delete provider payloads before a failed receipt or a lost
+    // response, so purge cached payloads for every confirmed attempt.
+    setLogGeneration((generation) => generation + 1);
     try {
       const res = await api.clearMemory();
       if (res.status === 'completed') {
         showToast(t('memory.clear.cleared'), 'success');
         setClearOpen(false);
-        // Remount with the successful clear render so cleared payloads cannot
-        // remain expandable or copyable from stale component state.
-        setLogGeneration((generation) => generation + 1);
         void loadStatus();
         void loadSettings();
       } else {
