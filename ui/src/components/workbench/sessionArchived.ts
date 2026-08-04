@@ -89,6 +89,24 @@ export const markSessionArchived = (
 ): WorkbenchSession | null =>
   prev && prev.id === sessionId && prev.status !== 'archived' ? { ...prev, status: 'archived' } : prev;
 
+/** Whether a pending archive request still belongs to the session in front of the
+ *  user — i.e. whether the confirm dialog may be open.
+ *
+ *  The archive request outlives no session but its own. ``ChatPage`` (and the hook
+ *  that owns this state) is REUSED across session ids — a route param change, not a
+ *  remount — so a request stored as a bare ``open`` boolean is inherited: open the
+ *  dialog for A, have A go read-only mid-flight (another tab archived it, SSE
+ *  converges) or simply navigate to B, and the dialog re-appears already open and
+ *  re-pointed at B, one Enter away from archiving the wrong session (Codex).
+ *
+ *  Storing the requested ID and comparing it here closes that by construction: the
+ *  dialog can only be open for the session the user actually asked about, and a
+ *  target that moved or disappeared cannot inherit the request. */
+export const archiveRequestIsLive = (
+  requestedSessionId: string | null,
+  targetSessionId: string | null,
+): boolean => requestedSessionId !== null && requestedSessionId === targetSessionId;
+
 /** Which text-selection actions the transcript offers.
  *
  *  "Quote" appends into the composer and "Ask in a new session" forks — a

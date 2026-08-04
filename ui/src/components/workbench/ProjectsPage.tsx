@@ -6,16 +6,12 @@ import {
   ChevronDown,
   ChevronRight,
   Ellipsis,
-  EyeOff,
   FileText,
   Folder,
   FolderOpen,
   FolderPlus,
-  GitFork,
   Loader2,
   Pencil,
-  Pin,
-  PinOff,
   Plus,
   RotateCw,
   Settings2,
@@ -26,22 +22,19 @@ import clsx from 'clsx';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
-import { SessionPinAction } from './SessionPinAction';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
-import { useApi } from '../../context/ApiContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
-import { useToast } from '../../context/ToastContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
-import { hideSessionToBackground } from '../../lib/sessionVisibilityActions';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { ArchiveSessionDialog } from './ArchiveSessionDialog';
 import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
-import { SessionPinIndicator } from './SessionPinAction';
+import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
+import { useSessionActions } from './useSessionActions';
+import { SessionPinIndicator } from './SessionPinIndicator';
 
 const DOT: Record<string, string> = {
   running: 'bg-mint shadow-[0_0_7px_rgba(91,255,160,0.9)]',
@@ -254,8 +247,9 @@ const MobileProjectRow: React.FC<{
   );
 };
 
-// Session row: tap to open the chat, ⋯ to rename (the desktop sidebar exposes
-// rename via right-click). Inline rename, same keyboard-safe reasoning as above.
+// Session row: tap to open the chat, ⋯ for the shared session action menu (the
+// same items the desktop sidebar and the chat header show — see sessionActions.tsx).
+// Rename is inline, keyboard-safe on iOS for the same reason as the project row.
 const MobileSessionRow: React.FC<{
   projectId: string;
   session: WorkbenchSession;
@@ -264,19 +258,25 @@ const MobileSessionRow: React.FC<{
   onOpen: () => void;
 }> = ({ projectId, session, unread, canChat, onOpen }) => {
   const { t } = useTranslation();
-  const api = useApi();
-  const { showToast } = useToast();
-  const { renameSession, setSessionPinned, archiveSession, forkSession } = useWorkbenchProjectsTree();
+  const { renameSession } = useWorkbenchProjectsTree();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
-  const [pinning, setPinning] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
   const handledRef = useRef(false);
-  const forkingRef = useRef(false);
-  const pinningRef = useRef(false);
+
+  const { actions, archiveDialog } = useSessionActions({
+    session,
+    writable: canChat,
+    projectId,
+    onRenameStart: () => {
+      setDraft(session.title ?? '');
+      handledRef.current = false;
+      setRenaming(true);
+    },
+    onOpenSession: (sessionId) => navigate(`/chat/${encodeURIComponent(sessionId)}`),
+  });
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -298,20 +298,6 @@ const MobileSessionRow: React.FC<{
   const cancelRename = () => {
     handledRef.current = true;
     setRenaming(false);
-  };
-
-  const togglePinned = async () => {
-    if (pinningRef.current) return;
-    pinningRef.current = true;
-    setPinning(true);
-    try {
-      await setSessionPinned(projectId, session.id, !session.pinned);
-    } catch {
-      // apiFetch already surfaced the error toast.
-    } finally {
-      pinningRef.current = false;
-      setPinning(false);
-    }
   };
 
   if (renaming) {
@@ -356,102 +342,23 @@ const MobileSessionRow: React.FC<{
           </span>
         )}
       </button>
-      {canChat && <SessionPinAction
-        pinned={session.pinned}
-        pending={pinning}
-        pinLabel={t('workbench.sessionPin')}
-        unpinLabel={t('workbench.sessionUnpin')}
-        onToggle={() => void togglePinned()}
-      />}
       {canChat && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={t('workbench.sessionActions')}
-            className="size-8 shrink-0 text-muted"
-          >
-            <Ellipsis className="size-3.5" />
-          </Button>
+          <SessionActionsTrigger
+            label={t('workbench.sessionActions')}
+            open={menuOpen}
+            variant="bar"
+            className="size-8"
+          />
         </PopoverTrigger>
-        <PopoverContent align="end" className="w-[176px] p-1">
-          <MenuItem
-            icon={session.pinned ? PinOff : Pin}
-            onClick={() => {
-              setMenuOpen(false);
-              void togglePinned();
-            }}
-          >
-            {t(session.pinned ? 'workbench.sessionUnpin' : 'workbench.sessionPin')}
-          </MenuItem>
-          <MenuItem
-            icon={Pencil}
-            onClick={() => {
-              setMenuOpen(false);
-              setDraft(session.title ?? '');
-              handledRef.current = false;
-              setRenaming(true);
-            }}
-          >
-            {t('workbench.sessionRename')}
-          </MenuItem>
-          {/* Fork is hidden until the session has a native agent session to fork
-              (mirrors the desktop sidebar's fork gate). */}
-          {session.native_session_id && (
-            <MenuItem
-              icon={GitFork}
-              onClick={async () => {
-                setMenuOpen(false);
-                // The row stays mounted after the menu closes, so guard against a
-                // second tap (reopened menu) spawning a duplicate fork in flight.
-                if (forkingRef.current) return;
-                forkingRef.current = true;
-                try {
-                  const forked = await forkSession(projectId, session.id);
-                  if (forked) navigate(`/chat/${encodeURIComponent(forked.id)}`);
-                } finally {
-                  forkingRef.current = false;
-                }
-              }}
-            >
-              {t('workbench.sessionFork')}
-            </MenuItem>
-          )}
-          <MenuItem
-            icon={EyeOff}
-            onClick={() => {
-              setMenuOpen(false);
-              void hideSessionToBackground({
-                sessionId: session.id,
-                setSessionVisibility: api.setSessionVisibility,
-                showToast,
-                hiddenMessage: t('workbench.sessionHiddenToast'),
-                undoLabel: t('common.undo'),
-              });
-            }}
-          >
-            {t('workbench.sessionHideToBackground')}
-          </MenuItem>
-          <MenuItem
-            icon={Archive}
-            danger
-            onClick={() => {
-              setMenuOpen(false);
-              setArchiveOpen(true);
-            }}
-          >
-            {t('workbench.sessionArchive')}
-          </MenuItem>
-        </PopoverContent>
+        <SessionActionMenuContent
+          actions={actions}
+          label={t('workbench.sessionActions')}
+          align="end"
+          onClose={() => setMenuOpen(false)}
+        />
       </Popover>}
-      {canChat && <ArchiveSessionDialog
-        sessionId={archiveOpen ? session.id : null}
-        sessionTitle={session.title}
-        open={archiveOpen}
-        onOpenChange={setArchiveOpen}
-        onConfirm={() => archiveSession(projectId, session.id)}
-      />}
+      {archiveDialog}
     </div>
   );
 };

@@ -175,7 +175,7 @@ vibe remote
 
 In the conservative Organization release, the remote Workbench remains
 available for Organization management and authorized Project, Session, message,
-and history reads. Agent turns, Harness definition changes and autonomous
+and history reads. Agent turns and runtime controls, Harness definition changes and autonomous
 execution, terminal access, and file operations remain trusted-local only; open
 Avibe on the machine to perform those actions.
 

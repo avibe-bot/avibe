@@ -155,7 +155,7 @@ vibe remote
 ```
 
 在 Organization 的保守发布版本中，远程工作台仍可用于 Organization 管理，以及按权限
-查看 Project、Session、消息和历史记录。Agent 对话、Harness 定义修改与自主执行、
+查看 Project、Session、消息和历史记录。Agent 对话与运行控制、Harness 定义修改与自主执行、
 终端和文件操作仅允许可信本机调用；如需执行这些操作，请在运行 Avibe 的机器上打开。
 
 **流程：**

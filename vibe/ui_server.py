@@ -2245,9 +2245,11 @@ def _is_remote_local_execution_request(method: str, path: str) -> bool:
         "OPTIONS",
     }:
         return True
+    if normalized_method == "POST" and path == "/api/running-agents/end":
+        return True
     return normalized_method == "POST" and bool(
         re.fullmatch(
-            r"/api/sessions/[^/]+/(?:messages|attachments|queue/[^/]+/send-now)",
+            r"/api/sessions/[^/]+/(?:messages|attachments|cancel|queue/[^/]+/send-now)",
             path,
         )
     )

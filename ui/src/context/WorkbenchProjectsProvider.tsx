@@ -523,10 +523,15 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   );
 
   const forkSession = useCallback(
-    async (projectId: string, sessionId: string): Promise<WorkbenchSession | null> => {
-      const alreadyLoaded = sessionsRef.current[projectId]?.sessions != null;
+    async (projectId: string | null, sessionId: string): Promise<WorkbenchSession | null> => {
+      // A standalone session (no project-bound scope, so `project_id: null`) has no
+      // bucket in this tree. The fork itself is session-keyed, so it still runs —
+      // only the cache placement below is skipped, otherwise "fork" would silently
+      // do nothing for every session outside a project (Codex).
+      const alreadyLoaded = projectId != null && sessionsRef.current[projectId]?.sessions != null;
       try {
         const session = await api.forkSession(sessionId);
+        if (projectId == null) return session;
         if (alreadyLoaded) {
           setSessions((prev) => {
             const cur = prev[projectId] ?? EMPTY_SESSIONS;
@@ -615,9 +620,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   );
 
   const setSessionPinned = useCallback(
-    async (projectId: string, sessionId: string, pinned: boolean) => {
+    async (projectId: string | null, sessionId: string, pinned: boolean) => {
       const updated = await api.updateSession(sessionId, { pinned });
+      // Session-keyed: patches whatever project holds the row (none, for a
+      // standalone session). Only the pinned-first re-order needs a project.
       setSessions((prev) => patchSessionRow(prev, sessionId, () => updated, true));
+      if (projectId == null) return;
       const loaded = sessionsRef.current[projectId]?.sessions?.length ?? 0;
       void reconcileSessions(projectId, { minCount: loaded });
     },
@@ -625,10 +633,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   );
 
   const archiveSession = useCallback(
-    async (projectId: string, sessionId: string) => {
+    async (projectId: string | null, sessionId: string) => {
       // Archive is terminal — the API reclaims bound tasks/watches/runs server-side.
       // Drop the row from the tree on success; throw so the caller's dialog can react.
       await api.archiveSession(sessionId);
+      if (projectId == null) return; // standalone session: no tree row to drop
       setSessions((prev) => {
         const state = prev[projectId];
         if (!state?.sessions) return prev;
