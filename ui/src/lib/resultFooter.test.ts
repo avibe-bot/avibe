@@ -20,7 +20,7 @@ describe('resultFooterParts', () => {
     const footer = '✅ ⏱️ 5s · 🪙 1.2k tok';
     expect(resultFooterParts(message(`Answer\n\n${footer}`, { result_footer: footer }))).toEqual({
       body: 'Answer',
-      footer,
+      footer: '⏱️ 5s · 🪙 1.2k tok',
     });
   });
 
@@ -28,24 +28,30 @@ describe('resultFooterParts', () => {
     const footer = '✅ ⏱️ 2m 24s';
     expect(resultFooterParts(message('Answer', { result_footer: footer }))).toEqual({
       body: 'Answer',
-      footer,
+      footer: '⏱️ 2m 24s',
     });
   });
 
   it('recognizes legacy duration and token footer shapes', () => {
-    for (const footer of [
-      '✅ ⏱️ 0s',
-      '⚠️ ⏱️ 2m 4s · 🪙 240k tok',
-      '❌ 🪙 12.3k tok',
-      '✅ 🪙 1.4M tok',
+    for (const [footer, displayedFooter] of [
+      ['✅ ⏱️ 0s', '⏱️ 0s'],
+      ['⚠️ ⏱️ 2m 4s · 🪙 240k tok', '⚠️ ⏱️ 2m 4s · 🪙 240k tok'],
+      ['❌ 🪙 12.3k tok', '❌ 🪙 12.3k tok'],
+      ['✅ 🪙 1.4M tok', '🪙 1.4M tok'],
     ]) {
-      expect(resultFooterParts(message(`Answer\n\n${footer}`))).toEqual({ body: 'Answer', footer });
+      expect(resultFooterParts(message(`Answer\n\n${footer}`))).toEqual({
+        body: 'Answer',
+        footer: displayedFooter,
+      });
     }
   });
 
   it('moves a standalone generated footer out of a footer-only completion body', () => {
     const footer = '✅ ⏱️ 5s · 🪙 1.2k tok';
-    expect(resultFooterParts(message(footer))).toEqual({ body: '', footer });
+    expect(resultFooterParts(message(footer))).toEqual({
+      body: '',
+      footer: '⏱️ 5s · 🪙 1.2k tok',
+    });
   });
 
   it('does not move authored text or non-Agent result content', () => {
