@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.11.4
+version: 0.11.5
 ---
 
 # Background Watch Hook
@@ -261,11 +261,18 @@ resolved for, and an explicit `--since-review-comment-id` /
 `--since-issue-comment-id` drops the matching saved `since` so the replay it asks
 for is not narrowed away. It is written on every cursor advance and on timeout,
 replaced atomically, and ignored when unreadable. Cursors that cover a reported event
-are committed only after the report has been written, because the follow-up is built
-from a completed process: the other order loses the event outright if the waiter is
-killed in between, while this one costs at most one repeated report. Progress made by
-filtering — new activity that was deliberately not reported — commits immediately,
-since there is no delivery to wait for. Two failures are terminal rather
+are not committed by the cycle that reports it. A waiter cannot observe its own
+delivery — `vibe watch` reads its stdout only after the process exits — so those
+cursors are staged under `pending` while the committed ones stay before the event,
+and the next cycle promotes them only when the supervisor sets
+`AVIBE_WATCH_EVENT_DELIVERED`, which it does for exactly one cycle after the
+follow-up is durably queued. No acknowledgement means the report may never have been
+queued, so the staged cursors are dropped and the event is reported again: at-least-once,
+costing one repeated Agent turn instead of losing the activity for good. A manual run
+has no next cycle and no supervisor, and there printing *is* the delivery, so it
+commits straight after reporting. Progress made by filtering — new activity that was
+deliberately not reported — commits immediately either way, since there is no
+delivery to wait for. Two failures are terminal rather
 than a warning — a path that cannot be written to (checked before the first poll)
 and a path already owned by another watch — and both stop the watch with exit `1`
 rather than polling on without the cursors it was asked to keep, or clobbering

@@ -2487,7 +2487,7 @@ def _stdout_at_persist(module, stdout: io.StringIO) -> list[str]:
 
 
 def test_main_commits_cursors_only_after_the_event_is_reported(tmp_path) -> None:
-    """A reported event's cursors move after the report, not before it.
+    """A manual run's reported event moves its cursors after the report, not before.
 
     `vibe watch` builds the follow-up from a completed process, so a kill between
     the two orderings has opposite costs: commit-then-report loses the event for
@@ -2579,6 +2579,165 @@ def test_main_new_prs_commits_the_cursor_only_after_the_event_is_reported(tmp_pa
     assert len(snapshots) == 1
     assert "pull_request #158" in snapshots[0]
     assert json.loads(state_file.read_text(encoding="utf-8"))["pr_cursor"] == 410
+
+
+def _managed_state(module, path, watch_id: str, **fields) -> None:
+    """A state file already owned by ``watch_id``, so a managed run resumes from it."""
+
+    path.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": None,
+                "owner": watch_id,
+                "review_cursor": 0,
+                "review_comment_cursor": 500,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+                "pr_status": "open",
+                **fields,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _run_managed(module, state_file, fetch, *, delivered: bool):
+    """One managed cycle over ``state_file``, told whether the last report was queued."""
+
+    env = {module.WATCH_ID_ENV: "wat_9", module.EVENT_DELIVERED_ENV: "1" if delivered else ""}
+    stdout = io.StringIO()
+    with (
+        patch.dict("os.environ", env, clear=False),
+        patch.object(module, "_fetch_state", side_effect=fetch),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+    return rc, stdout.getvalue(), json.loads(state_file.read_text(encoding="utf-8"))
+
+
+def test_a_managed_run_stages_the_cursors_that_cover_its_report(tmp_path) -> None:
+    """Under `vibe watch` the reported event's cursors are staged, not committed.
+
+    Flushing stdout is not delivery: the supervisor reads the report only after the
+    process exits, so this process cannot know its report survived. Committing at
+    report time therefore drops the event whenever the service dies in between --
+    the saved cursors have moved past it and no follow-up ever carried it. So the
+    committed cursors stay put and the advanced ones wait under ``STAGED_KEY``,
+    written down BEFORE the report leaves, for the next cycle to resolve.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _managed_state(module, state_file, "wat_9")
+
+    def _fetch(repo, pr_number, token, **kwargs):
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    rc, stdout, payload = _run_managed(module, state_file, _fetch, delivered=False)
+
+    assert rc == 0
+    assert "review_comment #501" in stdout
+    # Still pointing before the event that was just reported.
+    assert payload["review_comment_cursor"] == 500
+    assert payload[module.STAGED_KEY]["review_comment_cursor"] == 501
+
+
+def test_a_managed_run_promotes_the_staged_cursors_once_the_report_is_acknowledged(tmp_path) -> None:
+    """The acknowledged report is durable, so the next cycle may start after it."""
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _managed_state(
+        module,
+        state_file,
+        "wat_9",
+        **{module.STAGED_KEY: {"review_comment_cursor": 501, "review_cursor": 0}},
+    )
+
+    saved = module._load_state_file(
+        str(state_file), repo="avibe-bot/avibe", pr_number=153, watch_identity=None, watch_id="wat_9"
+    )
+    with patch("sys.stderr", io.StringIO()):
+        resolved = module._resolve_staged_state(
+            str(state_file),
+            saved,
+            delivered=True,
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            watch_identity=None,
+            watch_id="wat_9",
+        )
+
+    assert resolved["review_comment_cursor"] == 501
+    assert module.STAGED_KEY not in resolved
+    # Written down before any polling, so the promotion is decided exactly once.
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert payload["review_comment_cursor"] == 501
+    assert module.STAGED_KEY not in payload
+
+
+def test_a_managed_run_reports_the_event_again_when_the_report_was_not_acknowledged(tmp_path) -> None:
+    """No acknowledgement means the report may never have been queued: replay it.
+
+    One repeated Agent turn is the cost of the staged cursors being dropped; the
+    alternative -- promoting them anyway -- is an event nobody ever hears about.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _managed_state(
+        module,
+        state_file,
+        "wat_9",
+        **{module.STAGED_KEY: {"review_comment_cursor": 501, "review_cursor": 0}},
+    )
+
+    def _fetch(repo, pr_number, token, **kwargs):
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    rc, stdout, payload = _run_managed(module, state_file, _fetch, delivered=False)
+
+    assert rc == 0
+    assert "review_comment #501" in stdout
+    assert payload["review_comment_cursor"] == 500
+    assert payload[module.STAGED_KEY]["review_comment_cursor"] == 501
+
+
+def test_a_manual_run_stages_nothing_because_printing_is_its_delivery(tmp_path) -> None:
+    """No watch id, no next cycle: staged cursors would be promoted by nobody."""
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _managed_state(module, state_file, "wat_9")
+
+    def _fetch(repo, pr_number, token, **kwargs):
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stdout = io.StringIO()
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.EVENT_DELIVERED_ENV: ""}, clear=False),
+        patch.object(module, "_fetch_state", side_effect=_fetch),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert payload["review_comment_cursor"] == 501
+    assert module.STAGED_KEY not in payload
 
 
 def _ownerless_state(module, path, **fields) -> None:

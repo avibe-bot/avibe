@@ -23,12 +23,15 @@ from core.process_isolation import (
 )
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import (
+    EVENT_DELIVERED_ENV,
     NO_EVENT_EXIT_CODE,
     NO_EVENT_MARKER,
+    WATCH_ID_ENV,
     ManagedWatchService,
     ManagedWatchStore,
     WatchRuntimeStateStore,
     _CycleResult,
+    _cycle_env,
 )
 from storage.background import SQLiteBackgroundTaskStore
 
@@ -2516,7 +2519,7 @@ def test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim(tmp_path: Path)
 
     cycles: list[str] = []
 
-    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
+    async def _spy_cycle(watch_arg, *, timeout_seconds, event_delivered=False):  # noqa: ANN001
         cycles.append(watch_arg.id)
         return _CycleResult(exit_code=0, stdout="ci is green", stderr="", timed_out=False)
 
@@ -2708,7 +2711,7 @@ def _hook_branch_service(tmp_path: Path, branch: str, *, request_store=None) -> 
     results = list(spec["cycles"])
     calls: list[str] = []
 
-    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
+    async def _spy_cycle(watch_arg, *, timeout_seconds, event_delivered=False):  # noqa: ANN001
         calls.append(watch_arg.id)
         return results[min(len(calls) - 1, len(results) - 1)]
 
@@ -3530,6 +3533,85 @@ def test_quiet_cycle_summary_keeps_the_end_of_a_long_waiter_report() -> None:
     assert len(squashed) <= NO_EVENT_SUMMARY_LOG_LIMIT
     assert squashed.endswith(short)
     assert squashed.startswith("…")
+
+
+def test_only_the_cycle_after_a_delivered_event_is_told_the_report_was_queued(tmp_path: Path) -> None:
+    """A waiter learns its previous report is durable, and only once it truly is.
+
+    A waiter cannot observe its own delivery: its stdout reaches the supervisor only
+    after the process exits, so a waiter that wants to advance its own cursors past a
+    reported event has to be told the report was durably queued. That fact is known
+    exactly here -- after ``_commit_cycle_result`` commits the result stamp and the
+    follow-up hook together -- and it is true for exactly ONE cycle: the next one.
+
+    So: not on the first cycle (nothing has been reported yet), set on the cycle after
+    the event, and cleared again after a quiet cycle, which queued no hook. Getting the
+    last case wrong is the harmful one -- a waiter would promote cursors covering a
+    report that was never delivered and skip the activity for good.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store"
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor="slack_C_ack")
+    watch = store.add_watch(
+        name="Watch PR",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=[sys.executable, "-c", "print('event')"],
+        shell_command=None,
+        prefix="PR activity.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    # One event, one quiet cycle, then stop: the three states the flag has to
+    # distinguish, in the order a forever watch meets them.
+    scripted = [
+        _CycleResult(exit_code=0, stdout="review_comment #501", stderr="", timed_out=False),
+        _CycleResult(exit_code=NO_EVENT_EXIT_CODE, stdout="", stderr=NO_EVENT_MARKER, timed_out=False),
+        _CycleResult(exit_code=NO_EVENT_EXIT_CODE, stdout="", stderr=NO_EVENT_MARKER, timed_out=False),
+    ]
+    told: list[bool] = []
+
+    async def _spy_cycle(watch_arg, *, timeout_seconds, event_delivered=False):  # noqa: ANN001
+        told.append(event_delivered)
+        if len(told) >= len(scripted):
+            service._running = False
+        return scripted[min(len(told) - 1, len(scripted) - 1)]
+
+    service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+
+    asyncio.run(service._run_watch(watch.id))
+
+    assert told[:3] == [False, True, False]
+
+
+def test_the_cycle_environment_only_carries_the_ack_when_a_report_was_delivered() -> None:
+    """The flag reaches the waiter as an environment variable, or not at all."""
+    watch = SimpleNamespace(id="wat_9")
+
+    assert _cycle_env(watch, event_delivered=False) == {WATCH_ID_ENV: "wat_9"}
+    assert _cycle_env(watch, event_delivered=True) == {
+        WATCH_ID_ENV: "wat_9",
+        EVENT_DELIVERED_ENV: "1",
+    }
 
 
 def test_managed_watch_service_names_the_watch_in_the_cycle_environment(tmp_path: Path) -> None:

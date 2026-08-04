@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -27,6 +28,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _github_wait_common import (  # noqa: E402
+    EVENT_DELIVERED_ENV,
     filter_new,
     get_authenticated_login,
     get_token,
@@ -62,6 +64,12 @@ DEFAULT_NOISE_COMMENT_PATTERNS = (
 # Agent's own doing, so they are noise in --actionable-only mode.
 ACTIONABLE_PR_STATUSES = frozenset({"merged", "closed"})
 STATE_FILE_VERSION = 1
+# Cursors that cover a REPORTED event, held here instead of committed. A waiter cannot
+# see its own delivery -- the supervisor reads its output only after the process exits
+# -- so committing them at report time loses the event whenever the service stops in
+# between. They are promoted by the next cycle, which the supervisor tells whether the
+# report was durably queued, and replayed when it was not.
+STAGED_KEY = "pending"
 STATE_CURSOR_KEYS = (
     "review_cursor",
     "review_comment_cursor",
@@ -929,6 +937,65 @@ def _saved_str(saved: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _event_delivery_acknowledged() -> bool:
+    """Did the supervisor confirm the previous cycle's report reached its outbox?
+
+    Only ``vibe watch`` can answer this, so a manual run says no -- and does not need
+    a yes, because there printing the report IS delivering it and nothing is staged.
+    """
+
+    return bool(os.environ.get(EVENT_DELIVERED_ENV, "").strip())
+
+
+def _resolve_staged_state(
+    path: str | None,
+    saved: dict[str, Any],
+    *,
+    delivered: bool,
+    repo: str,
+    pr_number: int | None,
+    watch_identity: str | None,
+    watch_id: str | None,
+) -> dict[str, Any]:
+    """Promote or drop the cursors staged for the previous cycle's report.
+
+    Promoted when the supervisor acknowledged the report: it is durable, so the next
+    poll may start after it. Dropped otherwise, which replays the report -- one
+    repeated Agent turn, against an event lost for good. Either way the decision is
+    written down before polling, so it is taken once.
+    """
+
+    staged = saved.get(STAGED_KEY)
+    if not isinstance(staged, dict):
+        return saved
+
+    resolved = {key: value for key, value in saved.items() if key != STAGED_KEY}
+    if delivered:
+        resolved.update(staged)
+    print(
+        (
+            "Previous cycle's report was acknowledged; advancing past it."
+            if delivered
+            else "Previous cycle's report was not acknowledged; reporting it again."
+        ),
+        file=sys.stderr,
+    )
+    fields = {
+        key: value
+        for key, value in resolved.items()
+        if key not in {"version", "repo", "pr", "watch", "owner"}
+    }
+    _write_state_file(
+        path,
+        repo=repo,
+        pr_number=pr_number,
+        watch_identity=watch_identity,
+        watch_id=watch_id,
+        **fields,
+    )
+    return resolved
+
+
 def _deliver(output: str) -> None:
     """Hand the report to the supervisor, and make sure it has left this process.
 
@@ -1051,6 +1118,10 @@ def main() -> int:
 
     watch_identity = _watch_identity(args)
     watch_id = _managed_watch_id()
+    # Only a managed run has a next cycle to promote staged cursors, and only it gets
+    # told whether the report was queued. A manual run is one process whose stdout is
+    # the delivery, so staging there would leave cursors nobody ever promotes.
+    two_phase = watch_id is not None
     _verify_state_file_writable(
         args.state_file,
         repo=args.repo,
@@ -1060,6 +1131,15 @@ def main() -> int:
     )
     saved = _load_state_file(
         args.state_file,
+        repo=args.repo,
+        pr_number=args.pr,
+        watch_identity=watch_identity,
+        watch_id=watch_id,
+    )
+    saved = _resolve_staged_state(
+        args.state_file,
+        saved,
+        delivered=_event_delivery_acknowledged(),
         repo=args.repo,
         pr_number=args.pr,
         watch_identity=watch_identity,
@@ -1228,23 +1308,49 @@ def main() -> int:
             review_comment_since = later_since(review_comment_since, state["review_comments"])
             issue_comment_since = later_since(issue_comment_since, state["issue_comments"])
 
-        def _persist_pr_state() -> None:
+        def _pr_state_fields() -> dict[str, Any]:
+            return {
+                "review_cursor": review_cursor,
+                "review_comment_cursor": review_comment_cursor,
+                "issue_comment_cursor": issue_comment_cursor,
+                "reaction_cursor": reaction_cursor,
+                "pr_status": pr_status,
+                "review_comment_since": review_comment_since,
+                "issue_comment_since": issue_comment_since,
+                "viewer_login": viewer_login,
+                "token_fingerprint": token_fingerprint,
+            }
+
+        def _persist_pr_state(*, previous: dict[str, Any] | None = None) -> None:
+            fields = _pr_state_fields()
+            if previous is not None:
+                # Committed state stays where the reported event is still unseen; the
+                # cursors past it wait under STAGED_KEY for the acknowledgement.
+                fields = {**previous, STAGED_KEY: fields}
             _write_state_file(
                 args.state_file,
                 repo=args.repo,
                 pr_number=args.pr,
                 watch_identity=watch_identity,
                 watch_id=watch_id,
-                review_cursor=review_cursor,
-                review_comment_cursor=review_comment_cursor,
-                issue_comment_cursor=issue_comment_cursor,
-                reaction_cursor=reaction_cursor,
-                pr_status=pr_status,
-                review_comment_since=review_comment_since,
-                issue_comment_since=issue_comment_since,
-                viewer_login=viewer_login,
-                token_fingerprint=token_fingerprint,
+                **fields,
             )
+
+        def _report_pr(output: str, previous: dict[str, Any]) -> None:
+            """Hand one report to the supervisor, staging or committing to match.
+
+            Under ``vibe watch`` the cursors covering the event are staged first, so a
+            crash before the supervisor queues the follow-up replays the report instead
+            of skipping it. A manual run has no next cycle to promote anything, and
+            printing there is the delivery, so it commits straight after.
+            """
+
+            if two_phase:
+                _persist_pr_state(previous=previous)
+                _deliver(output)
+                return
+            _deliver(output)
+            _persist_pr_state()
 
         def _settle(
             first: tuple[str | None, int, int, int, int, str],
@@ -1307,6 +1413,7 @@ def main() -> int:
             reaction_cursor,
             pr_status,
         )
+        pre_event_fields = _pr_state_fields()
         initial_result = _render(pending_cursors)
         if initial_result[0] is not None and not args.catch_up:
             initial_result = _settle(initial_result, pending_cursors)
@@ -1332,13 +1439,7 @@ def main() -> int:
                 reaction_cursor=reaction_cursor,
                 pr_status=pr_status,
             )
-            _deliver(initial_output)
-            # Only now are the cursors that cover this event committed. `vibe watch`
-            # builds the follow-up from a completed process, so a kill between the
-            # two costs one repeated report next cycle, while committing first
-            # dropped the event for good: the saved cursors had moved past it and no
-            # follow-up ever carried it.
-            _persist_pr_state()
+            _report_pr(initial_output, pre_event_fields)
             return 0
     else:
         pr_cursor = since_pr_id if since_pr_id is not None else (0 if args.catch_up else max_id(state["pull_requests"]))
@@ -1346,29 +1447,41 @@ def main() -> int:
             f"Watching GitHub new PRs in {args.repo} from cursor: pr={pr_cursor} catch_up={args.catch_up}",
             file=sys.stderr,
         )
+        pre_event_pr_cursor = pr_cursor
         initial_output, pr_cursor = _render_new_pull_requests(
             repo=args.repo,
             state=state,
             pr_cursor=pr_cursor,
             event_limit=args.event_limit,
         )
-        def _persist_new_pr_state() -> None:
+        def _persist_new_pr_state(*, previous: int | None = None) -> None:
+            fields: dict[str, Any] = {"pr_cursor": pr_cursor}
+            if previous is not None:
+                fields = {"pr_cursor": previous, STAGED_KEY: {"pr_cursor": pr_cursor}}
             _write_state_file(
                 args.state_file,
                 repo=args.repo,
                 pr_number=None,
                 watch_identity=watch_identity,
                 watch_id=watch_id,
-                pr_cursor=pr_cursor,
+                **fields,
             )
+
+        def _report_new_pr(output: str, previous: int) -> None:
+            """Same staging contract as ``_report_pr``, over the single new-PR cursor."""
+
+            if two_phase:
+                _persist_new_pr_state(previous=previous)
+                _deliver(output)
+                return
+            _deliver(output)
+            _persist_new_pr_state()
 
         if initial_output is None:
             _persist_new_pr_state()
         else:
             _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
-            _deliver(initial_output)
-            # Same ordering as the PR path: report first, commit after.
-            _persist_new_pr_state()
+            _report_new_pr(initial_output, pre_event_pr_cursor)
             return 0
 
     while True:
@@ -1448,6 +1561,7 @@ def main() -> int:
                 reaction_cursor,
                 pr_status,
             )
+            pre_event_fields = _pr_state_fields()
             result = _render(pending_cursors)
             if result[0] is not None:
                 result = _settle(result, pending_cursors)
@@ -1475,8 +1589,9 @@ def main() -> int:
                 reaction_cursor=reaction_cursor,
                 pr_status=pr_status,
             )
-            commit = _persist_pr_state
+            report = partial(_report_pr, previous=pre_event_fields)
         else:
+            pre_event_pr_cursor = pr_cursor
             output, pr_cursor = _render_new_pull_requests(
                 repo=args.repo,
                 state=state,
@@ -1487,11 +1602,10 @@ def main() -> int:
                 _persist_new_pr_state()
                 continue
             _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
-            commit = _persist_new_pr_state
+            report = partial(_report_new_pr, previous=pre_event_pr_cursor)
 
         print(cache.summary(), file=sys.stderr)
-        _deliver(output)
-        commit()
+        report(output)
         return 0
 
 

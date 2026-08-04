@@ -29,6 +29,12 @@ NO_EVENT_MARKER = "avibe-watch: no-event"
 # per-watch state on disk should own that state by this id, so two identically
 # configured watches cannot silently share one file. Absent for a manual run.
 WATCH_ID_ENV = "AVIBE_WATCH_ID"
+# `vibe watch` sets this on the cycle that follows one whose event report was durably
+# queued as a follow-up. Flushing stdout proves nothing: the supervisor only sees the
+# output once the process has exited, so a waiter that stages the cursors covering a
+# reported event promotes them when it sees this ack and reports the event again
+# otherwise. Absent for a manual run, where printing IS the delivery.
+EVENT_DELIVERED_ENV = "AVIBE_WATCH_EVENT_DELIVERED"
 # Socket timeout for one GitHub request. Callers that have their own deadline need
 # this to size a request budget: a waiter with 20s left cannot afford a fetch that
 # is allowed to block for 30.
