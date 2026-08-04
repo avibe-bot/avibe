@@ -47,7 +47,11 @@ import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
-import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
+import {
+  isTranscriptWindowDisjoint,
+  mergeById,
+  insertMessageOrdered,
+} from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
@@ -779,9 +783,9 @@ export const ChatPage: React.FC = () => {
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
       const fresh = res.messages.filter(isTranscriptMessage);
       if (fresh.length) {
-        const tailOldestId = fresh[0].id;
+        const tailOldest = fresh[0];
         const previousOldestId = oldestLoadedIdRef.current;
-        const previousNewestId = newestLoadedIdRef.current;
+        const previousNewest = messagesRef.current[messagesRef.current.length - 1];
         setMessages((prev) => {
           const merged = mergeById(prev, fresh);
           // Following the tail: keep the window capped. A gap larger than the tail
@@ -795,7 +799,11 @@ export const ChatPage: React.FC = () => {
           }
           return merged;
         });
-        if (!previousOldestId || !previousNewestId || tailOldestId > previousNewestId) {
+        if (
+          !previousOldestId ||
+          !previousNewest ||
+          isTranscriptWindowDisjoint(previousNewest, tailOldest)
+        ) {
           setOlderCursor(res.next_before_id ?? null);
         }
       }

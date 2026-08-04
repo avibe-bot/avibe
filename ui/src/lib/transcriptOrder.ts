@@ -54,6 +54,12 @@ export const byCreatedThenId = (a: WorkbenchMessage, b: WorkbenchMessage): numbe
   return a.id < b.id ? -1 : 1;
 };
 
+/** Whether a newly fetched tail begins strictly after the loaded window. */
+export const isTranscriptWindowDisjoint = (
+  previousNewest: WorkbenchMessage,
+  tailOldest: WorkbenchMessage,
+): boolean => byCreatedThenId(tailOldest, previousNewest) > 0;
+
 // Union two row sets, deduped by id and re-sorted into durable order. Used by the
 // BATCH paths (initial snapshot, reconcile, older-page load), so a fast agent
 // result that arrives over /api/events *before* its prompt row still lands in the

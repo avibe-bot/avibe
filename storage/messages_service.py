@@ -77,14 +77,10 @@ def _timestamp_key(value: Any, row_id: Any) -> tuple[datetime, str]:
 def _new_message_id() -> str:
     """Time-sortable message id.
 
-    The transcript and inbox order rows by ``(created_at, id)`` and
-    ``created_at`` is second-resolution, so two rows written in the same second
-    — e.g. a fast avibe turn where the user prompt and the agent result land
-    together — tie on ``created_at``. A microsecond-clock prefix makes the id
-    monotonic so that tie-break preserves insertion order; otherwise a random
-    uuid could render the result before the prompt, or make the inbox pick the
-    wrong "last" row for its activity / replied state. The random suffix keeps
-    ids unique within the same microsecond.
+    The durable transcript key uses Message acceptance-or-creation time plus id.
+    Legacy and imported rows may still have second-resolution timestamps, so a
+    microsecond-clock prefix makes the id tie-break preserve insertion order.
+    The random suffix keeps ids unique within the same microsecond.
     """
     return f"msg_{int(time.time() * 1_000_000):015x}{uuid.uuid4().hex[:8]}"
 
@@ -261,7 +257,7 @@ def _attach_harness_provenance(
     return payloads
 
 
-def transcript_order_value() -> Any:
+def transcript_order_value(table: Any = messages) -> Any:
     """SQLite ordering key for when a Message entered the transcript.
 
     A queued Delivery may be submitted while another Turn is active. Its Message
@@ -270,7 +266,7 @@ def transcript_order_value() -> Any:
     and keep their microsecond ``created_at`` plus id tie-break.
     """
 
-    return func.coalesce(messages.c.delivered_at, messages.c.created_at)
+    return func.coalesce(table.c.delivered_at, table.c.created_at)
 
 
 _WS_RE = re.compile(r"\s+")
@@ -415,7 +411,7 @@ def search_messages(
         # sessions stay active), so exclude a disabled scope's messages too. A
         # missing scope_settings row (legacy / folder-less project) is enabled.
         .where(or_(scope_settings.c.enabled.is_(None), scope_settings.c.enabled != 0))
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
         .limit(effective_limit)
     )
 
@@ -969,7 +965,7 @@ def list_inbox_sessions(
     """
 
     def _latest_message_value(
-        column_name: str,
+        column_name: Optional[str],
         *,
         author: Optional[str] = None,
         types: Optional[tuple[str, ...]] = None,
@@ -977,11 +973,13 @@ def list_inbox_sessions(
         input_turn_only: bool = False,
     ) -> Any:
         msg = messages.alias()
+        order_value = transcript_order_value(msg)
+        selected_value = order_value if column_name is None else getattr(msg.c, column_name)
         query = (
-            select(getattr(msg.c, column_name))
+            select(selected_value)
             .where(msg.c.session_id == agent_sessions.c.id)
             .where(msg.c.session_id.is_not(None))
-            .order_by(msg.c.created_at.desc(), msg.c.id.desc())
+            .order_by(order_value.desc(), msg.c.id.desc())
             .limit(1)
         )
         if platform is not None:
@@ -1006,12 +1004,12 @@ def list_inbox_sessions(
     # Drive from the small session set and do top-1 index probes per session.
     # This preserves the inbox contract while avoiding full message-window
     # materialization as history grows.
-    last_activity_at = _latest_message_value("created_at", conversation_only=True)
+    last_activity_at = _latest_message_value(None, conversation_only=True)
     last_author = _latest_message_value("author", conversation_only=True)
     preview_id = _latest_message_value("id", types=_INBOX_PREVIEW_TYPES)
-    preview_at = _latest_message_value("created_at", types=_INBOX_PREVIEW_TYPES)
+    preview_at = _latest_message_value(None, types=_INBOX_PREVIEW_TYPES)
     last_terminal_id = _latest_message_value("id", types=_INBOX_SETTLES_REPLY_TYPES)
-    last_terminal_at = _latest_message_value("created_at", types=_INBOX_SETTLES_REPLY_TYPES)
+    last_terminal_at = _latest_message_value(None, types=_INBOX_SETTLES_REPLY_TYPES)
     last_turn_terminal_id = (
         select(session_turns.c.id)
         .where(
@@ -1041,7 +1039,7 @@ def list_inbox_sessions(
         .scalar_subquery()
     )
     last_input_at = _latest_message_value(
-        "created_at", conversation_only=True, input_turn_only=True
+        None, conversation_only=True, input_turn_only=True
     )
     last_input_id = _latest_message_value("id", conversation_only=True, input_turn_only=True)
     last_input_turn_state = (
@@ -1157,11 +1155,9 @@ def list_inbox_sessions(
         unread = int(row["unread_count"] or 0)
         # Awaiting the agent: the latest human or harness input is newer than the
         # agent's latest reply. Persistent across a reload and stays set for the whole
-        # agent turn, unlike a literal "last author" check. ``created_at`` is
-        # second-resolution, so compare ``(created_at, id)`` tuples — the message
-        # id carries a microsecond-clock prefix (see ``_new_message_id``), giving
-        # the right order for a follow-up sent in the same second as the prior
-        # reply.
+        # agent turn, unlike a literal "last author" check. The timestamp values
+        # here are the same acceptance-or-creation positions used by the transcript;
+        # id remains the stable tie-break for legacy second-resolution rows.
         last_input_at = row["last_input_at"]
         last_input_id = row["last_input_id"]
         # Execution settlement belongs to SessionTurn. A visible result Message
@@ -1244,18 +1240,15 @@ def mark_session_read(
     )
     if until_message_id:
         anchor = conn.execute(
-            select(messages.c.created_at).where(messages.c.id == until_message_id)
+            select(transcript_order_value()).where(messages.c.id == until_message_id)
         ).scalar_one_or_none()
         if anchor is not None:
-            # ``created_at`` is stored at second precision, so a bare
-            # ``<= anchor`` would also mark newer messages created in the
-            # same second as read. Tie-break on ``id`` so only rows at-or-
-            # before the anchor message itself are affected.
+            order_value = transcript_order_value()
             base = base.where(
                 or_(
-                    messages.c.created_at < anchor,
+                    order_value < anchor,
                     and_(
-                        messages.c.created_at == anchor,
+                        order_value == anchor,
                         messages.c.id <= until_message_id,
                     ),
                 )
@@ -1275,7 +1268,7 @@ def list_messages_for_inbox_scope(
     query = (
         select(messages)
         .where(messages.c.scope_id == scope_id)
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
         .limit(min(max(int(limit), 1), 50))
     )
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]

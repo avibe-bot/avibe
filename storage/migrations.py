@@ -764,8 +764,6 @@ def _ensure_agent_runs_expression_indexes(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
-    from vibe.message_types import build_partial_index_predicate
-
     if "agent_sessions" in tables:
         conn.execute(
             "create index if not exists ix_agent_sessions_visibility "
@@ -802,21 +800,19 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
         'create index if not exists ix_messages_unread_session '
         'on messages (platform, type, author, read_at, session_id)'
     )
-    conn.execute(
-        'create index if not exists ix_messages_mark_read '
-        'on messages (session_id, author, read_at, created_at, id)'
-    )
-    for index_name in (
-        "ix_messages_inbox_activity",
-        "ix_messages_inbox_agent_reply",
-        "ix_messages_inbox_user_send",
-    ):
+    for index_name, index_sql in transcript_index._INDEX_SQL.items():
+        if index_name == transcript_index._INDEX:
+            continue
+        row = conn.execute(
+            "select sql from sqlite_master where type = 'index' and name = ?",
+            (index_name,),
+        ).fetchone()
+        if row is not None and _normalized_index_sql(row[0]) == _normalized_index_sql(
+            index_sql
+        ):
+            continue
         conn.execute(f"drop index if exists {index_name}")
-        conn.execute(
-            f"create index {index_name} "
-            "on messages (platform, session_id, created_at desc, id desc) "
-            f"where {build_partial_index_predicate(index_name)}"
-        )
+        conn.execute(index_sql)
 
 
 def _ensure_agent_events_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:

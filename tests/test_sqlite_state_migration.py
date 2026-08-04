@@ -67,7 +67,8 @@ def test_message_partial_index_ddl_matches_catalog_contract(
     assert catalog_predicate == expected_predicate
     assert ddl == (
         f"CREATE INDEX {index_name} ON messages "
-        f"(platform, session_id, created_at desc, id desc) WHERE {expected_predicate}"
+        "(platform, session_id, coalesce(delivered_at, created_at) desc, id desc) "
+        f"WHERE {expected_predicate}"
     )
 
 
@@ -136,12 +137,25 @@ def test_message_transcript_order_upgrade_normalizes_and_indexes_exact_time(
             ("msg_legacy_order",),
         ).fetchone()
         index_sql = _index_sql(conn, "ix_messages_session_transcript_id")
+        dependent_index_sql = {
+            name: _index_sql(conn, name)
+            for name in (
+                "ix_messages_mark_read",
+                "ix_messages_inbox_activity",
+                "ix_messages_inbox_agent_reply",
+                "ix_messages_inbox_user_send",
+            )
+        }
 
     assert row == (
         "2026-08-04T00:00:00.000000Z",
         "2026-08-04T00:00:00.000999Z",
     )
     assert "coalesce(delivered_at, created_at)" in index_sql.lower()
+    assert all(
+        "coalesce(delivered_at, created_at)" in sql.lower()
+        for sql in dependent_index_sql.values()
+    )
 
 
 def test_scoped_native_message_identity_upgrade_and_safe_downgrade(
@@ -1699,7 +1713,10 @@ def test_show_annotation_migration_changes_only_the_user_send_index(
     assert user_send_index.endswith(
         MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_user_send"]
     )
-    assert "(platform, session_id, created_at desc, id desc)" in user_send_index
+    assert (
+        "(platform, session_id, coalesce(delivered_at, created_at) desc, id desc)"
+        in user_send_index
+    )
     assert version == (HEAD_REVISION,)
 
     command.downgrade(migrations.alembic_config(db_path), "20260726_0037")

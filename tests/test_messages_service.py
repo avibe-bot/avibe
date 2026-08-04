@@ -1127,7 +1127,19 @@ def _seed_titled_session(conn, scope_id: str, session_id: str, title: str) -> No
     )
 
 
-def _insert_msg(conn, scope_id, session_id, author, text, created_at, *, read=True, msg_type=None, msg_id=None):
+def _insert_msg(
+    conn,
+    scope_id,
+    session_id,
+    author,
+    text,
+    created_at,
+    *,
+    read=True,
+    msg_type=None,
+    msg_id=None,
+    delivered_at=None,
+):
     """Direct insert so the test controls created_at (second-resolution) + read_at.
 
     Agent rows default to type='result' (the user-facing reply the inbox
@@ -1149,6 +1161,7 @@ def _insert_msg(conn, scope_id, session_id, author, text, created_at, *, read=Tr
             metadata_json="{}",
             created_at=created_at,
             updated_at=created_at,
+            delivered_at=delivered_at,
             read_at=created_at if (read and author == "agent") else None,
         )
     )
@@ -1500,6 +1513,81 @@ def test_list_inbox_sessions_same_second_followup_uses_id_tiebreaker(isolated_st
     assert rows["ses_wait_tie"]["replied"] is True
     # Same second, the agent reply has the later id → already replied.
     assert rows["ses_done_tie"]["replied"] is False
+
+
+def test_list_inbox_sessions_uses_transcript_acceptance_order(isolated_state):
+    """Inbox activity and awaiting state follow the visible transcript order.
+
+    A queued input can be authored before a reply but accepted after it. Its
+    acceptance is then the newest visible activity and the Session is awaiting
+    another reply even though ``created_at`` alone says the opposite.
+    """
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_acceptance", "Acceptance")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_acceptance",
+            "user",
+            "queued follow-up",
+            "2026-08-04T00:00:01.000000Z",
+            msg_id="msg_001",
+            delivered_at="2026-08-04T00:00:04.000000Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_acceptance",
+            "agent",
+            "reply before acceptance",
+            "2026-08-04T00:00:03.000000Z",
+            msg_id="msg_003",
+        )
+
+    with engine.connect() as conn:
+        row = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+
+    assert row["last_activity_at"] == "2026-08-04T00:00:04.000000Z"
+    assert row["last_message_author"] == "user"
+    assert row["replied"] is True
+
+
+def test_mark_session_read_uses_transcript_acceptance_boundary(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_acceptance_read")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_acceptance_read",
+            "user",
+            "queued follow-up",
+            "2026-08-04T00:00:01.000000Z",
+            msg_id="msg_001",
+            delivered_at="2026-08-04T00:00:04.000000Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_acceptance_read",
+            "agent",
+            "reply before acceptance",
+            "2026-08-04T00:00:03.000000Z",
+            read=False,
+            msg_id="msg_003",
+        )
+
+    with engine.begin() as conn:
+        updated = messages_service.mark_session_read(
+            conn,
+            "ses_acceptance_read",
+            until_message_id="msg_001",
+        )
+
+    assert updated == 1
 
 
 def test_list_inbox_sessions_pagination(isolated_state):

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { WorkbenchMessage } from '../context/ApiContext';
 import {
   byCreatedThenId,
+  isTranscriptWindowDisjoint,
   mergeById,
   insertMessageOrdered,
   messageOrderTimeMs,
@@ -72,6 +73,19 @@ describe('byCreatedThenId', () => {
     const reply = mk('msg_003', '2026-08-04T00:00:02Z');
     const queued = mk('msg_002', '2026-08-04T00:00:01Z', '2026-08-04T00:00:03.500000Z');
     expect(byCreatedThenId(reply, queued)).toBe(-1);
+  });
+});
+
+describe('isTranscriptWindowDisjoint', () => {
+  it('uses acceptance order rather than sortable ids at the reconciliation boundary', () => {
+    const previousNewest = mk('msg_003', '2026-08-04T00:00:02Z');
+    const tailOldest = mk(
+      'msg_002',
+      '2026-08-04T00:00:01Z',
+      '2026-08-04T00:00:03.500000Z',
+    );
+
+    expect(isTranscriptWindowDisjoint(previousNewest, tailOldest)).toBe(true);
   });
 });
 
