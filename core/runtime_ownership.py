@@ -10,7 +10,12 @@ from typing import Callable
 
 from sqlalchemy import Engine, and_, func, or_, select
 
-from storage.background import EXECUTION_RUN_TYPES, normalize_run_status
+from storage.background import (
+    EXECUTION_RUN_TYPES,
+    RUN_STATUS_ALIASES,
+    TERMINAL_RUN_STATUSES,
+    normalize_run_status,
+)
 from storage.delivery_states import policy_for
 from storage.models import (
     agent_runs,
@@ -50,11 +55,10 @@ _DISPOSITION_PRIORITY = {
 _KNOWN_ACTIVITY_PHASES = frozenset(
     {ACTIVE_PHASE, AWAITING_OUTPUT_PHASE, "terminal"}
 )
-_TERMINAL_RAW_RUN_STATUSES = (
-    "completed",
-    "succeeded",
-    "failed",
-    "canceled",
+_TERMINAL_RAW_RUN_STATUSES = tuple(
+    raw
+    for raw, normalized in RUN_STATUS_ALIASES.items()
+    if normalized in TERMINAL_RUN_STATUSES
 )
 
 

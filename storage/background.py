@@ -277,6 +277,7 @@ RUN_STATUS_ALIASES: dict[str, str] = {
     "succeeded": "succeeded",
     "failed": "failed",
     "canceled": "canceled",
+    "cancelled": "canceled",
 }
 _LIKE_ESCAPE = "\\"
 # Every run status Session teardown condemns, which is deliberately WIDER than the

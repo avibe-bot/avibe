@@ -1514,6 +1514,22 @@ def test_hfr_148_unknown_run_status_fails_closed(tmp_path: Path) -> None:
     engine.dispose()
 
 
+def test_hfr_148_legacy_cancelled_run_is_terminal_history(tmp_path: Path) -> None:
+    """HFR-148: a legacy terminal spelling cannot pin a runtime forever."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        _run(
+            conn,
+            "run-legacy-cancelled",
+            status="cancelled",
+            legacy_session_key="route:base",
+        )
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is SessionRuntimeDisposition.RECLAIMABLE
+    engine.dispose()
+
+
 def test_hfr_139_unrelated_session_does_not_pin_target(tmp_path: Path) -> None:
     """HFR-139: an unrelated durable Session cannot pin this resource."""
     engine = _engine(tmp_path)
