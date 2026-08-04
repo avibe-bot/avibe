@@ -3389,6 +3389,24 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
         self.assertEqual(agent._session_last_activity, {})
 
+    def test_turn_start_refreshes_the_cwd_transport_clock(self):
+        agent = self._agent()
+        agent._transport_last_activity = {"/tmp/work": 0.0}
+        agent._session_last_activity = {"session-1": 0.0}
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            base_session_id="session-1",
+        )
+
+        with patch.object(_MODULE.time, "monotonic", return_value=1234.0):
+            agent.record_runtime_turn_start(
+                runtime_key="session:/tmp/work",
+                request=request,
+            )
+
+        self.assertEqual(agent._transport_last_activity, {"/tmp/work": 1234.0})
+        self.assertEqual(agent._session_last_activity, {"session-1": 1234.0})
+
     async def test_hfr_142_server_request_callback_does_not_create_progress(self):
         """HFR-142: the cwd-bound callback preserves the prior progress clock."""
         import tempfile

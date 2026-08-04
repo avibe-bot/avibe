@@ -129,6 +129,8 @@ def test_runtime_ready_fails_closed_after_queue_recovery_failure() -> None:
     )
     controller.runtime_work_supervisor = SimpleNamespace(activate=AsyncMock())
     controller._delivery_recovery_complete = asyncio.Event()
+    controller._shutdown_requested = False
+    controller._loop = None
 
     with pytest.raises(RuntimeError, match="queue recovery failed"):
         asyncio.run(controller._on_runtime_ready())
@@ -140,6 +142,7 @@ def test_runtime_ready_fails_closed_after_queue_recovery_failure() -> None:
     controller.runtime_command_watcher.start.assert_not_awaited()
     controller.update_checker.start.assert_not_called()
     assert not controller._delivery_recovery_complete.is_set()
+    assert controller._shutdown_requested is True
 
 
 def test_runtime_ready_fails_closed_after_fallback_recovery_failure() -> None:
@@ -164,6 +167,8 @@ def test_runtime_ready_fails_closed_after_fallback_recovery_failure() -> None:
     )
     controller.runtime_work_supervisor = SimpleNamespace(activate=AsyncMock())
     controller._delivery_recovery_complete = asyncio.Event()
+    controller._shutdown_requested = False
+    controller._loop = None
 
     with pytest.raises(RuntimeError, match="fallback recovery failed"):
         asyncio.run(controller._on_runtime_ready())
@@ -174,3 +179,4 @@ def test_runtime_ready_fails_closed_after_fallback_recovery_failure() -> None:
     controller.runtime_command_watcher.start.assert_not_awaited()
     controller.update_checker.start.assert_not_called()
     assert not controller._delivery_recovery_complete.is_set()
+    assert controller._shutdown_requested is True

@@ -74,6 +74,21 @@ def test_admission_first_commit_finishes_before_retirement_predicate() -> None:
     assert registry.current("claude", "runtime-1", include_retired=True) == identity
 
 
+def test_task_request_serialization_excludes_the_live_activation_boundary() -> None:
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    request = TaskExecutionRequest(
+        id="run-1",
+        request_type="agent_run",
+        observed_activation_identity=identity,
+    )
+
+    payload = request.to_dict()
+
+    assert "observed_activation_identity" not in payload
+    assert payload["id"] == "run-1"
+
+
 def test_cleanup_first_retirement_rejects_delayed_owner_commit() -> None:
     registry = RuntimeActivationRegistry()
     identity = registry.attach("claude", "runtime-1")

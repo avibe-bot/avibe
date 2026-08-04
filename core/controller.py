@@ -966,7 +966,11 @@ class Controller:
         if self.primary_platform == "avibe":
             workbench_platforms.add("")
         await self._restore_active_polls(workbench_platforms)
-        await self._recover_runtime_owners()
+        try:
+            await self._recover_runtime_owners()
+        except Exception:
+            self.request_shutdown("runtime owner recovery failed")
+            raise
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
@@ -1541,7 +1545,7 @@ class Controller:
             return
         self._shutdown_requested = True
         self._service_lock_safe_to_release = False
-        loop = self._loop
+        loop = getattr(self, "_loop", None)
         if loop is None or loop.is_closed() or not loop.is_running():
             return
         try:

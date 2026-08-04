@@ -9,7 +9,7 @@ import logging
 import os
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -1120,7 +1120,7 @@ class TaskExecutionRequest:
     )
 
     def to_dict(self) -> Dict[str, Any]:
-        payload = asdict(self)
+        payload = asdict(replace(self, observed_activation_identity=None))
         payload.pop("observed_activation_identity", None)
         return payload
 

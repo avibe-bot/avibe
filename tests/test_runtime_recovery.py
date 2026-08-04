@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,7 +14,7 @@ from core.runtime_recovery import (
     FallbackRequestRecoveryHandler,
     SessionDeliveryRecoveryHandler,
 )
-from core.runtime_work import RuntimeWorkLane, RuntimeWorkSupervisor
+from core.runtime_work import RuntimeWorkItem, RuntimeWorkLane, RuntimeWorkSupervisor
 from core.session_turns import SessionTurnManager
 from storage import message_deliveries as delivery_store
 from storage.background import SQLiteBackgroundTaskStore
@@ -524,6 +525,31 @@ async def test_hfr_149_fallback_recovery_preserves_the_live_service_claim(
         assert store.get_run("run-live")["status"] == "queued"
     finally:
         store.close()
+
+
+@pytest.mark.anyio
+async def test_fallback_recovery_write_runs_off_the_controller_loop() -> None:
+    loop_thread = threading.get_ident()
+    worker_threads: list[int] = []
+
+    class _Store:
+        @staticmethod
+        def recover_claimed_pre_execution_run(**_kwargs) -> bool:
+            worker_threads.append(threading.get_ident())
+            return True
+
+    handler = FallbackRequestRecoveryHandler(_Store())
+    item = RuntimeWorkItem(
+        "run-1",
+        {
+            "id": "run-1",
+            "status": "running",
+            "updated_at": NOW,
+        },
+    )
+
+    assert await handler.process(item)
+    assert worker_threads and worker_threads[0] != loop_thread
 
 
 def test_hfr_151_fallback_scan_advances_with_a_bounded_keyset_cursor(

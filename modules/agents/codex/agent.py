@@ -947,9 +947,10 @@ class CodexAgent(BaseAgent):
         runtime_key: str,
         request: AgentRequest | None,
     ) -> None:
-        self._touch_transport_activity(runtime_key)
-        if request is not None:
-            self._touch_session_activity(request.base_session_id)
+        if request is None:
+            return
+        self._touch_transport_activity(request.working_path)
+        self._touch_session_activity(request.base_session_id)
 
     def _stuck_active_sessions_for_cwd(
         self,

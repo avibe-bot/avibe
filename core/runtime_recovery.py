@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -73,7 +74,8 @@ class FallbackRequestRecoveryHandler:
         row = item.observation
         if str(row["id"]) in self._live_claims():
             return True
-        return self.store.recover_claimed_pre_execution_run(
+        return await asyncio.to_thread(
+            self.store.recover_claimed_pre_execution_run,
             run_id=str(row["id"]),
             expected_status=str(row["status"]),
             expected_updated_at=str(row["updated_at"]),
