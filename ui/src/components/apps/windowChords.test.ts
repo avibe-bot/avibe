@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  bindFrameChord,
   bindShowPageFrameCloseShortcut,
   inTerminalSurface,
   inTextEntrySurface,
@@ -91,6 +92,47 @@ describe('bindShowPageFrameCloseShortcut', () => {
     cleanup();
     recoveredWindow.emit('keydown', shortcutEvent());
     expect(close).toHaveBeenCalledTimes(2);
+  });
+});
+
+// A keydown inside an iframe never reaches the parent window, so every parent-level
+// chord (⌥W close, ⌘⇧D archive) has to be bound in the frame's own document too.
+describe('bindFrameChord', () => {
+  it('runs an arbitrary chord in the frame, with the frame’s focused element', () => {
+    const iframeEvents = new ListenerHub();
+    const frameWindow = new ListenerHub();
+    const active = elWithClosest((s) => s === '.editor');
+    const frame = {
+      contentDocument: { activeElement: active },
+      contentWindow: frameWindow,
+      addEventListener: iframeEvents.addEventListener.bind(iframeEvents),
+      removeEventListener: iframeEvents.removeEventListener.bind(iframeEvents),
+    } as unknown as HTMLIFrameElement;
+    const run = vi.fn();
+    const seen: Array<Element | null> = [];
+    const cleanup = bindFrameChord(
+      frame,
+      (event, activeInFrame) => {
+        seen.push(activeInFrame);
+        return event.code === 'KeyD' && event.metaKey && event.shiftKey;
+      },
+      run,
+    );
+
+    const matching = { code: 'KeyD', metaKey: true, shiftKey: true, preventDefault: vi.fn() };
+    frameWindow.emit('keydown', matching);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(matching.preventDefault).toHaveBeenCalledTimes(1);
+    expect(seen[0]).toBe(active); // the predicate sees the frame's realm, not ours
+
+    const other = { code: 'KeyD', metaKey: true, shiftKey: false, preventDefault: vi.fn() };
+    frameWindow.emit('keydown', other);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(other.preventDefault).not.toHaveBeenCalled(); // no chord, no stolen key
+
+    cleanup();
+    frameWindow.emit('keydown', matching);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });
 

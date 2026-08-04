@@ -3,6 +3,7 @@ import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
+import { Archive } from 'lucide-react';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
@@ -16,6 +17,7 @@ import { sessionAgentDisplayName } from './sessionAgentName';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
 import {
+  archiveRequestIsLive,
   isSessionArchivedConflict,
   isSessionArchivedError,
   isSessionReadOnly,
@@ -340,6 +342,51 @@ describe('read-only header withdraws the Show Page controls', () => {
     // The title is static text, not a click-to-edit button (round-two behaviour,
     // re-asserted here so the header render is checked as a whole).
     expect(countButtons(markup)).toBe(1); // just Back
+  });
+
+  it('withdraws the session ⋯ menu on a read-only header even if actions are passed', () => {
+    // useSessionActions already returns an empty list for a read-only session, so
+    // this pins the second half: pin / rename / fork / hide / archive are all
+    // refused server-side (409 archived / 403 reserved_session), so the header must
+    // not mount a trigger for them. The trigger is the only new button in the
+    // cluster, hence the same Back-only count as above.
+    const markup = render(
+      <ChatHeaderBar
+        session={session({ status: 'archived' })}
+        agents={[]}
+        defaultAgentName={null}
+        onPatch={async () => undefined}
+        onBack={() => undefined}
+        working={false}
+        showPageMode={false}
+        showPageBusy={false}
+        onToggleShowPage={() => undefined}
+        onPrepareShowPageLaunch={async () => false}
+        annotation={{
+          state: null,
+          iframeRef: { current: null },
+          handleIframeLoad: () => undefined,
+          enable: () => undefined,
+          disable: () => undefined,
+          setMode: () => undefined,
+        }}
+        readOnlyReason="archived"
+        sessionActions={[
+          {
+            id: 'archive',
+            group: 'lifecycle',
+            icon: Archive,
+            label: en.workbench.sessionArchive,
+            danger: true,
+            onSelect: () => undefined,
+          },
+        ]}
+      />,
+    );
+    expect(markup).toContain('Model Hub');
+    expect(markup).not.toContain(en.workbench.sessionActions);
+    expect(markup).not.toContain(en.workbench.sessionArchive);
+    expect(countButtons(markup)).toBe(1); // still just Back
   });
 });
 
@@ -913,5 +960,23 @@ describe('agent-authored local file links', () => {
     expect(markup.match(/data-local-file-link/g)).toHaveLength(1);
     expect(markup).toContain('href="/tmp/report.md"');
     expect(markup).not.toContain('href="/tmp/preview.png"');
+  });
+});
+
+// ── Codex review round 2 (useSessionActions.tsx:216) ─────────────────────────
+// The archive confirm dialog is owned by a hook instance that OUTLIVES the session
+// it was opened for: ChatPage is reused across session ids. Stored as a bare `open`
+// boolean, a request for A was inherited by B — the dialog re-appeared already open,
+// re-pointed, one Enter from archiving the wrong session.
+describe('a pending archive request belongs to one session', () => {
+  it('is live only while the target is still the session it was requested for', () => {
+    expect(archiveRequestIsLive('ses_a', 'ses_a')).toBe(true);
+    // Navigated on, or the row moved: B must not inherit A's request.
+    expect(archiveRequestIsLive('ses_a', 'ses_b')).toBe(false);
+    // The target went read-only mid-flight (another tab archived it) or unloaded.
+    expect(archiveRequestIsLive('ses_a', null)).toBe(false);
+    // Nothing requested: an existing target never opens the dialog by itself.
+    expect(archiveRequestIsLive(null, 'ses_a')).toBe(false);
+    expect(archiveRequestIsLive(null, null)).toBe(false);
   });
 });
