@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.9.1
+version: 0.10.0
 ---
 
 # Background Watch Hook
@@ -184,6 +184,7 @@ vibe watch add \
     --repo avibe-bot/avibe \
     --pr 151 \
     --actionable-only \
+    --settle 20 \
     --interval 60
 ```
 
@@ -197,6 +198,13 @@ is everything the review loop needs to make progress or close out.
 Narrow it further with `--ignore-author <login>` and `--ignore-comment-pattern <regex>`
 (both repeatable). Filtered items still advance the cursors, so they are examined
 once and never re-reported.
+
+`--settle <seconds>` is worth setting on any review loop. A bot review arrives as a
+burst of inline comments plus an envelope, so the poll that happens to catch the
+first fragment would otherwise report it alone and the rest would arrive as a second
+event. With `--settle` the waiter re-polls until the set stops growing (at most three
+extra polls) and reports the whole batch as one event, which is one Agent turn
+instead of several. 20 seconds is a reasonable starting point.
 
 Catch up on existing activity first:
 
@@ -224,13 +232,27 @@ vibe watch add \
   uv run --no-project scripts/wait_pr.py \
     --repo avibe-bot/avibe \
     --pr 151 \
+    --actionable-only \
+    --settle 20 \
+    --state-file ~/.avibe/state/watch-cursors/pr-151.json \
     --interval 60
 ```
+
+Always pass `--state-file` to a `--forever` watch. Each cycle is a fresh waiter
+process, so without it the next cycle re-snapshots the PR as its baseline and
+anything that arrived between the previous cycle's exit and that snapshot is lost.
+The file also carries the `since` filters and the resolved GitHub login forward, so
+a resumed cycle asks GitHub only for what is new instead of re-reading the whole PR.
+It is written on every cursor advance and on timeout, replaced atomically, and
+ignored if it belongs to another PR or is unreadable.
 
 GitHub-specific notes:
 
 - `--catch-up` reports activity that already exists at startup
-- without `--catch-up`, the waiter snapshots current PR activity as the baseline
+- without `--catch-up` or a `--state-file`, the waiter snapshots current PR activity as the baseline
+- polling is cheap by design: comment fetches are filtered server-side with `since`,
+  reactions with `content=+1`, and unchanged pages revalidate to `304`, which GitHub
+  does not charge against the rate limit — an idle watch can poll for hours for free
 - PR activity also includes the special case where `chatgpt-codex-connector[bot]` leaves a `+1` reaction on the PR body instead of posting a comment
 - PR activity also includes lifecycle changes on the PR itself, for example draft/ready, closed, reopened, or merged transitions
 - self-authored comments are ignored by default when the current authenticated GitHub user can be resolved; pass `--include-self-comments` to keep them

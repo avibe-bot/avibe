@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -23,12 +24,14 @@ from _github_wait_common import (  # noqa: E402
     get_token,
     github_get,
     is_retryable_http_error,
+    later_since,
     list_paginated,
     list_paginated_with_count,
     max_id,
     min_interval_for_unauthenticated,
     RETRY_EXIT_CODE,
     requests_per_poll,
+    ResponseCache,
     squash,
 )
 
@@ -44,6 +47,17 @@ DEFAULT_NOISE_COMMENT_PATTERNS = (
 # Lifecycle transitions worth interrupting for. Draft toggles are usually the
 # Agent's own doing, so they are noise in --actionable-only mode.
 ACTIONABLE_PR_STATUSES = frozenset({"merged", "closed"})
+STATE_FILE_VERSION = 1
+STATE_CURSOR_KEYS = (
+    "review_cursor",
+    "review_comment_cursor",
+    "issue_comment_cursor",
+    "reaction_cursor",
+)
+# A bot review lands as a burst of inline comments plus an envelope. Re-polling a
+# few times while the burst is still arriving turns it into one Agent turn instead
+# of one turn per fragment that happened to cross a poll boundary.
+SETTLE_MAX_ROUNDS = 3
 
 
 def _format_review(review: dict[str, Any]) -> str:
@@ -193,27 +207,51 @@ def _format_pull_request(pr: dict[str, Any]) -> str:
     return f"- pull_request #{pr_number} by {author} ({state})\n  {title}\n  {url}"
 
 
-def _fetch_state(repo: str, pr_number: int, token: str | None) -> tuple[dict[str, list[dict[str, Any]]], int]:
+def _with_since(url: str, since: str | None) -> str:
+    if not since:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}since={urllib.parse.quote(since)}"
+
+
+def _fetch_state(
+    repo: str,
+    pr_number: int,
+    token: str | None,
+    *,
+    cache: ResponseCache | None = None,
+    review_comment_since: str | None = None,
+    issue_comment_since: str | None = None,
+) -> tuple[dict[str, list[dict[str, Any]]], int]:
     encoded_repo = urllib.parse.quote(repo, safe="/")
-    pull_request = github_get(
-        f"https://api.github.com/repos/{encoded_repo}/pulls/{pr_number}",
-        token,
-    )
+    base_url = f"https://api.github.com/repos/{encoded_repo}"
+    pull_request = github_get(f"{base_url}/pulls/{pr_number}", token, cache=cache)
+    # The reviews endpoint ignores sort/direction (verified against api.github.com:
+    # direction=desc returns the same ascending ids), so there is no way to page it
+    # newest-first and no `since` support either. An unchanged review list stays
+    # cheap by revalidating to 304 rather than by fetching less.
     reviews, review_requests = list_paginated_with_count(
-        f"https://api.github.com/repos/{encoded_repo}/pulls/{pr_number}/reviews",
+        f"{base_url}/pulls/{pr_number}/reviews",
         token,
+        cache=cache,
     )
     review_comments, review_comment_requests = list_paginated_with_count(
-        f"https://api.github.com/repos/{encoded_repo}/pulls/{pr_number}/comments",
+        _with_since(f"{base_url}/pulls/{pr_number}/comments", review_comment_since),
         token,
+        cache=cache,
     )
     issue_comments, issue_comment_requests = list_paginated_with_count(
-        f"https://api.github.com/repos/{encoded_repo}/issues/{pr_number}/comments",
+        _with_since(f"{base_url}/issues/{pr_number}/comments", issue_comment_since),
         token,
+        cache=cache,
     )
+    # Only the Codex pass reaction is ever reported, and this endpoint filters by
+    # content server-side, so every other reaction on the PR body stays home.
     reactions, reaction_requests = list_paginated_with_count(
-        f"https://api.github.com/repos/{encoded_repo}/issues/{pr_number}/reactions",
+        f"{base_url}/issues/{pr_number}/reactions"
+        f"?content={urllib.parse.quote(CODEX_REVIEW_PASS_REACTION_CONTENT)}",
         token,
+        cache=cache,
     )
     return (
         {
@@ -233,6 +271,7 @@ def _fetch_new_pr_state(
     *,
     stop_after_id: int | None = None,
     max_pages: int | None = None,
+    cache: ResponseCache | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], int]:
     encoded_repo = urllib.parse.quote(repo, safe="/")
     pull_requests, request_count = list_paginated_with_count(
@@ -240,6 +279,7 @@ def _fetch_new_pr_state(
         token,
         stop_after_id=stop_after_id,
         max_pages=max_pages,
+        cache=cache,
     )
     return {"pull_requests": pull_requests}, request_count
 
@@ -400,6 +440,68 @@ def _write_new_pr_cursor_output(path: str | None, *, pr_cursor: int) -> None:
         json.dump({"pr_cursor": pr_cursor}, handle)
 
 
+def _load_state_file(path: str | None, *, repo: str, pr_number: int | None) -> dict[str, Any]:
+    """Read cursors left behind by an earlier run of this same waiter.
+
+    A `--forever` watch runs the waiter once per cycle, so without this the next
+    cycle re-baselines from whatever the PR looks like at startup and silently
+    swallows everything that arrived between the previous cycle's exit and that
+    snapshot.
+    """
+
+    if not path:
+        return {}
+
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as err:
+        print(f"Ignoring unusable state file {path}: {err}", file=sys.stderr)
+        return {}
+
+    if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
+        print(f"Ignoring state file {path}: unrecognised format", file=sys.stderr)
+        return {}
+    # Resuming from another PR's cursors would skip that PR's real history.
+    if payload.get("repo") != repo or payload.get("pr") != pr_number:
+        print(
+            f"Ignoring state file {path}: it belongs to {payload.get('repo')}#{payload.get('pr')}",
+            file=sys.stderr,
+        )
+        return {}
+    return payload
+
+
+def _write_state_file(path: str | None, *, repo: str, pr_number: int | None, **fields: Any) -> None:
+    if not path:
+        return
+
+    payload = {"version": STATE_FILE_VERSION, "repo": repo, "pr": pr_number, **fields}
+    target = Path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Written aside and moved into place: a cycle killed mid-write must not
+        # leave a truncated file that the next cycle has to discard.
+        temporary = target.with_name(f"{target.name}.tmp")
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(temporary, target)
+    except OSError as err:
+        print(f"Could not write state file {path}: {err}", file=sys.stderr)
+
+
+def _saved_int(saved: dict[str, Any], key: str) -> int | None:
+    value = saved.get(key)
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _saved_str(saved: dict[str, Any], key: str) -> str | None:
+    value = saved.get(key)
+    return value if isinstance(value, str) and value else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="GitHub repo in owner/name form")
@@ -420,6 +522,25 @@ def main() -> int:
     parser.add_argument("--since-pr-status", help=argparse.SUPPRESS)
     parser.add_argument("--since-pr-id", type=int, default=None, help="Existing repository pull request cursor")
     parser.add_argument("--cursor-output", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--state-file",
+        help=(
+            "Path to a JSON file holding this watch's cursors between runs. Strongly recommended for "
+            "--forever watches: each cycle resumes where the previous one stopped instead of "
+            "re-baselining, so activity arriving between cycles is not lost, and the next fetch only "
+            "asks GitHub for what is new."
+        ),
+    )
+    parser.add_argument(
+        "--settle",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds to wait after the first new activity before reporting, re-polling until the set "
+            f"stops growing (at most {SETTLE_MAX_ROUNDS} extra polls). A batched review that straddles "
+            "a poll boundary then costs one Agent turn instead of one per fragment. 0 disables it."
+        ),
+    )
     parser.add_argument("--event-limit", type=int, default=8, help="Maximum number of new events to include in stdout")
     parser.add_argument(
         "--include-self-comments",
@@ -459,7 +580,12 @@ def main() -> int:
     args = parser.parse_args()
 
     token = get_token()
-    viewer_login = None if args.include_self_comments else get_authenticated_login(token)
+    cache = ResponseCache()
+    saved = _load_state_file(args.state_file, repo=args.repo, pr_number=args.pr)
+    viewer_login = None
+    if not args.include_self_comments:
+        # The stored login spares a /user request on every cycle of a forever watch.
+        viewer_login = _saved_str(saved, "viewer_login") or get_authenticated_login(token)
     ignored_authors = _normalize_authors(args.ignore_author)
     try:
         ignore_patterns = _compile_ignore_patterns(
@@ -482,17 +608,35 @@ def main() -> int:
 
     base_interval = max(args.interval, 1.0)
     effective_interval = base_interval
+    settle_seconds = max(args.settle, 0.0)
 
     start = time.monotonic()
 
+    # Resume only from a complete cursor set. A partial one would leave some
+    # baseline to be derived from a `since`-narrowed fetch, which no longer
+    # contains the PR's full history.
+    resume_cursors = {key: _saved_int(saved, key) for key in STATE_CURSOR_KEYS}
+    resumed = not args.catch_up and all(value is not None for value in resume_cursors.values())
+    review_comment_since = _saved_str(saved, "review_comment_since") if resumed else None
+    issue_comment_since = _saved_str(saved, "issue_comment_since") if resumed else None
+    saved_pr_cursor = _saved_int(saved, "pr_cursor")
+    since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
+
     try:
         if args.pr is not None:
-            state, requests_per_poll_count = _fetch_state(args.repo, args.pr, token)
+            state, requests_per_poll_count = _fetch_state(
+                args.repo,
+                args.pr,
+                token,
+                cache=cache,
+                review_comment_since=review_comment_since,
+                issue_comment_since=issue_comment_since,
+            )
         else:
             initial_pr_stop_after_id = None
             initial_pr_max_pages = None
-            if args.since_pr_id is not None and not args.catch_up:
-                initial_pr_stop_after_id = args.since_pr_id
+            if since_pr_id is not None and not args.catch_up:
+                initial_pr_stop_after_id = since_pr_id
             elif not args.catch_up:
                 initial_pr_max_pages = 1
             state, requests_per_poll_count = _fetch_new_pr_state(
@@ -500,6 +644,7 @@ def main() -> int:
                 token,
                 stop_after_id=initial_pr_stop_after_id,
                 max_pages=initial_pr_max_pages,
+                cache=cache,
             )
     except urllib.error.HTTPError as err:
         print(f"GitHub API error: {err.code} {err.reason}", file=sys.stderr)
@@ -533,31 +678,31 @@ def main() -> int:
         bootstrap_requests = 0
 
     if args.pr is not None:
-        review_cursor = (
-            args.since_review_id
-            if args.since_review_id is not None
-            else (0 if args.catch_up else max_id(state["reviews"]))
+
+        def _initial_cursor(flag_value: int | None, saved_key: str, items_key: str) -> int:
+            if flag_value is not None:
+                return flag_value
+            if resumed:
+                return resume_cursors[saved_key] or 0
+            return 0 if args.catch_up else max_id(state[items_key])
+
+        review_cursor = _initial_cursor(args.since_review_id, "review_cursor", "reviews")
+        review_comment_cursor = _initial_cursor(
+            args.since_review_comment_id, "review_comment_cursor", "review_comments"
         )
-        review_comment_cursor = (
-            args.since_review_comment_id
-            if args.since_review_comment_id is not None
-            else (0 if args.catch_up else max_id(state["review_comments"]))
+        issue_comment_cursor = _initial_cursor(
+            args.since_issue_comment_id, "issue_comment_cursor", "issue_comments"
         )
-        issue_comment_cursor = (
-            args.since_issue_comment_id
-            if args.since_issue_comment_id is not None
-            else (0 if args.catch_up else max_id(state["issue_comments"]))
+        reaction_cursor = _initial_cursor(args.since_reaction_id, "reaction_cursor", "reactions")
+        pr_status = (
+            args.since_pr_status
+            or (_saved_str(saved, "pr_status") if resumed else None)
+            or _current_pr_status(state.get("pull_request"))
         )
-        reaction_cursor = (
-            args.since_reaction_id
-            if args.since_reaction_id is not None
-            else (0 if args.catch_up else max_id(state["reactions"]))
-        )
-        pr_status = args.since_pr_status or _current_pr_status(state.get("pull_request"))
 
         print(
             (
-                "Watching GitHub PR %s#%s from cursors: review=%s review_comment=%s issue_comment=%s reaction=%s pr_status=%s catch_up=%s"
+                "Watching GitHub PR %s#%s from cursors: review=%s review_comment=%s issue_comment=%s reaction=%s pr_status=%s catch_up=%s resumed=%s"
                 % (
                     args.repo,
                     args.pr,
@@ -567,27 +712,110 @@ def main() -> int:
                     reaction_cursor,
                     pr_status,
                     args.catch_up,
+                    resumed,
                 )
             ),
             file=sys.stderr,
         )
 
-        initial_output, review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status = _render_activity(
-            repo=args.repo,
-            pr_number=args.pr,
-            state=state,
-            review_cursor=review_cursor,
-            review_comment_cursor=review_comment_cursor,
-            issue_comment_cursor=issue_comment_cursor,
-            reaction_cursor=reaction_cursor,
-            pr_status=pr_status,
-            event_limit=args.event_limit,
-            viewer_login=viewer_login,
-            ignore_self_comments=not args.include_self_comments,
-            actionable_only=args.actionable_only,
-            ignored_authors=ignored_authors,
-            ignore_patterns=ignore_patterns,
+        def _render(cursors: tuple[int, int, int, int, str]) -> tuple[str | None, int, int, int, int, str]:
+            return _render_activity(
+                repo=args.repo,
+                pr_number=args.pr,
+                state=state,
+                review_cursor=cursors[0],
+                review_comment_cursor=cursors[1],
+                issue_comment_cursor=cursors[2],
+                reaction_cursor=cursors[3],
+                pr_status=cursors[4],
+                event_limit=args.event_limit,
+                viewer_login=viewer_login,
+                ignore_self_comments=not args.include_self_comments,
+                actionable_only=args.actionable_only,
+                ignored_authors=ignored_authors,
+                ignore_patterns=ignore_patterns,
+            )
+
+        def _advance_since() -> None:
+            nonlocal review_comment_since, issue_comment_since
+            review_comment_since = later_since(review_comment_since, state["review_comments"])
+            issue_comment_since = later_since(issue_comment_since, state["issue_comments"])
+
+        def _persist_pr_state() -> None:
+            _write_state_file(
+                args.state_file,
+                repo=args.repo,
+                pr_number=args.pr,
+                review_cursor=review_cursor,
+                review_comment_cursor=review_comment_cursor,
+                issue_comment_cursor=issue_comment_cursor,
+                reaction_cursor=reaction_cursor,
+                pr_status=pr_status,
+                review_comment_since=review_comment_since,
+                issue_comment_since=issue_comment_since,
+                viewer_login=viewer_login,
+            )
+
+        def _settle(
+            first: tuple[str | None, int, int, int, int, str],
+            pending: tuple[int, int, int, int, str],
+        ) -> tuple[str | None, int, int, int, int, str]:
+            """Re-poll while a batch is still landing so it costs one Agent turn."""
+
+            nonlocal state
+            if settle_seconds <= 0:
+                return first
+
+            best = first
+            for _round in range(SETTLE_MAX_ROUNDS):
+                time.sleep(settle_seconds)
+                try:
+                    state, _count = _fetch_state(
+                        args.repo,
+                        args.pr,
+                        token,
+                        cache=cache,
+                        review_comment_since=review_comment_since,
+                        issue_comment_since=issue_comment_since,
+                    )
+                except Exception as err:  # noqa: BLE001
+                    print(
+                        f"Settle re-poll failed; reporting the batch as first seen: {err}",
+                        file=sys.stderr,
+                    )
+                    return best
+                # Rendered from the same cursors as the first hit, so the result is a
+                # superset rather than a second, partial report.
+                candidate = _render(pending)
+                if candidate[0] is None:
+                    return best
+                if candidate[1:] == best[1:]:
+                    return candidate
+                best = candidate
+            return best
+
+        pending_cursors = (
+            review_cursor,
+            review_comment_cursor,
+            issue_comment_cursor,
+            reaction_cursor,
+            pr_status,
         )
+        initial_result = _render(pending_cursors)
+        if initial_result[0] is not None and not args.catch_up:
+            initial_result = _settle(initial_result, pending_cursors)
+        (
+            initial_output,
+            review_cursor,
+            review_comment_cursor,
+            issue_comment_cursor,
+            reaction_cursor,
+            pr_status,
+        ) = initial_result
+        _advance_since()
+        # Persisted even with nothing to report: the baseline this cycle established
+        # is exactly what the next cycle must resume from.
+        _persist_pr_state()
         if initial_output is not None:
             _write_cursor_output(
                 args.cursor_output,
@@ -600,7 +828,7 @@ def main() -> int:
             print(initial_output)
             return 0
     else:
-        pr_cursor = args.since_pr_id if args.since_pr_id is not None else (0 if args.catch_up else max_id(state["pull_requests"]))
+        pr_cursor = since_pr_id if since_pr_id is not None else (0 if args.catch_up else max_id(state["pull_requests"]))
         print(
             f"Watching GitHub new PRs in {args.repo} from cursor: pr={pr_cursor} catch_up={args.catch_up}",
             file=sys.stderr,
@@ -611,6 +839,7 @@ def main() -> int:
             pr_cursor=pr_cursor,
             event_limit=args.event_limit,
         )
+        _write_state_file(args.state_file, repo=args.repo, pr_number=None, pr_cursor=pr_cursor)
         if initial_output is not None:
             _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
             print(initial_output)
@@ -622,6 +851,7 @@ def main() -> int:
             remaining_timeout = args.timeout - (time.monotonic() - start)
             if remaining_timeout <= 0:
                 print("Timed out while waiting for GitHub PR activity", file=sys.stderr)
+                print(cache.summary(), file=sys.stderr)
                 return 124
             sleep_seconds = min(sleep_seconds, remaining_timeout)
 
@@ -629,12 +859,20 @@ def main() -> int:
 
         try:
             if args.pr is not None:
-                state, requests_per_poll_count = _fetch_state(args.repo, args.pr, token)
+                state, requests_per_poll_count = _fetch_state(
+                    args.repo,
+                    args.pr,
+                    token,
+                    cache=cache,
+                    review_comment_since=review_comment_since,
+                    issue_comment_since=issue_comment_since,
+                )
             else:
                 state, requests_per_poll_count = _fetch_new_pr_state(
                     args.repo,
                     token,
                     stop_after_id=pr_cursor if pr_cursor > 0 else None,
+                    cache=cache,
                 )
         except urllib.error.HTTPError as err:
             if token is None and err.code in {403, 429}:
@@ -677,22 +915,28 @@ def main() -> int:
                 effective_interval = target_interval
 
         if args.pr is not None:
-            output, review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status = _render_activity(
-                repo=args.repo,
-                pr_number=args.pr,
-                state=state,
-                review_cursor=review_cursor,
-                review_comment_cursor=review_comment_cursor,
-                issue_comment_cursor=issue_comment_cursor,
-                reaction_cursor=reaction_cursor,
-                pr_status=pr_status,
-                event_limit=args.event_limit,
-                viewer_login=viewer_login,
-                ignore_self_comments=not args.include_self_comments,
-                actionable_only=args.actionable_only,
-                ignored_authors=ignored_authors,
-                ignore_patterns=ignore_patterns,
+            pending_cursors = (
+                review_cursor,
+                review_comment_cursor,
+                issue_comment_cursor,
+                reaction_cursor,
+                pr_status,
             )
+            result = _render(pending_cursors)
+            if result[0] is not None:
+                result = _settle(result, pending_cursors)
+            (
+                output,
+                review_cursor,
+                review_comment_cursor,
+                issue_comment_cursor,
+                reaction_cursor,
+                pr_status,
+            ) = result
+            _advance_since()
+            # Cursors also move when everything new was filtered out, and that
+            # progress has to survive the cycle or the next one re-examines it.
+            _persist_pr_state()
             if output is None:
                 continue
 
@@ -711,10 +955,12 @@ def main() -> int:
                 pr_cursor=pr_cursor,
                 event_limit=args.event_limit,
             )
+            _write_state_file(args.state_file, repo=args.repo, pr_number=None, pr_cursor=pr_cursor)
             if output is None:
                 continue
             _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
 
+        print(cache.summary(), file=sys.stderr)
         print(output)
         return 0
 

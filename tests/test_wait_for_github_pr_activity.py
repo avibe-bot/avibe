@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import importlib.util
+import json
 import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -489,7 +490,7 @@ def test_fetch_new_pr_state_stops_after_cursor() -> None:
         ]
     ]
 
-    def _fake_list_paginated_with_count(base_url, token, *, stop_after_id=None, max_pages=None):
+    def _fake_list_paginated_with_count(base_url, token, *, stop_after_id=None, max_pages=None, cache=None):
         assert "pulls?state=all" in base_url
         assert stop_after_id == 405
         assert max_pages is None
@@ -510,7 +511,7 @@ def test_main_uses_since_pr_cursor_for_initial_new_pr_fetch() -> None:
     module = _load_module()
     calls: list[int | None] = []
 
-    def _fake_fetch_new_pr_state(repo, token, *, stop_after_id=None, max_pages=None):
+    def _fake_fetch_new_pr_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
         calls.append((stop_after_id, max_pages))
         return (
             {
@@ -557,7 +558,7 @@ def test_main_bootstraps_new_pr_watch_from_first_page_only() -> None:
     module = _load_module()
     calls: list[tuple[int | None, int | None]] = []
 
-    def _fake_fetch_new_pr_state(repo, token, *, stop_after_id=None, max_pages=None):
+    def _fake_fetch_new_pr_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
         calls.append((stop_after_id, max_pages))
         if len(calls) == 1:
             return ({"pull_requests": []}, 1)
@@ -597,7 +598,7 @@ def test_main_detects_pr_status_change_during_polling() -> None:
     module = _load_module()
     fetch_calls = 0
 
-    def _fake_fetch_state(repo, pr_number, token):
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
         nonlocal fetch_calls
         fetch_calls += 1
         if fetch_calls == 1:
@@ -654,7 +655,7 @@ def test_main_reduces_unauthenticated_new_pr_interval_after_bootstrap() -> None:
     fetch_calls: list[int | None] = []
     sleep_calls: list[float] = []
 
-    def _fake_fetch_new_pr_state(repo, token, *, stop_after_id=None, max_pages=None):
+    def _fake_fetch_new_pr_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
         fetch_calls.append((stop_after_id, max_pages))
         if len(fetch_calls) == 1:
             return ({"pull_requests": []}, 50)
@@ -1100,3 +1101,513 @@ def test_main_rejects_invalid_ignore_comment_pattern() -> None:
         rc = module.main()
 
     assert rc == 2
+
+
+def _pr_state(
+    *,
+    reviews=None,
+    review_comments=None,
+    issue_comments=None,
+    reactions=None,
+    pr_state="open",
+):
+    return {
+        "pull_request": {
+            "number": 153,
+            "state": pr_state,
+            "draft": False,
+            "html_url": "https://github.com/example/repo/pull/153",
+        },
+        "reviews": reviews or [],
+        "review_comments": review_comments or [],
+        "issue_comments": issue_comments or [],
+        "reactions": reactions or [],
+    }
+
+
+def _review_comment(comment_id: int, *, body="Fix this", created_at="2026-08-04T10:00:00Z"):
+    return {
+        "id": comment_id,
+        "body": body,
+        "path": "core/watches.py",
+        "created_at": created_at,
+        "updated_at": created_at,
+        "html_url": f"https://github.com/example/repo/pull/153#discussion_r{comment_id}",
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+    }
+
+
+def test_fetch_state_narrows_comments_and_filters_reactions_server_side() -> None:
+    module = _load_module()
+    urls: list[str] = []
+
+    def _fake_list_paginated_with_count(base_url, token, *, stop_after_id=None, max_pages=None, cache=None):
+        urls.append(base_url)
+        return [], 1
+
+    with (
+        patch.object(module, "list_paginated_with_count", side_effect=_fake_list_paginated_with_count),
+        patch.object(module, "github_get", return_value={"number": 153, "state": "open"}),
+    ):
+        module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            review_comment_since="2026-08-04T06:47:10Z",
+            issue_comment_since="2026-08-04T06:47:10Z",
+        )
+
+    reviews_url = next(url for url in urls if url.endswith("/reviews"))
+    review_comments_url = next(url for url in urls if "/pulls/153/comments" in url)
+    issue_comments_url = next(url for url in urls if "/issues/153/comments" in url)
+    reactions_url = next(url for url in urls if "/reactions" in url)
+
+    # The reviews endpoint supports neither `since` nor a newest-first order, so it
+    # must stay unfiltered and lean on revalidation instead.
+    assert "since=" not in reviews_url
+    assert "since=2026-08-04T06%3A47%3A10Z" in review_comments_url
+    assert "since=2026-08-04T06%3A47%3A10Z" in issue_comments_url
+    # Only the Codex pass reaction is ever reported, so the rest never travel.
+    assert "content=%2B1" in reactions_url
+
+
+def test_fetch_state_omits_since_when_no_cursor_is_known() -> None:
+    module = _load_module()
+    urls: list[str] = []
+
+    def _fake_list_paginated_with_count(base_url, token, *, stop_after_id=None, max_pages=None, cache=None):
+        urls.append(base_url)
+        return [], 1
+
+    with (
+        patch.object(module, "list_paginated_with_count", side_effect=_fake_list_paginated_with_count),
+        patch.object(module, "github_get", return_value={"number": 153, "state": "open"}),
+    ):
+        module._fetch_state("avibe-bot/avibe", 153, "token")
+
+    assert all("since=" not in url for url in urls)
+
+
+def test_fetch_state_shares_one_cache_across_every_request() -> None:
+    module = _load_module()
+    caches: list[object] = []
+    sentinel = object()
+
+    def _fake_list_paginated_with_count(base_url, token, *, stop_after_id=None, max_pages=None, cache=None):
+        caches.append(cache)
+        return [], 1
+
+    with (
+        patch.object(module, "list_paginated_with_count", side_effect=_fake_list_paginated_with_count),
+        patch.object(module, "github_get", return_value={"number": 153, "state": "open"}) as fake_get,
+    ):
+        module._fetch_state("avibe-bot/avibe", 153, "token", cache=sentinel)
+
+    assert caches == [sentinel, sentinel, sentinel, sentinel]
+    assert fake_get.call_args.kwargs["cache"] is sentinel
+
+
+def test_main_settle_window_reports_a_batched_review_as_one_event() -> None:
+    module = _load_module()
+    fetches = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetches
+        fetches += 1
+        if fetches == 1:
+            return _pr_state(), 1
+        if fetches == 2:
+            # First fragment of the batch is visible.
+            return _pr_state(review_comments=[_review_comment(501)]), 1
+        # The rest of the batch lands while the waiter is settling.
+        return (
+            _pr_state(review_comments=[_review_comment(501), _review_comment(502), _review_comment(503)]),
+            1,
+        )
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--interval",
+                "1",
+                "--settle",
+                "5",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    output = stdout.getvalue()
+    assert rc == 0
+    # One report, one Agent turn, all three comments in it.
+    assert output.count("GitHub PR activity detected") == 1
+    assert "review_comment #501" in output
+    assert "review_comment #502" in output
+    assert "review_comment #503" in output
+
+
+def test_main_settle_window_stops_once_the_batch_is_stable() -> None:
+    module = _load_module()
+    fetches = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetches
+        fetches += 1
+        if fetches == 1:
+            return _pr_state(), 1
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--interval", "1", "--settle", "5"],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    # Bootstrap, the poll that found it, and a single confirming re-poll: a quiet
+    # batch must not burn all the settle rounds.
+    assert fetches == 3
+    assert "review_comment #501" in stdout.getvalue()
+
+
+def test_main_settle_window_survives_a_failed_re_poll() -> None:
+    module = _load_module()
+    fetches = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetches
+        fetches += 1
+        if fetches == 1:
+            return _pr_state(), 1
+        if fetches == 2:
+            return _pr_state(review_comments=[_review_comment(501)]), 1
+        raise urllib.error.URLError("network went away mid-settle")
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--interval", "1", "--settle", "5"],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    # A broken re-poll must not lose the event that was already detected.
+    assert rc == 0
+    assert "review_comment #501" in stdout.getvalue()
+
+
+def test_main_writes_the_state_file_even_with_nothing_to_report(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "cursors" / "pr-153.json"
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="qiqi"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    assert rc == 124
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    # The baseline this cycle established is what the next cycle must resume from.
+    assert saved["review_comment_cursor"] == 501
+    assert saved["repo"] == "avibe-bot/avibe"
+    assert saved["pr"] == 153
+    assert saved["viewer_login"] == "qiqi"
+    assert saved["review_comment_since"] == "2026-08-04T09:59:58Z"
+
+
+def test_main_resumes_from_the_state_file_instead_of_re_baselining(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_cursor": 0,
+                "review_comment_cursor": 400,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+                "pr_status": "open",
+                "review_comment_since": "2026-08-04T09:00:00Z",
+                "issue_comment_since": "2026-08-04T09:00:00Z",
+                "viewer_login": "qiqi",
+            }
+        ),
+        encoding="utf-8",
+    )
+    since_values: list[str | None] = []
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        since_values.append(kwargs.get("review_comment_since"))
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login") as fake_login,
+        patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)]),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    # A comment that arrived between cycles is reported instead of being swallowed
+    # by a fresh baseline.
+    assert "review_comment #501" in stdout.getvalue()
+    # The stored `since` narrows the very first fetch of the new cycle.
+    assert since_values == ["2026-08-04T09:00:00Z"]
+    # The stored login spares a /user request per cycle.
+    fake_login.assert_not_called()
+
+
+def test_main_ignores_a_state_file_belonging_to_another_pr(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-999.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 999,
+                "review_cursor": 0,
+                "review_comment_cursor": 400,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    # Foreign cursors would silently skip this PR's real history, so it baselines.
+    assert rc == 124
+    assert stdout.getvalue() == ""
+    assert "belongs to avibe-bot/avibe#999" in stderr.getvalue()
+
+
+def test_main_ignores_a_partial_state_file(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_comment_cursor": 400,
+                "review_comment_since": "2026-08-04T09:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    since_values: list[str | None] = []
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        since_values.append(kwargs.get("review_comment_since"))
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    # An incomplete cursor set cannot be combined with a narrowed fetch: the
+    # missing baselines would have to come from a partial history.
+    assert rc == 124
+    assert since_values == [None]
+
+
+def test_main_ignores_an_unreadable_state_file(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text("{ this is not json", encoding="utf-8")
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        return _pr_state(), 1
+
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 124
+    assert "Ignoring unusable state file" in stderr.getvalue()
+    # A corrupt file is replaced by a usable one rather than breaking every cycle.
+    assert json.loads(state_file.read_text(encoding="utf-8"))["repo"] == "avibe-bot/avibe"
+
+
+def test_main_state_file_round_trips_new_pr_cursor(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "new-prs.json"
+
+    def _fake_fetch_new_pr_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
+        return (
+            {
+                "pull_requests": [
+                    {
+                        "id": 410,
+                        "number": 158,
+                        "title": "New PR",
+                        "state": "open",
+                        "html_url": "https://github.com/example/repo/pull/158",
+                        "user": {"login": "cyhhao"},
+                    }
+                ]
+            },
+            1,
+        )
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--new-prs",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    assert rc == 124
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["pr_cursor"] == 410
+    assert saved["pr"] is None
