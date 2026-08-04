@@ -47,6 +47,12 @@ _FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
 _PROFILE_QUERY = "profile"
 _MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
+_RECORDER_HEALTH_FALLBACK = {"state": "degraded", "reason": "writer_failures"}
+_RECORDER_HEALTH_REASONS = {
+    "writer_failures",
+    "serialization_failed",
+    "call_log_corrupt",
+}
 
 ProviderAttachment = CaptureAttachment
 
@@ -302,6 +308,34 @@ class EverOSPort:
         except MemoryProviderFailure:
             return False
         return True
+
+    async def recorder_health(self) -> dict[str, str | None]:
+        """Return the closed recorder state projected by the sidecar health route."""
+        try:
+            payload = await self._sidecar_request(
+                "GET", "/health", None, require_json=True
+            )
+        except MemoryProviderFailure:
+            return dict(_RECORDER_HEALTH_FALLBACK)
+        recorder = payload.get("recorder") if payload is not None else None
+        if not isinstance(recorder, dict) or set(recorder) != {"state", "reason"}:
+            return dict(_RECORDER_HEALTH_FALLBACK)
+        state = recorder.get("state")
+        reason = recorder.get("reason")
+        valid = (
+            (state == "active" and reason is None)
+            or (
+                state == "degraded"
+                and reason in _RECORDER_HEALTH_REASONS
+            )
+            or (
+                state == "disabled"
+                and reason in {None, "writer_failures"}
+            )
+        )
+        if not valid:
+            return dict(_RECORDER_HEALTH_FALLBACK)
+        return {"state": state, "reason": reason}
 
     async def processing_healthy(self) -> bool:
         """Probe both configured model endpoints with fixed synthetic requests.
@@ -815,6 +849,8 @@ class MemoryProviderPort(Protocol):
 
     async def health(self) -> bool: ...
 
+    async def recorder_health(self) -> dict[str, str | None]: ...
+
     async def processing_healthy(self) -> bool: ...
 
 
@@ -837,6 +873,9 @@ class FakeMemoryProvider:
     profile_failure: BaseException | None = None
     health_failure: BaseException | None = None
     processing_health_failure: BaseException | None = None
+    recorder_health_state: dict[str, str | None] = field(
+        default_factory=lambda: {"state": "disabled", "reason": None}
+    )
 
     async def add(self, capture: ProviderCapture) -> AddAck:
         if self.ingest_failures:
@@ -874,6 +913,9 @@ class FakeMemoryProvider:
         if self.health_failure is not None:
             raise self.health_failure
         return self.healthy
+
+    async def recorder_health(self) -> dict[str, str | None]:
+        return dict(self.recorder_health_state)
 
     async def processing_healthy(self) -> bool:
         """Whether the configured processing (LLM/embedding) endpoints are reachable.

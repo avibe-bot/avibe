@@ -372,6 +372,49 @@ def test_memory_clear_signs_the_selected_ui_owner(monkeypatch, socket_path):
     )
 
 
+def test_memory_log_helpers_forward_structured_query_and_sign_owner(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    captured: list[httpx.Request] = []
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            await internal_client.memory_log(
+                cursor="opaque_cursor",
+                limit=17,
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+            await internal_client.memory_log_entry(
+                "mc_1",
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+
+    asyncio.run(_go())
+
+    assert [(request.url.path, dict(request.url.params)) for request in captured] == [
+        ("/internal/memory/log", {"cursor": "opaque_cursor", "limit": "17"}),
+        ("/internal/memory/log/entry", {"memcell_id": "mc_1"}),
+    ]
+    for request in captured:
+        assert request.headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
+        assert request.headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+            "test-ui-controller-secret",
+            method="GET",
+            path=request.url.path,
+            user_key="avibe:remote:user-1",
+        )
+
+
 def test_memory_sync_read_helper_sends_agent_session_header(socket_path):
     captured: dict[str, str] = {}
 

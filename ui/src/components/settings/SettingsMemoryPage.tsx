@@ -8,6 +8,7 @@ import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { SegmentedRadio } from '../ui/segmented';
 import { MemoryProfilePanel } from './memory/MemoryProfilePanel';
+import { MemoryLogPanel, MemoryRecorderFaultBanner } from './memory/MemoryLogPanel';
 import { MemorySearchPanel } from './memory/MemorySearchPanel';
 import { MemorySettingsPanel } from './memory/MemorySettingsPanel';
 import { MemoryStatusPanel } from './memory/MemoryStatusPanel';
@@ -20,10 +21,10 @@ import type {
   MemoryStatus,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { memoryRuntimeRecoveryAvailable, memorySetupStage } from '../../lib/memorySettings';
+import { memoryDiagnostics, memoryRuntimeRecoveryAvailable, memorySetupStage } from '../../lib/memorySettings';
 import { memoryErrorMessage } from '../../lib/memoryRead';
 
-type MemoryTab = 'status' | 'profile' | 'search' | 'settings';
+type MemoryTab = 'status' | 'profile' | 'search' | 'log' | 'settings';
 
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
 type MemoryFailureLogOk = Extract<MemoryFailureLogResult, { items: MemoryFailureLogEntry[] }>;
@@ -47,6 +48,7 @@ export const SettingsMemoryPage: React.FC = () => {
   const [dependencyReady, setDependencyReady] = useState(true);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [restarting, setRestarting] = useState(false);
+  const [logGeneration, setLogGeneration] = useState(0);
 
   const settingsRead = useMemoryResource<MemorySettingsOk>({
     read: api.getMemorySettings,
@@ -118,6 +120,9 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const confirmClear = async () => {
     setClearing(true);
+    // Clear can delete provider payloads before a failed receipt or a lost
+    // response, so purge cached payloads for every confirmed attempt.
+    setLogGeneration((generation) => generation + 1);
     try {
       const res = await api.clearMemory();
       if (res.status === 'completed') {
@@ -162,6 +167,7 @@ export const SettingsMemoryPage: React.FC = () => {
       { id: 'status' as const, label: t('memory.tabs.status') },
       { id: 'profile' as const, label: t('memory.tabs.profile') },
       { id: 'search' as const, label: t('memory.tabs.search') },
+      { id: 'log' as const, label: t('memory.tabs.log') },
       { id: 'settings' as const, label: t('memory.tabs.settings') },
     ],
     [t],
@@ -181,6 +187,9 @@ export const SettingsMemoryPage: React.FC = () => {
         void loadStatus();
         void loadDependency();
       }}
+      onReloadSettings={() => {
+        void loadSettings();
+      }}
       onReloadStatus={() => {
         void loadStatus();
         void loadDependency();
@@ -196,6 +205,14 @@ export const SettingsMemoryPage: React.FC = () => {
       title={t('memory.title')}
       subtitle={t('memory.subtitle')}
     >
+      {!remoteUnavailable && settings?.enabled === false ? (
+        <MemoryRecorderFaultBanner
+          status={status}
+          onRestartRuntime={() => void restartEngine()}
+          restarting={restarting}
+          onClearAll={() => setClearOpen(true)}
+        />
+      ) : null}
       {remoteUnavailable ? (
         <div className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-10 text-center">
           <ShieldAlert className="size-6 text-muted" />
@@ -234,7 +251,11 @@ export const SettingsMemoryPage: React.FC = () => {
         settingsPanel
       ) : (
         <>
-          <SegmentedRadio value={tab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
+          <div data-testid="memory-tabs-scroll" className="max-w-full overflow-x-auto pb-1">
+            <div className="min-w-max">
+              <SegmentedRadio value={tab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
+            </div>
+          </div>
 
           {tab === 'status' && (
             <MemoryStatusPanel
@@ -257,6 +278,18 @@ export const SettingsMemoryPage: React.FC = () => {
           {tab === 'profile' && <MemoryProfilePanel enabled={!!settings?.enabled} />}
 
           {tab === 'search' && <MemorySearchPanel enabled={!!settings?.enabled} />}
+
+          {tab === 'log' && settings ? (
+            <MemoryLogPanel
+              key={logGeneration}
+              enabled={settings.enabled}
+              loggingEnabled={memoryDiagnostics(settings).logProviderCalls}
+              status={status}
+              onRestartRuntime={() => void restartEngine()}
+              restarting={restarting}
+              onClearAll={() => setClearOpen(true)}
+            />
+          ) : null}
 
           {tab === 'settings' &&
             (!settingsRead.loaded && !settings ? (

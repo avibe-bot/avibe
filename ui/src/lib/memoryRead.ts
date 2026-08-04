@@ -3,7 +3,7 @@ import type { TFunction } from 'i18next';
 // Backend forbidden path (`_memory_forbidden_response`) returns exactly this closed shape for
 // every Memory route when the request is neither direct-loopback nor an authenticated
 // Avibe Cloud session. It is
-// otherwise never produced by a settings/status/profile/search/clear success or config-disabled
+// otherwise never produced by a settings/status/profile/search/log/clear success or config-disabled
 // path, so it's a safe signal to render the "available on this device only" static state instead
 // of a generic error.
 export const MEMORY_FORBIDDEN_ERROR = 'memory_disabled';

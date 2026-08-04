@@ -1218,6 +1218,7 @@
     "bind_code_limit_reached": "可用绑定码过多，请先撤销一个未使用的绑定码，再创建新的绑定码。",
     "memory_disabled": "记忆功能已禁用，或当前连接无法访问它。",
     "memory_invalid_input": "该记忆请求无效。",
+    "memory_log_entry_not_found": "该记忆处理条目已不可用。",
     "memory_access_denied": "该调用方无权读取此记忆数据。",
     "memory_input_too_large": "输入内容对记忆功能来说太大了。",
     "memory_queue_full": "记忆队列目前已满。",
@@ -3468,6 +3469,7 @@
       "status": "状态",
       "profile": "画像",
       "search": "搜索",
+      "log": "日志",
       "settings": "设置"
     },
     "remoteUnavailable": {
@@ -3563,6 +3565,100 @@
       "disabledHint": "启用记忆后即可搜索。",
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
+    "log": {
+      "description": "查看每条已捕获消息如何转化为记忆状态。",
+      "loading": "正在加载处理日志…",
+      "loadFailed": "无法加载处理日志。",
+      "detailLoading": "正在加载处理详情…",
+      "detailFailed": "无法加载处理详情。",
+      "detailUnavailable": "处理详情不可用。",
+      "forbidden": "当前连接无法访问处理日志。",
+      "disabledHint": "启用记忆后即可查看处理日志。",
+      "empty": "还没有已处理的记忆条目。",
+      "refresh": "刷新",
+      "loadMore": "加载更多",
+      "limitReached": "当前显示前 {{count}} 条记录。刷新后可查看最新处理活动。",
+      "back": "返回处理日志",
+      "messages": "{{count}} 条消息",
+      "runs": "{{count}} 次运行",
+      "providerCalls": "{{count}} 次调用",
+      "noPreview": "没有可用的文本预览。",
+      "loggingOff": "提供方负载日志已关闭。正常处理时间线和已保留的诊断记录仍可查看。",
+      "recorderDegraded": "新的提供方调用未被记录，已有记录仍可读取。",
+      "recorderCorrupt": "提供方调用日志已损坏。必须先通过「清除全部」移除该日志，之后才能恢复记录。",
+      "restartAction": "重启记忆引擎",
+      "clearAction": "打开「清除全部」",
+      "sectionUnavailable": "{{section}}不可用（{{reason}}），其他部分可能仍然完整。",
+      "sectionPartial": "{{section}}部分可用（{{reason}}）。",
+      "section": {
+        "everos": "时间线数据",
+        "capture": "捕获关联",
+        "calls": "提供方调用"
+      },
+      "timeline": "处理时间线",
+      "step": {
+        "capture": "捕获与投递",
+        "memcell": "已创建 Memcell",
+        "strategy": "记忆策略"
+      },
+      "reason": {
+        "missing": "来源数据缺失",
+        "busy": "来源数据正忙",
+        "malformed": "来源数据格式异常",
+        "expired": "关联信息已过期",
+        "runsMissing": "处理运行记录缺失",
+        "runsBusy": "处理运行记录正忙",
+        "runsMalformed": "处理运行记录格式异常"
+      },
+      "status": {
+        "created": "已创建",
+        "mixed": "多种状态",
+        "pending": "等待中",
+        "processing": "处理中",
+        "delivered": "已投递",
+        "dead": "已停止",
+        "running": "运行中",
+        "ok": "成功",
+        "success": "成功",
+        "failed": "失败",
+        "deadLetter": "重试后停止",
+        "crashed": "已崩溃",
+        "error": "错误",
+        "present": "已存在",
+        "missing": "缺失",
+        "notSeen": "尚未发现",
+        "indexed": "已索引"
+      },
+      "callKind": {
+        "llm": "LLM",
+        "multimodalLlm": "多模态 LLM",
+        "embedding": "Embedding"
+      },
+      "callStage": {
+        "boundary": "请求边界",
+        "strategy": "处理策略",
+        "cascade": "级联处理",
+        "episodeExtract": "事件提取",
+        "parse": "多模态解析"
+      },
+      "callSummary": "{{kind}} · {{status}}",
+      "profileTrigger": "触发画像运行",
+      "unavailable": "不可用：{{reason}}",
+      "omittedSteps": "已省略 {{count}} 个较早的时间线步骤。",
+      "callDetails": "提供方调用",
+      "callsNotRecorded": "提供方调用未被记录或已经过期。",
+      "omittedCalls": "已省略 {{count}} 个较早的提供方调用。",
+      "droppedCalls": "此记录之前有 {{count}} 次提供方调用被丢弃。",
+      "copyCall": "复制请求和响应",
+      "finishReason": "结束原因",
+      "usage": "提示 / 补全 token",
+      "request": "请求",
+      "response": "响应",
+      "currentState": "当前记忆状态",
+      "currentProfile": "画像",
+      "currentIndexing": "索引",
+      "currentStateOnly": "这里显示的是当前状态，不是本次处理运行的历史快照。"
+    },
     "settings": {
       "loading": "正在加载设置…",
       "loadFailed": "无法加载记忆设置。",
@@ -3583,6 +3679,9 @@
       "apiKeyClearHint": "密钥仅可写入——Avibe 不会把已保存的密钥回显给你。",
       "embeddingLocked": "已有记忆数据时无法更改 Embedding 端点或模型，请先执行「清除全部」。",
       "embeddingStatusPending": "正在确认记忆状态……确认没有数据后，Embedding 端点将解锁。",
+      "providerCallLoggingLabel": "记录提供方负载",
+      "providerCallLoggingDisclosure": "选择启用后，会为本安装的所有用户存储经脱敏且有大小限制的 LLM 与 Embedding 请求和响应。关闭后不再写入新记录；已有记录会保留最多 14 天，或直到执行「清除全部」。",
+      "providerCallLoggingLocalOnly": "只有直接连接本机的管理员才能更改此设置。",
       "save": "保存设置",
       "saving": "保存中…",
       "saveFailed": "无法保存记忆设置。",
@@ -3606,12 +3705,13 @@
     "clear": {
       "button": "清除全部",
       "confirmTitle": "清除全部本地记忆数据？",
-      "confirmDescription": "这会移除你的画像、事件、事实，以及本机上任何尚未处理的排队文本。",
+      "confirmDescription": "这会移除你的画像、事件、事实、本机上尚未处理的排队文本，以及已保留的提供方调用诊断。",
       "removesTitle": "将会移除：",
       "removes": [
         "你可见的画像",
         "用于构建画像的隐藏本地缓冲区和索引",
-        "本地处理队列中待处理和已完成的条目"
+        "本地处理队列中待处理和已完成的条目",
+        "已保留的提供方请求和响应诊断"
       ],
       "keepsTitle": "不会移除：",
       "keeps": [

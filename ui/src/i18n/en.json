@@ -1218,6 +1218,7 @@
     "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another.",
     "memory_disabled": "Memory is disabled, or this connection can't reach it.",
     "memory_invalid_input": "That Memory request wasn't valid.",
+    "memory_log_entry_not_found": "That Memory processing entry is no longer available.",
     "memory_access_denied": "This caller isn't allowed to read that Memory data.",
     "memory_input_too_large": "That input is too large for Memory.",
     "memory_queue_full": "The Memory queue is full right now.",
@@ -3468,6 +3469,7 @@
       "status": "Status",
       "profile": "Profile",
       "search": "Search",
+      "log": "Log",
       "settings": "Settings"
     },
     "remoteUnavailable": {
@@ -3563,6 +3565,100 @@
       "disabledHint": "Enable Memory to search.",
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
+    "log": {
+      "description": "Trace how each captured message became Memory state.",
+      "loading": "Loading processing log…",
+      "loadFailed": "Couldn't load the processing log.",
+      "detailLoading": "Loading processing details…",
+      "detailFailed": "Couldn't load processing details.",
+      "detailUnavailable": "Processing details are unavailable.",
+      "forbidden": "This processing log isn't available on the current connection.",
+      "disabledHint": "Enable Memory to view its processing log.",
+      "empty": "No processed Memory entries yet.",
+      "refresh": "Refresh",
+      "loadMore": "Load more",
+      "limitReached": "Showing the first {{count}} entries. Refresh to see the newest processing activity.",
+      "back": "Back to processing log",
+      "messages": "{{count}} messages",
+      "runs": "{{count}} runs",
+      "providerCalls": "{{count}} calls",
+      "noPreview": "No text preview available.",
+      "loggingOff": "Provider payload logging is off. The normal processing timeline and retained diagnostic rows remain available.",
+      "recorderDegraded": "New provider calls aren't being recorded. Existing rows remain readable.",
+      "recorderCorrupt": "The provider call log is corrupt. Clear all Memory data to remove it before recording can resume.",
+      "restartAction": "Restart Memory engine",
+      "clearAction": "Open Clear all",
+      "sectionUnavailable": "{{section}} is unavailable ({{reason}}). Other sections may still be complete.",
+      "sectionPartial": "{{section}} is partially available ({{reason}}).",
+      "section": {
+        "everos": "Timeline data",
+        "capture": "Capture attribution",
+        "calls": "Provider calls"
+      },
+      "timeline": "Processing timeline",
+      "step": {
+        "capture": "Capture and delivery",
+        "memcell": "Memcell created",
+        "strategy": "Memory strategy"
+      },
+      "reason": {
+        "missing": "source data is missing",
+        "busy": "source data is busy",
+        "malformed": "source data is malformed",
+        "expired": "attribution has expired",
+        "runsMissing": "processing runs are missing",
+        "runsBusy": "processing runs are busy",
+        "runsMalformed": "processing runs are malformed"
+      },
+      "status": {
+        "created": "Created",
+        "mixed": "Mixed",
+        "pending": "Pending",
+        "processing": "Processing",
+        "delivered": "Delivered",
+        "dead": "Stopped",
+        "running": "Running",
+        "ok": "Succeeded",
+        "success": "Succeeded",
+        "failed": "Failed",
+        "deadLetter": "Stopped after retries",
+        "crashed": "Crashed",
+        "error": "Error",
+        "present": "Present",
+        "missing": "Missing",
+        "notSeen": "Not seen",
+        "indexed": "Indexed"
+      },
+      "callKind": {
+        "llm": "LLM",
+        "multimodalLlm": "Multimodal LLM",
+        "embedding": "Embedding"
+      },
+      "callStage": {
+        "boundary": "Request boundary",
+        "strategy": "Strategy",
+        "cascade": "Cascade",
+        "episodeExtract": "Episode extraction",
+        "parse": "Multimodal parsing"
+      },
+      "callSummary": "{{kind}} · {{status}}",
+      "profileTrigger": "Triggered profile run",
+      "unavailable": "Unavailable: {{reason}}",
+      "omittedSteps": "{{count}} older timeline steps omitted.",
+      "callDetails": "Provider calls",
+      "callsNotRecorded": "Provider calls were not recorded or have expired.",
+      "omittedCalls": "{{count}} older provider calls omitted.",
+      "droppedCalls": "{{count}} provider calls were dropped before this row.",
+      "copyCall": "Copy request and response",
+      "finishReason": "Finish reason",
+      "usage": "Prompt / completion tokens",
+      "request": "Request",
+      "response": "Response",
+      "currentState": "Current Memory state",
+      "currentProfile": "Profile",
+      "currentIndexing": "Indexing",
+      "currentStateOnly": "This is current state, not a historical snapshot of this processing run."
+    },
     "settings": {
       "loading": "Loading settings…",
       "loadFailed": "Couldn't load Memory settings.",
@@ -3583,6 +3679,9 @@
       "apiKeyClearHint": "Keys are write-only — Avibe never shows a saved key back to you.",
       "embeddingLocked": "Changing the embedding endpoint or model is disabled while memory data exists. Run Clear all first.",
       "embeddingStatusPending": "Confirming Memory state… the embedding endpoint unlocks once it's confirmed no data exists.",
+      "providerCallLoggingLabel": "Log provider payloads",
+      "providerCallLoggingDisclosure": "Opt in to storing scrubbed, bounded LLM and embedding requests and responses for every principal using this installation. Turning this off stops new rows; retained rows remain for up to 14 days or until Clear all.",
+      "providerCallLoggingLocalOnly": "Only an administrator connected directly to this installation can change this setting.",
       "save": "Save settings",
       "saving": "Saving…",
       "saveFailed": "Couldn't save Memory settings.",
@@ -3606,12 +3705,13 @@
     "clear": {
       "button": "Clear all",
       "confirmTitle": "Clear all local Memory data?",
-      "confirmDescription": "This removes your distilled profile, episodes, facts, and any pending queued text on this install.",
+      "confirmDescription": "This removes your distilled profile, episodes, facts, pending queued text, and retained provider-call diagnostics on this install.",
       "removesTitle": "This removes:",
       "removes": [
         "Your visible distilled profile",
         "Hidden local buffers and indexes used to build it",
-        "Pending and finished items in the local processing queue"
+        "Pending and finished items in the local processing queue",
+        "Retained provider request and response diagnostics"
       ],
       "keepsTitle": "This does not remove:",
       "keeps": [

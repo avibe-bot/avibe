@@ -16,12 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, Callable
 
 from fastapi import Request as FastAPIRequest
 
 from config.v2_config import V2Config
 from vibe.ui_compat import Response, jsonify
+
+
+_MEMORY_LOG_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_MEMORY_LOG_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
 
 def _memory_ui_user_key() -> str | None:
@@ -55,6 +60,34 @@ def _memory_response_body(response: Response) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _memory_log_list_query(request: FastAPIRequest) -> tuple[str | None, int]:
+    items = list(request.query_params.multi_items())
+    keys = [key for key, _value in items]
+    if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
+        raise ValueError("invalid memory log query")
+    values = dict(items)
+    cursor = values.get("cursor")
+    if cursor is not None and _MEMORY_LOG_CURSOR_RE.fullmatch(cursor) is None:
+        raise ValueError("invalid memory log cursor")
+    raw_limit = values.get("limit", "20")
+    if not raw_limit.isascii() or not raw_limit.isdecimal():
+        raise ValueError("invalid memory log limit")
+    limit = int(raw_limit)
+    if not 1 <= limit <= 50:
+        raise ValueError("invalid memory log limit")
+    return cursor, limit
+
+
+def _memory_log_entry_query(request: FastAPIRequest) -> str:
+    items = list(request.query_params.multi_items())
+    if len(items) != 1 or items[0][0] != "memcell_id":
+        raise ValueError("invalid memory log entry query")
+    memcell_id = items[0][1]
+    if _MEMORY_LOG_ENTRY_ID_RE.fullmatch(memcell_id) is None:
+        raise ValueError("invalid memory log entry id")
+    return memcell_id
+
+
 async def _memory_internal_response(call: Callable[[], Any]) -> Response:
     from vibe import internal_client
 
@@ -71,12 +104,24 @@ async def _memory_internal_response(call: Callable[[], Any]) -> Response:
     return _memory_response(body, status_code=result.get("status_code", 503))
 
 
-def _memory_settings_payload() -> dict:
+def _memory_settings_projection(memory: object, *, diagnostics_mutable: bool) -> dict:
     from config.v2_config import memory_config_to_payload
 
+    payload = memory_config_to_payload(memory)
+    payload["diagnostics"]["mutable"] = diagnostics_mutable
+    return payload
+
+
+def _memory_settings_payload(*, diagnostics_mutable: bool) -> dict:
     # Tag the response, not `memory_config_to_payload` itself: the same helper
     # feeds the persisted config, which must stay free of result envelopes.
-    return {**memory_config_to_payload(V2Config.load().memory), "status": "ok"}
+    return {
+        **_memory_settings_projection(
+            V2Config.load().memory,
+            diagnostics_mutable=diagnostics_mutable,
+        ),
+        "status": "ok",
+    }
 
 
 def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
@@ -84,7 +129,9 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
 
     from config.v2_config import memory_config_to_payload
 
-    if not isinstance(patch_payload, dict) or not set(patch_payload).issubset({"enabled", "processing"}):
+    if not isinstance(patch_payload, dict) or not set(patch_payload).issubset(
+        {"enabled", "processing", "diagnostics"}
+    ):
         raise ValueError("invalid_memory_patch")
     target = memory_config_to_payload(current.memory, include_secrets=True)
     for endpoint in ("llm", "embedding"):
@@ -104,6 +151,18 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
             if not isinstance(endpoint_patch, dict) or not set(endpoint_patch).issubset({"base_url", "model", "api_key"}):
                 raise ValueError("invalid_memory_patch")
             target["processing"][endpoint].update(endpoint_patch)
+
+    diagnostics_patch = patch_payload.get("diagnostics")
+    if diagnostics_patch is not None:
+        if not isinstance(diagnostics_patch, dict) or not set(diagnostics_patch).issubset(
+            {"log_provider_calls"}
+        ):
+            raise ValueError("invalid_memory_patch")
+        if "log_provider_calls" in diagnostics_patch:
+            value = diagnostics_patch["log_provider_calls"]
+            if not isinstance(value, bool):
+                raise ValueError("invalid_memory_patch")
+            target["diagnostics"]["log_provider_calls"] = value
 
     explicit_key_clear = any(
         endpoint_patch.get("api_key") in {None, ""}
@@ -163,7 +222,11 @@ def _memory_settings_write_lock() -> asyncio.Lock:
     return _settings_write_lock
 
 
-async def _apply_memory_settings_patch(patch_payload: object) -> Response:
+async def _apply_memory_settings_patch(
+    patch_payload: object,
+    *,
+    diagnostics_mutable: bool = True,
+) -> Response:
     """Persist one Memory settings patch, reconcile it, or roll the save back.
 
     The whole read -> save -> reconcile -> rollback sequence runs under one
@@ -183,6 +246,11 @@ async def _apply_memory_settings_patch(patch_payload: object) -> Response:
             current = await asyncio.to_thread(V2Config.load)
             target_payload = _memory_settings_patch(current, patch_payload)
             candidate = _memory_candidate_config(current, target_payload)
+            disable_diagnostics = bool(
+                isinstance(patch_payload, dict)
+                and isinstance(patch_payload.get("diagnostics"), dict)
+                and patch_payload["diagnostics"].get("log_provider_calls") is False
+            )
             embedding_change_pending = (
                 current.memory.embedding_change_pending
                 or _memory_embedding_configuration_changed(current, candidate)
@@ -210,9 +278,15 @@ async def _apply_memory_settings_patch(patch_payload: object) -> Response:
             # Persisted settings must not outrun the controller's closed
             # compatibility decision, including while memory is disabled.
             try:
+                rollback_payload = memory_config_to_payload(
+                    current.memory,
+                    include_secrets=True,
+                )
+                if disable_diagnostics:
+                    rollback_payload["diagnostics"]["log_provider_calls"] = False
                 await asyncio.to_thread(
                     api.save_memory_config,
-                    memory_config_to_payload(current.memory, include_secrets=True),
+                    rollback_payload,
                     embedding_change_pending=current.memory.embedding_change_pending,
                 )
                 await _memory_internal_response(internal_client.reconcile_memory)
@@ -227,7 +301,10 @@ async def _apply_memory_settings_patch(patch_payload: object) -> Response:
             )
         if response.status_code >= 500:
             return response
-        payload = memory_config_to_payload(saved.memory)
+        payload = _memory_settings_projection(
+            saved.memory,
+            diagnostics_mutable=diagnostics_mutable,
+        )
         payload["runtime"] = runtime_payload
         payload["status"] = "ok"
         return _memory_response(payload)
@@ -242,7 +319,15 @@ def register_memory_routes(app) -> None:
             if _memory_ui_user_key() is None:
                 return _memory_forbidden_response()
             try:
-                return _memory_response(await asyncio.to_thread(_memory_settings_payload))
+                from vibe import ui_server
+
+                diagnostics_mutable = ui_server.is_direct_loopback_memory_request()
+                return _memory_response(
+                    await asyncio.to_thread(
+                        _memory_settings_payload,
+                        diagnostics_mutable=diagnostics_mutable,
+                    )
+                )
             except Exception:
                 return _memory_response({"status": "failed", "error": "memory_store_unavailable"}, status_code=503)
 
@@ -257,7 +342,22 @@ def register_memory_routes(app) -> None:
                 patch_payload = await starlette_request.json()
             except (TypeError, ValueError):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            return await _apply_memory_settings_patch(patch_payload)
+            from vibe import ui_server
+
+            diagnostics_mutable = ui_server.is_direct_loopback_memory_request()
+            if (
+                isinstance(patch_payload, dict)
+                and "diagnostics" in patch_payload
+                and not diagnostics_mutable
+            ):
+                return _memory_response(
+                    {"status": "failed", "error": "memory_access_denied"},
+                    status_code=403,
+                )
+            return await _apply_memory_settings_patch(
+                patch_payload,
+                diagnostics_mutable=diagnostics_mutable,
+            )
 
         return await app.dispatch_native_request(starlette_request, handler)
 
@@ -293,6 +393,55 @@ def register_memory_routes(app) -> None:
 
             return await _memory_internal_response(
                 lambda: internal_client.memory_profile(user_key=user_key)
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    @app.get("/api/memory/log", include_in_schema=False)
+    async def memory_log_get(starlette_request: FastAPIRequest):
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            try:
+                cursor, limit = _memory_log_list_query(starlette_request)
+            except ValueError:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"},
+                    status_code=400,
+                )
+            from vibe import internal_client
+
+            return await _memory_internal_response(
+                lambda: internal_client.memory_log(
+                    cursor=cursor,
+                    limit=limit,
+                    user_key=user_key,
+                )
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    @app.get("/api/memory/log/entry", include_in_schema=False)
+    async def memory_log_entry_get(starlette_request: FastAPIRequest):
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            try:
+                memcell_id = _memory_log_entry_query(starlette_request)
+            except ValueError:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"},
+                    status_code=400,
+                )
+            from vibe import internal_client
+
+            return await _memory_internal_response(
+                lambda: internal_client.memory_log_entry(
+                    memcell_id,
+                    user_key=user_key,
+                )
             )
 
         return await app.dispatch_native_request(starlette_request, handler)

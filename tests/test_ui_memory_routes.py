@@ -61,6 +61,10 @@ def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tm
     assert response.headers["cache-control"] == "no-store"
     assert response.get_json()["processing"]["llm"]["api_key"] is None
     assert response.get_json()["processing"]["llm"]["has_api_key"] is False
+    assert response.get_json()["diagnostics"] == {
+        "log_provider_calls": False,
+        "mutable": True,
+    }
 
 
 def test_memory_settings_get_accepts_same_origin_referer_without_origin(monkeypatch, tmp_path) -> None:
@@ -138,12 +142,107 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
     )
 
     assert settings_response.status_code == 200
+    assert settings_response.get_json()["diagnostics"] == {
+        "log_provider_calls": False,
+        "mutable": False,
+    }
     assert profile_response.status_code == 200
     assert clear_response.status_code == 200
     assert calls == [
         ("profile", "avibe:remote:user-1"),
         ("clear", "avibe:remote:user-1"),
     ]
+
+
+def test_memory_diagnostics_patch_is_local_only_even_when_mixed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+    calls: list[bool] = []
+
+    async def reconcile():
+        calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": False, "diagnostics": {"log_provider_calls": True}},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"status": "failed", "error": "memory_access_denied"}
+    assert calls == []
+    assert V2Config.load().memory.diagnostics.log_provider_calls is False
+
+
+def test_memory_diagnostics_patch_reconciles_once_and_returns_mutability(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[bool] = []
+
+    async def reconcile():
+        calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"diagnostics": {"log_provider_calls": True}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["diagnostics"] == {
+        "log_provider_calls": True,
+        "mutable": True,
+    }
+    assert calls == [True]
+    assert V2Config.load().memory.diagnostics.log_provider_calls is True
+
+
+def test_memory_diagnostics_disable_is_never_rolled_back_on_reconcile_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory.diagnostics.log_provider_calls = True
+    current.save()
+    calls: list[bool] = []
+
+    async def reconcile():
+        calls.append(V2Config.load().memory.diagnostics.log_provider_calls)
+        return {
+            "status_code": 200,
+            "body": {"ok": False, "error": "memory_processing_failed"},
+        }
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"diagnostics": {"log_provider_calls": False}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert calls == [False, False]
+    assert V2Config.load().memory.diagnostics.log_provider_calls is False
 
 
 def test_memory_avibe_cloud_read_still_requires_same_origin(monkeypatch, tmp_path) -> None:
@@ -259,6 +358,52 @@ def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypat
     assert response.status_code == 200
     assert calls == [("find this", 3, "avibe:local")]
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[tuple[object, ...]] = []
+
+    async def memory_log(*, cursor: str | None, limit: int, user_key: str):
+        calls.append(("list", cursor, limit, user_key))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "entries": [], "next_cursor": None},
+        }
+
+    async def memory_log_entry(memcell_id: str, *, user_key: str):
+        calls.append(("detail", memcell_id, user_key))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "entry": {"memcell_id": memcell_id}},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_log", memory_log)
+    monkeypatch.setattr(internal_client, "memory_log_entry", memory_log_entry)
+    client = app.test_client()
+    request_options = {
+        "headers": _local_headers(),
+        "base_url": "http://127.0.0.1:15131",
+        "environ_base": {"REMOTE_ADDR": "127.0.0.1"},
+    }
+
+    listed = client.get("/api/memory/log?cursor=opaque_cursor&limit=17", **request_options)
+    detail = client.get("/api/memory/log/entry?memcell_id=mc_1", **request_options)
+    duplicate = client.get("/api/memory/log?limit=1&limit=2", **request_options)
+    invalid_id = client.get("/api/memory/log/entry?memcell_id=../secret", **request_options)
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    assert listed.headers["cache-control"] == "no-store"
+    assert detail.headers["cache-control"] == "no-store"
+    assert calls == [
+        ("list", "opaque_cursor", 17, "avibe:local"),
+        ("detail", "mc_1", "avibe:local"),
+    ]
+    for response in (duplicate, invalid_id):
+        assert response.status_code == 400
+        assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
 
 
 def test_memory_settings_enable_reconciles_through_controller(monkeypatch, tmp_path) -> None:

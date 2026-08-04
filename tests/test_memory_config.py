@@ -33,6 +33,7 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
             {
                 "enabled": True,
                 "processing": _complete_processing(),
+                "diagnostics": {"log_provider_calls": True},
                 "embedding_change_pending": True,
             }
         )
@@ -44,6 +45,7 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
 
     assert stored["memory"]["processing"]["llm"]["api_key"] == "llm-key"
     assert stored["memory"]["embedding_change_pending"] is True
+    assert stored["memory"]["diagnostics"] == {"log_provider_calls": True}
     assert projected["memory"]["processing"]["llm"] == {
         "base_url": "https://llm.example.test/v1",
         "model": "chat",
@@ -52,6 +54,7 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
     }
     assert "embed-key" not in json.dumps(projected)
     assert "embedding_change_pending" not in projected["memory"]
+    assert projected["memory"]["diagnostics"] == {"log_provider_calls": True}
 
 
 def test_memory_config_drops_retired_proactive_capture_flag(tmp_path) -> None:
@@ -127,6 +130,24 @@ def test_memory_config_defaults_disabled_for_legacy_payload() -> None:
         agents=AgentsConfig(),
     )
     assert config.memory == MemoryConfig()
+    assert config.memory.diagnostics.log_provider_calls is False
+
+
+@pytest.mark.parametrize(
+    "diagnostics",
+    [True, [], {"log_provider_calls": "yes"}],
+)
+def test_memory_config_rejects_invalid_diagnostics(diagnostics: object) -> None:
+    with pytest.raises(ValueError, match="memory.diagnostics"):
+        V2Config.from_payload(
+            _payload(
+                {
+                    "enabled": False,
+                    "processing": {},
+                    "diagnostics": diagnostics,
+                }
+            )
+        )
 
 
 def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> None:

@@ -385,6 +385,46 @@ async def memory_search(
     )
 
 
+async def memory_log(
+    *,
+    cursor: str | None,
+    limit: int,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/log"
+    params: dict[str, str | int] = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
+    return await _memory_request(
+        "GET",
+        path,
+        params=params,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_log_entry(
+    memcell_id: str,
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/log/entry"
+    return await _memory_request(
+        "GET",
+        path,
+        params={"memcell_id": memcell_id},
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def memory_clear(
     *,
     user_key: str,
@@ -475,6 +515,7 @@ async def _memory_request(
     route: str,
     *,
     payload: dict[str, Any] | None = None,
+    params: dict[str, str | int] | None = None,
     headers: dict[str, str] | None = None,
     socket_path: Optional[Path] = None,
     timeout: float,
@@ -487,7 +528,13 @@ async def _memory_request(
             base_url="http://localhost",
             timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
         ) as client:
-            response = await client.request(method, route, json=payload, headers=headers)
+            response = await client.request(
+                method,
+                route,
+                json=payload,
+                params=params,
+                headers=headers,
+            )
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     try:

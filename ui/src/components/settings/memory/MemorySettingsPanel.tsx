@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, Loader2, Lock, ShieldAlert, Trash2 } from 'lucide-react';
+import { ArrowUpRight, FileJson2, Loader2, Lock, ShieldAlert, Trash2 } from 'lucide-react';
 
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
@@ -18,7 +18,7 @@ import type {
   MemoryStatus,
 } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
-import { buildEndpointPatch, draftFromConfig } from '../../../lib/memorySettings';
+import { buildEndpointPatch, draftFromConfig, memoryDiagnostics } from '../../../lib/memorySettings';
 import type { EndpointDraft } from '../../../lib/memorySettings';
 import { isMemoryOk, memoryErrorMessage } from '../../../lib/memoryRead';
 
@@ -118,16 +118,30 @@ export const MemorySettingsPanel: React.FC<{
   status: MemoryStatus | null;
   dependencyReady: boolean;
   onSaved: (next: MemorySettingsOk) => void;
+  onReloadSettings: () => void;
   onReloadStatus: () => void;
   onClearAll: () => void;
   clearing: boolean;
-}> = ({ settings, status, dependencyReady, onSaved, onReloadStatus, onClearAll, clearing }) => {
+}> = ({
+  settings,
+  status,
+  dependencyReady,
+  onSaved,
+  onReloadSettings,
+  onReloadStatus,
+  onClearAll,
+  clearing,
+}) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
+  const diagnostics = memoryDiagnostics(settings);
   const [enabledDraft, setEnabledDraft] = useState(settings.enabled);
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
+  const [providerCallLoggingDraft, setProviderCallLoggingDraft] = useState(
+    diagnostics.logProviderCalls,
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -136,6 +150,7 @@ export const MemorySettingsPanel: React.FC<{
     setEnabledDraft(settings.enabled);
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
+    setProviderCallLoggingDraft(memoryDiagnostics(settings).logProviderCalls);
   }, [settings]);
 
   // `data_exists` is only known once status resolves. Settings can render first (the two loads run
@@ -184,6 +199,9 @@ export const MemorySettingsPanel: React.FC<{
         if (llmPatch) patch.processing.llm = llmPatch;
         if (embeddingPatch) patch.processing.embedding = embeddingPatch;
       }
+      if (providerCallLoggingDraft !== diagnostics.logProviderCalls) {
+        patch.diagnostics = { log_provider_calls: providerCallLoggingDraft };
+      }
       if (Object.keys(patch).length === 0) {
         showToast(t('memory.settings.saved'), 'success');
         return;
@@ -194,15 +212,14 @@ export const MemorySettingsPanel: React.FC<{
         showToast(t('memory.settings.saved'), 'success');
       } else {
         setError(memoryErrorMessage(t, (res as { error?: string })?.error));
-        // A failed enable did not persist — revert the toggle to the stored state so it reflects
-        // reality, and refresh status so a runtime-dependency blocker (and its Dependencies
-        // affordance) reappears instead of a stale "enabled" toggle hiding it.
-        setEnabledDraft(settings.enabled);
+        // Reconciliation may roll back endpoint fields while retaining a diagnostics disable.
+        // Reload both resources instead of restoring drafts from the stale pre-save snapshot.
+        onReloadSettings();
         onReloadStatus();
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
-      setEnabledDraft(settings.enabled);
+      onReloadSettings();
       onReloadStatus();
     } finally {
       setSaving(false);
@@ -245,6 +262,31 @@ export const MemorySettingsPanel: React.FC<{
         locked={false}
         canClearKey={canClearKeys}
       />
+
+      <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-surface px-4 py-3.5">
+        <div className="flex min-w-0 gap-3">
+          <FileJson2 className="mt-0.5 size-4 shrink-0 text-cyan" />
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="text-[13px] font-semibold text-foreground">
+              {t('memory.settings.providerCallLoggingLabel')}
+            </span>
+            <span className="text-[11.5px] leading-snug text-muted">
+              {t('memory.settings.providerCallLoggingDisclosure')}
+            </span>
+            {!diagnostics.mutable ? (
+              <span className="mt-1 text-[11.5px] text-gold">
+                {t('memory.settings.providerCallLoggingLocalOnly')}
+              </span>
+            ) : null}
+          </div>
+        </div>
+        <Switch
+          checked={providerCallLoggingDraft}
+          onCheckedChange={setProviderCallLoggingDraft}
+          disabled={saving || !diagnostics.mutable}
+          label={t('memory.settings.providerCallLoggingLabel')}
+        />
+      </div>
       <EndpointFields
         title={t('memory.settings.embeddingTitle')}
         draft={embeddingDraft}

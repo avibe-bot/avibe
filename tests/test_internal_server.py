@@ -355,6 +355,8 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/memory/status", ("GET",)) in routes
     assert ("/internal/memory/failures", ("GET",)) in routes
     assert ("/internal/memory/profile", ("GET",)) in routes
+    assert ("/internal/memory/log", ("GET",)) in routes
+    assert ("/internal/memory/log/entry", ("GET",)) in routes
     assert ("/internal/memory/search", ("POST",)) in routes
     assert ("/internal/memory/remember", ("POST",)) in routes
     assert ("/internal/memory/clear", ("POST",)) in routes
@@ -679,6 +681,88 @@ def test_memory_internal_reads_accept_an_associated_agent_session():
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "items": []}
     controller.memory_runtime.profile_payload.assert_awaited_once_with(principal_id, PROJECT)
+
+
+def test_memory_log_internal_routes_validate_query_and_keep_scope(monkeypatch):
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    principal_id = "u-11111111111111111111111111111111"
+    runtime = types.SimpleNamespace(
+        principal_for_user_key=Mock(return_value=principal_id),
+        log_entries_payload=AsyncMock(
+            return_value={"status": "ok", "entries": [], "next_cursor": None}
+        ),
+        log_entry_payload=AsyncMock(
+            side_effect=(
+                {"status": "ok", "entry": {"memcell_id": "mc_1"}},
+                {"status": "not_found"},
+            )
+        ),
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    secret = "test-ui-controller-secret"
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    def headers(path: str) -> dict[str, str]:
+        return {
+            MEMORY_USER_KEY_HEADER: "avibe:local",
+            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                secret,
+                method="GET",
+                path=path,
+                user_key="avibe:local",
+            ),
+        }
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (
+                await client.get(
+                    "/internal/memory/log?cursor=abc&limit=3",
+                    headers=headers("/internal/memory/log"),
+                ),
+                await client.get(
+                    "/internal/memory/log/entry?memcell_id=mc_1",
+                    headers=headers("/internal/memory/log/entry"),
+                ),
+                await client.get(
+                    "/internal/memory/log/entry?memcell_id=mc_missing",
+                    headers=headers("/internal/memory/log/entry"),
+                ),
+                await client.get(
+                    "/internal/memory/log?limit=1&limit=2",
+                    headers=headers("/internal/memory/log"),
+                ),
+                await client.get(
+                    f"/internal/memory/log?cursor={'x' * 257}",
+                    headers=headers("/internal/memory/log"),
+                ),
+                await client.get(
+                    "/internal/memory/log/entry?memcell_id=../secret",
+                    headers=headers("/internal/memory/log/entry"),
+                ),
+            )
+
+    listed, detail, missing, duplicate, long_cursor, invalid_id = asyncio.run(_go())
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    assert missing.status_code == 404
+    assert missing.json() == {
+        "status": "failed",
+        "error": "memory_log_entry_not_found",
+    }
+    for response in (duplicate, long_cursor, invalid_id):
+        assert response.status_code == 400
+        assert response.json() == {"status": "failed", "error": "memory_invalid_input"}
+    runtime.log_entries_payload.assert_awaited_once_with(principal_id, PROJECT, "abc", 3)
+    assert runtime.log_entry_payload.await_args_list == [
+        ((principal_id, PROJECT, "mc_1"),),
+        ((principal_id, PROJECT, "mc_missing"),),
+    ]
 
 
 def test_memory_ui_reads_use_the_default_agent_session_project(tmp_path: Path):

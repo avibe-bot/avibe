@@ -10,8 +10,8 @@ from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import asdict, replace
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from config import paths
@@ -26,6 +26,8 @@ from core.memory.artifact import (
     get_memory_artifact_manager,
 )
 from core.memory.everos import EverOSPort
+from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
+from core.memory.everos_insight.recorder import clear_call_log, maintain_call_log
 from core.memory.module import MemoryModule
 from core.memory.process import (
     EverOSProcess,
@@ -51,6 +53,9 @@ logger = logging.getLogger(__name__)
 
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
+_CALL_LOG_RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
+_RECORDER_DISABLED = {"state": "disabled", "reason": None}
+_RECORDER_DEGRADED = {"state": "degraded", "reason": "writer_failures"}
 
 
 class MemoryStoreUnavailableError(RuntimeError):
@@ -78,6 +83,7 @@ def create_memory_runtime(
     process_factory: EverOSProcessFactory | None = None,
     effective_home: Path | None = None,
     processing_event: ProcessingEvent | None = None,
+    insight_reader: MemoryInsightReader | None = None,
 ) -> MemoryRuntime:
     """Construct Memory without allowing store failures to stop Avibe.
 
@@ -91,6 +97,7 @@ def create_memory_runtime(
         process_factory=process_factory,
         effective_home=effective_home,
         processing_event=processing_event,
+        insight_reader=insight_reader,
     )
 
 
@@ -106,6 +113,7 @@ class MemoryRuntime:
         process_factory: EverOSProcessFactory | None = None,
         effective_home: Path | None = None,
         processing_event: ProcessingEvent | None = None,
+        insight_reader: MemoryInsightReader | None = None,
     ) -> None:
         self._config = config
         self._effective_home = effective_home or paths.get_vibe_remote_dir()
@@ -129,6 +137,11 @@ class MemoryRuntime:
         self._store: MemoryStore | None = None
         self._module: MemoryModule | None = None
         self._store_error: Exception | None = None
+        self._insight_reader_override = insight_reader
+        self._insight_reader: MemoryInsightReader | None = None
+        self._call_log_retention_task: asyncio.Task[None] | None = None
+        self._process_records_calls = False
+        self._recorder_health: dict[str, str | None] = dict(_RECORDER_DISABLED)
         self._open_store(store)
 
     def _open_store(self, store: MemoryStore | None = None) -> bool:
@@ -165,6 +178,7 @@ class MemoryRuntime:
         self._store = opened
         self._module = module
         self._store_error = None
+        self._configure_insight_reader(self._config)
         self._artifact_manager.set_activation_coordinator(self._coordinate_artifact_activation)
         return True
 
@@ -197,7 +211,44 @@ class MemoryRuntime:
     def _socket_path(self) -> Path:
         return self._memory_dir / ".rt" / "everos.sock"
 
-    async def _reap_recorded_sidecar_if_unowned(self) -> None:
+    @property
+    def _call_log_db_path(self) -> Path:
+        return self._memory_dir / "call-log" / "call-log.db"
+
+    def _configure_insight_reader(self, config: MemoryConfig) -> None:
+        if self._insight_reader_override is not None:
+            self._insight_reader = self._insight_reader_override
+            return
+        if self._store is None:
+            self._insight_reader = None
+            return
+        base_urls = tuple(
+            value
+            for value in (
+                config.processing.llm.base_url,
+                config.processing.embedding.base_url,
+            )
+            if value
+        )
+        exact_redaction_values = tuple(
+            value
+            for value in (
+                config.processing.llm.api_key,
+                config.processing.embedding.api_key,
+            )
+            if value
+        )
+        self._insight_reader = MemoryInsightReader(
+            MemoryInsightPaths(
+                self._provider_root,
+                self._store.path,
+                self._call_log_db_path,
+            ),
+            provider_base_urls=base_urls,
+            exact_redaction_values=exact_redaction_values,
+        )
+
+    async def _reap_recorded_sidecar_if_unowned(self) -> bool:
         """Reap a previous run's sidecar when this runtime supervises none.
 
         ``EverOSProcess`` reaps a recorded orphan on its way to spawning a
@@ -237,7 +288,7 @@ class MemoryRuntime:
 
         async with self._reconcile_lock:
             if self._process is not None:
-                return
+                return False
             ownership = SidecarOwnership(
                 record_path=sidecar_record_path(self._memory_dir),
                 socket_path=self._socket_path,
@@ -247,6 +298,8 @@ class MemoryRuntime:
                 await ownership.reap()
             except Exception as exc:
                 logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
+                return False
+            return True
 
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
@@ -255,7 +308,12 @@ class MemoryRuntime:
         # sidecar is exactly the boot that may face one from the run before it.
         # Takes and releases the reconcile lock itself; the lock this method
         # acquires later is a separate, sequential acquisition.
-        await self._reap_recorded_sidecar_if_unowned()
+        if await self._reap_recorded_sidecar_if_unowned():
+            # Retention may run while artifact/store/credential preflight is
+            # failing, but only after recovery proved no previous recorder can
+            # still own the database. A recorder launch fences this task again
+            # through ``before_recorder_start`` below.
+            self._ensure_call_log_retention()
         if not self.available:
             # A transient store failure must not close Memory forever: every
             # reconciliation is another chance to open it.
@@ -291,6 +349,26 @@ class MemoryRuntime:
         resume_claims_on_failure: bool = True,
     ) -> dict[str, Any]:
         """Reconcile while both controller and module lifecycle locks are held."""
+
+        capture_revoked = (
+            self._config.diagnostics.log_provider_calls
+            and not config.diagnostics.log_provider_calls
+        )
+        if capture_revoked:
+            # Revocation precedes every candidate probe. A failed endpoint or
+            # artifact replacement may retain the old functional settings, but
+            # it must never retain a child that can append diagnostic payloads.
+            await self._stop_worker()
+            stopped_process = self._process is not None
+            if stopped_process:
+                await self._process.stop()
+                self._process = None
+            self._process_records_calls = False
+            self._config = replace(self._config, diagnostics=config.diagnostics)
+            self._configure_insight_reader(self._config)
+            self._reset_recorder_health_unless_corrupt()
+            if stopped_process:
+                self._ensure_call_log_retention()
 
         embedding_changed = not skip_embedding_guard and (
             config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
@@ -341,12 +419,18 @@ class MemoryRuntime:
 
         if not config.enabled:
             self._config = config
+            self._configure_insight_reader(config)
             self._provider = EverOSPort(self._socket_path)
             self.module._replace_provider(self._provider)
             await self._stop_worker()
-            if self._process is not None:
+            stopped_process = self._process is not None
+            if stopped_process:
                 await self._process.stop()
                 self._process = None
+            self._process_records_calls = False
+            self._reset_recorder_health_unless_corrupt()
+            if stopped_process:
+                self._ensure_call_log_retention()
             self._runtime_error = None
             if claims_paused:
                 self.module._worker.resume_claims()
@@ -389,8 +473,10 @@ class MemoryRuntime:
         if self._process is not None:
             await self._process.stop()
             self._process = None
+        self._process_records_calls = False
 
         self._config = config
+        self._configure_insight_reader(config)
         self._provider = candidate_provider
         self.module._replace_provider(self._provider)
         await self._apply_active_artifact_metadata()
@@ -403,18 +489,53 @@ class MemoryRuntime:
                 self.module._worker.resume_claims()
             return {"ok": False, "error": self._runtime_error}
 
-        self._process = self._process_factory(
+        records_calls = config.diagnostics.log_provider_calls
+        await self._stop_call_log_retention()
+        sidecar: EverOSProcessPort | None = None
+
+        async def before_recorder_start() -> None:
+            if sidecar is not self._process:
+                raise RuntimeError("stale EverOS recorder supervisor")
+            await self._stop_call_log_retention()
+
+        async def recorder_reaped() -> None:
+            if sidecar is not self._process:
+                return
+            self._process_records_calls = False
+            self._ensure_call_log_retention()
+
+        settings = _process_settings(
+            config,
+            call_log_db_path=self._call_log_db_path if records_calls else None,
+        )
+        sidecar = self._process_factory(
             python,
             provider_root=self._provider_root,
             effective_home=self._effective_home,
-            settings=_process_settings(config),
+            settings=settings,
             socket_path=self._socket_path,
             on_ready=self._on_sidecar_ready,
+            before_start=before_recorder_start if records_calls else None,
+            on_reaped=recorder_reaped if records_calls else None,
         )
-        started = await self._process.start()
+        self._process = sidecar
+        self._process_records_calls = records_calls
+        try:
+            started = await self._process.start()
+        except BaseException:
+            self._process_records_calls = False
+            self._ensure_call_log_retention()
+            raise
         if not started:
+            self._process_records_calls = False
+            self._ensure_call_log_retention()
             self._runtime_error = "memory_sidecar_unavailable"
             return {"ok": False, "error": self._runtime_error}
+        if records_calls:
+            self._recorder_health = dict(_RECORDER_DEGRADED)
+        else:
+            self._reset_recorder_health_unless_corrupt()
+            self._ensure_call_log_retention()
         self._runtime_error = None
         self.module._worker.resume_claims()
         self._ensure_worker()
@@ -426,6 +547,7 @@ class MemoryRuntime:
                 **asdict(MemoryStatus(state="error", error="memory_store_unavailable")),
                 # Unknown store contents must keep embedding changes fail-closed.
                 "data_exists": True,
+                "recorder": await self._recorder_status_payload(),
             }
         status = await self.module.status()
         # No ``profile_warning`` here: status is not scoped to a principal, so
@@ -434,7 +556,33 @@ class MemoryRuntime:
         return {
             **asdict(status),
             "data_exists": await asyncio.to_thread(self._data_exists),
+            "recorder": await self._recorder_status_payload(),
         }
+
+    async def _recorder_status_payload(self) -> dict[str, str | None]:
+        if self._recorder_health.get("reason") == "call_log_corrupt":
+            return dict(self._recorder_health)
+        if not (
+            self._config.enabled
+            and self._config.diagnostics.log_provider_calls
+        ):
+            return dict(self._recorder_health)
+        if not (
+            self._process_records_calls
+            and self._process is not None
+            and self._process.running
+        ):
+            return dict(_RECORDER_DEGRADED)
+        try:
+            health = await self._provider.recorder_health()
+        except Exception:
+            health = dict(_RECORDER_DEGRADED)
+        if health.get("state") == "disabled":
+            # Diagnostics was explicitly enabled. A live sidecar with its
+            # recorder off is a writer failure, not an intentional disable.
+            health = dict(_RECORDER_DEGRADED)
+        self._recorder_health = dict(health)
+        return dict(self._recorder_health)
 
     async def failure_log_payload(self) -> dict[str, Any]:
         if not self.available:
@@ -485,6 +633,48 @@ class MemoryRuntime:
                 project_id=project_id,
             )
         )
+
+    async def log_entries_payload(
+        self,
+        principal_id: str,
+        project_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        reader = self._insight_reader
+        if not self.available or reader is None:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        return await self._run_insight_read(
+            lambda: reader.list_entries((principal_id, project_id), cursor, limit)
+        )
+
+    async def log_entry_payload(
+        self,
+        principal_id: str,
+        project_id: str,
+        memcell_id: str,
+    ) -> dict[str, Any]:
+        reader = self._insight_reader
+        if not self.available or reader is None:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        return await self._run_insight_read(
+            lambda: reader.entry_detail((principal_id, project_id), memcell_id)
+        )
+
+    async def _run_insight_read(
+        self,
+        operation: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        async with self.module._lifecycle_lock:
+            task = asyncio.create_task(asyncio.to_thread(operation))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                try:
+                    await asyncio.shield(task)
+                except Exception:
+                    pass
+                raise
 
     async def clear(self) -> dict[str, Any]:
         if not self.available:
@@ -552,6 +742,8 @@ class MemoryRuntime:
                             "download_error": None,
                         }
                     self._process = None
+                    self._process_records_calls = False
+                    self._ensure_call_log_retention()
             self._artifact_installing = True
         try:
             payload = await asyncio.to_thread(self._artifact_manager.ensure, force=True)
@@ -579,12 +771,13 @@ class MemoryRuntime:
         }
 
     async def close(self) -> None:
-        if not self.available:
-            return
-        await self._stop_worker()
+        if self.available:
+            await self._stop_worker()
         if self._process is not None:
             await self._process.stop()
             self._process = None
+        self._process_records_calls = False
+        await self._stop_call_log_retention()
         self._artifact_manager.set_activation_coordinator(None)
 
     async def _apply_active_artifact_metadata(self) -> None:
@@ -696,6 +889,7 @@ class MemoryRuntime:
                     if self._process is not None:
                         await self._process.stop()
                         self._process = None
+                    self._process_records_calls = False
                     if root_state.exists:
                         meta = await asyncio.to_thread(self._store.get_meta)
                         if meta is None:
@@ -747,12 +941,22 @@ class MemoryRuntime:
         if self._process is not None:
             await self._process.stop()
             self._process = None
+        self._process_records_calls = False
+        await self._stop_call_log_retention()
+        await asyncio.to_thread(clear_call_log, self._call_log_db_path)
+        self._recorder_health = dict(_RECORDER_DISABLED)
 
     async def _on_sidecar_ready(self) -> None:
         """Resume capture when a supervised child recovers after a failed boot."""
 
         if not self._config.enabled:
             return
+        if self._config.diagnostics.log_provider_calls:
+            self._process_records_calls = True
+            await self._stop_call_log_retention()
+        else:
+            self._process_records_calls = False
+            self._ensure_call_log_retention()
         self._runtime_error = None
         self.module._worker.resume_claims()
         self._ensure_worker()
@@ -818,6 +1022,89 @@ class MemoryRuntime:
         except asyncio.CancelledError:
             pass
 
+    def _ensure_call_log_retention(self) -> None:
+        task = self._call_log_retention_task
+        if (
+            self._process_records_calls
+            or self._recorder_health.get("reason") == "call_log_corrupt"
+            or not self._call_log_exists()
+        ):
+            return
+        if task is not None and not task.done():
+            return
+        self._call_log_retention_task = asyncio.create_task(
+            self._call_log_retention_loop(),
+            name="memory-call-log-retention",
+        )
+
+    async def _stop_call_log_retention(self) -> None:
+        task = self._call_log_retention_task
+        self._call_log_retention_task = None
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _call_log_retention_loop(self) -> None:
+        current = asyncio.current_task()
+        try:
+            while True:
+                should_continue, reason = await self._maintain_call_log_once()
+                if not should_continue:
+                    return
+                if reason is not None:
+                    self._recorder_health = {"state": "degraded", "reason": reason}
+                    if reason == "call_log_corrupt":
+                        return
+                elif self._recorder_health.get("reason") != "call_log_corrupt":
+                    self._recorder_health = dict(_RECORDER_DISABLED)
+                await asyncio.sleep(_CALL_LOG_RETENTION_INTERVAL_SECONDS)
+        finally:
+            if self._call_log_retention_task is current:
+                self._call_log_retention_task = None
+
+    async def _maintain_call_log_once(self) -> tuple[bool, str | None]:
+        async with self._reconcile_lock:
+            if self._process_records_calls or not self._call_log_exists():
+                return False, None
+            if self._module is None:
+                return True, await self._run_call_log_maintenance()
+            async with self.module._lifecycle_lock:
+                if self._process_records_calls or not self._call_log_exists():
+                    return False, None
+                return True, await self._run_call_log_maintenance()
+
+    async def _run_call_log_maintenance(self) -> str | None:
+        task = asyncio.create_task(
+            asyncio.to_thread(maintain_call_log, self._call_log_db_path)
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(task)
+            except Exception:
+                pass
+            raise
+        except Exception:
+            return "writer_failures"
+
+    def _call_log_exists(self) -> bool:
+        try:
+            self._call_log_db_path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return True
+
+    def _reset_recorder_health_unless_corrupt(self) -> None:
+        if self._recorder_health.get("reason") != "call_log_corrupt":
+            self._recorder_health = dict(_RECORDER_DISABLED)
+
     async def _drain_loop(self) -> None:
         while self._config.enabled:
             try:
@@ -830,7 +1117,7 @@ class MemoryRuntime:
             await asyncio.sleep(1.0)
 
     def _data_exists(self) -> bool:
-        """Return a conservative status projection of provider/queue state."""
+        """Return a conservative status projection of vector-bearing state."""
 
         try:
             return self._provider_data_exists_strict()
@@ -923,8 +1210,15 @@ def _same_memory_configuration(current: MemoryConfig, candidate: MemoryConfig) -
     )
 
 
-def _process_settings(config: MemoryConfig) -> EverOSProcessSettings:
-    return EverOSProcessSettings(**_provider_kwargs(config))
+def _process_settings(
+    config: MemoryConfig,
+    *,
+    call_log_db_path: Path | None = None,
+) -> EverOSProcessSettings:
+    return EverOSProcessSettings(
+        **_provider_kwargs(config),
+        call_log_db_path=call_log_db_path,
+    )
 
 
 def _runtime_error_for_status(status: dict[str, Any]) -> str:

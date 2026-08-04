@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -11,7 +12,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -46,6 +49,7 @@ from core.memory.process import (
     _snapshot_owned_processes,
 )
 from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
+from core.memory.everos_insight.recorder import initialize_call_log
 from core.memory.store import MemoryStore
 from core.memory.types import (
     MemoryItem,
@@ -57,6 +61,7 @@ from core.memory.types import (
 from config.v2_config import (
     AgentsConfig,
     MemoryConfig,
+    MemoryDiagnosticsConfig,
     MemoryEndpointConfig,
     MemoryProcessingConfig,
     RuntimeConfig,
@@ -990,6 +995,65 @@ def test_recorded_orphan_recovery_runs_on_boots_that_never_launch_a_sidecar(
     ]
 
 
+def test_store_reopen_failure_maintains_call_log_after_orphan_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    maintained = threading.Event()
+
+    def maintain(path: Path) -> None:
+        assert path == db_path
+        maintained.set()
+
+    monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
+    _recording_ownership(monkeypatch)
+    config = MemoryConfig(enabled=True)
+
+    async def run() -> None:
+        runtime = MemoryRuntime(config, effective_home=tmp_path)
+        runtime._module = None
+        monkeypatch.setattr(runtime, "_open_store", lambda: False)
+
+        assert await runtime.reconcile(config) == {
+            "ok": False,
+            "error": "memory_store_unavailable",
+        }
+        assert await asyncio.to_thread(maintained.wait, 1)
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_store_reopen_failure_does_not_maintain_call_log_beside_unreaped_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    _recording_ownership(monkeypatch, failure=RuntimeError("orphan still owns call log"))
+    config = MemoryConfig(enabled=True)
+
+    async def run() -> None:
+        runtime = MemoryRuntime(config, effective_home=tmp_path)
+        runtime._module = None
+        monkeypatch.setattr(runtime, "_open_store", lambda: False)
+
+        assert await runtime.reconcile(config) == {
+            "ok": False,
+            "error": "memory_store_unavailable",
+        }
+        assert runtime._call_log_retention_task is None
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_disabled_boot_retires_the_record_of_a_sidecar_that_is_already_gone(
     tmp_path: Path,
 ) -> None:
@@ -1189,6 +1253,22 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
     assert "embedding-secret" not in generated
     assert "rerank" in generated
     assert str(tmp_path / "attachments" / "avibe") in generated
+    assert "AVIBE_MEMORY_CALL_LOG_DB" not in environment
+
+
+def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_path: Path) -> None:
+    call_log = tmp_path / "memory" / "call-log" / "call-log.db"
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=replace(_settings(), call_log_db_path=call_log),
+    )
+
+    process._prepare_owned_directories()
+    environment = process._child_environment()
+
+    assert environment["AVIBE_MEMORY_CALL_LOG_DB"] == str(call_log)
+    assert stat.S_IMODE(call_log.parent.stat().st_mode) == 0o700
 
 
 def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_path: Path) -> None:
@@ -2270,6 +2350,453 @@ def test_runtime_preflight_failure_keeps_existing_sidecar_running(monkeypatch) -
     asyncio.run(run())
 
 
+def test_runtime_passes_call_log_only_to_the_supervised_recorder_child(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+
+        assert len(factory.created) == 2
+        probe, supervised = factory.created
+        assert probe.settings.call_log_db_path is None
+        assert supervised.settings.call_log_db_path == (
+            tmp_path / "memory" / "call-log" / "call-log.db"
+        )
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_disabling_diagnostics_stops_recorder_before_fallible_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    class _Process(FakeEverOSProcess):
+        async def processing_healthy(self) -> bool:
+            return self.settings is not None and self.settings.llm_model != "unhealthy"
+
+    factory = FakeEverOSProcessFactory(template=_Process)
+    initial = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
+    )
+    rejected = replace(
+        initial,
+        processing=replace(
+            initial.processing,
+            llm=replace(initial.processing.llm, model="unhealthy"),
+        ),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=False),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            initial,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(initial))["ok"] is True
+        recorder_child = factory.supervised[0]
+
+        assert await runtime.reconcile(rejected) == {
+            "ok": False,
+            "error": "memory_processing_failed",
+        }
+        assert recorder_child.stopped is True
+        assert runtime._process is None
+        assert runtime._config.processing == initial.processing
+        assert runtime._config.diagnostics.log_provider_calls is False
+        assert factory.created[-1].settings.call_log_db_path is None
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_recorder_corruption_stays_degraded_until_clear(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=FakeEverOSProcessFactory(),
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+        calls = 0
+
+        async def recorder_health() -> dict[str, str | None]:
+            nonlocal calls
+            calls += 1
+            return (
+                {"state": "degraded", "reason": "call_log_corrupt"}
+                if calls == 1
+                else {"state": "active", "reason": None}
+            )
+
+        async def ready_status():
+            return memory_runtime.MemoryStatus(state="ready")
+
+        monkeypatch.setattr(runtime._provider, "recorder_health", recorder_health)
+        monkeypatch.setattr(runtime.module, "status", ready_status)
+
+        first = await runtime.status_payload()
+        second = await runtime.status_payload()
+
+        assert first["recorder"] == {
+            "state": "degraded",
+            "reason": "call_log_corrupt",
+        }
+        assert second["recorder"] == first["recorder"]
+        assert calls == 1
+        await runtime._stop_sidecar_for_clear()
+        assert runtime._recorder_health == {"state": "disabled", "reason": None}
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_live_sidecar_with_disabled_recorder_is_reported_as_writer_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=FakeEverOSProcessFactory(),
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+
+        async def recorder_health() -> dict[str, str | None]:
+            return {"state": "disabled", "reason": None}
+
+        async def ready_status() -> memory_runtime.MemoryStatus:
+            return memory_runtime.MemoryStatus(state="ready")
+
+        monkeypatch.setattr(runtime._provider, "recorder_health", recorder_health)
+        monkeypatch.setattr(runtime.module, "status", ready_status)
+        assert (await runtime.status_payload())["recorder"] == {
+            "state": "degraded",
+            "reason": "writer_failures",
+        }
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_recorder_reap_hands_call_log_to_host_until_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A crashed recorder has no DB-owner overlap with its supervised restart."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    maintenance_entered = threading.Event()
+    maintenance_release = threading.Event()
+    maintenance_finished = threading.Event()
+
+    def maintain(path: Path) -> None:
+        assert path == db_path
+        maintenance_entered.set()
+        maintenance_release.wait(timeout=2)
+        maintenance_finished.set()
+        return None
+
+    monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+        db_path.parent.mkdir(parents=True, mode=0o700)
+        initialize_call_log(db_path)
+        recorder = factory.supervised[0]
+        assert recorder.on_reaped is not None
+
+        # This is the supervisor's post-reap notification at the beginning of
+        # its crash-backoff window, before it schedules the restart attempt.
+        recorder._running = False
+        result = recorder.on_reaped()
+        if inspect.isawaitable(result):
+            await result
+        assert await asyncio.to_thread(maintenance_entered.wait, 1)
+        assert runtime._process_records_calls is False
+
+        restarting = asyncio.create_task(recorder.start())
+        await asyncio.sleep(0)
+        assert not restarting.done()
+        assert not maintenance_finished.is_set()
+
+        maintenance_release.set()
+        assert await asyncio.wait_for(restarting, timeout=1)
+        assert maintenance_finished.is_set()
+        assert runtime._process_records_calls is True
+        assert runtime._call_log_retention_task is None
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_stale_recorder_supervisor_cannot_release_host_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+        stale = factory.supervised[0]
+        assert stale.before_start is not None
+        runtime._process = FakeEverOSProcess()
+        with pytest.raises(RuntimeError, match="stale EverOS recorder supervisor"):
+            await stale.before_start()
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_same_config_reconcile_restarts_failed_host_retention(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    first_maintained = threading.Event()
+    second_maintained = threading.Event()
+    maintenance_lock = threading.Lock()
+    maintenance_calls = 0
+    active_maintenance = 0
+    max_active_maintenance = 0
+
+    def maintain(path: Path) -> str | None:
+        nonlocal maintenance_calls, active_maintenance, max_active_maintenance
+        assert path == db_path
+        with maintenance_lock:
+            maintenance_calls += 1
+            call = maintenance_calls
+            active_maintenance += 1
+            max_active_maintenance = max(max_active_maintenance, active_maintenance)
+        try:
+            if call == 1:
+                first_maintained.set()
+                return "writer_failures"
+            second_maintained.set()
+            return None
+        finally:
+            with maintenance_lock:
+                active_maintenance -= 1
+
+    monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=False),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=FakeEverOSProcessFactory(),
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+        db_path.parent.mkdir(parents=True, mode=0o700)
+        initialize_call_log(db_path)
+        runtime._ensure_call_log_retention()
+        assert await asyncio.to_thread(first_maintained.wait, 1)
+        for _ in range(20):
+            if runtime._recorder_health["reason"] == "writer_failures":
+                break
+            await asyncio.sleep(0)
+        assert runtime._recorder_health["reason"] == "writer_failures"
+        old_task = runtime._call_log_retention_task
+        assert old_task is not None
+        assert not old_task.done()
+
+        assert (await asyncio.wait_for(runtime.reconcile(config), timeout=1))["ok"] is True
+        assert await asyncio.to_thread(second_maintained.wait, 1)
+        new_task = runtime._call_log_retention_task
+        assert old_task.done()
+        assert new_task is not None
+        assert new_task is not old_task
+        assert not new_task.done()
+        assert maintenance_calls == 2
+        assert max_active_maintenance == 1
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    maintained = threading.Event()
+    release_maintenance = threading.Event()
+    maintenance_calls = 0
+
+    def maintain(path: Path) -> str:
+        nonlocal maintenance_calls
+        assert path == db_path
+        maintenance_calls += 1
+        maintained.set()
+        assert release_maintenance.wait(timeout=2)
+        return "call_log_corrupt"
+
+    monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
+
+    async def run() -> None:
+        runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+        assert await runtime.reconcile(MemoryConfig()) == {
+            "ok": True,
+            "state": "disabled",
+        }
+        assert await asyncio.to_thread(maintained.wait, 1)
+        task = runtime._call_log_retention_task
+        assert task is not None
+        assert not task.done()
+        release_maintenance.set()
+        for _ in range(20):
+            if runtime._recorder_health["reason"] == "call_log_corrupt":
+                break
+            await asyncio.sleep(0)
+        payload = await runtime.status_payload()
+        assert payload["recorder"] == {
+            "state": "degraded",
+            "reason": "call_log_corrupt",
+        }
+        await asyncio.wait_for(asyncio.shield(task), timeout=1)
+        assert maintenance_calls == 1
+        assert runtime._call_log_retention_task is None
+        runtime._ensure_call_log_retention()
+        assert runtime._call_log_retention_task is None
+        assert maintenance_calls == 1
+        await runtime.close()
+        assert task.done()
+
+    asyncio.run(run())
+
+
+def test_runtime_close_waits_for_active_call_log_maintenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def maintain(_path: Path) -> None:
+        entered.set()
+        release.wait(timeout=2)
+        return None
+
+    monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
+
+    async def run() -> None:
+        runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+        await runtime.reconcile(MemoryConfig())
+        assert await asyncio.to_thread(entered.wait, 1)
+
+        closing = asyncio.create_task(runtime.close())
+        await asyncio.sleep(0)
+        assert not closing.done()
+        release.set()
+        await asyncio.wait_for(closing, timeout=1)
+
+    asyncio.run(run())
+
+
+def test_clear_stops_call_log_maintenance_and_removes_only_owned_database_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    unexpected = db_path.parent / "keep.txt"
+    unexpected.write_text("keep", encoding="utf-8")
+    os.chmod(unexpected, 0o600)
+
+    async def run() -> None:
+        runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+        await runtime._stop_sidecar_for_clear()
+
+        assert not db_path.exists()
+        assert unexpected.read_text(encoding="utf-8") == "keep"
+        assert runtime._recorder_health == {"state": "disabled", "reason": None}
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_generated_timezone_stays_with_existing_provider_root(tmp_path: Path) -> None:
     process = EverOSProcess(
         sys.executable,
@@ -2423,6 +2950,139 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
     # Status is not scoped to a principal, so it must not expose a field whose
     # only possible value is some other principal's last profile read.
     assert "profile_warning" not in payload
+
+
+def test_status_data_exists_ignores_an_empty_diagnostic_call_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+
+    async def run() -> None:
+        assert (await runtime.status_payload())["data_exists"] is False
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_builds_insight_reader_from_injected_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite")
+    config = MemoryConfig(
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                base_url="https://llm.example.test/v1",
+                api_key="opaque-llm-key",
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url="https://embed.example.test/v1",
+                api_key="opaque-embedding-key",
+            ),
+        )
+    )
+
+    runtime = MemoryRuntime(config, store=store, effective_home=tmp_path)
+
+    assert runtime._insight_reader is not None
+    assert runtime._insight_reader._paths.everos_root == tmp_path / "memory" / "everos-root"
+    assert runtime._insight_reader._paths.capture_db_path == store.path
+    assert runtime._insight_reader._paths.call_log_db_path == (
+        tmp_path / "memory" / "call-log" / "call-log.db"
+    )
+    assert runtime._insight_reader._provider_base_urls == (
+        "https://llm.example.test/v1",
+        "https://embed.example.test/v1",
+    )
+    assert set(runtime._insight_reader._exact_redaction_values) == {
+        "opaque-llm-key",
+        "opaque-embedding-key",
+    }
+
+
+def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    principal_id = "u-11111111111111111111111111111111"
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingReader:
+        def list_entries(self, scope, cursor, limit):
+            assert scope == (principal_id, PROJECT)
+            assert cursor == "cursor"
+            assert limit == 7
+            started.set()
+            assert release.wait(2)
+            return {"status": "ok", "entries": [], "next_cursor": None}
+
+    runtime = MemoryRuntime(
+        MemoryConfig(),
+        store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
+        effective_home=tmp_path,
+        insight_reader=BlockingReader(),
+    )
+
+    async def run() -> None:
+        reading = asyncio.create_task(
+            runtime.log_entries_payload(principal_id, PROJECT, "cursor", 7)
+        )
+        assert await asyncio.to_thread(started.wait, 2)
+        reading.cancel()
+        await asyncio.sleep(0)
+        assert runtime.module._lifecycle_lock.locked()
+        acquired = asyncio.Event()
+
+        async def wait_for_lifecycle() -> None:
+            async with runtime.module._lifecycle_lock:
+                acquired.set()
+
+        waiter = asyncio.create_task(wait_for_lifecycle())
+        await asyncio.sleep(0)
+        assert not acquired.is_set()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        await asyncio.wait_for(acquired.wait(), timeout=1)
+        await waiter
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_forwards_scoped_insight_detail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    principal_id = "u-11111111111111111111111111111111"
+    calls: list[tuple[tuple[str, str], str]] = []
+
+    class Reader:
+        def entry_detail(self, scope, memcell_id):
+            calls.append((scope, memcell_id))
+            return {"status": "ok", "entry": {"memcell_id": memcell_id}}
+
+    runtime = MemoryRuntime(
+        MemoryConfig(),
+        store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
+        effective_home=tmp_path,
+        insight_reader=Reader(),
+    )
+
+    payload = asyncio.run(runtime.log_entry_payload(principal_id, PROJECT, "mc_1"))
+
+    assert payload == {"status": "ok", "entry": {"memcell_id": "mc_1"}}
+    assert calls == [((principal_id, PROJECT), "mc_1")]
 
 
 def _processing_config() -> MemoryProcessingConfig:
@@ -3750,6 +4410,121 @@ def _late_helper_disclosures(process: EverOSProcess) -> dict[int, dict]:
             "environ": {"EVEROS_ROOT": str(process.provider_root)},
         }
     }
+
+
+def test_sidecar_notifies_reaped_callback_only_after_tree_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The runtime handoff begins after the exited child's tree is reaped."""
+
+    events: list[str] = []
+
+    async def on_reaped() -> None:
+        assert process._process is None
+        events.append("reaped")
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        on_reaped=on_reaped,
+    )
+    child = _ExitedChild()
+    _supervising(process, child)
+    process._desired_running = False
+
+    async def terminate(*_args, **_kwargs) -> None:
+        events.append("tree-cleaned")
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+    monkeypatch.setattr(process._ownership, "retire_if_group_is_clear", lambda _group: events.append("retired"))
+
+    asyncio.run(process._watch_child(child))
+
+    assert events == ["tree-cleaned", "retired", "reaped"]
+
+
+def test_sidecar_start_failure_after_host_handoff_notifies_reaped(tmp_path: Path) -> None:
+    """A pre-spawn launch failure leaves the host free to reclaim the call log."""
+
+    reaped = 0
+
+    async def on_reaped() -> None:
+        nonlocal reaped
+        reaped += 1
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        on_reaped=on_reaped,
+    )
+    process._consecutive_failures = 4
+    process._validate_launch_inputs = lambda: (_ for _ in ()).throw(RuntimeError("launch rejected"))
+
+    assert asyncio.run(process.start()) is False
+    assert reaped == 1
+    assert process._restart_task is None
+
+
+def test_sidecar_restart_releases_process_lock_while_host_handoff_waits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Stop wins while a restart waits for the controller-owned call-log lock."""
+
+    callback_entered = asyncio.Event()
+    release_callback = asyncio.Event()
+    launches = 0
+
+    async def before_start() -> None:
+        callback_entered.set()
+        await release_callback.wait()
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        before_start=before_start,
+    )
+    process._desired_running = True
+
+    async def start_locked() -> bool:
+        nonlocal launches
+        launches += 1
+        return True
+
+    monkeypatch.setattr(process, "_start_locked", start_locked)
+
+    async def run() -> None:
+        restarting = asyncio.create_task(process._restart_after(0))
+        await asyncio.wait_for(callback_entered.wait(), timeout=1)
+
+        # This models a callback already in flight when Stop begins. It must
+        # not retain the process lock while waiting on controller ownership.
+        await asyncio.wait_for(process.stop(), timeout=1)
+        release_callback.set()
+        await asyncio.wait_for(restarting, timeout=1)
+
+    asyncio.run(run())
+    assert launches == 0
+
+
+def test_fake_sidecar_failed_start_notifies_reaped_for_runtime_handoff() -> None:
+    reaped = 0
+
+    async def on_reaped() -> None:
+        nonlocal reaped
+        reaped += 1
+
+    process = FakeEverOSProcess(
+        start_results=deque([False]),
+        on_reaped=on_reaped,
+    )
+
+    assert asyncio.run(process.start()) is False
+    assert reaped == 1
 
 
 @pytest.mark.parametrize("group_holds_a_survivor", [True, False])
