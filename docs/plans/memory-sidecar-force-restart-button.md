@@ -1,12 +1,13 @@
-# Add a forced sidecar restart action to Memory settings (rev12)
+# Add a forced sidecar restart action to Memory settings (rev13)
 
-> Rev12 keeps one public recovery action and a focused set of internal fixes:
+> Rev13 keeps one public recovery action and a focused set of internal fixes:
 > replayable configuration, config-wide write serialization, restart-specific
 > and lifecycle-intent admission, generation-fenced ready activation, complete
 > supervisor quiescing, bounded orphan recovery, disk/live replay convergence,
 > marker-free replay promotion, store-thread settlement, worker lease rotation,
 > locked clear-marker recovery, bounded readiness, supervisor callback rebinding,
-> authoritative controller/UI settings refresh, and queued-read exclusion.
+> authoritative controller/UI settings refresh, queued-operation exclusion, and
+> disabled/fail-closed replay handling.
 > Timed-out work remains owned until it is either joined or proven unable to
 > mutate state. It does not add a lifecycle coordinator, explicit state machine,
 > provider/store port, or frontend DOM test framework.
@@ -159,8 +160,12 @@ itself, exclude a Memory PATCH or an unrelated `/api/config` save running in the
 UI process. Because every `V2Config.save()` replaces the complete JSON document,
 Memory-only serialization is insufficient.
 
-- Before calling `internal_client.memory_restart()`, the restart route checks
-  `_memory_settings_write_lock()`. If it is already held, return
+- Before calling `internal_client.memory_restart()`, the restart route checks a
+  synchronous `_memory_settings_write_pending_count` and
+  `_memory_settings_write_lock()`. Every Memory PATCH increments the counter
+  before its first await and decrements it in `finally` only after its complete
+  lock/save/reconcile/rollback path exits, so it covers the current owner and
+  every queued writer. If the count is nonzero or the lock is held, return
   `memory_restart_busy` immediately rather than joining its waiter queue.
 - If it is free, acquire it immediately and hold it across the complete internal
   restart request and response. Every Memory PATCH already holds this same lock
@@ -268,10 +273,17 @@ an abandoned restart, and a user retry can enqueue a second one.
   current owner and every queued operation, including the interval between clear
   recovery and a search/profile provider call. Nested locked helpers reuse the
   outer intent; no code reads private `asyncio.Lock` waiter state.
+- Add a synchronous `_reconcile_pending_count` to `MemoryRuntime`. Every
+  non-restart operation that can acquire `_reconcile_lock`, including persisted
+  and runtime-internal reconcile and artifact activation, increments it before
+  its first await and decrements it in `finally` only after its entire public
+  operation exits, including artifact installation's unlocked `ensure()`
+  interval. Nested locked helpers reuse the outer intent.
 - Before any await, `restart()` checks `_clear_pending_count`,
-  `module.lifecycle_busy`, `_reconcile_lock`, and `module._lifecycle_lock`. If a
-  complete Runtime Clear or any module lifecycle operation is active/queued, or
-  either lock is held, return
+  `_reconcile_pending_count`, `module.lifecycle_busy`, `_reconcile_lock`, and
+  `module._lifecycle_lock`. If a complete Runtime Clear, reconcile, artifact
+  activation, or module lifecycle operation is active/queued, or either lock is
+  held, return
   `{ok: false, error: 'memory_restart_busy'}` without changing the process,
   claims, or worker.
 - When both are free, acquire them in the established order in the same event
@@ -354,10 +366,10 @@ an abandoned restart, and a user retry can enqueue a second one.
   `memory_restart_failed`, starts no background task, ends the UI spinner, and
   displays a localized reason.
 
-No additional restart lock or queue is needed. The existing UI settings lock,
-config-wide write transaction, installer flag, restart-ownership boolean,
-Clear-intent counter, module lifecycle-intent counter, and controller/module
-lifecycle locks define single-flight ownership.
+No additional restart lock or queue is needed. The UI settings-writer intent
+counter and lock, config-wide write transaction, installer flag,
+restart-ownership boolean, Clear/reconcile/module lifecycle-intent counters, and
+controller/module lifecycle locks define single-flight ownership.
 
 ### 5. Forced replacement and lease handoff
 
@@ -382,7 +394,11 @@ finished.
 
 The locked sequence is fixed:
 
-1. Validate store, artifact, and enabled state; recover an interrupted clear.
+1. Snapshot the last-good `_restart_config` and recover an interrupted clear.
+   Validate store and artifact availability only when that replay is enabled.
+   Do not reject solely because the persisted candidate is enabled while the
+   replay is disabled; the replay state is authoritative after step 8
+   convergence and needs no launch prerequisites.
 2. Before touching the worker, call a non-awaiting, idempotent supervisor handoff
    fence on the old `EverOSProcess`. It sets `_desired_running=false`, marks ready
    callbacks quiesced, and captures the exact restart, watcher, and monitor task
@@ -423,9 +439,18 @@ The locked sequence is fixed:
    convergence succeeds. Ordinary persisted reconcile follows the same rule:
    settlement rebases its private in-flight candidate from the committed block,
    so successful live and `_restart_config` state cannot retain the old marker.
+   If the exact converged replay block is disabled, install that disabled block
+   into runtime state, proceed through bounded old-process stop, and record the
+   successful terminal state `{ok: true, state: 'disabled'}`. The controller
+   wrapper installs the same exact committed block into
+   `Controller.config.memory`, and the UI's mandatory success reload switches to
+   the authoritative disabled settings. A stop error remains fail-closed and
+   cannot report disabled success.
 9. Stop the old process. Do not discard its supervisor or start another child
    until its process tree is confirmed reaped.
-10. Create a process from `_restart_config` bound to the lifecycle generation
+10. If the converged replay is disabled, return the recorded disabled state
+   without creating a replacement child, activation task, or worker. Otherwise,
+   create a process from `_restart_config` bound to the lifecycle generation
    captured when restart entered its critical section. Its explicit initial
    `start()` suppresses the automatic ready callback: while restart still owns
    `_reconcile_lock -> module._lifecycle_lock`, runtime itself resumes claims,
@@ -484,17 +509,16 @@ Every exit after claims are fenced must end in one of these states:
   recovery, rotate the lease, or touch process ownership until the thread has
   returned and its terminal result has been consumed.
 - **Failure before `old_process.stop()` is invoked:** the old supervisor still
-  owns its child but is quiesced. While both runtime lifecycle locks remain
-  owned, re-arm supervision and replace its ready callback with one bound to the
-  current supervisor object and the lifecycle generation that owns this failure
-  recovery; when invoked, that callback captures the child identity that actually
-  reached ready. Never reuse the generation captured when the supervisor object
-  was originally created. If its child is still running, reactivate with the new
-  lease owner, resume claims and the worker, and return the specific failure. If
-  the child exited during the handoff, keep claims fenced and let the re-armed
-  supervisor start a child; only the newly bound current-generation activation
-  task may resume the worker after taking both lifecycle locks. This branch
-  applies only after the previous worker, store, and process-owner tasks are
+  owns its child but is quiesced. A live PID is not evidence that the UDS health
+  endpoint is ready, so never resume claims or the worker from `running` alone.
+  If it remains running, retain the quiesced supervisor, keep claims and the
+  worker fenced, and return the specific failure; a retry rejoins ownership and
+  attempts replacement again. Never reuse the supervisor's
+  construction-generation callback. If the child exited, it may be re-armed for
+  automatic start with a callback rebound to the current supervisor object and
+  lifecycle generation, but claims stay fenced until that newly bound activation
+  task takes both lifecycle locks and proves the replacement ready. This branch
+  applies only after all previous worker, store, and process-owner tasks are
   confirmed done; it never attempts reactivation beside a retained task.
 - **`old_process.stop()` was invoked:** `EverOSProcess.stop()` sets
   `_desired_running=false` before termination and cancels scheduled restart.
@@ -551,14 +575,17 @@ exceptions use the transport-only `memory_restart_failed`.
    caller.
 2. `core/memory/runtime.py`: add `_restart_config`,
    `_persisted_memory_snapshot`, `_explicit_restart_active`,
-   `_clear_pending_count`, lifecycle generation and a retained ready activation
-   task, and fail-fast `restart()`; refresh the persisted snapshot after every
-   successful runtime-owned V2 mutation and rebase a successfully reconciled
+   `_clear_pending_count`, `_reconcile_pending_count`, lifecycle generation and
+   a retained ready activation task, and fail-fast `restart()`; refresh the
+   persisted snapshot after every successful runtime-owned V2 mutation and
+   rebase a successfully reconciled
    live/replay candidate from marker settlement's exact return; conditionally
    converge disk to replay before launch; retain worker/store tasks that outlive
    cancellation; reject restart while artifact installation is active; make only
-   explicit restart admission fail fast. Add `reconcile_persisted()` to return
-   the exact successful candidate alongside the transport result while ordinary
+   explicit restart admission fail fast. Make `restart()` return its transport
+   result plus the exact applied replay config on ready/disabled success and no
+   config on busy/failure. Add `reconcile_persisted()` to return the exact
+   successful candidate alongside the transport result while ordinary
    `reconcile()` preserves its dict contract.
    `Controller.reconcile_memory()` installs that returned candidate into
    `Controller.config.memory`; post-Clear and artifact-internal reconciles cannot
@@ -576,15 +603,19 @@ exceptions use the transport-only `memory_restart_failed`.
    from active cleanup owners with narrow phase flags, hard-cap the complete
    readiness operation, rebind re-armed ready callbacks to the current
    generation, and support callback-suppressed explicit start.
-6. `core/internal_server.py`: add `POST /internal/memory/restart`. Missing runtime
-   returns `memory_runtime_missing`; unhandled exceptions map to
+6. `core/controller.py` / `core/internal_server.py`: add a controller-owned
+   restart wrapper and `POST /internal/memory/restart`. On ready or disabled
+   success, install a deep copy of the exact applied config returned by Runtime
+   into `Controller.config.memory`, then expose only the transport response.
+   Missing runtime returns `memory_runtime_missing`; unhandled exceptions map to
    `memory_restart_failed`, not `memory_reconcile_failed`.
 7. `vibe/internal_client.py`: add `memory_restart()` with a deadline above the
    complete restart lifecycle budget; retain and join the shielded request task
    after a reporting timeout.
 8. `vibe/ui_memory_routes.py`: keep `/api/memory/runtime/restart`, acquire the
-   Memory settings write lock across the internal call, and preserve same-origin
-   validation.
+   Memory settings write lock across the internal call, use a synchronous
+   pending-writer count to reject restart behind active or queued settings
+   saves, and preserve same-origin validation.
 9. `core/memory/types.py` and frontend `errors` translations: add transport-only
    `memory_restart_failed` and `memory_restart_busy`; add no SQLite schema field.
 
@@ -630,8 +661,11 @@ exceptions use the transport-only `memory_restart_failed`.
     the uncontended operation remains inside both lifecycle locks and
     conditionally replaces the expected persisted C1 Memory block with C0 while
     preserving unrelated fields. A fresh disk load must equal the live runtime;
-    an unexpected Memory C2 fails before process mutation. A post-Clear internal
-    reconcile cannot overwrite the persisted snapshot contract.
+    an unexpected Memory C2 fails before process mutation. If C0 is disabled,
+    convergence stops any retained old child without invoking the process
+    factory, start, activation, or worker; Runtime, Controller, disk, and the UI
+    reload all observe disabled. A post-Clear internal reconcile cannot
+    overwrite the persisted snapshot contract.
   - Pre-held reconcile/module locks and concurrent restart calls immediately
     return `memory_restart_busy`, create no waiters, and change no ownership.
     An installer paused inside unlocked `ensure(force=True)` also returns busy
@@ -640,6 +674,10 @@ exceptions use the transport-only `memory_restart_failed`.
     the owner's release/waiter-wakeup gap, `lifecycle_busy` remains true and
     restart returns busy without joining the read queue. After both reads finish,
     restart can acquire admission normally.
+    Hold one reconcile owner and queue a second non-restart reconcile; across
+    the owner's release/waiter-wakeup gap, `_reconcile_pending_count` remains
+    nonzero and restart returns busy without joining the queue. Each intent is
+    released on success, failure, and cancellation.
   - Clear started while `_explicit_restart_active` is true returns before
     `begin_clear()` and leaves no waiter or durable marker; the inverse ordering
     makes restart return busy. A search/profile call holding the same module lock
@@ -659,9 +697,11 @@ exceptions use the transport-only `memory_restart_failed`.
     and recovers.
   - If the old child exits during the five-second drain grace, its supervisor is
     already quiesced: no automatic restart can schedule ready activation, resume
-    claims, or replace `_worker_task`. Pre-stop failure re-arms that supervisor
-    with a callback bound to the current lifecycle generation and resumes work
-    only after a live/ready child is established; the callback from the
+    claims, or replace `_worker_task`. Pre-stop failure beside an alive but
+    unhealthy child retains the quiesced supervisor and keeps claims and the
+    worker fenced; `.running` alone never reactivates it. A child that exited may
+    re-arm with a callback bound to the current lifecycle generation and resume
+    work only after a replacement proves ready; the callback from the
     supervisor's construction generation is never reused.
   - An automatic restart already inside `_start_locked()` is retained while
     claims are paused. It either settles within the complete start bound and its
@@ -710,6 +750,10 @@ exceptions use the transport-only `memory_restart_failed`.
 - `tests/test_ui_memory_routes.py`: new client path, internal unavailable,
   cross-origin rejection, restart/settings serialization, timed-out settlement
   ownership, unrelated-field retention, and failed-Memory-C1 convergence to C0.
+  Hold one settings writer and queue a second; through the owner's
+  release/waiter-wakeup gap, the synchronous pending count makes restart return
+  busy without acquiring the lock. After every writer exits, restart may acquire
+  admission normally.
 - `tests/test_v2_config.py` / config route tests: a generic non-Memory save in a
   second process waits before loading while settlement owns the config
   transaction, then preserves both its C1 change and the cleared marker. Saving
