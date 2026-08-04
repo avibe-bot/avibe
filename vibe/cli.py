@@ -5240,19 +5240,34 @@ def _command_definition_spawn_cwd(
     invocation directory for every policy rather than only for ``existing``: a policy
     change is not a request to move the command, and re-stamping the directory the
     UPDATE happened to run from is the same silent relocation in a different lane.
-    ``stored_cwd`` defaults to ``None``, so ``task add`` -- which has nothing stored
-    yet -- resolves exactly as it did before.
+    It outranks ``session_cwd`` for the same reason. The two are equal wherever
+    ``--cwd`` set both, and differ exactly where the user separated them -- a bound
+    command moved to B while its Session keeps A -- so reading the Session half first
+    let a later ``--create-session*`` carry A forward onto the command and move it
+    back. ``stored_cwd`` defaults to ``None``, so ``task add`` -- which has nothing
+    stored yet -- resolves exactly as it did before.
     """
 
     if not has_command:
         return session_cwd
     raw = (explicit_cwd or "").strip()
-    if session_policy == "existing" and raw:
+    if raw:
+        # The flag is the command's answer wherever it arrives. A creating policy has
+        # already folded it into ``session_cwd`` -- same directory, both halves -- so
+        # resolving it again here returns the same path; an ``existing`` binding answers
+        # its Session question ``None`` on purpose, and this is the only place the flag
+        # can be picked up at all.
         return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+    if stored_cwd:
+        # Before ``session_cwd``, because the two can legitimately differ and only one of
+        # them is an answer to this question. Once ``--cwd`` moves a bound command to B
+        # while its Session keeps A, a later ``--create-session*`` carrying A forward
+        # resolved the command to A as well -- moving it back, with nothing in the edit
+        # asking to. Same rule as ``_resolve_command_only_cwd``'s and SCT-051's: only the
+        # explicit flag replaces a stored directory.
+        return stored_cwd
     if session_cwd:
         return session_cwd
-    if stored_cwd:
-        return stored_cwd
     if session_policy == "create_per_run":
         return os.getcwd()
     return None

@@ -356,4 +356,23 @@ Two findings, both taken, both about a claim rather than the code.
   the copy is where the claim lives. Folded into **SCT-055** rather than given its
   own ID: same invariant, same field.
 
-Scenario catalogue: SCT-050 – SCT-058.
+### Fifth review pass
+
+Two findings, both taken.
+
+- **A policy change pulled the command back to its Session's directory.** The
+  mirror image of SCT-053, in the last lane where one half was read as the other.
+  `--cwd` on a bound command moves it to B and leaves the Session on A — that
+  separation is the point of Issue 1 — and a later `--create-session*` carries A
+  forward as the *Session's* answer correctly, but `_command_definition_spawn_cwd`
+  read `session_cwd` before `stored_cwd` and so moved the command back. The two
+  are equal wherever `--cwd` set both and differ exactly where the user separated
+  them, so the stored command half now outranks the Session's, under the explicit
+  flag. **SCT-059.**
+- **`--cwd` still missing from `docs/COMMANDS*.md`.** My previous reply said that
+  file covers IM slash commands only. It also carries a `vibe task add` /
+  `vibe task update` option reference, so the flag belongs in both lists and in
+  both command-task explanations. Added, EN and ZH, pointing at `docs/CLI.md` for
+  the full rules.
+
+Scenario catalogue: SCT-050 – SCT-059.

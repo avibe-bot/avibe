@@ -656,3 +656,19 @@ scenarios:
     # blank. A ``create_once`` definition that had not reserved yet reserved there for the
     # same reason. Each half now carries forward from where that half is stored, which is
     # the rule SCT-053, SCT-056 and SCT-057 each enforce in one other lane.
+  - id: SCT-059
+    name: a policy change does not pull a command back to its Session's directory
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_retarget_does_not_pull_the_command_back_to_its_sessions_directory
+    # The mirror image of SCT-053, and the last lane where one half was read as the other.
+    # ``--cwd`` on a bound escalating command moves the command to B and leaves its
+    # Session on A -- that separation is what SCT-050 exists for. A later
+    # ``--create-session*`` carries A forward as the SESSION's answer, correctly, and
+    # ``_command_definition_spawn_cwd`` read it before the stored command half, so the
+    # command was pulled back to A with nothing in the edit asking. The two are equal
+    # wherever ``--cwd`` set both and differ exactly where the user separated them, so
+    # the stored command half now outranks the Session's: SCT-051's rule -- only the
+    # explicit flag replaces a stored directory -- in the retarget lane.

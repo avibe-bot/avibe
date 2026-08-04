@@ -722,11 +722,17 @@ vibe task add (--cron <表达式> | --at <时间戳>) (--shell <命令> | -- <ar
 - `--shell`
 - `--on-failure {none,agent}`
 - `--timeout <秒>`
+- `--cwd <目录>`
 - `--timezone`
 
 命令任务（`--shell` 或写在 `--` 之后的 argv）执行时不会触发任何 Agent turn，
 除非设置了 `--on-failure agent`，否则不接受 session、scope 或 agent 相关参数。
 `--timeout` 限制每次命令执行的时长（默认 21600 秒，`0` 表示不限制）。
+`--cwd` 指定命令的执行目录；当 `--on-failure agent` 绑定到已存在的 Session 时，
+它只作用于命令，升级 Session 保留自己的工作目录；配合 `--create-session` /
+`--create-session-per-run` 时，它同时决定新建 Session 的目录。不传该参数时，
+绑定了 Session 的命令会跟随那个 Session 的目录（触发时实时读取），其他命令则记录
+你执行 `vibe task add` 时所在的目录。完整规则见 `docs/CLI.md`。
 
 ### `vibe task update`
 
@@ -751,10 +757,13 @@ vibe task update <task_id> [options]
 - `--message-file`
 - `--shell`
 - `--timeout <秒>`
+- `--cwd <目录>`
 - `--timezone`
 
 在 message 形态与 command 形态之间切换，或修改 `--on-failure`，都会被
-`task_mode_immutable` 拒绝——请删除任务后重新创建。
+`task_mode_immutable` 拒绝——请删除任务后重新创建。`--cwd` 可以修改命令任务的执行
+目录，而不影响它升级时使用的 Session；对 message 任务，在目标 Session 已存在时
+仍然会被拒绝。
 
 ### `vibe task list`
 

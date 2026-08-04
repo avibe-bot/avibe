@@ -1752,6 +1752,64 @@ def test_task_update_keeps_a_command_tasks_cwd_through_an_unrelated_edit(
     )
 
 
+def test_task_update_retarget_does_not_pull_the_command_back_to_its_sessions_directory(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-059 -- once the two halves differ, neither may be read as the other.
+
+    ``--cwd`` on a bound escalating command moves the command to B and leaves its
+    Session on A, which is the whole point of SCT-050. A later ``--create-session*``
+    carries A forward as the Session's answer -- correct -- and
+    ``_command_definition_spawn_cwd`` read that before the stored command half, so the
+    command was pulled back to A with nothing in the edit asking to. SCT-051's rule in
+    the retarget lane: only the explicit flag replaces a stored directory.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    session_dir = tmp_path / "session-dir"
+    session_dir.mkdir()
+    command_dir = tmp_path / "command-dir"
+    command_dir.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="sesCaller",
+        session_policy="create_once",
+        agent_name="codex",
+        # What ``task update --cwd <command_dir>`` leaves behind on a definition whose
+        # reusable Session was reserved in ``session_dir``: the halves now differ.
+        cwd=str(command_dir),
+        metadata={
+            "session_scope_id": "avibe::project::proj-command-task",
+            "session_workdir": str(session_dir),
+            "on_failure": "agent",
+        },
+    )
+    args = _parse_task_update(task.id, ["--create-session-per-run"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+        patch("os.getcwd", return_value=str(tmp_path)),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["session_policy"] == "create_per_run"
+    assert definition["cwd"] == str(command_dir), (
+        "the policy change pulled the command back to its Session's directory: "
+        f"{definition['cwd']!r}"
+    )
+    assert definition["metadata"]["session_workdir"] == str(session_dir), (
+        "the Session half did not survive the retarget: "
+        f"{definition['metadata'].get('session_workdir')!r}"
+    )
+
+
 def test_task_update_unrelated_edit_leaves_a_per_run_definitions_sessions_unplaced(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
