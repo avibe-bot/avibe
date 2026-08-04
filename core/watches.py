@@ -818,6 +818,7 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                     "managed-watches",
                     None,
                     rearm_after_process=False,
+                    defer_until_partition_release=True,
                 )
             ], False
         with self.service._store_worker_lock:

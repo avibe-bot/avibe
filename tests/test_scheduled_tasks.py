@@ -1791,6 +1791,55 @@ def test_task_reload_and_scheduler_snapshot_share_one_mirror_lock(
     assert refreshed.enabled is False
 
 
+def test_hfr_282_task_reload_waits_for_result_stamp_mirror_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="run once",
+        schedule_type="at",
+        run_at="2030-01-01T00:00:00+00:00",
+        timezone_name="UTC",
+    )
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    load_entered = threading.Event()
+    original_save = store._save
+    original_load = store._load_unlocked
+
+    def blocked_save() -> None:
+        write_entered.set()
+        assert release_write.wait(timeout=1)
+        original_save()
+
+    def observed_load() -> None:
+        load_entered.set()
+        original_load()
+
+    monkeypatch.setattr(store, "_save", blocked_save)
+    monkeypatch.setattr(store, "_load_unlocked", observed_load)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        stamp_future = executor.submit(store.mark_task_result, task.id, error=None)
+        assert write_entered.wait(timeout=1)
+        reload_future = executor.submit(store.load)
+        try:
+            with pytest.raises(FutureTimeoutError):
+                reload_future.result(timeout=0.05)
+            assert not load_entered.is_set()
+        finally:
+            release_write.set()
+
+        assert stamp_future.result(timeout=1) is True
+        reload_future.result(timeout=1)
+
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    assert reloaded.enabled is False
+
+
 def test_hfr_165_vault_scan_arms_exact_pending_expiry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

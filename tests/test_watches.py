@@ -1905,10 +1905,13 @@ def test_hfr_179_watch_wake_during_reconcile_replays_after_owner_release(
     reload_calls = 0
     persist_entered = asyncio.Event()
     release_persist = asyncio.Event()
+    second_reload = threading.Event()
 
     def reload_store() -> bool:
         nonlocal reload_calls
         reload_calls += 1
+        if reload_calls == 2:
+            second_reload.set()
         return False
 
     async def persist_runtime_state() -> None:
@@ -1933,10 +1936,7 @@ def test_hfr_179_watch_wake_during_reconcile_replays_after_owner_release(
         assert reload_calls == 1
 
         release_persist.set()
-        for _ in range(100):
-            if reload_calls >= 2:
-                break
-            await asyncio.sleep(0)
+        assert await asyncio.to_thread(second_reload.wait, 1)
         assert reload_calls == 2
         await supervisor.stop()
 

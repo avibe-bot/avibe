@@ -422,6 +422,54 @@ async def test_runtime_work_stack_stops_supervisor_after_service_failure() -> No
     assert controller._shutdown_tainted is True
 
 
+@pytest.mark.anyio
+async def test_hfr_284_runtime_work_stack_joins_controller_lanes_before_service_teardown() -> None:
+    controller = Controller.__new__(Controller)
+    controller._shutdown_tainted = False
+    controller._runtime_work_tokens = [object()]
+    join_entered = asyncio.Event()
+    release_join = asyncio.Event()
+    stopped: list[str] = []
+
+    class _Service:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+
+    class _Supervisor:
+        def quiesce(self) -> None:
+            stopped.append("quiesce")
+
+        def begin_unregister(self, _token):  # noqa: ANN001, ANN202
+            async def _join() -> None:
+                join_entered.set()
+                await release_join.wait()
+                stopped.append("controller-lanes")
+
+            return asyncio.create_task(_join())
+
+        async def stop(self) -> None:
+            stopped.append("supervisor")
+
+    controller.scheduled_task_service = _Service("tasks")
+    controller.watch_service = _Service("watch")
+    controller.runtime_work_supervisor = _Supervisor()
+
+    shutdown = asyncio.create_task(controller._stop_runtime_work_stack())
+    await asyncio.wait_for(join_entered.wait(), 1)
+    assert stopped == ["quiesce"]
+
+    release_join.set()
+    await shutdown
+
+    assert stopped[1] == "controller-lanes"
+    assert set(stopped[2:4]) == {"tasks", "watch"}
+    assert stopped[4] == "supervisor"
+    assert controller._runtime_work_tokens == []
+
+
 def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:
     controller = Controller.__new__(Controller)
     loop = asyncio.new_event_loop()

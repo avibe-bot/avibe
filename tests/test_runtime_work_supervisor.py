@@ -196,6 +196,7 @@ async def test_hfr_162_backoff_partitions_release_capacity_and_rewind_for_retry(
 async def test_hfr_162_partition_backoff_state_is_lane_bounded() -> None:
     retry_entered = asyncio.Event()
     release_retry = asyncio.Event()
+    six_partitions_attempted = asyncio.Event()
     later_partition_started = asyncio.Event()
     later_partition_retried = asyncio.Event()
     attempted: list[str] = []
@@ -221,6 +222,8 @@ async def test_hfr_162_partition_backoff_state_is_lane_bounded() -> None:
 
         async def process(self, item: RuntimeWorkItem) -> bool:
             attempted.append(item.partition_key)
+            if len(attempted) == 6:
+                six_partitions_attempted.set()
             attempt_counts[item.partition_key] = (
                 attempt_counts.get(item.partition_key, 0) + 1
             )
@@ -244,8 +247,7 @@ async def test_hfr_162_partition_backoff_state_is_lane_bounded() -> None:
     await supervisor.activate()
 
     await asyncio.wait_for(retry_entered.wait(), 1)
-    for _ in range(10):
-        await asyncio.sleep(0)
+    await asyncio.wait_for(six_partitions_attempted.wait(), 1)
     assert attempted == [f"partition-{index:02d}" for index in range(6)]
     registration = supervisor._registrations[RuntimeWorkLane.REQUESTS]
     assert len(registration.backoff_deadlines) == 6

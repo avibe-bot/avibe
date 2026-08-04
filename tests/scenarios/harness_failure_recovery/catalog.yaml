@@ -3765,6 +3765,37 @@ scenarios:
     # A rename the mirror has NOT absorbed needs nothing: it bumps the agent binding
     # revision and the compare-and-set refuses both halves.
     test: tests/test_watches.py::test_a_hook_queued_after_a_rename_names_an_agent_that_still_exists
+  - id: HFR-282
+    name: scheduled task mirror mutations serialize with reloads through commit
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # A scheduler result stamp reads, mutates, and persists one full definition row.
+    # Reloading the mirror inside that window could replace the object being stamped,
+    # leaving the live mirror enabled after the durable one-shot task was disabled.
+    # Every mirror mutation now holds the same re-entrant lock as reload and snapshot.
+    test: tests/test_scheduled_tasks.py::test_hfr_282_task_reload_waits_for_result_stamp_mirror_commit
+  - id: HFR-283
+    name: session archive wakes cancellation processing after its Run commit
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Archive flags active Runs with raw SQL. The post-commit UI path must publish the
+    # ordinary runs.updated hint so STALE_RUNS promptly propagates command cancellation;
+    # a lost hint remains recoverable by periodic reconciliation.
+    test: tests/test_ui_server_fastapi.py::test_hfr_283_archive_run_cancellations_wake_runtime_consumers
+  - id: HFR-284
+    name: controller delivery recovery joins before final Turn owner release
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Quiesce rejects new scans but does not join a worker already admitted. Controller-
+    # generation lanes are invalidated and joined while the executor remains available,
+    # before ScheduledTaskService takes its final durable owner snapshot.
+    test: tests/test_controller_dispatch_loop.py::test_hfr_284_runtime_work_stack_joins_controller_lanes_before_service_teardown
   - id: HFR-430
     name: an Agent Run can apply the Workbench send-now transition to a busy Session
     status: covered

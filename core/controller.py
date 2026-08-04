@@ -1663,6 +1663,37 @@ class Controller:
         if callable(quiesce):
             quiesce()
 
+        # Controller-generation lanes can still be finishing work after
+        # quiesce. Join them before ScheduledTaskService releases durable Turn
+        # owners; otherwise a delivery-recovery worker can admit a new Turn
+        # immediately after the final owner snapshot.
+        controller_tokens = tuple(getattr(self, "_runtime_work_tokens", ()))
+        if controller_tokens:
+            begin_unregister = getattr(supervisor, "begin_unregister", None)
+            if not callable(begin_unregister):
+                self._shutdown_tainted = True
+                raise RuntimeError(
+                    "runtime work supervisor cannot join controller lanes"
+                )
+            controller_lane_joins = [
+                begin_unregister(token) for token in controller_tokens
+            ]
+            self._runtime_work_tokens = []
+            controller_results = await asyncio.gather(
+                *controller_lane_joins,
+                return_exceptions=True,
+            )
+            controller_errors = [
+                result
+                for result in controller_results
+                if isinstance(result, BaseException)
+            ]
+            if controller_errors:
+                self._shutdown_tainted = True
+                raise RuntimeError(
+                    "controller runtime work lane shutdown failed"
+                ) from controller_errors[0]
+
         service_stops: list[asyncio.Task[None]] = []
         for service_name in ("scheduled_task_service", "watch_service"):
             service = getattr(self, service_name, None)

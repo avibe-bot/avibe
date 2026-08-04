@@ -11,10 +11,10 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from functools import partial
+from functools import partial, wraps
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
-from typing import Any, Dict, Mapping, NamedTuple, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, NamedTuple, Optional, Sequence, TypeVar
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -125,6 +125,8 @@ from vibe import runtime
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+_TaskStoreResult = TypeVar("_TaskStoreResult")
 
 AGENT_RUN_DELIVERY_STEER = "steer"
 AGENT_RUN_DELIVERY_SEND_NOW = "send_now"
@@ -1236,6 +1238,23 @@ def _retire_stale_agent_run_queue_rows(
         return retired
 
 
+def _serialize_task_mirror(
+    method: Callable[..., _TaskStoreResult],
+) -> Callable[..., _TaskStoreResult]:
+    """Hold one mirror generation across each read-modify-write operation."""
+
+    @wraps(method)
+    def _locked(
+        self: "ScheduledTaskStore",
+        *args: Any,
+        **kwargs: Any,
+    ) -> _TaskStoreResult:
+        with self._reload_lock:
+            return method(self, *args, **kwargs)
+
+    return _locked
+
+
 class ScheduledTaskStore:
     def __init__(self, path: Optional[Path] = None):
         self.path = path or (paths.get_state_dir() / "scheduled_tasks.json")
@@ -1503,6 +1522,7 @@ class ScheduledTaskStore:
             self._signature = None
             self._reload_required = True
 
+    @_serialize_task_mirror
     def upsert_task(
         self,
         task: ScheduledTask,
@@ -1592,6 +1612,7 @@ class ScheduledTaskStore:
             expected_reference_agent_id=expected_reference_agent_id,
         )
 
+    @_serialize_task_mirror
     def remove_task(self, task_id: str) -> bool:
         """Delete a task; the mirror rolls back with the delete (HFR-275).
 
@@ -1616,6 +1637,7 @@ class ScheduledTaskStore:
         _publish_task_definitions_updated()
         return True
 
+    @_serialize_task_mirror
     def set_enabled(self, task_id: str, enabled: bool) -> ScheduledTask:
         task = self._tasks[task_id]
         expect = self._read_state(task)
@@ -1628,6 +1650,7 @@ class ScheduledTaskStore:
             raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
         return task
 
+    @_serialize_task_mirror
     def update_task(
         self,
         task_id: str,
@@ -1700,6 +1723,7 @@ class ScheduledTaskStore:
             return self._tasks[task_id]
         return task
 
+    @_serialize_task_mirror
     def record_binding_recovery(
         self,
         task_id: str,
@@ -1744,6 +1768,7 @@ class ScheduledTaskStore:
             return False
         return self._write_task(task, expect)
 
+    @_serialize_task_mirror
     def list_orphaned_reservations(self, task_id: str) -> list[dict[str, Any]]:
         """The reserved sessions recorded against ``task_id`` that were never given back."""
 
@@ -1755,6 +1780,7 @@ class ScheduledTaskStore:
             return []
         return [dict(entry) for entry in entries if isinstance(entry, dict)]
 
+    @_serialize_task_mirror
     def record_orphaned_reservations(self, task_id: str, entries: list[dict[str, Any]]) -> bool:
         """Durably record (or clear) the reservations this definition could not release.
 
@@ -1785,6 +1811,7 @@ class ScheduledTaskStore:
         task.updated_at = _utc_now_iso()
         return self._write_task(task, expect)
 
+    @_serialize_task_mirror
     def mark_task_result(
         self,
         task_id: str,

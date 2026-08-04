@@ -62,6 +62,37 @@ def test_archive_definition_wakes_do_not_block_the_asgi_loop(monkeypatch):
     assert all(thread_id != loop_thread for thread_id, _ in published)
 
 
+def test_hfr_283_archive_run_cancellations_wake_runtime_consumers(monkeypatch):
+    published: list[tuple[str, dict[str, str], float]] = []
+
+    async def _publish(event_type, data, *, timeout):  # noqa: ANN001, ANN202
+        published.append((event_type, data, timeout))
+        return {"ok": True}
+
+    monkeypatch.setattr("vibe.internal_client.publish_event", _publish)
+
+    asyncio.run(
+        ui_server._archive_publish_run_updates(
+            "session-a",
+            {"runs": 2},
+        )
+    )
+    asyncio.run(
+        ui_server._archive_publish_run_updates(
+            "session-b",
+            {"runs": 0},
+        )
+    )
+
+    assert published == [
+        (
+            "runs.updated",
+            {"session_id": "session-a", "reason": "session_archived"},
+            1.5,
+        )
+    ]
+
+
 def test_websocket_echo_is_disabled_by_default(monkeypatch):
     monkeypatch.delenv("VIBE_UI_ENABLE_WS_ECHO", raising=False)
 

@@ -52,6 +52,7 @@ class RuntimeWorkItem:
     observation: Any
     cursor_key: str | None = None
     rearm_after_process: bool = True
+    defer_until_partition_release: bool = False
 
 
 class RuntimeWorkHandler(Protocol):
@@ -680,6 +681,18 @@ class RuntimeWorkSupervisor:
                 for item in items:
                     partition = str(item.partition_key or "").strip()
                     if not partition:
+                        continue
+                    if item.defer_until_partition_release:
+                        # Some scans return an occupied partition only to preserve a
+                        # wake until its current owner exits. The owner can finish
+                        # between the off-loop scan and admission here; in that case
+                        # rewind immediately instead of executing a placeholder with
+                        # no durable observation.
+                        if partition in registration.workers:
+                            registration.rewind_after_partitions.add(partition)
+                        else:
+                            registration.rewind_requested = True
+                            registration.event.set()
                         continue
                     if partition in registration.workers:
                         # Row ordering can be finer-grained than the execution
