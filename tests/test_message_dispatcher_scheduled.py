@@ -3857,6 +3857,22 @@ class HarnessPromptEchoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(controller.im_client.sent, [])
 
+    async def test_display_snapshot_wins_over_internal_dispatch_text(self):
+        """A replayed durable turn carries an internal recovery guard in its dispatch
+        text; the channel must see the stored prompt instead (Codex P2)."""
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(display_text="summarize open PRs"),
+            "[Avibe recovery: this request may have been delivered before restart.]"
+            "\n\nsummarize open PRs",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertIn("> summarize open PRs", text)
+        self.assertNotIn("Avibe recovery", text)
+
     async def test_runtime_switch_is_reloaded_before_the_gate(self):
         """A Harness turn reaches no IM inbound handler, so nothing else reloads
         ``controller.config``: the config-only toggle must be re-read here, or a

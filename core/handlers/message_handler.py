@@ -12,7 +12,11 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
-from core.message_output import terminal_output_for, terminal_turn_output
+from core.message_output import (
+    HARNESS_PROMPT_ECHO_SPEC_KEY,
+    terminal_output_for,
+    terminal_turn_output,
+)
 from core.message_context import resolve_context_thread_id
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
@@ -635,22 +639,19 @@ class MessageHandler(BaseHandler):
                 # for the entire duration of the subagent run.
 
             # A background task's prompt is only visible in the Workbench transcript
-            # (the ``harness`` Message row); echo it into the IM conversation so the
-            # reply that follows has its question. Deliberately here rather than at the
-            # mirror boundary above: this point is past every ``suppress_delivery``
-            # resolution (the ``agent_run_target`` and thread-anchor branches settle it
-            # only after ``get_session_info``) and still before the status bubble and
-            # dispatch, so the channel reads trigger -> work -> result in order. A
-            # queued Harness turn cannot announce itself early either: its durable
-            # admission happens upstream, and ``_handle_turn`` is entered only when the
-            # turn actually runs. It covers the durable Delivery path too, which skips
-            # the mirror branch above.
+            # (the ``harness`` Message row); stage it so the IM conversation gets the
+            # question the following reply answers. Staged here because this point is
+            # past every ``suppress_delivery`` resolution (the ``agent_run_target`` and
+            # thread-anchor branches settle it only after ``get_session_info``) and
+            # covers the durable Delivery path too, which skips the mirror branch
+            # above; the send itself happens at the real turn start, once the runtime
+            # gate is held (see ``_stage_harness_prompt_echo``).
             # ``control_message`` rather than ``message``: subagent routing above
             # strips a matched ``name:`` prefix off ``message``, and the echo must show
             # the prompt as it was stored (which is what the Workbench row shows too),
             # including the prefix that names the requested subagent.
             if source != self.TURN_SOURCE_HUMAN:
-                await self._echo_harness_prompt(context, control_message)
+                self._stage_harness_prompt_echo(context, control_message)
 
             user_message = self._get_user_message(context, message)
             audio_transcripts = await self._transcribe_audio_attachments(context, processed_files or [])
@@ -1097,22 +1098,24 @@ class MessageHandler(BaseHandler):
         except Exception as err:
             logger.debug("Failed to echo audio transcript: %s", err, exc_info=True)
 
-    async def _echo_harness_prompt(self, context: MessageContext, message: str) -> None:
-        """Post the Harness prompt to the turn's IM conversation, best-effort.
+    def _stage_harness_prompt_echo(self, context: MessageContext, message: str) -> None:
+        """Stage the Harness prompt for the outward echo at turn start.
 
-        The dispatcher owns every gate (platform, ``suppress_delivery``, trigger kind,
-        the ``runtime.harness_prompt_echo`` switch) and the delivery target, because it
-        already owns outbound routing. Guarded with ``getattr`` because several test
-        controllers substitute a minimal dispatcher.
+        Staged instead of sent here: ``AgentService.handle_message`` blocks on the
+        runtime turn gate before this turn really starts, so posting now would
+        announce a queued task's prompt while another turn is still working — and
+        would leave that prompt behind if the queued turn is cancelled.
+        ``AgentService._begin_turn_status`` emits it once the gate is held, right
+        before the status bubble, so the channel still reads trigger -> work ->
+        result. The dispatcher still owns every gate (platform,
+        ``suppress_delivery``, trigger kind, the ``runtime.harness_prompt_echo``
+        switch) and the delivery target.
         """
-        dispatcher = getattr(self.controller, "message_dispatcher", None)
-        emit = getattr(dispatcher, "emit_harness_prompt", None)
-        if not callable(emit):
+        if not (message or "").strip():
             return
-        try:
-            await emit(context, message)
-        except Exception:
-            logger.debug("harness prompt echo failed; turn continues", exc_info=True)
+        spec = dict(context.platform_specific or {})
+        spec[HARNESS_PROMPT_ECHO_SPEC_KEY] = message
+        context.platform_specific = spec
 
     @staticmethod
     def _sanitize_identity(value: str) -> str:

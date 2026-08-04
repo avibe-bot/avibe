@@ -28,6 +28,12 @@ HARNESS_TRIGGER_KINDS: frozenset[str] = frozenset(
 # id addresses a write to a row that cannot exist.
 HARNESS_RUN_ID_TRIGGER_KINDS: frozenset[str] = HARNESS_TRIGGER_KINDS - {"activity_recovery"}
 
+# ``platform_specific`` key carrying the Harness prompt that should be echoed into
+# the turn's IM conversation. The turn pipeline stages it; ``AgentService`` emits it
+# once the runtime turn gate is acquired, so a turn queued behind another turn cannot
+# announce its prompt while that other turn is still working.
+HARNESS_PROMPT_ECHO_SPEC_KEY = "harness_prompt_echo_text"
+
 
 @dataclass(frozen=True)
 class MessageOutput:

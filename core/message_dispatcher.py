@@ -1592,7 +1592,8 @@ class ConsolidatedMessageDispatcher:
         snapshot), which the Workbench transcript renders as the turn that asked the
         question. An IM channel has no such view: it only ever received the agent's
         reply, so a scheduled result read as an answer to a question nobody could see.
-        This posts that question once, right before the turn is dispatched.
+        This posts that question once, at the real start of the turn (called from
+        ``AgentService._begin_turn_status``, i.e. after the runtime gate is acquired).
 
         Deliberately NOT routed through ``emit_agent_message``: this is neither an
         agent output nor a lifecycle event. It must not consolidate into the status
@@ -1623,7 +1624,12 @@ class ConsolidatedMessageDispatcher:
         self._refresh_runtime_config()
         if not getattr(self.controller.config, "harness_prompt_echo", True):
             return None
-        body = self._harness_prompt_body(trigger_kind, spec.get("task_definition_name"), text)
+        # The Delivery's display snapshot wins over the dispatch text when present:
+        # ``SessionTurnGate`` prepends internal instructions to ``dispatch_text`` (the
+        # ``[Avibe recovery: ...]`` guard on an ambiguous-start replay), and the channel
+        # must see the stored prompt, not a backend-only directive.
+        prompt = str(spec.get("display_text") or "").strip() or text
+        body = self._harness_prompt_body(trigger_kind, spec.get("task_definition_name"), prompt)
         if not body:
             return None
         # The prompt is delivered to the SAME target as the run's result (post_to /

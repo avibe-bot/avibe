@@ -30,25 +30,30 @@ Non-goals:
 
 ## Solution
 
-One platform-agnostic call in the shared turn pipeline, one outbound helper in the
-dispatcher.
+Stage in the shared turn pipeline, send at the real turn start, gate and format in
+the dispatcher.
 
 1. `core/handlers/message_handler.py::_handle_turn` — for `source != human`, calls
-   `_echo_harness_prompt(context, message)`. Placement is the design:
+   `_stage_harness_prompt_echo(context, control_message)`, which stamps
+   `HARNESS_PROMPT_ECHO_SPEC_KEY` (`core/message_output.py`) into
+   `platform_specific`. Placement is the design:
    - **after** every `suppress_delivery` resolution (the `agent_run_target` and the
      `find_session_for_anchor` branches, both settled only after
      `get_session_info`), so a backgrounded session stays silent;
-   - a queued Harness turn still cannot announce itself early: its durable admission
-     happens upstream in `ScheduledTaskService`, so `_handle_turn` is entered only
-     when the turn actually runs;
-   - **before** `_prepend_message_metadata` and dispatch, so the echo is the raw
-     prompt and lands ahead of the status bubble and the result;
-   - echoing `control_message`, the pre-routing prompt: subagent routing rewrites
+   - **before** `_prepend_message_metadata`, so the staged text is the prompt, not the
+     decorated backend dispatch text;
+   - staging `control_message`, the pre-routing prompt: subagent routing rewrites
      `message` to the prefix-stripped body, and the echo must match what the
      Workbench row shows, prefix included;
    - outside the mirror `if`, so the durable Delivery path is covered too.
-   The helper is best-effort and resolves the dispatcher through `getattr`.
-2. `core/message_dispatcher.py::emit_harness_prompt` — owns the gates and the send.
+2. `modules/agents/service.py::_begin_turn_status` — `_emit_staged_harness_prompt`
+   pops the staged key and sends it, next to the existing turn-start hooks. The send
+   belongs *here*, not in the pipeline: `AgentService.handle_message` blocks on the
+   runtime turn gate first, so a pipeline-side send would show a queued task's prompt
+   while another turn is still working — or leave a prompt behind for a turn that was
+   cancelled on the gate. Emitted before `begin_status_bubble` so the channel still
+   reads trigger -> work -> result. Best-effort and `getattr`-guarded.
+3. `core/message_dispatcher.py::emit_harness_prompt` — owns the gates and the send.
    Deliberately **not** routed through `emit_agent_message`: this is neither agent
    output nor a lifecycle event, and must not consolidate into the status bubble,
    settle a turn, touch an `agent_runs` row, or persist a row.
@@ -58,6 +63,10 @@ dispatcher.
      re-injection, not a user instruction), and `harness_prompt_echo = false`;
    - target is `_get_target_context(context)`, so the question lands where the
      answer lands (`post_to` / deliver-key overrides included);
+   - text is the Delivery's `display_text` snapshot when present, else the staged
+     prompt: `SessionTurnGate` prepends internal instructions to `dispatch_text` (the
+     `[Avibe recovery: ...]` guard on an ambiguous-start replay) that must stay
+     backend-only;
    - body: an i18n label per trigger kind, optionally `label · name`, then the
      prompt with every line `> `-quoted (readable on plain-text platforms too),
      truncated at `HARNESS_PROMPT_ECHO_MAX_CHARS = 800`;
@@ -66,29 +75,32 @@ dispatcher.
      delivery cannot read as the task having fired twice. A cross-restart replay is
      not covered on purpose: it writes a new Delivery anyway, a duplicate echo is
      cosmetic, and a missing echo defeats the feature.
-3. `core/scheduled_tasks.py::_build_context` stamps `task_definition_name` next to
+4. `core/scheduled_tasks.py::_build_context` stamps `task_definition_name` next to
    the existing `task_definition_id`, resolved through
    `_definition_display_name` (task row, else watch definition, best-effort), so
    the label names the task instead of an id. `agent_run` has no definition.
-4. Config: `V2Config.runtime.harness_prompt_echo` (default `true`), mirrored onto
+5. Config: `V2Config.runtime.harness_prompt_echo` (default `true`), mirrored onto
    `AppCompatConfig` + `to_app_config` (the turn path reads `controller.config`,
    which is the compat object) and hot-reloaded in
    `Controller._refresh_config_from_disk`. The gate calls that mtime-guarded reload
    itself (`_refresh_runtime_config`), because a Harness turn passes through no IM
    inbound handler and would otherwise read the process-start snapshot. No UI,
    matching `harness_run_*`.
-5. Copy: `harness.promptEcho.*` in `vibe/i18n/en.json` and `zh.json`.
+6. Copy: `harness.promptEcho.*` in `vibe/i18n/en.json` and `zh.json`.
 
 ## Evidence
 
 - unit — `tests/test_message_dispatcher_scheduled.py::HarnessPromptEchoTests`
   (per-kind coverage, every gate, delivery override, dedupe, memory bound,
-  truncation/quoting, silent-only prompt, send failure, hot-toggle reload and a
-  failing reload);
-  `tests/test_message_handler_harness_echo.py` (pipeline wiring: echo-before-dispatch
-  ordering, raw prompt, subagent-prefixed prompt echoed unstripped, human turn silent,
-  backgrounded thread resolution visible to the echo, missing hook and failing echo
-  never block the turn);
+  truncation/quoting, silent-only prompt, send failure, hot-toggle reload, a failing
+  reload, display-snapshot precedence over internal dispatch text);
+  `tests/test_message_handler_harness_echo.py` (pipeline staging: raw prompt,
+  subagent-prefixed prompt staged unstripped, human turn stages nothing, blank prompt
+  stages nothing, backgrounded thread resolution visible to the echo, and no send from
+  the pipeline);
+  `tests/test_agent_service.py` (turn-start emission: a queued turn stays quiet until
+  it owns the runtime gate, the key is popped, no staged prompt echoes nothing, a
+  failing echo never breaks turn start);
   `tests/test_scheduled_tasks.py::test_build_context_carries_the_definition_name_for_display`
   and `::test_build_context_survives_a_store_that_cannot_name_the_definition`.
 - scenario — `MESSAGE-DELIVERY-018` (prompt precedes result; the result still owns
