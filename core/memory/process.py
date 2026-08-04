@@ -63,6 +63,7 @@ class EverOSProcessSettings:
     embedding_model: str | None = None
     embedding_api_key: str | None = field(default=None, repr=False)
     timezone: str | None = None
+    call_log_db_path: Path | None = None
 
 
 class EverOSProcess:
@@ -505,7 +506,7 @@ class EverOSProcess:
             raise RuntimeError("processing settings incomplete")
 
     def _prepare_owned_directories(self) -> None:
-        for directory in (
+        directories = [
             self._memory_dir,
             self._memory_dir / ".rt",
             self._memory_dir / ".child-home",
@@ -514,7 +515,10 @@ class EverOSProcess:
             self._memory_dir / ".child-home" / ".local" / "share",
             self._memory_dir / ".child-home" / ".local" / "state",
             self._memory_dir / "generated",
-        ):
+        ]
+        if self._settings.call_log_db_path is not None:
+            directories.append(self._settings.call_log_db_path.parent)
+        for directory in directories:
             _ensure_owner_directory(directory)
         _ensure_owner_directory(self._provider_root)
 
@@ -589,6 +593,8 @@ class EverOSProcess:
             "EVEROS_EMBEDDING__MODEL": str(settings.embedding_model),
             "EVEROS_EMBEDDING__API_KEY": str(settings.embedding_api_key),
         }
+        if settings.call_log_db_path is not None:
+            env["AVIBE_MEMORY_CALL_LOG_DB"] = str(settings.call_log_db_path)
         # This is an explicit allowlist, so proxy/CA override variables are never
         # inherited from the parent service environment.
         return env

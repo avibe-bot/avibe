@@ -1189,6 +1189,22 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
     assert "embedding-secret" not in generated
     assert "rerank" in generated
     assert str(tmp_path / "attachments" / "avibe") in generated
+    assert "AVIBE_MEMORY_CALL_LOG_DB" not in environment
+
+
+def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_path: Path) -> None:
+    call_log = tmp_path / "memory" / "call-log" / "call-log.db"
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=replace(_settings(), call_log_db_path=call_log),
+    )
+
+    process._prepare_owned_directories()
+    environment = process._child_environment()
+
+    assert environment["AVIBE_MEMORY_CALL_LOG_DB"] == str(call_log)
+    assert stat.S_IMODE(call_log.parent.stat().st_mode) == 0o700
 
 
 def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_path: Path) -> None:

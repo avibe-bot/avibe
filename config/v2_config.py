@@ -304,11 +304,23 @@ class MemoryProcessingConfig:
 
 
 @dataclass
+class MemoryDiagnosticsConfig:
+    log_provider_calls: bool = False
+
+    def validate(self) -> None:
+        if not isinstance(self.log_provider_calls, bool):
+            raise ValueError(
+                "Config 'memory.diagnostics.log_provider_calls' must be a boolean"
+            )
+
+
+@dataclass
 class MemoryConfig:
     """Persisted local EverOS configuration; credentials are API-write-only."""
 
     enabled: bool = False
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
+    diagnostics: MemoryDiagnosticsConfig = field(default_factory=MemoryDiagnosticsConfig)
     embedding_change_pending: bool = False
 
     def validate(self) -> None:
@@ -317,6 +329,7 @@ class MemoryConfig:
         if not isinstance(self.embedding_change_pending, bool):
             raise ValueError("Config 'memory.embedding_change_pending' must be a boolean")
         self.processing.validate()
+        self.diagnostics.validate()
         if self.enabled and not (self.processing.llm.complete() and self.processing.embedding.complete()):
             raise ValueError("Both Memory processing endpoints must be complete before enabling Memory")
 
@@ -416,6 +429,9 @@ def memory_config_to_payload(
         "processing": {
             "llm": endpoint_payload(memory.processing.llm),
             "embedding": endpoint_payload(memory.processing.embedding),
+        },
+        "diagnostics": {
+            "log_provider_calls": memory.diagnostics.log_provider_calls,
         },
     }
     if include_internal:
@@ -1309,6 +1325,9 @@ class V2Config:
             raise ValueError("Config 'memory.processing.llm' must be an object")
         if not isinstance(memory_embedding_payload, dict):
             raise ValueError("Config 'memory.processing.embedding' must be an object")
+        memory_diagnostics_payload = memory_payload.get("diagnostics", {})
+        if not isinstance(memory_diagnostics_payload, dict):
+            raise ValueError("Config 'memory.diagnostics' must be an object")
         memory = MemoryConfig(
             enabled=memory_payload.get("enabled", False),
             embedding_change_pending=memory_payload.get("embedding_change_pending", False),
@@ -1319,6 +1338,12 @@ class V2Config:
                 embedding=MemoryEndpointConfig(
                     **_filter_dataclass_fields(MemoryEndpointConfig, memory_embedding_payload)
                 ),
+            ),
+            diagnostics=MemoryDiagnosticsConfig(
+                **_filter_dataclass_fields(
+                    MemoryDiagnosticsConfig,
+                    memory_diagnostics_payload,
+                )
             ),
         )
         memory.validate()
