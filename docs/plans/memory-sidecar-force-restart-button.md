@@ -1,6 +1,6 @@
-# Add a forced sidecar restart action to Memory settings (rev18)
+# Add a forced sidecar restart action to Memory settings (rev19)
 
-> Rev18 keeps one public recovery action and a focused set of internal fixes:
+> Rev19 keeps one public recovery action and a focused set of internal fixes:
 > replayable configuration, config-wide write serialization, restart-specific
 > and lifecycle-intent admission, generation-fenced ready activation, complete
 > supervisor quiescing, bounded orphan recovery, disk/live replay convergence,
@@ -10,8 +10,9 @@
 > disabled/fail-closed replay handling, explicit worker activation, post-lock
 > retained-owner admission, complete root/installer/probe ownership, lifecycle
 > abort reactivation, under-lock generation changes, retained config writers,
-> store-unavailable retry, shutdown joining, and durable retry eligibility
-> alongside processing-probe/module-store ownership.
+> store-unavailable retry, disabled no-store convergence, durable ownership-record
+> recovery, controller config rebasing, shutdown joining, and durable retry
+> eligibility alongside processing-probe/module-store ownership.
 > Timed-out work remains owned until it is either joined or proven unable to
 > mutate state. It does not add a lifecycle coordinator, explicit state machine,
 > provider/store port, or frontend DOM test framework.
@@ -142,6 +143,14 @@ Add private `_restart_config` and `_persisted_memory_snapshot` values to
   candidate into `Controller.config.memory` before exposing only the transport
   result. Thus disk, Runtime, and Controller remain authoritative independently
   of the later lifecycle outcome.
+- A controller reconciler that awaited while Memory convergence completed must
+  not publish its earlier full-config snapshot afterward. Immediately before
+  `reconcile_platforms()` calls `_sync_config_references()`, deep-copy its incoming
+  config and replace only that copy's Memory block with the then-current
+  `Controller.config.memory`, with no intervening await before publication. The
+  platform operation still publishes all fields it owns from its saved candidate,
+  while reverse ordering cannot restore stale C1 over the C0 installed by
+  `restart_memory()` or `reconcile_memory()`.
 
 These snapshots answer which configuration an explicit restart replays and
 which exact Memory block it may conditionally replace on disk. They do not
@@ -321,12 +330,15 @@ an abandoned restart, and a user retry can enqueue a second one.
   `{ok: false, error: 'memory_restart_busy'}` without changing the process,
   claims, or worker.
 - Order that admission so Runtime-only counters and locks are checked before any
-  module member is read. If the store is unavailable and no conflicting Runtime
-  intent owns admission, synchronously retry `_open_store()` before accessing
-  `module.lifecycle_busy` or `module._lifecycle_lock`; a second failed open returns
-  `memory_store_unavailable` without process/config mutation. This preserves the
-  existing transient-store recovery behavior and never treats
-  `_UnavailableMemoryModule` as a full lifecycle module.
+  module member is read. Once those checks prove no competing reconcile intent,
+  synchronously snapshot `_restart_config` before store admission. If that replay
+  is enabled, retry `_open_store()` before accessing `module.lifecycle_busy` or
+  `module._lifecycle_lock`; a second failed open returns
+  `memory_store_unavailable` without process/config mutation. If the replay is
+  disabled, do not require or reopen the store and do not touch
+  `_UnavailableMemoryModule`: enter the narrow no-module disabled lane below.
+  This preserves transient-store recovery for enabled launch while allowing an
+  authoritative disabled C0 to repair a persisted C1 and reap old ownership.
 - Add a narrow `_retained_ownership_active` gate to `MemoryRuntime`. Any worker,
   worker/module store task, processing probe, supervisor start, watcher/monitor,
   or process cleanup owner that outlives its bound sets this gate synchronously
@@ -512,11 +524,17 @@ finished.
 
 The locked sequence is fixed:
 
-1. Snapshot the last-good `_restart_config` and recover an interrupted clear.
-   Validate store and artifact availability only when that replay is enabled.
+1. Snapshot the last-good `_restart_config` before module admission and recover
+   an interrupted clear only when a real module is available. Validate store and
+   artifact availability only when that replay is enabled.
    Do not reject solely because the persisted candidate is enabled while the
    replay is disabled; the replay state is authoritative after step 9
-   convergence and needs no launch prerequisites.
+   convergence and needs no launch prerequisites. When disabled replay is paired
+   with an unavailable store, acquire only the Runtime reconcile lock, revalidate
+   that the replay is still disabled, and run a no-module path containing config
+   convergence plus recorded/supervised sidecar cleanup. It performs no clear
+   recovery, provider-root access, worker/store operation, artifact resolution,
+   lease rotation, replacement construction, or module lifecycle access.
 2. Before touching the worker, call a non-awaiting, idempotent supervisor handoff
    fence on the old `EverOSProcess`. It sets `_desired_running=false`, marks ready
    callbacks quiesced, and captures the exact restart, watcher, and monitor task
@@ -692,8 +710,15 @@ Every exit after claims are fenced must end in one of these states:
   The user can retry the explicit restart, which first retries owned-tree stop.
   If replay already committed disabled config, return
   `restart_recovery_required=true` and expose the same fact through pure status
-  projection until the retained supervisor/child is reaped. This keeps explicit
-  cleanup retry reachable without making disabled Memory launch a replacement.
+  projection until the retained supervisor/child is reaped. Persisted ownership
+  evidence is equally authoritative: on startup, a retained sidecar ownership
+  record whose bounded reap fails sets the same recovery projection even when no
+  supervisor object survived and the store/module is unavailable. Pure status
+  reports that flag beside the ordinary disabled or store-unavailable state.
+  Explicit disabled restart, including the no-module lane, retries the recorded
+  reap and clears eligibility only after the record is retired or ownership is
+  otherwise proven absent. This keeps cleanup retry reachable across controller
+  restarts without making disabled Memory launch a replacement.
 - **The old child stopped but replacement startup failed:** retain the new
   supervisor, if one was created, and keep claims and the worker fenced. If its
   bounded supervisor later reaches ready, its generation-fenced activation task
@@ -779,7 +804,11 @@ exceptions use the transport-only `memory_restart_failed`.
    restart admission fail fast. Make `restart()` return its transport
    result plus the exact applied replay config whenever convergence committed,
    including later lifecycle failure, and no config before convergence or on
-   busy. Retry unavailable-store creation before module admission; compensate
+   busy. Snapshot replay before module admission, retry unavailable-store
+   creation only for enabled replay, and give disabled replay a no-module
+   convergence/ownership-cleanup lane. Reconstruct
+   `restart_recovery_required` from a failed startup reap of the durable ownership
+   record as well as retained in-memory owners; compensate
    failed lifecycle generation invalidation by activating an unchanged current
    ready supervisor under both locks. Project `restart_recovery_required` in
    restart/status results while a
@@ -821,6 +850,10 @@ exceptions use the transport-only `memory_restart_failed`.
    not `memory_reconcile_failed`. Make synchronous cleanup accept a per-resource
    allowance; Memory cancels/joins active restart ownership and receives its full
    Runtime-exported shutdown allowance rather than the generic five seconds.
+   Before platform reconciliation publishes an awaited full-config candidate,
+   rebase that candidate's Memory block from current `Controller.config.memory`
+   and publish without another await, so a stale platform snapshot cannot undo a
+   completed Memory convergence.
 7. `vibe/internal_client.py`: add `memory_restart()` with a deadline above the
    complete restart lifecycle budget; retain and join the shielded request task
    after a reporting timeout.
@@ -899,6 +932,11 @@ exceptions use the transport-only `memory_restart_failed`.
     `restart_recovery_required=true`; retry remains visible, settles the child,
     and never launches while disabled. A post-Clear internal reconcile cannot
     overwrite the persisted snapshot contract.
+    Restart a fresh controller after disabled convergence left an ownership
+    record and make startup reap fail. Status must reconstruct
+    `restart_recovery_required=true` without an in-memory supervisor; the one
+    recovery action remains available until explicit disabled restart reaps the
+    record, then status clears the flag.
   - Pre-held reconcile/module locks and concurrent restart calls immediately
     return `memory_restart_busy`, create no waiters, and change no ownership.
     An installer paused inside unlocked `ensure(force=True)` also returns busy
@@ -910,7 +948,11 @@ exceptions use the transport-only `memory_restart_failed`.
     With a startup store-open failure, restart retries `_open_store()` before
     reading module lifecycle state: a recovered store proceeds normally, while a
     second failure returns `memory_store_unavailable` without touching the
-    unavailable module adapter, process, or config.
+    unavailable module adapter, process, or config when replay is enabled. With a
+    disabled last-good replay, the same unavailable store is not an admission
+    failure: conditionally converge persisted enabled C1 to disabled C0, reap the
+    recorded or supervised child, and never access the module, provider root,
+    worker, artifact manager, lease, or process factory.
     Hold one search/profile request in the module lock and queue a second; across
     the owner's release/waiter-wakeup gap, `lifecycle_busy` remains true and
     restart returns busy without joining the read queue. After both reads finish,
@@ -1036,6 +1078,12 @@ exceptions use the transport-only `memory_restart_failed`.
   `Controller.config.memory`. Disk, controller, runtime live state, and replay
   state must match; the original marker-bearing request object is not installed.
   Failure returns no candidate and preserves the prior controller config.
+- `tests/test_controller_platform_reconcile.py`: pause a platform reconcile after
+  it captured marker-bearing or enabled C1, let Memory restart converge and
+  install C0 into `Controller.config.memory`, then release the platform operation.
+  Its publication retains its platform changes but rebases Memory from current
+  controller state, so handlers and controller still reference C0. Cover the
+  inverse completion order as well.
 - `tests/test_internal_server.py`: success, missing runtime, exception mapping,
   and post-convergence failure propagation without serializing the config object.
 - `tests/test_internal_client.py` / `tests/test_internal_client_timeouts.py`:
@@ -1160,7 +1208,9 @@ explicit restart cannot queue behind or leapfrog any active or queued module
 lifecycle operation, while reads and destructive Clear retain their existing
 serialization and recheck retained ownership after acquiring their locks;
 artifact installation and every root metadata thread remain explicitly owned
-through cancellation; unavailable-store retry precedes module admission;
+through cancellation; enabled unavailable-store retry follows replay snapshotting,
+while disabled replay can converge and clean durable ownership without a
+store/module;
 artifact installation excludes launch; orphan
 recovery has one complete cap; every active process lifecycle
 owner is settled and budgeted before stop; readiness, including the final health
@@ -1174,10 +1224,12 @@ shielded worker/module store thread exit; activation success is observable and
 its shared future is shielded from reporting timeout; post-convergence failure
 still propagates the committed block to Controller and UI; retained ownership
 excludes every other mutating lifecycle; replacement cleanup fences supervision
-before awaiting; disabled retained cleanup keeps its explicit recovery action;
+before awaiting; disabled retained cleanup and failed durable-record reap keep
+their explicit recovery action across controller restart;
 Runtime retains throwaway preflight supervisors; shutdown joins active restart
 ownership beyond the generic five-second close; enabled retry eligibility survives
-settings invalidation/read failure; and clear markers serialize with root/child
+settings invalidation/read failure; delayed platform config publication rebases
+the authoritative Memory block; and clear markers serialize with root/child
 lifecycle. The
 implementation adds two private snapshots, focused intent counters, one narrow
 retained-owner gate, focused helpers, and two precise transport-only error codes
@@ -1209,6 +1261,7 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] Under-lock retained-owner recheck for every queued lifecycle operation
 - [ ] Cancelled artifact installer ownership and restart exclusion
 - [ ] Unavailable-store restart bootstrap before module admission
+- [ ] Disabled no-store replay convergence and durable-record cleanup retry
 - [ ] Runtime-owned preflight-probe supervisors and cancellation settlement
 - [ ] Supervisor handoff/rebind, lifecycle-owner settlement, readiness/deadline contract
 - [ ] Lifecycle-generation ready activation and Clear/reconcile race regression
@@ -1220,6 +1273,7 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] UI route and response normalizer
 - [ ] Page action, deduplicated banner, success/failure settings reload, toast/i18n
 - [ ] Disabled retained-cleanup recovery projection and persistent retry action
+- [ ] Platform reconcile publication rebased against authoritative Memory config
 - [ ] Known-enabled retry eligibility across authoritative reload failure
 - [ ] Memory-specific shutdown allowance and active-restart ownership join
 - [ ] Focused Python/TypeScript validation and Incus `SIGSTOP` scenario
