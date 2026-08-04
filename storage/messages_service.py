@@ -43,6 +43,24 @@ def _utc_now_iso() -> str:
     )
 
 
+def canonical_message_timestamp(value: Any) -> str | None:
+    """Return one lexically sortable UTC representation for Message timestamps."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parseable = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        instant = datetime.fromisoformat(parseable)
+    except ValueError:
+        return text
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
 def _timestamp_key(value: Any, row_id: Any) -> tuple[datetime, str]:
     text = str(value or "").strip()
     if text.endswith("Z"):
@@ -243,7 +261,7 @@ def _attach_harness_provenance(
     return payloads
 
 
-def _transcript_order_value() -> Any:
+def transcript_order_value() -> Any:
     """SQLite ordering key for when a Message entered the transcript.
 
     A queued Delivery may be submitted while another Turn is active. Its Message
@@ -252,11 +270,7 @@ def _transcript_order_value() -> Any:
     and keep their microsecond ``created_at`` plus id tie-break.
     """
 
-    return func.coalesce(
-        func.julianday(messages.c.delivered_at),
-        func.julianday(messages.c.created_at),
-        0.0,
-    )
+    return func.coalesce(messages.c.delivered_at, messages.c.created_at)
 
 
 _WS_RE = re.compile(r"\s+")
@@ -483,7 +497,8 @@ def append(
         author = HARNESS_TYPE
         resolved_type = HARNESS_TYPE
 
-    now = _utc_now_iso()
+    now = canonical_message_timestamp(_utc_now_iso())
+    assert now is not None
     payload = {
         "id": _new_message_id(),
         "scope_id": scope_id,
@@ -501,7 +516,7 @@ def append(
         "metadata_json": json.dumps(metadata or {}),
         "created_at": now,
         "updated_at": now,
-        "delivered_at": delivered_at,
+        "delivered_at": canonical_message_timestamp(delivered_at),
         "read_at": read_at,
     }
     conn.execute(messages.insert().values(**payload))
@@ -672,7 +687,7 @@ def list_session_messages(
         # yields an empty window. ``query`` already carries the type/metadata
         # filter, so the older/anchor/newer sub-queries inherit it — the anchor
         # only appears if it is itself transcript-visible.
-        order_value = _transcript_order_value()
+        order_value = transcript_order_value()
         anchor = conn.execute(
             select(order_value).where(
                 messages.c.id == around_id, messages.c.session_id == session_id
@@ -723,7 +738,7 @@ def list_session_messages(
         }
     if tail:
         # Newest ``limit`` rows, then flip back to chronological for the caller.
-        order_value = _transcript_order_value()
+        order_value = transcript_order_value()
         query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(effective_limit + 1)
         rows = _attach_harness_provenance(
             conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
@@ -737,7 +752,7 @@ def list_session_messages(
             "next_before_id": rows[0]["id"] if has_older and rows else None,
         }
     if before_id:
-        order_value = _transcript_order_value()
+        order_value = transcript_order_value()
         anchor = conn.execute(
             select(order_value).where(messages.c.id == before_id)
         ).scalar_one_or_none()
@@ -761,7 +776,7 @@ def list_session_messages(
             "next_before_id": rows[0]["id"] if has_older and rows else None,
         }
     if after_id:
-        order_value = _transcript_order_value()
+        order_value = transcript_order_value()
         anchor = conn.execute(
             select(order_value).where(messages.c.id == after_id)
         ).scalar_one_or_none()
@@ -772,7 +787,7 @@ def list_session_messages(
                     and_(order_value == anchor, messages.c.id > after_id),
                 )
             )
-    order_value = _transcript_order_value()
+    order_value = transcript_order_value()
     query = query.order_by(order_value.asc(), messages.c.id.asc()).limit(effective_limit + 1)
     rows = _attach_harness_provenance(
         conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]

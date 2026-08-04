@@ -853,8 +853,7 @@ def test_queued_initial_message_opens_at_its_accepted_turn(
     isolated_state,
     monkeypatch,
 ):
-    """Submission order stays in the transcript, but execution grouping starts when
-    the queued Delivery becomes the initial owner of its accepted Turn."""
+    """Transcript entry and execution grouping both start at Delivery acceptance."""
 
     engine = create_sqlite_engine()
     sid = "ses_queued_boundary"
@@ -975,8 +974,8 @@ def test_queued_initial_message_opens_at_its_accepted_turn(
 
     assert [row["id"] for row in transcript] == [
         "msg_first_input",
-        "msg_queued_input",
         "msg_first_result",
+        "msg_queued_input",
         "msg_second_result",
     ]
     assert [group["status"] for group in groups] == ["done", "done"]

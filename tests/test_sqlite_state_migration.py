@@ -28,7 +28,7 @@ from storage.settings_service import SQLiteSettingsService, upsert_scope
 from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260802_0045"
+HEAD_REVISION = "20260804_0046"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -99,6 +99,49 @@ def test_alembic_script_directory_has_exactly_one_head() -> None:
 
     assert len(heads) == 1
     assert heads[0] == HEAD_REVISION
+
+
+def test_message_transcript_order_upgrade_normalizes_and_indexes_exact_time(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260802_0045")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into messages (
+                id, platform, author, type, content_json, metadata_json,
+                created_at, updated_at, delivered_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "msg_legacy_order",
+                "avibe",
+                "user",
+                "user",
+                "{}",
+                "{}",
+                "2026-08-04T08:00:00+08:00",
+                "2026-08-04T08:00:00+08:00",
+                "2026-08-04T08:00:00.000999+08:00",
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "select created_at, delivered_at from messages where id = ?",
+            ("msg_legacy_order",),
+        ).fetchone()
+        index_sql = _index_sql(conn, "ix_messages_session_transcript_id")
+
+    assert row == (
+        "2026-08-04T00:00:00.000000Z",
+        "2026-08-04T00:00:00.000999Z",
+    )
+    assert "coalesce(delivered_at, created_at)" in index_sql.lower()
 
 
 def test_scoped_native_message_identity_upgrade_and_safe_downgrade(
@@ -1243,6 +1286,7 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
             )
         }
         assert "ix_messages_session_created_id" in message_indexes
+        assert "ix_messages_session_transcript_id" in message_indexes
         assert "ix_messages_session_type_created_id" in message_indexes
         assert "ix_messages_platform_session_created_id" in message_indexes
         assert "ix_messages_unread_session" in message_indexes
@@ -1582,7 +1626,7 @@ def test_show_annotation_migration_changes_only_the_user_send_index(
 ) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path, revision="20260726_0037")
-    now = "2026-07-27T00:00:00Z"
+    now = "2026-07-27T00:00:00.000000Z"
     legacy_payloads = [
         ("agent", "assistant", "assistant.mark.created")
         for _ in range(5)

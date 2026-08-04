@@ -260,7 +260,9 @@ def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(manage
         "remote:user-a",
         "remote:user-b",
     ]
-    assert stored["created_at"] == accepted[0]["submitted_at"]
+    assert stored["created_at"] == messages_service.canonical_message_timestamp(
+        accepted[0]["submitted_at"]
+    )
     assert stored["delivered_at"] == accepted[0]["materialized_at"]
 
 
@@ -2901,7 +2903,9 @@ def test_materialized_message_preserves_submission_and_acceptance_times(managers
         message = conn.execute(
             select(messages).where(messages.c.id == delivery["id"])
         ).mappings().one()
-    assert message["created_at"] == delivery["submitted_at"]
+    assert message["created_at"] == messages_service.canonical_message_timestamp(
+        delivery["submitted_at"]
+    )
     assert message["delivered_at"] == delivery["materialized_at"]
 
 

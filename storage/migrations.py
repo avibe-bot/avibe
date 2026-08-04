@@ -781,6 +781,20 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
         )
     if "messages" not in tables:
         return
+    transcript_index = import_module(
+        "storage.alembic.versions.20260804_0046_message_transcript_order"
+    )
+    transcript_row = conn.execute(
+        "select sql from sqlite_master where type = 'index' and name = ?",
+        (transcript_index._INDEX,),
+    ).fetchone()
+    if (
+        transcript_row is None
+        or _normalized_index_sql(transcript_row[0])
+        != _normalized_index_sql(transcript_index.CREATE_INDEX_SQL)
+    ):
+        conn.execute(transcript_index.DROP_INDEX_SQL)
+        conn.execute(transcript_index.CREATE_INDEX_SQL)
     conn.execute('create index if not exists ix_messages_session_created_id on messages (session_id, created_at, id)')
     conn.execute('create index if not exists ix_messages_session_type_created_id on messages (session_id, type, created_at, id)')
     conn.execute('create index if not exists ix_messages_platform_session_created_id on messages (platform, session_id, created_at, id)')

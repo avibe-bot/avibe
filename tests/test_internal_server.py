@@ -1843,7 +1843,7 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
         conn.execute(
             update(delivery_rows)
             .where(delivery_rows.c.id == queued["id"])
-            .values(submitted_at="2026-06-22T00:00:37Z")
+            .values(submitted_at="2026-06-22T00:00:37.000000Z")
         )
         generated_ids = iter(
             (
@@ -1853,6 +1853,11 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
         )
         monkeypatch.setattr(messages_service, "_new_message_id", lambda: next(generated_ids))
         monkeypatch.setattr(messages_service, "_utc_now_iso", lambda: "2026-06-22T00:00:37Z")
+        monkeypatch.setattr(
+            message_deliveries,
+            "turn_now_iso",
+            lambda: "2026-06-22T00:00:37.000000Z",
+        )
         result = messages_service.append(
             conn,
             scope_id=queued["scope_id"],
@@ -1866,8 +1871,8 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
             update(messages)
             .where(messages.c.id == result["id"])
             .values(
-                created_at="2026-06-22T00:00:37Z",
-                updated_at="2026-06-22T00:00:37Z",
+                created_at="2026-06-22T00:00:37.000000Z",
+                updated_at="2026-06-22T00:00:37.000000Z",
             )
         )
 
@@ -1929,9 +1934,9 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
         ("result", "fast queued result"),
     ]
     assert [row["created_at"] for row in transcript["messages"]] == [
-        "2026-06-22T00:00:37Z",
-        "2026-06-22T00:00:37Z",
-        "2026-06-22T00:00:37Z",
+        "2026-06-22T00:00:37.000000Z",
+        "2026-06-22T00:00:37.000000Z",
+        "2026-06-22T00:00:37.000000Z",
     ]
     assert [row["id"] for row in transcript["messages"]] == [
         "msg_000000000000100aaaaaaaa",

@@ -461,7 +461,7 @@ def test_append_keeps_subsecond_transcript_order_for_direct_reply(
             platform="avibe",
             author="user",
             text="prompt",
-            delivered_at="2026-08-04T00:00:00.500000Z",
+            delivered_at="2026-08-04T08:00:00.500000+08:00",
         )
         reply = messages_service.append(
             conn,
@@ -479,7 +479,79 @@ def test_append_keeps_subsecond_transcript_order_for_direct_reply(
         )["messages"]
 
     assert reply["created_at"] == "2026-08-04T00:00:00.750000Z"
+    assert prompt["delivered_at"] == "2026-08-04T00:00:00.500000Z"
     assert [row["text"] for row in transcript] == ["prompt", "reply"]
+
+
+def test_transcript_preserves_submillisecond_acceptance_order(
+    isolated_state,
+    monkeypatch,
+):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_microsecond")
+        timestamps = iter(
+            (
+                "2026-08-04T00:00:00.000000Z",
+                "2026-08-04T00:00:00.000100Z",
+            )
+        )
+        monkeypatch.setattr(
+            messages_service, "_utc_now_iso", lambda: next(timestamps)
+        )
+        queued = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_microsecond",
+            platform="avibe",
+            author="user",
+            text="queued",
+            delivered_at="2026-08-04T00:00:00.000900Z",
+        )
+        reply = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_microsecond",
+            platform="avibe",
+            author="agent",
+            text="reply",
+        )
+
+    with engine.connect() as conn:
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses_microsecond",
+        )["messages"]
+
+    assert queued["id"] < reply["id"]
+    assert [row["text"] for row in transcript] == ["reply", "queued"]
+
+
+def test_transcript_tail_uses_the_exact_order_expression_index(isolated_state):
+    engine = create_sqlite_engine()
+    order_value = messages_service.transcript_order_value()
+    statement = (
+        select(messages.c.id)
+        .where(
+            messages.c.session_id == "ses_plan",
+            messages.c.type.in_(messages_service.TRANSCRIPT_TYPES),
+        )
+        .order_by(order_value.desc(), messages.c.id.desc())
+        .limit(51)
+    )
+    compiled = statement.compile(engine, compile_kwargs={"literal_binds": True})
+
+    with engine.connect() as conn:
+        plan = "\n".join(
+            str(row[-1])
+            for row in conn.exec_driver_sql(
+                "EXPLAIN QUERY PLAN " + str(compiled)
+            ).all()
+        )
+
+    assert "USING INDEX ix_messages_session_transcript_id (session_id=?)" in plan
+    assert "TEMP B-TREE" not in plan
 
 
 def test_mark_session_read_ties_break_on_id(isolated_state):
