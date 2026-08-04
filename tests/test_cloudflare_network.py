@@ -56,6 +56,7 @@ def test_ra_tq_026_route_assessment_is_conservative() -> None:
     assert cloudflare_network.assess_route("SIN", ["SIN", "SIN"], catalog) == "same_metro"
     assert cloudflare_network.assess_route("NRT", ["NRT", "KIX"], catalog) == "same_country"
     assert cloudflare_network.assess_route("SIN", ["SIN", "NRT"], catalog) == "cross_country"
+    assert cloudflare_network.assess_route("SIN", ["NRT", "LAX"], catalog) == "cross_country"
     assert cloudflare_network.assess_route(None, ["SIN"], catalog) == "unknown"
     assert cloudflare_network.assess_route("SIN", ["SIN", "LAX"], catalog) == "unknown"
 

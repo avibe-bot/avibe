@@ -264,11 +264,14 @@ def assess_route(
         return "same_metro"
     client_country = (catalog.get(client_colo) or {}).get("country")
     connector_countries = [(catalog.get(colo) or {}).get("country") for colo in connector_colos]
-    if not client_country or any(not country for country in connector_countries):
+    if not client_country:
         return "unknown"
-    if all(country == client_country for country in connector_countries):
-        return "same_country"
-    return "cross_country"
+    known_connector_countries = [country for country in connector_countries if country]
+    if any(country != client_country for country in known_connector_countries):
+        return "cross_country"
+    if len(known_connector_countries) != len(connector_countries):
+        return "unknown"
+    return "same_country"
 
 
 def network_path_snapshot(
