@@ -248,7 +248,9 @@ class RecorderHandle:
 
     async def close(self, timeout: float = 1.0) -> None:
         budget = max(0.0, float(timeout))
-        interrupt_grace = min(_CLOSE_INTERRUPT_GRACE_SECONDS, budget)
+        # sqlite3_interrupt() does not reliably cancel an in-flight busy wait.
+        busy_grace = _WRITER_BUSY_TIMEOUT_MS / 1000.0
+        interrupt_grace = min(_CLOSE_INTERRUPT_GRACE_SECONDS + busy_grace, budget)
         graceful_budget = max(0.0, budget - interrupt_grace)
         try:
             with self._condition:

@@ -2655,6 +2655,9 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
         await asyncio.wait_for(asyncio.shield(task), timeout=1)
         assert maintenance_calls == 1
         assert runtime._call_log_retention_task is None
+        runtime._ensure_call_log_retention()
+        assert runtime._call_log_retention_task is None
+        assert maintenance_calls == 1
         await runtime.close()
         assert task.done()
 

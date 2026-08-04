@@ -1025,7 +1025,11 @@ class MemoryRuntime:
 
     def _ensure_call_log_retention(self) -> None:
         task = self._call_log_retention_task
-        if self._process_records_calls or not self._call_log_exists():
+        if (
+            self._process_records_calls
+            or self._recorder_health.get("reason") == "call_log_corrupt"
+            or not self._call_log_exists()
+        ):
             return
         if task is not None and not task.done():
             return
