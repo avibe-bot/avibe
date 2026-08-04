@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -78,13 +79,20 @@ class _Controller:
         self.receiver_tasks = {}
         self.stored_session_mappings = {}
         self._working_path = working_path
-        self.runtime_ownership = SimpleNamespace(
-            snapshot=lambda _target: SimpleNamespace(
+        def ownership(target):
+            return SimpleNamespace(
+                resource_key=target.resource_key,
                 disposition=SessionRuntimeDisposition.RECLAIMABLE,
                 blocks_reclamation=False,
                 needs_session_delivery_wake=False,
                 needs_request_wake=False,
             )
+
+        self.runtime_ownership = SimpleNamespace(
+            snapshot=ownership,
+            snapshot_many=lambda targets: tuple(
+                ownership(target) for target in targets
+            ),
         )
 
     def get_cwd(self, context) -> str:
@@ -1543,6 +1551,53 @@ def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path)
         composite_key,
         include_retired=True,
     ) == identity
+
+
+def test_idle_sweep_batches_ownership_reads_off_the_controller_loop(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    loop_thread = threading.get_ident()
+    batch_threads: list[int] = []
+    single_calls: list[str] = []
+
+    def ownership(resource_key: str):
+        return SimpleNamespace(
+            resource_key=resource_key,
+            disposition=SessionRuntimeDisposition.RECLAIMABLE,
+            blocks_reclamation=False,
+            needs_session_delivery_wake=False,
+            needs_request_wake=False,
+        )
+
+    class _Provider:
+        def snapshot(self, target):
+            single_calls.append(target.resource_key)
+            return ownership(target.resource_key)
+
+        def snapshot_many(self, targets):
+            batch_threads.append(threading.get_ident())
+            return tuple(ownership(target.resource_key) for target in targets)
+
+    controller.runtime_ownership = _Provider()
+    for suffix in ("a", "b"):
+        resource_key = f"runtime-{suffix}"
+        controller.claude_sessions[resource_key] = SimpleNamespace(
+            _vibe_runtime_base_session_id=f"base-{suffix}",
+            _vibe_runtime_session_key=resource_key,
+            _vibe_runtime_workdir=f"/work/{suffix}",
+            _vibe_runtime_fallback_session_key=f"route:{suffix}",
+            _vibe_agent_session_id=f"ses-{suffix}",
+        )
+        handler.session_last_activity[resource_key] = 999.0
+
+    assert asyncio.run(handler.evict_idle_sessions(600)) == 0
+    assert single_calls == []
+    assert len(batch_threads) == 1
+    assert batch_threads[0] != loop_thread
 
 
 def test_session_handler_keeps_active_claude_session(monkeypatch, tmp_path: Path) -> None:

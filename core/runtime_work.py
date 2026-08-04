@@ -107,6 +107,7 @@ class RuntimeWorkSupervisor:
         self._stopping = False
         self._subscription_id: int | None = None
         self._reconcile_task: asyncio.Task[None] | None = None
+        self._stop_task: asyncio.Task[None] | None = None
         self._pending_lock = threading.Lock()
         self._pending_lanes: set[RuntimeWorkLane] = set()
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
@@ -206,6 +207,14 @@ class RuntimeWorkSupervisor:
             pass
 
     async def stop(self) -> None:
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(
+                self._stop_and_join(),
+                name="runtime-work-stop",
+            )
+        await asyncio.shield(self._stop_task)
+
+    async def _stop_and_join(self) -> None:
         if self._stopping:
             return
         self._stopping = True

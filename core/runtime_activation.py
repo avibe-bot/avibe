@@ -14,12 +14,21 @@ from __future__ import annotations
 
 import itertools
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Generic, Iterator, TypeVar
 
 
 _T = TypeVar("_T")
+_RETIRED_DIAGNOSTIC_LIMIT = 64
+
+
+@dataclass
+class _GenerationBoundary:
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    phase: str = "live"
+    reservation_serial: int = 0
 
 
 @dataclass(frozen=True)
@@ -29,6 +38,11 @@ class RuntimeActivationIdentity:
     backend: str
     resource_key: str
     generation: int
+    _boundary: _GenerationBoundary = field(
+        default_factory=_GenerationBoundary,
+        compare=False,
+        repr=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -47,24 +61,30 @@ class RuntimeActivationResolution:
     identity: RuntimeActivationIdentity | None = None
 
 
-@dataclass
-class _GenerationState:
+@dataclass(frozen=True)
+class RuntimeActivationRetirementReservation:
+    """One exact in-progress retirement decision for a runtime generation."""
+
     identity: RuntimeActivationIdentity
-    retired: bool = False
+    serial: int
 
 
 class RuntimeActivationRegistry:
     """Serialize exact-generation owner commits against runtime reclamation.
 
-    Locks are retained for the registry lifetime so an old identity can never
-    acquire a different lock after a target is replaced. The number of runtime
-    resource targets is naturally bounded by the controller's adapter caches.
+    Each identity owns its boundary, so an old identity can never acquire a new
+    generation's lock after replacement. Live targets are strongly referenced;
+    retired identities are retained only in a fixed-size diagnostics cache.
     """
 
     def __init__(self) -> None:
         self._index_lock = threading.Lock()
-        self._boundaries: dict[tuple[str, str], threading.RLock] = {}
-        self._states: dict[tuple[str, str], _GenerationState] = {}
+        self._current: dict[
+            tuple[str, str], RuntimeActivationIdentity
+        ] = {}
+        self._retired_diagnostics: OrderedDict[
+            tuple[str, str], RuntimeActivationIdentity
+        ] = OrderedDict()
         self._generations = itertools.count(1)
 
     @staticmethod
@@ -74,10 +94,6 @@ class RuntimeActivationRegistry:
         if not normalized_backend or not normalized_resource_key:
             raise ValueError("runtime activation target requires backend and resource_key")
         return normalized_backend, normalized_resource_key
-
-    def _boundary(self, key: tuple[str, str]) -> threading.RLock:
-        with self._index_lock:
-            return self._boundaries.setdefault(key, threading.RLock())
 
     def attach(self, backend: str, resource_key: str) -> RuntimeActivationIdentity:
         """Install and return a fresh generation for one runtime resource target.
@@ -89,15 +105,36 @@ class RuntimeActivationRegistry:
         """
 
         key = self._target_key(backend, resource_key)
-        boundary = self._boundary(key)
-        with boundary:
-            identity = RuntimeActivationIdentity(
-                backend=key[0],
-                resource_key=key[1],
-                generation=next(self._generations),
-            )
-            self._states[key] = _GenerationState(identity=identity)
-            return identity
+        while True:
+            with self._index_lock:
+                previous = self._current.get(key)
+                if previous is None:
+                    identity = RuntimeActivationIdentity(
+                        backend=key[0],
+                        resource_key=key[1],
+                        generation=next(self._generations),
+                    )
+                    self._current[key] = identity
+                    self._retired_diagnostics.pop(key, None)
+                    return identity
+
+            with previous._boundary.lock:
+                with self._index_lock:
+                    if self._current.get(key) is not previous:
+                        continue
+                    if previous._boundary.phase == "retiring":
+                        raise RuntimeError(
+                            "cannot replace a runtime generation while it is retiring"
+                        )
+                    previous._boundary.phase = "retired"
+                    self._remember_retired_locked(key, previous)
+                    identity = RuntimeActivationIdentity(
+                        backend=key[0],
+                        resource_key=key[1],
+                        generation=next(self._generations),
+                    )
+                    self._current[key] = identity
+                    return identity
 
     def current(
         self,
@@ -109,19 +146,28 @@ class RuntimeActivationRegistry:
         """Return the current target identity without creating a generation."""
 
         key = self._target_key(backend, resource_key)
-        boundary = self._boundary(key)
-        with boundary:
-            state = self._states.get(key)
-            if state is None or (state.retired and not include_retired):
-                return None
-            return state.identity
+        while True:
+            with self._index_lock:
+                identity = self._current.get(key)
+                if identity is None:
+                    return (
+                        self._retired_diagnostics.get(key)
+                        if include_retired
+                        else None
+                    )
+            with identity._boundary.lock:
+                with self._index_lock:
+                    if self._current.get(key) is not identity:
+                        continue
+                    if identity._boundary.phase == "live" or include_retired:
+                        return identity
+                    return None
 
     def is_current(self, identity: RuntimeActivationIdentity) -> bool:
         """Whether ``identity`` still names the live generation for its target."""
 
         key = self._target_key(identity.backend, identity.resource_key)
-        boundary = self._boundary(key)
-        with boundary:
+        with identity._boundary.lock:
             return self._is_current_locked(key, identity)
 
     def commit_if_current(
@@ -137,8 +183,7 @@ class RuntimeActivationRegistry:
         """
 
         key = self._target_key(identity.backend, identity.resource_key)
-        boundary = self._boundary(key)
-        with boundary:
+        with identity._boundary.lock:
             if not self._is_current_locked(key, identity):
                 return RuntimeActivationCommit(admitted=False)
             return RuntimeActivationCommit(admitted=True, value=commit())
@@ -158,9 +203,52 @@ class RuntimeActivationRegistry:
         """
 
         key = self._target_key(identity.backend, identity.resource_key)
-        boundary = self._boundary(key)
-        with boundary:
+        with identity._boundary.lock:
             yield self._is_current_locked(key, identity)
+
+    def reserve_retirement(
+        self,
+        identity: RuntimeActivationIdentity,
+    ) -> RuntimeActivationRetirementReservation | None:
+        """Block new admissions while an exact final snapshot is computed."""
+
+        key = self._target_key(identity.backend, identity.resource_key)
+        with identity._boundary.lock:
+            if not self._is_current_locked(key, identity):
+                return None
+            identity._boundary.phase = "retiring"
+            identity._boundary.reservation_serial += 1
+            return RuntimeActivationRetirementReservation(
+                identity=identity,
+                serial=identity._boundary.reservation_serial,
+            )
+
+    def finish_retirement(
+        self,
+        reservation: RuntimeActivationRetirementReservation,
+        *,
+        retire: bool,
+    ) -> bool:
+        """Commit or abort one exact retirement reservation."""
+
+        identity = reservation.identity
+        key = self._target_key(identity.backend, identity.resource_key)
+        with identity._boundary.lock:
+            if (
+                identity._boundary.phase != "retiring"
+                or identity._boundary.reservation_serial != reservation.serial
+            ):
+                return False
+            with self._index_lock:
+                if self._current.get(key) is not identity:
+                    return False
+                if retire:
+                    identity._boundary.phase = "retired"
+                    self._current.pop(key, None)
+                    self._remember_retired_locked(key, identity)
+                else:
+                    identity._boundary.phase = "live"
+            return True
 
     def retire_if_current(
         self,
@@ -176,24 +264,44 @@ class RuntimeActivationRegistry:
         happen outside this registry.
         """
 
-        key = self._target_key(identity.backend, identity.resource_key)
-        boundary = self._boundary(key)
-        with boundary:
-            if not self._is_current_locked(key, identity):
-                return False
-            if not final_predicate():
-                return False
-            self._states[key].retired = True
-            return True
+        reservation = self.reserve_retirement(identity)
+        if reservation is None:
+            return False
+        try:
+            should_retire = bool(final_predicate())
+        except BaseException:
+            self.finish_retirement(reservation, retire=False)
+            raise
+        if not should_retire:
+            self.finish_retirement(reservation, retire=False)
+            return False
+        return self.finish_retirement(reservation, retire=True)
+
+    def tracked_target_count(self) -> int:
+        with self._index_lock:
+            return len(self._current)
+
+    def retired_diagnostic_count(self) -> int:
+        with self._index_lock:
+            return len(self._retired_diagnostics)
 
     def _is_current_locked(
         self,
         key: tuple[str, str],
         identity: RuntimeActivationIdentity,
     ) -> bool:
-        state = self._states.get(key)
-        return bool(
-            state is not None
-            and not state.retired
-            and state.identity == identity
-        )
+        with self._index_lock:
+            return bool(
+                self._current.get(key) is identity
+                and identity._boundary.phase == "live"
+            )
+
+    def _remember_retired_locked(
+        self,
+        key: tuple[str, str],
+        identity: RuntimeActivationIdentity,
+    ) -> None:
+        self._retired_diagnostics[key] = identity
+        self._retired_diagnostics.move_to_end(key)
+        while len(self._retired_diagnostics) > _RETIRED_DIAGNOSTIC_LIMIT:
+            self._retired_diagnostics.popitem(last=False)

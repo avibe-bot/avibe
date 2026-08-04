@@ -9,12 +9,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
 
 from core.runtime_ownership import (
     RuntimeOwnershipProvider,
     RuntimeResourceTarget,
     RuntimeSessionBinding,
+    RuntimeTargetOwnershipSnapshot,
+    SessionRuntimeOwnershipSnapshot,
     SessionRuntimeDisposition,
     wake_runtime_ownership,
 )
@@ -506,6 +508,162 @@ def _target(
         known_fallback_route_keys=known_route_keys or (route_key,),
         durable_session_workdir=durable_session_workdir,
     )
+
+
+def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, "ownership-batch.sqlite")
+    with engine.begin() as conn:
+        _session(
+            conn,
+            "ses-a",
+            anchor="base-a",
+            workdir="/work/a",
+            backend="claude",
+        )
+        _session(
+            conn,
+            "ses-b",
+            anchor="base-b",
+            workdir="/work/b",
+            backend="claude",
+        )
+
+    statements: list[str] = []
+
+    def record_statement(_conn, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        snapshots = RuntimeOwnershipProvider(engine).snapshot_many(
+            (
+                _target(
+                    session_id="ses-a",
+                    anchor="base-a",
+                    workdir="/work/a",
+                    backend="claude",
+                    runtime_key="runtime-a",
+                    route_key="route:a",
+                ),
+                _target(
+                    session_id="ses-b",
+                    anchor="base-b",
+                    workdir="/work/b",
+                    backend="claude",
+                    runtime_key="runtime-b",
+                    route_key="route:b",
+                ),
+            )
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+
+    assert tuple(snapshot.resource_key for snapshot in snapshots) == (
+        "/work/a",
+        "/work/b",
+    )
+    assert all(
+        snapshot.disposition is SessionRuntimeDisposition.RECLAIMABLE
+        for snapshot in snapshots
+    )
+    assert sum("FROM runtime_records" in statement for statement in statements) == 1
+    assert sum("FROM agent_runs" in statement for statement in statements) == 1
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "expected"),
+    (
+        (
+            RuntimeTargetOwnershipSnapshot(
+                backend="codex",
+                resource_key="/work",
+                activity_runtime_keys=(),
+                sessions=(),
+                sessionless_active_activity_ids=(),
+                sessionless_fallback_run_ids=(),
+                disposition=SessionRuntimeDisposition.UNKNOWN,
+            ),
+            True,
+        ),
+        (
+            RuntimeTargetOwnershipSnapshot(
+                backend="codex",
+                resource_key="/work",
+                activity_runtime_keys=(),
+                sessions=(),
+                sessionless_active_activity_ids=("activity-a",),
+                sessionless_fallback_run_ids=(),
+                disposition=SessionRuntimeDisposition.ACTIVE,
+            ),
+            True,
+        ),
+        (
+            RuntimeTargetOwnershipSnapshot(
+                backend="codex",
+                resource_key="/work",
+                activity_runtime_keys=(),
+                sessions=(),
+                sessionless_active_activity_ids=(),
+                sessionless_fallback_run_ids=("run-a",),
+                disposition=SessionRuntimeDisposition.ACTIVE,
+                reasons=("run:run-a:active",),
+            ),
+            True,
+        ),
+        (
+            RuntimeTargetOwnershipSnapshot(
+                backend="codex",
+                resource_key="/work",
+                activity_runtime_keys=(),
+                sessions=(
+                    SessionRuntimeOwnershipSnapshot(
+                        session_id="ses-a",
+                        disposition=SessionRuntimeDisposition.ACTIVE,
+                        delivery_ids=("delivery-a",),
+                        turn_ids=("turn-a",),
+                        active_activity_ids=(),
+                        fallback_run_ids=(),
+                        queue_hold_state="open",
+                        reasons=("delivery:claimed", "turn:starting"),
+                    ),
+                ),
+                sessionless_active_activity_ids=(),
+                sessionless_fallback_run_ids=(),
+                disposition=SessionRuntimeDisposition.ACTIVE,
+            ),
+            False,
+        ),
+        (
+            RuntimeTargetOwnershipSnapshot(
+                backend="codex",
+                resource_key="/work",
+                activity_runtime_keys=(),
+                sessions=(
+                    SessionRuntimeOwnershipSnapshot(
+                        session_id="ses-a",
+                        disposition=SessionRuntimeDisposition.ACTIVE,
+                        delivery_ids=("delivery-a",),
+                        turn_ids=("turn-a",),
+                        active_activity_ids=(),
+                        fallback_run_ids=(),
+                        queue_hold_state="open",
+                        reasons=("delivery:claimed", "turn:active"),
+                    ),
+                ),
+                sessionless_active_activity_ids=(),
+                sessionless_fallback_run_ids=(),
+                disposition=SessionRuntimeDisposition.ACTIVE,
+            ),
+            True,
+        ),
+    ),
+)
+def test_transport_replacement_gate_tracks_only_durable_native_effect_owners(
+    snapshot: RuntimeTargetOwnershipSnapshot,
+    expected: bool,
+) -> None:
+    assert snapshot.blocks_transport_replacement is expected
 
 
 def _codex_reclaimer(engine, bindings: list[tuple[str, str, str, str]]):

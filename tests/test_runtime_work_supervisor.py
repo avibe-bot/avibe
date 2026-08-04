@@ -315,3 +315,43 @@ async def test_hfr_154_begin_unregister_invalidates_before_async_join() -> None:
     assert handler.scans == 1
     assert handler.processed == []
     await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_concurrent_stop_callers_join_the_same_blocked_scan() -> None:
+    """Every stop caller waits for the exact underlying synchronous owner."""
+
+    class _BlockingScanHandler(RuntimeWorkHandler):
+        def __init__(self) -> None:
+            self.scan_started = threading.Event()
+            self.release_scan = threading.Event()
+
+        def scan(
+            self,
+            *,
+            limit: int,
+            occupied: frozenset[str],
+            cursor: str | None,
+        ):
+            del limit, occupied, cursor
+            self.scan_started.set()
+            assert self.release_scan.wait(timeout=2)
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            raise AssertionError(item)
+
+    handler = _BlockingScanHandler()
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, handler)
+    await supervisor.activate()
+    assert await asyncio.to_thread(handler.scan_started.wait, 1)
+
+    first = asyncio.create_task(supervisor.stop())
+    second = asyncio.create_task(supervisor.stop())
+    await asyncio.sleep(0)
+    assert not first.done()
+    assert not second.done()
+
+    handler.release_scan.set()
+    await asyncio.gather(first, second)

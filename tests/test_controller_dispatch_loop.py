@@ -237,6 +237,43 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert stopped["runtime"] is True
 
 
+def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:
+    controller = Controller.__new__(Controller)
+    loop = asyncio.new_event_loop()
+    controller._loop = loop
+    controller._shutdown_requested = False
+    controller._shutdown_task = None
+    controller._shutdown_tainted = False
+    controller._runtime_work_shutdown_grace_seconds = 0.0
+    started = threading.Event()
+    release = threading.Event()
+
+    class _Supervisor:
+        async def stop(self) -> None:
+            started.set()
+            await asyncio.to_thread(release.wait)
+
+    controller.runtime_work_supervisor = _Supervisor()
+
+    thread = threading.Thread(target=loop.run_forever, name="controller-loop")
+    thread.start()
+    try:
+        controller.request_shutdown("test")
+        assert started.wait(timeout=1)
+        assert thread.is_alive()
+        assert controller.service_lock_safe_to_release is False
+        release.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert controller._shutdown_tainted is True
+        assert controller.service_lock_safe_to_release is False
+    finally:
+        release.set()
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+
+
 def test_im_show_checkpoint_lifecycle_spans_real_start_to_terminal_result(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     controller = Controller.__new__(Controller)

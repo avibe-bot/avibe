@@ -794,6 +794,8 @@ class CodexAgent(BaseAgent):
         self,
         cwd: str,
         transport: CodexTransport,
+        *,
+        final_predicate: Callable[[], bool] | None = None,
     ) -> bool:
         """Retire and detach the exact cached transport before stopping it."""
         if self._transports.get(cwd) is not transport:
@@ -801,7 +803,10 @@ class CodexAgent(BaseAgent):
         if not self._retire_transport_activation(
             cwd,
             transport,
-            lambda: self._transports.get(cwd) is transport,
+            lambda: bool(
+                self._transports.get(cwd) is transport
+                and (final_predicate is None or final_predicate())
+            ),
         ):
             return False
         self._transports.pop(cwd, None)
@@ -1256,9 +1261,26 @@ class CodexAgent(BaseAgent):
                 else:
                     # Stop stale transport if any
                     if existing:
-                        if not self._detach_transport_generation(cwd, existing):
+                        def replacement_is_safe() -> bool:
+                            ownership = self._runtime_ownership_snapshot_for_cwd(cwd)
+                            return bool(
+                                ownership is not None
+                                and not getattr(
+                                    ownership,
+                                    "blocks_transport_replacement",
+                                    True,
+                                )
+                                and not self._has_active_turns_for_cwd(cwd)
+                            )
+
+                        if not self._detach_transport_generation(
+                            cwd,
+                            existing,
+                            final_predicate=replacement_is_safe,
+                        ):
                             raise RuntimeError(
-                                "Codex transport generation changed before replacement"
+                                "Codex transport replacement blocked by a durable owner "
+                                "or changed generation"
                             )
                         await existing.stop()
                         if (

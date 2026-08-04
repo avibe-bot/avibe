@@ -1768,6 +1768,9 @@ class SessionHandler(BaseHandler):
         self,
         composite_key: str,
         client: ClaudeSDKClient,
+        *,
+        known_activity_keys: tuple[str, ...] | None = None,
+        known_route_keys: tuple[str, ...] | None = None,
     ) -> "RuntimeResourceTarget | None":
         from core.runtime_ownership import (
             RuntimeResourceTarget,
@@ -1799,35 +1802,10 @@ class SessionHandler(BaseHandler):
                 composite_key,
             )
             return None
-        known_activity_keys = tuple(
-            sorted(
-                {
-                    str(getattr(candidate, "_vibe_runtime_session_key", "") or "")
-                    for candidate in self.claude_sessions.values()
-                    if getattr(candidate, "_vibe_runtime_session_key", None)
-                }
+        if known_activity_keys is None or known_route_keys is None:
+            known_activity_keys, known_route_keys = (
+                self._claude_runtime_ownership_known_keys()
             )
-        )
-        known_route_keys = tuple(
-            sorted(
-                {
-                    str(
-                        getattr(
-                            candidate,
-                            "_vibe_runtime_fallback_session_key",
-                            "",
-                        )
-                        or ""
-                    )
-                    for candidate in self.claude_sessions.values()
-                    if getattr(
-                        candidate,
-                        "_vibe_runtime_fallback_session_key",
-                        None,
-                    )
-                }
-            )
-        )
         return RuntimeResourceTarget(
             backend="claude",
             resource_key=composite_key,
@@ -1843,6 +1821,69 @@ class SessionHandler(BaseHandler):
             known_activity_runtime_keys=known_activity_keys,
             known_fallback_route_keys=known_route_keys,
         )
+
+    def _claude_runtime_ownership_known_keys(
+        self,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        clients = tuple(self.claude_sessions.values())
+        return (
+            tuple(
+                sorted(
+                    {
+                        str(
+                            getattr(
+                                candidate,
+                                "_vibe_runtime_session_key",
+                                "",
+                            )
+                            or ""
+                        )
+                        for candidate in clients
+                        if getattr(candidate, "_vibe_runtime_session_key", None)
+                    }
+                )
+            ),
+            tuple(
+                sorted(
+                    {
+                        str(
+                            getattr(
+                                candidate,
+                                "_vibe_runtime_fallback_session_key",
+                                "",
+                            )
+                            or ""
+                        )
+                        for candidate in clients
+                        if getattr(
+                            candidate,
+                            "_vibe_runtime_fallback_session_key",
+                            None,
+                        )
+                    }
+                )
+            ),
+        )
+
+    def _claude_runtime_ownership_targets(
+        self,
+        items: tuple[tuple[str, ClaudeSDKClient], ...] | None = None,
+    ) -> dict[str, "RuntimeResourceTarget"]:
+        selected = items if items is not None else tuple(self.claude_sessions.items())
+        known_activity_keys, known_route_keys = (
+            self._claude_runtime_ownership_known_keys()
+        )
+        targets = {}
+        for composite_key, client in selected:
+            target = self._claude_runtime_ownership_target(
+                composite_key,
+                client,
+                known_activity_keys=known_activity_keys,
+                known_route_keys=known_route_keys,
+            )
+            if target is not None:
+                targets[composite_key] = target
+        return targets
 
     def _claude_runtime_ownership_snapshot(
         self,
@@ -1865,16 +1906,24 @@ class SessionHandler(BaseHandler):
         return result
 
     def runtime_ownership_snapshots(self) -> tuple[Any, ...] | None:
-        snapshots = []
-        for composite_key, client in tuple(self.claude_sessions.items()):
-            snapshot = self._claude_runtime_ownership_snapshot(
-                composite_key,
-                client,
-            )
-            if snapshot is None:
-                return None
-            snapshots.append(snapshot)
-        return tuple(snapshots)
+        from core.runtime_ownership import wake_runtime_ownership
+
+        items = tuple(self.claude_sessions.items())
+        targets_by_key = self._claude_runtime_ownership_targets(items)
+        if len(targets_by_key) != len(items):
+            return None
+        provider = getattr(self.controller, "runtime_ownership", None)
+        snapshot_many = getattr(provider, "snapshot_many", None)
+        if not callable(snapshot_many):
+            logger.error("Claude runtime ownership batch provider unavailable")
+            return None
+        results = tuple(snapshot_many(tuple(targets_by_key.values())))
+        if len(results) != len(targets_by_key):
+            logger.error("Claude runtime ownership batch returned incomplete results")
+            return None
+        for result in results:
+            wake_runtime_ownership(self.controller, result)
+        return results
 
     async def evict_idle_sessions(
         self,
@@ -1915,6 +1964,36 @@ class SessionHandler(BaseHandler):
         now = time.monotonic()
         expired: list[tuple[str, float]] = []
 
+        ownership_items = tuple(
+            (composite_key, client)
+            for composite_key in self.session_last_activity
+            if (client := self.claude_sessions.get(composite_key)) is not None
+        )
+        targets_by_key = self._claude_runtime_ownership_targets(ownership_items)
+        provider = getattr(self.controller, "runtime_ownership", None)
+        snapshot_many = getattr(provider, "snapshot_many", None)
+        ownership_by_key = {}
+        if targets_by_key and callable(snapshot_many):
+            from core.runtime_ownership import wake_runtime_ownership
+
+            results = await asyncio.to_thread(
+                snapshot_many,
+                tuple(targets_by_key.values()),
+            )
+            ownership_by_key = {
+                result.resource_key: result for result in results
+            }
+            if len(ownership_by_key) != len(targets_by_key):
+                logger.error(
+                    "Claude runtime ownership batch returned incomplete results"
+                )
+                ownership_by_key = {}
+            else:
+                for result in results:
+                    wake_runtime_ownership(self.controller, result)
+        elif targets_by_key:
+            logger.error("Claude runtime ownership batch provider unavailable")
+
         for composite_key, last_activity in list(self.session_last_activity.items()):
             client = self.claude_sessions.get(composite_key)
             if client is None:
@@ -1922,10 +2001,7 @@ class SessionHandler(BaseHandler):
                 self.session_turn_started.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
                 continue
-            ownership = self._claude_runtime_ownership_snapshot(
-                composite_key,
-                client,
-            )
+            ownership = ownership_by_key.get(composite_key)
             if ownership is None:
                 continue
             idle_for = now - last_activity
@@ -1952,44 +2028,76 @@ class SessionHandler(BaseHandler):
                     self.session_turn_started.pop(composite_key, None)
                     self.active_sessions.discard(composite_key)
                     continue
-                final: dict[str, Any] = {}
-
-                def final_reclamation_predicate() -> bool:
-                    if self.claude_sessions.get(composite_key) is not client:
-                        return False
-                    current_last_activity = self.session_last_activity.get(composite_key)
-                    if current_last_activity is None:
-                        return False
-                    ownership = self._claude_runtime_ownership_snapshot(
-                        composite_key,
-                        client,
-                    )
-                    if ownership is None:
-                        return False
-                    recheck_idle = time.monotonic() - current_last_activity
-                    final["idle_for"] = recheck_idle
-                    is_active = composite_key in self.active_sessions
-                    final["active"] = is_active
-                    if is_active:
-                        return bool(
-                            stuck_threshold is not None
-                            and recheck_idle >= stuck_threshold
-                            and ownership.disposition
-                            not in {
-                                SessionRuntimeDisposition.TRANSITIONING,
-                                SessionRuntimeDisposition.UNKNOWN,
-                            }
+                target = self._claude_runtime_ownership_targets(
+                    ((composite_key, client),)
+                ).get(composite_key)
+                snapshot = getattr(provider, "snapshot", None)
+                if target is None or not callable(snapshot):
+                    continue
+                registry = self._runtime_activation_registry()
+                reservation = None
+                if registry is not None:
+                    identity = self._claude_runtime_activation_identity(client)
+                    if identity is None:
+                        identity = self._attach_claude_runtime_activation(
+                            client,
+                            composite_key,
                         )
-                    return bool(
-                        not ownership.blocks_reclamation
-                        and recheck_idle >= idle_timeout
-                    )
+                    if identity is None:
+                        continue
+                    reservation = registry.reserve_retirement(identity)
+                    if reservation is None:
+                        continue
+                retired = False
+                final: dict[str, Any] = {}
+                try:
+                    ownership = await asyncio.to_thread(snapshot, target)
+                    from core.runtime_ownership import wake_runtime_ownership
 
-                if not self._retire_claude_runtime_activation(
-                    composite_key,
-                    client,
-                    final_reclamation_predicate,
-                ):
+                    wake_runtime_ownership(self.controller, ownership)
+                    current_last_activity = self.session_last_activity.get(
+                        composite_key
+                    )
+                    if (
+                        self.claude_sessions.get(composite_key) is client
+                        and current_last_activity is not None
+                    ):
+                        recheck_idle = time.monotonic() - current_last_activity
+                        final["idle_for"] = recheck_idle
+                        is_active = composite_key in self.active_sessions
+                        final["active"] = is_active
+                        if is_active:
+                            allowed = bool(
+                                stuck_threshold is not None
+                                and recheck_idle >= stuck_threshold
+                                and ownership.disposition
+                                not in {
+                                    SessionRuntimeDisposition.TRANSITIONING,
+                                    SessionRuntimeDisposition.UNKNOWN,
+                                }
+                            )
+                        else:
+                            allowed = bool(
+                                not ownership.blocks_reclamation
+                                and recheck_idle >= idle_timeout
+                            )
+                    else:
+                        allowed = False
+                    if reservation is None:
+                        retired = allowed
+                    else:
+                        retired = bool(
+                            registry.finish_retirement(
+                                reservation,
+                                retire=allowed,
+                            )
+                            and allowed
+                        )
+                        reservation = None
+                finally:
+                    if reservation is not None:
+                        registry.finish_retirement(reservation, retire=False)
+                if not retired:
                     continue
                 setattr(client, "_vibe_runtime_activation_retired", True)
                 recheck_idle = float(final.get("idle_for", idle_for))

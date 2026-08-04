@@ -116,6 +116,38 @@ class RuntimeTargetOwnershipSnapshot:
         }
 
     @property
+    def blocks_transport_replacement(self) -> bool:
+        """Whether durable native-effect evidence vetoes transport replacement.
+
+        Pre-native Delivery and Turn rows use the adapter's live-turn fence.
+        This gate covers evidence that can outlive that local fence: unknown
+        ownership, active Activity effects, and fallback Runs with a live PID.
+        """
+
+        if self.disposition is SessionRuntimeDisposition.UNKNOWN:
+            return True
+        if self.sessionless_active_activity_ids or any(
+            session.active_activity_ids for session in self.sessions
+        ):
+            return True
+        for session in self.sessions:
+            session_reasons = set(session.reasons)
+            if "turn:active" in session_reasons:
+                return True
+            if (
+                "delivery:claimed" in session_reasons
+                and "turn:starting" not in session_reasons
+            ):
+                return True
+        reasons = self.reasons + tuple(
+            reason for session in self.sessions for reason in session.reasons
+        )
+        return any(
+            reason.startswith("run:") and reason.endswith(":active")
+            for reason in reasons
+        )
+
+    @property
     def has_runnable_deliveries(self) -> bool:
         return any(
             session.queue_hold_state == "open"
@@ -215,30 +247,69 @@ class RuntimeOwnershipProvider:
         self._after_first_read = after_first_read
 
     def snapshot(self, target: RuntimeResourceTarget) -> RuntimeTargetOwnershipSnapshot:
+        return self.snapshot_many((target,))[0]
+
+    def snapshot_many(
+        self,
+        targets: tuple[RuntimeResourceTarget, ...],
+    ) -> tuple[RuntimeTargetOwnershipSnapshot, ...]:
+        if not targets:
+            return ()
         try:
-            return self._snapshot(target)
+            return self._snapshot_many(targets)
         except Exception:
             logger.exception(
-                "Runtime ownership lookup failed closed for backend=%s resource=%s",
-                target.backend,
-                target.resource_key,
+                "Runtime ownership batch lookup failed closed for backend=%s resources=%s",
+                targets[0].backend,
+                ",".join(str(target.resource_key) for target in targets),
             )
-            return RuntimeTargetOwnershipSnapshot(
-                backend=target.backend,
-                resource_key=target.resource_key,
-                activity_runtime_keys=tuple(target.known_activity_runtime_keys),
-                sessions=(),
-                sessionless_active_activity_ids=(),
-                sessionless_fallback_run_ids=(),
-                disposition=SessionRuntimeDisposition.UNKNOWN,
-                reasons=("provider_failure",),
+            return tuple(
+                self._provider_failure_snapshot(target) for target in targets
             )
 
-    def _snapshot(self, target: RuntimeResourceTarget) -> RuntimeTargetOwnershipSnapshot:
-        backend = str(target.backend or "").strip()
-        resource_key = str(target.resource_key or "").strip()
-        if not backend or not resource_key:
+    @staticmethod
+    def _provider_failure_snapshot(
+        target: RuntimeResourceTarget,
+    ) -> RuntimeTargetOwnershipSnapshot:
+        return RuntimeTargetOwnershipSnapshot(
+            backend=target.backend,
+            resource_key=target.resource_key,
+            activity_runtime_keys=tuple(target.known_activity_runtime_keys),
+            sessions=(),
+            sessionless_active_activity_ids=(),
+            sessionless_fallback_run_ids=(),
+            disposition=SessionRuntimeDisposition.UNKNOWN,
+            reasons=("provider_failure",),
+        )
+
+    def _snapshot_many(
+        self,
+        targets: tuple[RuntimeResourceTarget, ...],
+    ) -> tuple[RuntimeTargetOwnershipSnapshot, ...]:
+        normalized_backends = tuple(
+            str(target.backend or "").strip() for target in targets
+        )
+        if any(not backend for backend in normalized_backends):
             raise ValueError("runtime target requires backend and resource_key")
+        if len(set(normalized_backends)) != 1:
+            raise ValueError("runtime ownership batch requires one backend")
+        if any(not str(target.resource_key or "").strip() for target in targets):
+            raise ValueError("runtime target requires backend and resource_key")
+        backend = normalized_backends[0]
+
+        binding_ids_by_target: list[tuple[str, ...]] = []
+        all_binding_ids: set[str] = set()
+        for target in targets:
+            binding_ids = tuple(
+                str(binding.session_id or "").strip()
+                for binding in target.bindings
+            )
+            if any(not session_id for session_id in binding_ids):
+                raise ValueError("runtime binding requires an exact session_id")
+            if len(set(binding_ids)) != len(binding_ids):
+                raise ValueError("runtime bindings require unique session_ids")
+            binding_ids_by_target.append(binding_ids)
+            all_binding_ids.update(binding_ids)
 
         connection = self.engine.connect()
         try:
@@ -246,72 +317,89 @@ class RuntimeOwnershipProvider:
             # explicitly is the ownership boundary: every following SELECT sees
             # the same WAL generation until this connection is rolled back.
             connection.exec_driver_sql("BEGIN")
-            # Lifecycle visibility and execution ownership are independent.
-            # An archived Session may still have a Turn, Delivery, Activity, or
-            # fallback Run whose native effects have not settled yet.
-            binding_ids = tuple(
-                str(binding.session_id or "").strip() for binding in target.bindings
-            )
-            if any(not session_id for session_id in binding_ids):
-                raise ValueError("runtime binding requires an exact session_id")
-            if len(set(binding_ids)) != len(binding_ids):
-                raise ValueError("runtime bindings require unique session_ids")
-
-            bound_session_rows = (
+            session_filters = []
+            if any(target.include_all_backend_sessions for target in targets):
+                session_filters.append(agent_sessions.c.agent_backend == backend)
+            if all_binding_ids:
+                session_filters.append(agent_sessions.c.id.in_(all_binding_ids))
+            durable_workdirs = {
+                target.durable_session_workdir
+                for target in targets
+                if target.durable_session_workdir is not None
+            }
+            if durable_workdirs and not any(
+                target.include_all_backend_sessions for target in targets
+            ):
+                session_filters.append(
+                    and_(
+                        agent_sessions.c.agent_backend == backend,
+                        agent_sessions.c.workdir.in_(durable_workdirs),
+                    )
+                )
+            all_session_rows = (
                 [
                     dict(row)
                     for row in connection.execute(
                         select(agent_sessions)
-                        .where(agent_sessions.c.id.in_(binding_ids))
+                        .where(or_(*session_filters))
                         .order_by(agent_sessions.c.id)
                     ).mappings()
                 ]
-                if binding_ids
+                if session_filters
                 else []
             )
-            bound_session_by_id = {
-                str(row["id"]): row for row in bound_session_rows
+            all_session_by_id = {
+                str(row["id"]): row for row in all_session_rows
             }
-            for binding in target.bindings:
-                row = bound_session_by_id.get(binding.session_id)
-                if row is None:
-                    continue
-                if row.get("workdir") != binding.workdir:
-                    raise ValueError("runtime binding workdir does not match target")
-
-            if target.include_all_backend_sessions:
-                session_rows = [
-                    dict(row)
-                    for row in connection.execute(
-                        select(agent_sessions)
-                        .where(agent_sessions.c.agent_backend == backend)
-                        .order_by(agent_sessions.c.id)
-                    ).mappings()
-                ]
-            elif target.durable_session_workdir is not None:
-                session_rows = [
-                    dict(row)
-                    for row in connection.execute(
-                        select(agent_sessions)
-                        .where(agent_sessions.c.agent_backend == backend)
-                        .where(
-                            agent_sessions.c.workdir
-                            == target.durable_session_workdir
+            session_rows_by_target: list[list[dict[str, object]]] = []
+            for target, binding_ids in zip(
+                targets,
+                binding_ids_by_target,
+                strict=True,
+            ):
+                for binding in target.bindings:
+                    row = all_session_by_id.get(binding.session_id)
+                    if row is not None and row.get("workdir") != binding.workdir:
+                        raise ValueError(
+                            "runtime binding workdir does not match target"
                         )
-                        .order_by(agent_sessions.c.id)
-                    ).mappings()
-                ]
-            else:
-                session_rows = [
-                    row
-                    for row in bound_session_rows
-                    if str(row.get("agent_backend") or "") == backend
-                ]
+                if target.include_all_backend_sessions:
+                    target_session_rows = [
+                        row
+                        for row in all_session_rows
+                        if str(row.get("agent_backend") or "") == backend
+                    ]
+                elif target.durable_session_workdir is not None:
+                    target_session_rows = [
+                        row
+                        for row in all_session_rows
+                        if str(row.get("agent_backend") or "") == backend
+                        and row.get("workdir") == target.durable_session_workdir
+                    ]
+                else:
+                    target_session_rows = [
+                        all_session_by_id[session_id]
+                        for session_id in binding_ids
+                        if session_id in all_session_by_id
+                        and str(
+                            all_session_by_id[session_id].get("agent_backend") or ""
+                        )
+                        == backend
+                    ]
+                session_rows_by_target.append(target_session_rows)
 
             if self._after_first_read is not None:
                 self._after_first_read()
 
-            session_ids = tuple(str(row["id"]) for row in session_rows)
+            session_ids = tuple(
+                sorted(
+                    {
+                        str(row["id"])
+                        for rows in session_rows_by_target
+                        for row in rows
+                    }
+                )
+            )
             nonterminal_delivery_states = (
                 "reserved",
                 "queued",
@@ -457,15 +545,33 @@ class RuntimeOwnershipProvider:
                 connection.rollback()
             connection.close()
 
-        return self._derive(
-            target,
-            session_rows=session_rows,
-            delivery_rows=delivery_rows,
-            turn_rows=turn_rows,
-            activity_rows=activity_rows,
-            run_rows=run_rows,
-            represented_delivery_ids=represented_delivery_ids,
-        )
+        snapshots = []
+        for target, session_rows in zip(
+            targets,
+            session_rows_by_target,
+            strict=True,
+        ):
+            target_session_ids = {str(row["id"]) for row in session_rows}
+            snapshots.append(
+                self._derive(
+                    target,
+                    session_rows=session_rows,
+                    delivery_rows=[
+                        row
+                        for row in delivery_rows
+                        if str(row["session_id"]) in target_session_ids
+                    ],
+                    turn_rows=[
+                        row
+                        for row in turn_rows
+                        if str(row["session_id"]) in target_session_ids
+                    ],
+                    activity_rows=activity_rows,
+                    run_rows=run_rows,
+                    represented_delivery_ids=represented_delivery_ids,
+                )
+            )
+        return tuple(snapshots)
 
     @staticmethod
     def _derive(

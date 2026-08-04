@@ -3364,6 +3364,9 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         agent._session_mgr = SimpleNamespace(sessions_for_cwd=lambda cwd: [])
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
         agent.controller = SimpleNamespace()
+        agent._runtime_ownership_snapshot_for_cwd = Mock(
+            return_value=SimpleNamespace(blocks_transport_replacement=False)
+        )
         return agent
 
     async def test_hfr_142_server_request_does_not_refresh_progress_activity(self):
@@ -3465,6 +3468,47 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             fresh.start.assert_awaited_once()
             # The new spawn re-records the CURRENT inode.
             self.assertEqual(agent._transport_cwd_inodes[cwd], os.stat(cwd).st_ino)
+
+    async def test_stale_cwd_preserves_transport_with_durable_native_owner(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            stale = SimpleNamespace(is_initialized=True, stop=AsyncMock())
+            agent._transports[cwd] = stale
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino + 1
+            agent._runtime_ownership_snapshot_for_cwd = Mock(
+                return_value=SimpleNamespace(blocks_transport_replacement=True)
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "durable owner"):
+                await agent._get_or_create_transport(cwd)
+
+            stale.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], stale)
+
+    async def test_runtime_change_preserves_transport_with_pid_run_owner(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            existing = SimpleNamespace(
+                is_initialized=True,
+                runtime_fingerprint="direct",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = existing
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+            agent._runtime_ownership_snapshot_for_cwd = Mock(
+                return_value=SimpleNamespace(blocks_transport_replacement=True)
+            )
+            launch = SimpleNamespace(fingerprint="hub:replacement")
+
+            with self.assertRaisesRegex(RuntimeError, "durable owner"):
+                await agent._get_or_create_transport(cwd, launch)
+
+            existing.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], existing)
 
     async def test_stale_transport_stop_failure_leaves_retired_generation_detached(self):
         import tempfile

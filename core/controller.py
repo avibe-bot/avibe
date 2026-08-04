@@ -43,6 +43,8 @@ from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
 
+_RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
+
 
 class RemovedPlatformIMClient(BaseIMClient):
     """No-op sink for stale replies after an IM platform is hot-disabled."""
@@ -191,6 +193,13 @@ class Controller:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._im_thread: Optional[threading.Thread] = None
         self._im_run_exception: Optional[BaseException] = None
+        self._shutdown_requested = False
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._shutdown_tainted = False
+        self._service_lock_safe_to_release = False
+        self._runtime_work_shutdown_grace_seconds = (
+            _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
+        )
         self.enabled_platforms = list(getattr(config, "enabled_platforms", lambda: [config.platform])())
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
         self._reconcile_lock: Optional[asyncio.Lock] = None
@@ -1521,6 +1530,74 @@ class Controller:
         return dispatcher.session_token_field(context)
 
     # Main run method
+    @property
+    def service_lock_safe_to_release(self) -> bool:
+        return bool(getattr(self, "_service_lock_safe_to_release", False))
+
+    def request_shutdown(self, reason: str = "requested") -> None:
+        """Schedule shutdown on the controller loop without blocking its owner."""
+
+        if getattr(self, "_shutdown_requested", False):
+            return
+        self._shutdown_requested = True
+        self._service_lock_safe_to_release = False
+        loop = self._loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return
+        try:
+            loop.call_soon_threadsafe(self._ensure_shutdown_task, reason)
+        except RuntimeError:
+            logger.exception("Failed to schedule controller shutdown")
+            self._shutdown_tainted = True
+
+    def _ensure_shutdown_task(self, reason: str = "requested") -> None:
+        task = getattr(self, "_shutdown_task", None)
+        if task is not None and not task.done():
+            return
+        self._shutdown_task = asyncio.create_task(
+            self._shutdown_on_loop(reason),
+            name="controller-shutdown",
+        )
+
+    async def _shutdown_on_loop(self, reason: str) -> None:
+        """Join passive recovery owners before allowing the loop to stop."""
+
+        logger.info("Controller shutdown started: %s", reason)
+        supervisor = getattr(self, "runtime_work_supervisor", None)
+        stop_supervisor = getattr(supervisor, "stop", None)
+        try:
+            if callable(stop_supervisor):
+                stop_task = asyncio.create_task(
+                    stop_supervisor(),
+                    name="controller-runtime-work-stop",
+                )
+                grace = max(
+                    0.0,
+                    float(
+                        getattr(
+                            self,
+                            "_runtime_work_shutdown_grace_seconds",
+                            _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS,
+                        )
+                    ),
+                )
+                done, _ = await asyncio.wait({stop_task}, timeout=grace)
+                if not done:
+                    self._shutdown_tainted = True
+                    logger.critical(
+                        "Runtime work shutdown exceeded %.1fs; retaining the "
+                        "service lease until exact workers join",
+                        grace,
+                    )
+                await asyncio.shield(stop_task)
+        except Exception:
+            self._shutdown_tainted = True
+            logger.exception("Controller shutdown could not join runtime work")
+        finally:
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                loop.call_soon(loop.stop)
+
     def run(self):
         """Run the controller"""
         logger.info("Starting Claude Proxy Controller with platforms: %s", ", ".join(self.enabled_platforms))
@@ -1542,6 +1619,8 @@ class Controller:
                 self._internal_server_task = None
             self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
             self._im_thread.start()
+            if self._shutdown_requested:
+                self._ensure_shutdown_task("pre-loop request")
             self._loop.run_forever()
             if self._im_run_exception and not isinstance(self._im_run_exception, (KeyboardInterrupt, SystemExit)):
                 raise self._im_run_exception
@@ -1551,6 +1630,8 @@ class Controller:
             logger.error(f"Error in main run loop: {e}", exc_info=True)
         finally:
             self.cleanup_sync()
+            if not getattr(self, "_shutdown_tainted", False):
+                self._service_lock_safe_to_release = True
             # Best-effort: remove the dispatch socket so the next controller
             # boot starts from a clean filesystem state. uvicorn unlinks
             # the path on exit when it bound the socket itself, but it

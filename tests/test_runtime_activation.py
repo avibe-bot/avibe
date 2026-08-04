@@ -136,6 +136,49 @@ def test_replacement_generation_rejects_old_identity() -> None:
     assert registry.current("codex", "/workspace") == current_identity
 
 
+def test_retired_activation_targets_are_bounded_without_admitting_old_identity() -> None:
+    registry = RuntimeActivationRegistry()
+    oldest = registry.attach("codex", "/workspace/0")
+    assert registry.retire_if_current(oldest, lambda: True)
+
+    for index in range(1, 200):
+        identity = registry.attach("codex", f"/workspace/{index}")
+        assert registry.retire_if_current(identity, lambda: True)
+
+    commit = Mock(return_value="started")
+    assert not registry.commit_if_current(oldest, commit).admitted
+    commit.assert_not_called()
+    assert registry.tracked_target_count() == 0
+    assert registry.retired_diagnostic_count() <= 64
+
+
+def test_retirement_reservation_rejects_admission_until_abort() -> None:
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    reservation = registry.reserve_retirement(identity)
+
+    assert reservation is not None
+    rejected = Mock(return_value="owner")
+    assert not registry.commit_if_current(identity, rejected).admitted
+    rejected.assert_not_called()
+
+    assert registry.finish_retirement(reservation, retire=False)
+    admitted = registry.commit_if_current(identity, lambda: "owner")
+    assert admitted == RuntimeActivationCommit(admitted=True, value="owner")
+
+
+def test_retirement_reservation_can_retire_and_release_registry_target() -> None:
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    reservation = registry.reserve_retirement(identity)
+
+    assert reservation is not None
+    assert registry.finish_retirement(reservation, retire=True)
+    assert registry.current("claude", "runtime-1") is None
+    assert registry.current("claude", "runtime-1", include_retired=True) == identity
+    assert registry.tracked_target_count() == 0
+
+
 def test_backend_binding_resolvers_use_exact_anchor_and_workdir() -> None:
     registry = RuntimeActivationRegistry()
 
