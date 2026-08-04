@@ -16,7 +16,7 @@ from storage.background import (
     TERMINAL_RUN_STATUSES,
     normalize_run_status,
 )
-from storage.delivery_states import policy_for
+from storage.delivery_states import DELIVERY_STATE_MATRIX, policy_for
 from storage.models import (
     agent_runs,
     agent_sessions,
@@ -59,6 +59,11 @@ _TERMINAL_RAW_RUN_STATUSES = tuple(
     raw
     for raw, normalized in RUN_STATUS_ALIASES.items()
     if normalized in TERMINAL_RUN_STATUSES
+)
+_TERMINAL_DELIVERY_STATES = tuple(
+    state
+    for state, policy in DELIVERY_STATE_MATRIX.items()
+    if policy.ordering == "terminal"
 )
 
 
@@ -404,15 +409,6 @@ class RuntimeOwnershipProvider:
                     }
                 )
             )
-            nonterminal_delivery_states = (
-                "reserved",
-                "queued",
-                "claimed",
-                "pending_steer",
-                "steering",
-                "interrupt_waiting",
-                "reconciling_steer",
-            )
             delivery_rows = (
                 [
                     dict(row)
@@ -420,8 +416,11 @@ class RuntimeOwnershipProvider:
                         select(message_deliveries)
                         .where(message_deliveries.c.session_id.in_(session_ids))
                         .where(
-                            message_deliveries.c.state.in_(
-                                nonterminal_delivery_states
+                            or_(
+                                message_deliveries.c.state.is_(None),
+                                message_deliveries.c.state.notin_(
+                                    _TERMINAL_DELIVERY_STATES
+                                ),
                             )
                         )
                         .order_by(
@@ -441,7 +440,10 @@ class RuntimeOwnershipProvider:
                         select(session_turns)
                         .where(session_turns.c.session_id.in_(session_ids))
                         .where(
-                            session_turns.c.state.in_(("waiting", "starting", "active"))
+                            or_(
+                                session_turns.c.state.is_(None),
+                                session_turns.c.state != "terminal",
+                            )
                         )
                         .order_by(
                             session_turns.c.session_id,
@@ -701,7 +703,14 @@ class RuntimeOwnershipProvider:
                 continue
             runtime_key = str(activity.get("runtime_key") or "")
             activity_id = str(activity.get("id") or row["id"])
+            session_id = str(activity.get("session_id") or "")
             if phase not in _KNOWN_ACTIVITY_PHASES:
+                if (
+                    not target.maps_all_backend_activities
+                    and runtime_key not in known_activity_keys
+                    and session_id not in facts
+                ):
+                    continue
                 target_facts.append(SessionRuntimeDisposition.UNKNOWN)
                 target_reasons.append(f"activity:{activity_id}:unknown_phase")
                 continue
@@ -711,7 +720,6 @@ class RuntimeOwnershipProvider:
                 target_facts.append(SessionRuntimeDisposition.UNKNOWN)
                 target_reasons.append(f"activity:{activity_id}:unmapped")
                 continue
-            session_id = str(activity.get("session_id") or "")
             if (
                 runtime_key not in target_activity_keys
                 and not target.maps_all_backend_activities

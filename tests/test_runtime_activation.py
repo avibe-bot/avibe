@@ -850,17 +850,12 @@ def _fallback_service(
     request_store: Any,
     identity: Any,
     *,
-    wait_backend_ready: Any = None,
+    backend_ready: bool = True,
 ) -> ScheduledTaskService:
-    if wait_backend_ready is None:
-
-        async def wait_backend_ready(_backend: str) -> None:
-            return None
-
     agent_service = SimpleNamespace(
         activation_registry=registry,
         agents={"claude": object()},
-        wait_backend_ready=wait_backend_ready,
+        is_backend_ready=lambda _backend: backend_ready,
         runtime_activation_identity_for_request=lambda backend, request: (
             identity if backend == "claude" else None
         ),
@@ -989,51 +984,62 @@ def test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid() -> None:
     assert requeued == [pending.id]
 
 
-def test_hfr_137_backend_ready_precedes_fallback_pid_marker() -> None:
-    """HFR-137: a claimed Run writes no PID while its backend is draining."""
+def test_hfr_137_backend_drain_rejects_fallback_claim() -> None:
+    """HFR-137: a draining backend cannot acquire a fallback Run claim."""
 
-    async def exercise() -> None:
-        registry = RuntimeActivationRegistry()
-        identity = registry.attach("claude", "runtime-1")
-        wait_entered = asyncio.Event()
-        allow_ready = asyncio.Event()
-        mark_calls: list[str] = []
-        request = TaskExecutionRequest(
-            id="run-1",
-            request_type="agent_run",
-            agent_backend="claude",
-            observed_activation_identity=identity,
-        )
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    pending = TaskExecutionRequest(
+        id="run-1",
+        request_type="agent_run",
+        agent_backend="claude",
+    )
+    claim_calls: list[str] = []
+    request_store = SimpleNamespace(
+        claim=lambda request_id: claim_calls.append(request_id) or pending,
+    )
+    service = _fallback_service(
+        registry,
+        request_store,
+        identity,
+        backend_ready=False,
+    )
 
-        async def wait_backend_ready(_backend: str) -> None:
-            wait_entered.set()
-            await allow_ready.wait()
+    assert service._claim_pending_request(pending) is None
+    assert claim_calls == []
 
-        request_store = SimpleNamespace(
-            refresh_claimed_request=lambda current: current,
-            mark_execution_started=lambda request_id: mark_calls.append(request_id) or True,
-            requeue=lambda _request_id: pytest.fail("current generation was requeued"),
-        )
-        service = _fallback_service(
-            registry,
-            request_store,
-            identity,
-            wait_backend_ready=wait_backend_ready,
-        )
 
-        marker = asyncio.create_task(
-            service._mark_execution_started_for_claimed_request(request)
-        )
-        await wait_entered.wait()
-        assert mark_calls == []
-        allow_ready.set()
-        marked_request, started = await marker
+def test_hfr_137_backend_drain_requeues_existing_pre_pid_claim() -> None:
+    """HFR-137: a pre-PID claim never waits on the drain it would pin."""
 
-        assert marked_request is request
-        assert started is True
-        assert mark_calls == [request.id]
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    requeued: list[str] = []
+    request = TaskExecutionRequest(
+        id="run-1",
+        request_type="agent_run",
+        agent_backend="claude",
+        observed_activation_identity=identity,
+    )
+    request_store = SimpleNamespace(
+        refresh_claimed_request=lambda current: current,
+        mark_execution_started=lambda _request_id: pytest.fail("draining claim started"),
+        requeue=lambda request_id: requeued.append(request_id),
+    )
+    service = _fallback_service(
+        registry,
+        request_store,
+        identity,
+        backend_ready=False,
+    )
 
-    asyncio.run(exercise())
+    marked_request, started = asyncio.run(
+        service._mark_execution_started_for_claimed_request(request)
+    )
+
+    assert marked_request is request
+    assert started is False
+    assert requeued == [request.id]
 
 
 def test_hfr_137_fallback_pid_marker_first_blocks_retirement_until_commit() -> None:

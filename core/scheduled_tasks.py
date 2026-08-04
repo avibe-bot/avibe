@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 import os
@@ -6506,9 +6505,14 @@ class ScheduledTaskService:
         backend_resolution = self._claimed_request_backend_resolution(pending)
         if not backend_resolution.authoritative:
             return None
+        backend = backend_resolution.backend
+        service = getattr(self.controller, "agent_service", None)
+        is_backend_ready = getattr(service, "is_backend_ready", None)
+        if backend and callable(is_backend_ready) and not is_backend_ready(backend):
+            return None
         resolution = self._activation_resolution_for_request(
             pending,
-            backend=backend_resolution.backend,
+            backend=backend,
         )
         if resolution is not None and not resolution.authoritative:
             return None
@@ -6555,11 +6559,10 @@ class ScheduledTaskService:
         if not backend and activation_identity is not None:
             backend = activation_identity.backend
         if backend and service is not None:
-            wait_backend_ready = getattr(service, "wait_backend_ready", None)
-            if callable(wait_backend_ready):
-                readiness = wait_backend_ready(backend)
-                if inspect.isawaitable(readiness):
-                    await readiness
+            is_backend_ready = getattr(service, "is_backend_ready", None)
+            if callable(is_backend_ready) and not is_backend_ready(backend):
+                self.request_store.requeue(request.id)
+                return request, False
 
         def commit_start() -> bool:
             return self.request_store.mark_execution_started(request.id)

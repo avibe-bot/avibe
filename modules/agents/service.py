@@ -79,6 +79,9 @@ class AgentService:
     def end_backend_drain(self, backend: str) -> None:
         self._backend_ready_event(backend).set()
 
+    def is_backend_ready(self, backend: str) -> bool:
+        return self._backend_ready_event(backend).is_set()
+
     async def wait_backend_ready(self, backend: str) -> None:
         await self._backend_ready_event(backend).wait()
 

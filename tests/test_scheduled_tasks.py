@@ -3323,18 +3323,19 @@ def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypat
     assert settled["metadata"]["interrupt_reason"] == "restarted"
 
 
-def test_execute_claimed_request_waits_for_backend_before_marking_started(
+def test_execute_claimed_request_checks_backend_before_marking_started(
     tmp_path: Path,
 ) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     wait_observations: list[object] = []
 
-    async def wait_backend_ready(_backend: str) -> None:
+    def is_backend_ready(_backend: str) -> bool:
         wait_observations.append(request_store.get_run(claimed.id).get("pid"))
+        return True
 
     controller = SimpleNamespace(
         agent_service=SimpleNamespace(
-            wait_backend_ready=AsyncMock(side_effect=wait_backend_ready),
+            is_backend_ready=Mock(side_effect=is_backend_ready),
             runtime_activation_identity_for_request=Mock(return_value=None),
             activation_registry=None,
         )
@@ -3376,7 +3377,7 @@ def test_execute_claimed_request_skips_retired_runtime_generation(
     identity = registry.attach("codex", "/repo")
     controller = SimpleNamespace(
         agent_service=SimpleNamespace(
-            wait_backend_ready=AsyncMock(),
+            is_backend_ready=Mock(return_value=True),
             runtime_activation_identity_for_request=Mock(return_value=identity),
             activation_registry=registry,
         )

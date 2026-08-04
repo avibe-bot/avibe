@@ -267,7 +267,7 @@ def test_dispatch_im_message_to_controller_loop_gates_admission_on_recovery():
     assert called == ["hello"]
 
 
-def test_setup_callbacks_gates_every_platform_callback_except_runtime_ready():
+def test_setup_callbacks_gates_work_admission_but_not_runtime_evidence():
     controller = Controller.__new__(Controller)
     callback = AsyncMock()
     controller.command_handler = SimpleNamespace(
@@ -324,10 +324,10 @@ def test_setup_callbacks_gates_every_platform_callback_except_runtime_ready():
         "on_routing_update",
         "on_routing_modal_update",
         "on_resume_session",
-        "on_transport_ready",
     ):
         assert registered[name][0::2] == ("controller", True)
     assert registered["on_ready"][0::2] == ("controller", False)
+    assert registered["on_transport_ready"][0::2] == ("controller", False)
 
 
 def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:

@@ -1207,6 +1207,90 @@ def test_hfr_135_hfr_147_only_active_exact_mapped_activity_pins(
     engine.dispose()
 
 
+def test_hfr_135_unknown_activity_phase_blocks_only_its_runtime_target(
+    tmp_path: Path,
+) -> None:
+    """HFR-135: a scoped unknown Activity cannot pin a sibling runtime."""
+
+    engine = _engine(tmp_path, "unknown-activity-target.sqlite")
+    with engine.begin() as conn:
+        _session(conn, "ses-a", anchor="base-a", workdir="/work-a")
+        _session(conn, "ses-b", anchor="base-b", workdir="/work-b")
+        _activity(
+            conn,
+            "future-a",
+            runtime_key="base-a:/work-a",
+            phase="future_phase",
+            session_id="ses-a",
+        )
+
+    snapshots = RuntimeOwnershipProvider(engine).snapshot_many(
+        (
+            _target(
+                session_id="ses-a",
+                anchor="base-a",
+                workdir="/work-a",
+                runtime_key="base-a:/work-a",
+                route_key="route:a",
+            ),
+            _target(
+                session_id="ses-b",
+                anchor="base-b",
+                workdir="/work-b",
+                runtime_key="base-b:/work-b",
+                route_key="route:b",
+            ),
+        )
+    )
+
+    assert snapshots[0].disposition is SessionRuntimeDisposition.UNKNOWN
+    assert snapshots[0].reasons == ("activity:future-a:unknown_phase",)
+    assert snapshots[1].disposition is SessionRuntimeDisposition.RECLAIMABLE
+    engine.dispose()
+
+
+@pytest.mark.parametrize("owner", ["delivery", "turn"])
+def test_hfr_133_hfr_134_unknown_durable_owner_state_fails_closed(
+    tmp_path: Path,
+    owner: str,
+) -> None:
+    """HFR-133/HFR-134: drifted owner state remains visible and UNKNOWN."""
+
+    engine = _engine(tmp_path, f"unknown-{owner}-state.sqlite")
+    with engine.begin() as conn:
+        _session(conn, "ses-a", anchor="base", workdir="/work")
+        _delivery(conn, "delivery-a", "ses-a")
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+        if owner == "delivery":
+            conn.execute(
+                update(delivery_store.message_deliveries)
+                .where(delivery_store.message_deliveries.c.id == "delivery-a")
+                .values(state="future_native_owner")
+            )
+            expected_reason = "delivery:future_native_owner"
+        else:
+            delivery_store.insert_turn(
+                conn,
+                turn_id="turn-a",
+                session_id="ses-a",
+                initial_delivery_id="delivery-a",
+                state="starting",
+                backend="codex",
+            )
+            conn.execute(
+                update(delivery_store.session_turns)
+                .where(delivery_store.session_turns.c.id == "turn-a")
+                .values(state="future_native_owner")
+            )
+            expected_reason = "turn:future_native_owner"
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is SessionRuntimeDisposition.UNKNOWN
+    assert expected_reason in snapshot.sessions[0].reasons
+    engine.dispose()
+
+
 def test_hfr_136_watch_runtime_never_pins_but_execution_run_does(tmp_path: Path) -> None:
     """HFR-136: bookkeeping heartbeats do not own execution resources."""
     engine = _engine(tmp_path)

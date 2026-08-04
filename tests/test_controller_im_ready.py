@@ -67,6 +67,8 @@ def test_transport_ready_restores_only_its_state() -> None:
     controller.watch_service = SimpleNamespace(start=Mock())
     controller.runtime_command_watcher = SimpleNamespace(start=AsyncMock())
     controller.runtime_work_supervisor = SimpleNamespace(notify=Mock())
+    controller._delivery_recovery_complete = asyncio.Event()
+    controller._delivery_recovery_complete.set()
 
     asyncio.run(controller._on_im_ready(platform="discord"))
 
@@ -81,6 +83,52 @@ def test_transport_ready_restores_only_its_state() -> None:
     controller.watch_service.start.assert_not_called()
     controller.runtime_command_watcher.start.assert_not_awaited()
     controller.runtime_work_supervisor.notify.assert_not_called()
+
+
+def test_transport_ready_registers_polls_before_owner_recovery() -> None:
+    async def exercise() -> None:
+        controller = Controller.__new__(Controller)
+        restore_entered = asyncio.Event()
+
+        async def restore_active_polls(platforms: set[str]) -> int:
+            assert platforms == {"slack", ""}
+            restore_entered.set()
+            return 1
+
+        controller.agent_service = SimpleNamespace(
+            agents={
+                "opencode": SimpleNamespace(
+                    restore_active_polls=AsyncMock(side_effect=restore_active_polls)
+                )
+            }
+        )
+        controller.primary_platform = "slack"
+        controller.update_checker = SimpleNamespace(
+            check_and_send_post_update_notification=AsyncMock(return_value=True),
+            notify_transport_ready=Mock(),
+        )
+        controller.scheduled_task_service = SimpleNamespace(
+            notify_transport_ready=Mock()
+        )
+        controller._delivery_recovery_complete = asyncio.Event()
+
+        ready = asyncio.create_task(controller._on_im_ready(platform="slack"))
+        await restore_entered.wait()
+
+        assert not ready.done()
+        controller.scheduled_task_service.notify_transport_ready.assert_not_called()
+        controller.update_checker.notify_transport_ready.assert_not_called()
+        controller.update_checker.check_and_send_post_update_notification.assert_not_awaited()
+
+        controller._delivery_recovery_complete.set()
+        await ready
+
+        controller.scheduled_task_service.notify_transport_ready.assert_called_once_with(
+            "slack"
+        )
+        controller.update_checker.notify_transport_ready.assert_called_once_with("slack")
+
+    asyncio.run(exercise())
 
 
 def test_runtime_owner_recovery_fails_closed_after_delivery_failure() -> None:

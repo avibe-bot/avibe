@@ -823,7 +823,7 @@ class Controller:
                 self.session_handler.handle_resume_session_submission
             ),
             on_ready=self._dispatch_to_controller_loop(self._on_runtime_ready),
-            on_transport_ready=inbound(self._on_im_ready),
+            on_transport_ready=self._dispatch_to_controller_loop(self._on_im_ready),
         )
 
     async def _await_runtime_owner_recovery(self) -> None:
@@ -979,14 +979,17 @@ class Controller:
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
-        self.scheduled_task_service.notify_transport_ready(platform)
-        notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
-        if callable(notify_update_checker):
-            notify_update_checker(platform)
         platforms = {platform}
         if platform == self.primary_platform:
             platforms.add("")
         await self._restore_active_polls(platforms)
+        # Poll registration is durable-owner evidence needed by startup recovery.
+        # All work admission and user-visible delivery remain behind the barrier.
+        await self._await_runtime_owner_recovery()
+        self.scheduled_task_service.notify_transport_ready(platform)
+        notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
+        if callable(notify_update_checker):
+            notify_update_checker(platform)
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform=platform)
         except Exception as e:
