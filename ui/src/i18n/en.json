@@ -3058,6 +3058,8 @@
       "scheduled": "Scheduled task",
       "watch": "Watch",
       "webhook": "Webhook",
+      "hook": "Hook",
+      "activityRecovery": "Recovered activity",
       "showIntent": "Page action",
       "harness": "From agent",
       "from": "From",

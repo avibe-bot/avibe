@@ -4,7 +4,7 @@ from core import web_push_notifications
 from storage import message_deliveries, messages_service, web_push_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions
+from storage.models import agent_sessions, messages
 from storage.settings_service import upsert_scope
 
 
@@ -181,6 +181,96 @@ def test_backend_failure_notify_passes_durable_web_push_gates(monkeypatch, tmp_p
         assert web_push_notifications._web_push_user_keys_for_message(conn, failure["id"]) == ["remote:user-a"]
         assert web_push_notifications._message_still_unread(conn, ordinary_notify["id"]) is False
         assert web_push_notifications._web_push_user_keys_for_message(conn, ordinary_notify["id"]) == []
+    engine.dispose()
+
+
+def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_acceptance_owner",
+            now="2026-08-04T00:00:00.000000Z",
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_acceptance_owner",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_acceptance_owner",
+                native_session_id="",
+                title="Acceptance owner",
+                status="active",
+                metadata_json="{}",
+                created_at="2026-08-04T00:00:00.000000Z",
+                updated_at="2026-08-04T00:00:00.000000Z",
+                last_active_at="2026-08-04T00:00:00.000000Z",
+            )
+        )
+        before = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_acceptance_owner",
+            platform="avibe",
+            author="user",
+            source="user",
+            metadata={"_web_push_user_key": "remote:before"},
+            message_type="user",
+            text="accepted before result",
+        )
+        after = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_acceptance_owner",
+            platform="avibe",
+            author="user",
+            source="user",
+            metadata={"_web_push_user_key": "remote:after"},
+            message_type="user",
+            text="accepted after result",
+        )
+        result = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_acceptance_owner",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="done",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == before["id"])
+            .values(
+                created_at="2026-08-04T00:00:01.000000Z",
+                delivered_at="2026-08-04T00:00:02.000000Z",
+            )
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == after["id"])
+            .values(
+                created_at="2026-08-04T00:00:02.000000Z",
+                delivered_at="2026-08-04T00:00:04.000000Z",
+            )
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == result["id"])
+            .values(created_at="2026-08-04T00:00:03.000000Z")
+        )
+
+    with engine.connect() as conn:
+        assert web_push_notifications._web_push_user_keys_for_message(
+            conn,
+            result["id"],
+        ) == ["remote:before"]
     engine.dispose()
 
 

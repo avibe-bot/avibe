@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from './chatTrigger';
+import { chatTriggerLink, harnessChipLabelKey, needsHarnessProvenanceReconcile } from './chatTrigger';
 
 type Msg = Parameters<typeof chatTriggerLink>[0];
 const msg = (over: Partial<Msg>): Msg => ({
@@ -70,14 +70,20 @@ describe('chatTriggerLink', () => {
     expect(link({ author_name: 'agent_run', source_session_id: null })).toBeNull();
   });
 
-  it('prefers the source link over the kind link when both could apply', () => {
+  it('keeps an explicitly sourced watch on its exact source link', () => {
     expect(link({ author_name: 'watch', source_session_id: 'ses_src' })?.kind).toBe('source');
   });
 });
 
-describe('isUnresolvedAgentCallback', () => {
-  const m = (over: Partial<Parameters<typeof isUnresolvedAgentCallback>[0]>) =>
-    isUnresolvedAgentCallback({ source: 'harness', native_message_id: 'agent_run:exec1', source_session_id: null, ...over });
+describe('needsHarnessProvenanceReconcile', () => {
+  const m = (over: Partial<Parameters<typeof needsHarnessProvenanceReconcile>[0]>) =>
+    needsHarnessProvenanceReconcile({
+      source: 'harness',
+      native_message_id: 'agent_run:exec1',
+      source_session_id: null,
+      author_name: 'agent_run',
+      ...over,
+    });
 
   it('is true for a live agent_run harness message without a resolved source', () => {
     expect(m({})).toBe(true);
@@ -87,8 +93,19 @@ describe('isUnresolvedAgentCallback', () => {
     expect(m({ source_session_id: 'ses_src' })).toBe(false);
   });
 
-  it('is false for non-agent_run harness messages and non-harness messages', () => {
-    expect(m({ native_message_id: 'scheduled:def:exec' })).toBe(false);
+  it('also reconciles legacy trigger rows whose native identity outlived provenance', () => {
+    for (const native_message_id of [
+      'scheduled:def:exec',
+      'watch:def:exec',
+      'webhook:def:exec',
+      'hook:exec',
+    ]) {
+      expect(m({ native_message_id, author_name: null })).toBe(true);
+    }
+  });
+
+  it('is false for complete non-agent trigger rows and non-harness messages', () => {
+    expect(m({ native_message_id: 'scheduled:def:exec', author_name: 'scheduled' })).toBe(false);
     expect(m({ native_message_id: null })).toBe(false);
     expect(m({ source: 'agent' })).toBe(false);
   });
@@ -109,9 +126,11 @@ describe('harnessChipLabelKey (leading-label key by source presence)', () => {
     expect(key({ author_name: null, source_session_id: null })).toBe('chat.source.harness');
   });
 
-  it('task / watch / webhook keep their own self-contained labels (unchanged)', () => {
+  it('every non-agent Harness trigger keeps its own self-contained label', () => {
     expect(key({ author_name: 'watch' })).toBe('chat.source.watch');
     expect(key({ author_name: 'webhook' })).toBe('chat.source.webhook');
+    expect(key({ author_name: 'hook' })).toBe('chat.source.hook');
+    expect(key({ author_name: 'activity_recovery' })).toBe('chat.source.activityRecovery');
     for (const author_name of ['scheduled', 'task_run', 'task']) {
       expect(key({ author_name })).toBe('chat.source.scheduled');
     }

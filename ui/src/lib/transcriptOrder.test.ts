@@ -3,22 +3,21 @@ import { describe, expect, it } from 'vitest';
 import type { WorkbenchMessage } from '../context/ApiContext';
 import {
   byCreatedThenId,
+  isTranscriptWindowDisjoint,
   mergeById,
   insertMessageOrdered,
   messageOrderTimeMs,
   timestampOrderTimeMs,
+  transcriptOrderTimeMs,
 } from './transcriptOrder';
 
-// The transcript keeps its rows in durable (created_at, id) order at all times.
-// Only id + created_at drive ordering, so fixtures fill just those; the rest is
-// cast away. ``created_at`` is second-resolution server-side, so same-second rows
-// with different ids exercise the id tie-break (the case that would otherwise let
-// a fast agent result render ahead of its prompt). Timestamps stay whole-second to
-// match the real format — mixing fractional seconds would only test a string-
-// compare artifact the server never produces.
+// The transcript keeps rows in durable transcript-entry order. Direct Messages
+// use created_at plus their time-sortable id; accepted Delivery Messages use
+// delivered_at so time spent waiting in the queue cannot move them above the
+// reply that completed first.
 const t = (s: number) => `2024-01-01T00:00:${String(s).padStart(2, '0')}Z`;
-const mk = (id: string, created_at: string): WorkbenchMessage =>
-  ({ id, created_at }) as unknown as WorkbenchMessage;
+const mk = (id: string, created_at: string, delivered_at: string | null = null): WorkbenchMessage =>
+  ({ id, created_at, delivered_at }) as unknown as WorkbenchMessage;
 const ids = (list: WorkbenchMessage[]): string[] => list.map((m) => m.id);
 
 describe('messageOrderTimeMs', () => {
@@ -29,6 +28,16 @@ describe('messageOrderTimeMs', () => {
 
     expect(messageOrderTimeMs(mk(preciseId, createdAt))).toBe(preciseTime);
     expect(messageOrderTimeMs(mk('imported-id', createdAt))).toBe(Date.parse(createdAt));
+  });
+});
+
+describe('transcriptOrderTimeMs', () => {
+  it('uses native acceptance for a message submitted while another turn was active', () => {
+    expect(
+      transcriptOrderTimeMs(
+        mk('msg_000000000000001deadbeef', '2026-08-04T00:00:01Z', '2026-08-04T00:00:03.500000Z'),
+      ),
+    ).toBeCloseTo(Date.parse('2026-08-04T00:00:03.500Z'), 6);
   });
 });
 
@@ -59,6 +68,25 @@ describe('byCreatedThenId', () => {
   it('returns 0 only for the same id at the same time', () => {
     expect(byCreatedThenId(mk('a', t(1)), mk('a', t(1)))).toBe(0);
   });
+
+  it('places a queued input after the reply that completed before its acceptance', () => {
+    const reply = mk('msg_003', '2026-08-04T00:00:02Z');
+    const queued = mk('msg_002', '2026-08-04T00:00:01Z', '2026-08-04T00:00:03.500000Z');
+    expect(byCreatedThenId(reply, queued)).toBe(-1);
+  });
+});
+
+describe('isTranscriptWindowDisjoint', () => {
+  it('uses acceptance order rather than sortable ids at the reconciliation boundary', () => {
+    const previousNewest = mk('msg_003', '2026-08-04T00:00:02Z');
+    const tailOldest = mk(
+      'msg_002',
+      '2026-08-04T00:00:01Z',
+      '2026-08-04T00:00:03.500000Z',
+    );
+
+    expect(isTranscriptWindowDisjoint(previousNewest, tailOldest)).toBe(true);
+  });
 });
 
 describe('mergeById', () => {
@@ -83,13 +111,36 @@ describe('mergeById', () => {
   it('fills late-arriving source-session provenance onto an existing live row (A9a)', () => {
     const live = { id: 'm1', created_at: t(1), source_session_id: null } as unknown as WorkbenchMessage;
     const enriched = {
-      id: 'm1', created_at: t(1),
-      source_session_id: 'ses_src', source_session_title: 'Src', source_session_agent_name: 'pm',
+      id: 'm1',
+      created_at: t(1),
+      source_session_id: 'ses_src',
+      source_session_title: 'Src',
+      source_session_agent_name: 'pm',
     } as unknown as WorkbenchMessage;
     const [row] = mergeById([live], [enriched]);
     expect(row.source_session_id).toBe('ses_src');
     expect(row.source_session_title).toBe('Src');
     expect(row.source_session_agent_name).toBe('pm');
+  });
+
+  it('fills trigger provenance recovered from a legacy native id', () => {
+    const live = {
+      id: 'm1',
+      created_at: t(1),
+      delivered_at: null,
+      author_name: null,
+      author_id: null,
+    } as unknown as WorkbenchMessage;
+    const enriched = {
+      id: 'm1',
+      created_at: t(1),
+      delivered_at: null,
+      author_name: 'watch',
+      author_id: 'def_watch',
+    } as unknown as WorkbenchMessage;
+    const [row] = mergeById([live], [enriched]);
+    expect(row.author_name).toBe('watch');
+    expect(row.author_id).toBe('def_watch');
   });
 
   it('does not overwrite an already-resolved source-session id with a null reconcile', () => {

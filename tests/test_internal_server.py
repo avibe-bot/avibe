@@ -1843,7 +1843,7 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
         conn.execute(
             update(delivery_rows)
             .where(delivery_rows.c.id == queued["id"])
-            .values(submitted_at="2026-06-22T00:00:37Z")
+            .values(submitted_at="2026-06-22T00:00:37.000000Z")
         )
         generated_ids = iter(
             (
@@ -1853,6 +1853,11 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
         )
         monkeypatch.setattr(messages_service, "_new_message_id", lambda: next(generated_ids))
         monkeypatch.setattr(messages_service, "_utc_now_iso", lambda: "2026-06-22T00:00:37Z")
+        monkeypatch.setattr(
+            message_deliveries,
+            "turn_now_iso",
+            lambda: "2026-06-22T00:00:37.000000Z",
+        )
         result = messages_service.append(
             conn,
             scope_id=queued["scope_id"],
@@ -1866,8 +1871,8 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
             update(messages)
             .where(messages.c.id == result["id"])
             .values(
-                created_at="2026-06-22T00:00:37Z",
-                updated_at="2026-06-22T00:00:37Z",
+                created_at="2026-06-22T00:00:37.000000Z",
+                updated_at="2026-06-22T00:00:37.000000Z",
             )
         )
 
@@ -1929,9 +1934,9 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
         ("result", "fast queued result"),
     ]
     assert [row["created_at"] for row in transcript["messages"]] == [
-        "2026-06-22T00:00:37Z",
-        "2026-06-22T00:00:37Z",
-        "2026-06-22T00:00:37Z",
+        "2026-06-22T00:00:37.000000Z",
+        "2026-06-22T00:00:37.000000Z",
+        "2026-06-22T00:00:37.000000Z",
     ]
     assert [row["id"] for row in transcript["messages"]] == [
         "msg_000000000000100aaaaaaaa",
@@ -2947,7 +2952,16 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
-    ctx = MessageContext(user_id="workbench", channel_id=session_id, platform="avibe")
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id="watch:def-watch:scheduled-busy",
+        platform_specific={
+            "task_trigger_kind": "watch",
+            "task_definition_id": "def-watch",
+        },
+    )
 
     async def _go():
         async def _busy():
@@ -2979,6 +2993,8 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     assert [q["text"] for q in queued] == ["scheduled while busy"]
     assert queued[0]["scope_id"] == scope_id
     assert queued[0]["author"] == "harness"
+    assert queued[0]["author_name"] == "watch"
+    assert queued[0]["author_id"] == "def-watch"
     assert [row["text"] for row in transcript["messages"]] == ["active owner"]
     assert ("queue.updated", {"session_id": session_id}) in published
 

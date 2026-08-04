@@ -330,6 +330,230 @@ def test_agent_run_provenance_skips_missing_source_session(isolated_state):
     assert "source_session_id" not in by_id["msg_ghost"]
 
 
+@pytest.mark.parametrize(
+    ("native_message_id", "expected_kind", "expected_definition_id"),
+    [
+        ("watch:def_watch:run_1", "watch", "def_watch"),
+        ("watch:run_legacy", "watch", None),
+        ("scheduled:def_task:run_2", "scheduled", "def_task"),
+        ("scheduled:run_legacy", "scheduled", None),
+        ("webhook:def_hook:run_3", "webhook", "def_hook"),
+        ("webhook:run_legacy", "webhook", None),
+        ("hook:run_4", "hook", None),
+        ("agent_run:run_5", "agent_run", None),
+    ],
+)
+def test_legacy_queued_harness_message_recovers_native_provenance(
+    isolated_state,
+    native_message_id,
+    expected_kind,
+    expected_definition_id,
+):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_target")
+        _insert_harness_msg(
+            conn,
+            scope_id,
+            "ses_target",
+            author_name=None,
+            native_message_id=native_message_id,
+            msg_id="msg_trigger",
+            created_at="2026-08-04T00:00:00Z",
+        )
+
+    with engine.connect() as conn:
+        [message] = messages_service.list_session_messages(
+            conn,
+            session_id="ses_target",
+        )["messages"]
+
+    assert message["author_name"] == expected_kind
+    assert message.get("author_id") == expected_definition_id
+
+
+def test_transcript_orders_queued_input_at_acceptance_across_all_cursors(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_order")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_order",
+            "user",
+            "first prompt",
+            "2026-08-04T00:00:00Z",
+            msg_id="msg_001",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_order",
+            "agent",
+            "reply before queued input starts",
+            "2026-08-04T00:00:02Z",
+            msg_id="msg_003",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_order",
+            "user",
+            "submitted while busy",
+            "2026-08-04T00:00:01Z",
+            msg_id="msg_002",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == "msg_002")
+            .values(delivered_at="2026-08-04T00:00:03.500000+00:00")
+        )
+
+    with engine.connect() as conn:
+        all_rows = messages_service.list_session_messages(
+            conn,
+            session_id="ses_order",
+        )["messages"]
+        tail = messages_service.list_session_messages(
+            conn,
+            session_id="ses_order",
+            tail=True,
+            limit=2,
+        )["messages"]
+        before = messages_service.list_session_messages(
+            conn,
+            session_id="ses_order",
+            before_id="msg_002",
+            limit=2,
+        )["messages"]
+        around = messages_service.list_session_messages(
+            conn,
+            session_id="ses_order",
+            around_id="msg_003",
+            limit=1,
+        )["messages"]
+
+    assert [row["id"] for row in all_rows] == ["msg_001", "msg_003", "msg_002"]
+    assert [row["id"] for row in tail] == ["msg_003", "msg_002"]
+    assert [row["id"] for row in before] == ["msg_001", "msg_003"]
+    assert [row["id"] for row in around] == ["msg_001", "msg_003", "msg_002"]
+
+
+def test_append_keeps_subsecond_transcript_order_for_direct_reply(
+    isolated_state,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        messages_service,
+        "_utc_now_iso",
+        lambda: "2026-08-04T00:00:00.750000Z",
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_subsecond")
+        prompt = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_subsecond",
+            platform="avibe",
+            author="user",
+            text="prompt",
+            delivered_at="2026-08-04T08:00:00.500000+08:00",
+        )
+        reply = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_subsecond",
+            platform="avibe",
+            author="agent",
+            text="reply",
+        )
+
+    with engine.connect() as conn:
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses_subsecond",
+        )["messages"]
+
+    assert reply["created_at"] == "2026-08-04T00:00:00.750000Z"
+    assert prompt["delivered_at"] == "2026-08-04T00:00:00.500000Z"
+    assert [row["text"] for row in transcript] == ["prompt", "reply"]
+
+
+def test_transcript_preserves_submillisecond_acceptance_order(
+    isolated_state,
+    monkeypatch,
+):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_microsecond")
+        timestamps = iter(
+            (
+                "2026-08-04T00:00:00.000000Z",
+                "2026-08-04T00:00:00.000100Z",
+            )
+        )
+        monkeypatch.setattr(
+            messages_service, "_utc_now_iso", lambda: next(timestamps)
+        )
+        queued = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_microsecond",
+            platform="avibe",
+            author="user",
+            text="queued",
+            delivered_at="2026-08-04T00:00:00.000900Z",
+        )
+        reply = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_microsecond",
+            platform="avibe",
+            author="agent",
+            text="reply",
+        )
+
+    with engine.connect() as conn:
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses_microsecond",
+        )["messages"]
+
+    assert queued["id"] < reply["id"]
+    assert [row["text"] for row in transcript] == ["reply", "queued"]
+
+
+def test_transcript_tail_uses_the_exact_order_expression_index(isolated_state):
+    engine = create_sqlite_engine()
+    order_value = messages_service.transcript_order_value()
+    statement = (
+        select(messages.c.id)
+        .where(
+            messages.c.session_id == "ses_plan",
+            messages.c.type.in_(messages_service.TRANSCRIPT_TYPES),
+        )
+        .order_by(order_value.desc(), messages.c.id.desc())
+        .limit(51)
+    )
+    compiled = statement.compile(engine, compile_kwargs={"literal_binds": True})
+
+    with engine.connect() as conn:
+        plan = "\n".join(
+            str(row[-1])
+            for row in conn.exec_driver_sql(
+                "EXPLAIN QUERY PLAN " + str(compiled)
+            ).all()
+        )
+
+    assert "USING INDEX ix_messages_session_transcript_id (session_id=?)" in plan
+    assert "TEMP B-TREE" not in plan
+
+
 def test_mark_session_read_ties_break_on_id(isolated_state):
     """When ``until_message_id`` points at a message whose ``created_at``
     is shared by newer messages (second precision), only rows at-or-before
@@ -903,7 +1127,19 @@ def _seed_titled_session(conn, scope_id: str, session_id: str, title: str) -> No
     )
 
 
-def _insert_msg(conn, scope_id, session_id, author, text, created_at, *, read=True, msg_type=None, msg_id=None):
+def _insert_msg(
+    conn,
+    scope_id,
+    session_id,
+    author,
+    text,
+    created_at,
+    *,
+    read=True,
+    msg_type=None,
+    msg_id=None,
+    delivered_at=None,
+):
     """Direct insert so the test controls created_at (second-resolution) + read_at.
 
     Agent rows default to type='result' (the user-facing reply the inbox
@@ -925,6 +1161,7 @@ def _insert_msg(conn, scope_id, session_id, author, text, created_at, *, read=Tr
             metadata_json="{}",
             created_at=created_at,
             updated_at=created_at,
+            delivered_at=delivered_at,
             read_at=created_at if (read and author == "agent") else None,
         )
     )
@@ -1276,6 +1513,81 @@ def test_list_inbox_sessions_same_second_followup_uses_id_tiebreaker(isolated_st
     assert rows["ses_wait_tie"]["replied"] is True
     # Same second, the agent reply has the later id → already replied.
     assert rows["ses_done_tie"]["replied"] is False
+
+
+def test_list_inbox_sessions_uses_transcript_acceptance_order(isolated_state):
+    """Inbox activity and awaiting state follow the visible transcript order.
+
+    A queued input can be authored before a reply but accepted after it. Its
+    acceptance is then the newest visible activity and the Session is awaiting
+    another reply even though ``created_at`` alone says the opposite.
+    """
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_acceptance", "Acceptance")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_acceptance",
+            "user",
+            "queued follow-up",
+            "2026-08-04T00:00:01.000000Z",
+            msg_id="msg_001",
+            delivered_at="2026-08-04T00:00:04.000000Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_acceptance",
+            "agent",
+            "reply before acceptance",
+            "2026-08-04T00:00:03.000000Z",
+            msg_id="msg_003",
+        )
+
+    with engine.connect() as conn:
+        row = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+
+    assert row["last_activity_at"] == "2026-08-04T00:00:04.000000Z"
+    assert row["last_message_author"] == "user"
+    assert row["replied"] is True
+
+
+def test_mark_session_read_uses_transcript_acceptance_boundary(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_acceptance_read")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_acceptance_read",
+            "user",
+            "queued follow-up",
+            "2026-08-04T00:00:01.000000Z",
+            msg_id="msg_001",
+            delivered_at="2026-08-04T00:00:04.000000Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_acceptance_read",
+            "agent",
+            "reply before acceptance",
+            "2026-08-04T00:00:03.000000Z",
+            read=False,
+            msg_id="msg_003",
+        )
+
+    with engine.begin() as conn:
+        updated = messages_service.mark_session_read(
+            conn,
+            "ses_acceptance_read",
+            until_message_id="msg_001",
+        )
+
+    assert updated == 1
 
 
 def test_list_inbox_sessions_pagination(isolated_state):

@@ -965,6 +965,83 @@ def test_storage_lookup_includes_harness_driving_message():
     ) == TurnCheckpointContext()
 
 
+def test_storage_lookup_uses_transcript_acceptance_order():
+    from storage import messages_service
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(primary_platform="avibe")
+    session_id = "ses_acceptance_checkpoint"
+    with get_cached_sqlite_engine().begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_acceptance_checkpoint",
+            now="2026-08-04T00:00:00.000000+00:00",
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor=session_id,
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at="2026-08-04T00:00:00.000000+00:00",
+                updated_at="2026-08-04T00:00:00.000000+00:00",
+                last_active_at="2026-08-04T00:00:00.000000+00:00",
+            )
+        )
+        queued = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            message_type="user",
+            source="user",
+            text="queued input accepted last",
+        )
+        direct = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            message_type="user",
+            source="user",
+            text="direct input accepted first",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == queued["id"])
+            .values(
+                created_at="2026-08-04T00:00:01.000000+00:00",
+                delivered_at="2026-08-04T00:00:04.000000+00:00",
+            )
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == direct["id"])
+            .values(created_at="2026-08-04T00:00:02.000000+00:00")
+        )
+
+    expected = TurnCheckpointContext(
+        message="queued input accepted last",
+        message_id=queued["id"],
+    )
+    assert show_git.load_turn_checkpoint_context(session_id) == expected
+    assert show_git.load_turn_checkpoint_context(
+        session_id,
+        after="2026-08-04T00:00:03.000000+00:00",
+    ) == expected
+
+
 def test_storage_lookup_includes_annotation_driving_message():
     from storage import messages_service
     from storage.db import get_cached_sqlite_engine

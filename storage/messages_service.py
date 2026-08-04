@@ -38,7 +38,27 @@ from vibe.message_types import types_with
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def canonical_message_timestamp(value: Any) -> str | None:
+    """Return one lexically sortable UTC representation for Message timestamps."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parseable = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        instant = datetime.fromisoformat(parseable)
+    except ValueError:
+        return text
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _timestamp_key(value: Any, row_id: Any) -> tuple[datetime, str]:
@@ -57,14 +77,10 @@ def _timestamp_key(value: Any, row_id: Any) -> tuple[datetime, str]:
 def _new_message_id() -> str:
     """Time-sortable message id.
 
-    The transcript and inbox order rows by ``(created_at, id)`` and
-    ``created_at`` is second-resolution, so two rows written in the same second
-    — e.g. a fast avibe turn where the user prompt and the agent result land
-    together — tie on ``created_at``. A microsecond-clock prefix makes the id
-    monotonic so that tie-break preserves insertion order; otherwise a random
-    uuid could render the result before the prompt, or make the inbox pick the
-    wrong "last" row for its activity / replied state. The random suffix keeps
-    ids unique within the same microsecond.
+    The durable transcript key uses Message acceptance-or-creation time plus id.
+    Legacy and imported rows may still have second-resolution timestamps, so a
+    microsecond-clock prefix makes the id tie-break preserve insertion order.
+    The random suffix keeps ids unique within the same microsecond.
     """
     return f"msg_{int(time.time() * 1_000_000):015x}{uuid.uuid4().hex[:8]}"
 
@@ -103,11 +119,30 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
 _AGENT_RUN_NATIVE_PREFIX = "agent_run:"
 
 
-def _attach_agent_run_provenance(
+def _native_harness_provenance(native_message_id: Any) -> tuple[str | None, str | None]:
+    """Recover trigger kind/definition from the stable native Message identity.
+
+    Delivery snapshots written before provenance was carried through the durable
+    queue can have null ``author_name``/``author_id`` even though the native id
+    still records the exact trigger. This is read compatibility for those rows;
+    current writers persist the same values directly.
+    """
+
+    parts = str(native_message_id or "").split(":")
+    kind = parts[0] if parts else ""
+    if kind in {"watch", "webhook", "scheduled"}:
+        return kind, parts[1] if len(parts) >= 3 and parts[1] else None
+    if kind in {"hook", "agent_run"}:
+        return kind, None
+    return None, None
+
+
+def _attach_harness_provenance(
     conn: Connection, payloads: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Read-side provenance for agent-callback ("自动触发") chat messages (A9a).
+    """Read-side provenance for every durable Harness chat message.
 
+    Stable native ids repair legacy queued rows whose trigger fields were lost.
     A harness ``agent_run`` prompt is stored as ``native_message_id =
     "agent_run:<execution_id>"`` with no source-session pointer (the write path
     records none). Resolve it read-side: message → its ``agent_runs`` row
@@ -120,6 +155,12 @@ def _attach_agent_run_provenance(
     exec_by_msg: dict[str, str] = {}
     for payload in payloads:
         native_id = payload.get("native_message_id")
+        if payload.get("source") == "harness":
+            kind, definition_id = _native_harness_provenance(native_id)
+            if not payload.get("author_name") and kind:
+                payload["author_name"] = kind
+            if not payload.get("author_id") and definition_id:
+                payload["author_id"] = definition_id
         if (
             payload.get("source") == "harness"
             and isinstance(native_id, str)
@@ -214,6 +255,18 @@ def _attach_agent_run_provenance(
             payload["source_session_title"] = meta.get("title")
             payload["source_session_agent_name"] = meta.get("agent_name")
     return payloads
+
+
+def transcript_order_value(table: Any = messages) -> Any:
+    """SQLite ordering key for when a Message entered the transcript.
+
+    A queued Delivery may be submitted while another Turn is active. Its Message
+    is authored then but enters the transcript only when native start accepts it,
+    recorded in ``delivered_at``. Directly accepted rows have no ``delivered_at``
+    and keep their microsecond ``created_at`` plus id tie-break.
+    """
+
+    return func.coalesce(table.c.delivered_at, table.c.created_at)
 
 
 _WS_RE = re.compile(r"\s+")
@@ -358,7 +411,7 @@ def search_messages(
         # sessions stay active), so exclude a disabled scope's messages too. A
         # missing scope_settings row (legacy / folder-less project) is enabled.
         .where(or_(scope_settings.c.enabled.is_(None), scope_settings.c.enabled != 0))
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
         .limit(effective_limit)
     )
 
@@ -440,7 +493,8 @@ def append(
         author = HARNESS_TYPE
         resolved_type = HARNESS_TYPE
 
-    now = _utc_now_iso()
+    now = canonical_message_timestamp(_utc_now_iso())
+    assert now is not None
     payload = {
         "id": _new_message_id(),
         "scope_id": scope_id,
@@ -458,7 +512,7 @@ def append(
         "metadata_json": json.dumps(metadata or {}),
         "created_at": now,
         "updated_at": now,
-        "delivered_at": delivered_at,
+        "delivered_at": canonical_message_timestamp(delivered_at),
         "read_at": read_at,
     }
     conn.execute(messages.insert().values(**payload))
@@ -629,8 +683,9 @@ def list_session_messages(
         # yields an empty window. ``query`` already carries the type/metadata
         # filter, so the older/anchor/newer sub-queries inherit it — the anchor
         # only appears if it is itself transcript-visible.
+        order_value = transcript_order_value()
         anchor = conn.execute(
-            select(messages.c.created_at).where(
+            select(order_value).where(
                 messages.c.id == around_id, messages.c.session_id == session_id
             )
         ).scalar_one_or_none()
@@ -640,11 +695,11 @@ def list_session_messages(
         older_q = (
             query.where(
                 or_(
-                    messages.c.created_at < anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id < around_id),
+                    order_value < anchor,
+                    and_(order_value == anchor, messages.c.id < around_id),
                 )
             )
-            .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+            .order_by(order_value.desc(), messages.c.id.desc())
             .limit(effective_limit + 1)
         )
         older = [_row_to_payload(dict(row)) for row in conn.execute(older_q).mappings().all()]
@@ -660,18 +715,18 @@ def list_session_messages(
         newer_q = (
             query.where(
                 or_(
-                    messages.c.created_at > anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id > around_id),
+                    order_value > anchor,
+                    and_(order_value == anchor, messages.c.id > around_id),
                 )
             )
-            .order_by(messages.c.created_at.asc(), messages.c.id.asc())
+            .order_by(order_value.asc(), messages.c.id.asc())
             .limit(effective_limit + 1)
         )
         newer = [_row_to_payload(dict(row)) for row in conn.execute(newer_q).mappings().all()]
         has_newer = len(newer) > effective_limit
         newer = newer[:effective_limit]
 
-        merged = _attach_agent_run_provenance(conn, older + anchor_rows + newer)
+        merged = _attach_harness_provenance(conn, older + anchor_rows + newer)
         return {
             "messages": merged,
             "next_after_id": newer[-1]["id"] if has_newer and newer else None,
@@ -679,8 +734,9 @@ def list_session_messages(
         }
     if tail:
         # Newest ``limit`` rows, then flip back to chronological for the caller.
-        query = query.order_by(messages.c.created_at.desc(), messages.c.id.desc()).limit(effective_limit + 1)
-        rows = _attach_agent_run_provenance(
+        order_value = transcript_order_value()
+        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(effective_limit + 1)
+        rows = _attach_harness_provenance(
             conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
         )
         has_older = len(rows) > effective_limit
@@ -692,18 +748,19 @@ def list_session_messages(
             "next_before_id": rows[0]["id"] if has_older and rows else None,
         }
     if before_id:
+        order_value = transcript_order_value()
         anchor = conn.execute(
-            select(messages.c.created_at).where(messages.c.id == before_id)
+            select(order_value).where(messages.c.id == before_id)
         ).scalar_one_or_none()
         if anchor is not None:
             query = query.where(
                 or_(
-                    messages.c.created_at < anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id < before_id),
+                    order_value < anchor,
+                    and_(order_value == anchor, messages.c.id < before_id),
                 )
             )
-        query = query.order_by(messages.c.created_at.desc(), messages.c.id.desc()).limit(effective_limit + 1)
-        rows = _attach_agent_run_provenance(
+        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(effective_limit + 1)
+        rows = _attach_harness_provenance(
             conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
         )
         has_older = len(rows) > effective_limit
@@ -715,18 +772,20 @@ def list_session_messages(
             "next_before_id": rows[0]["id"] if has_older and rows else None,
         }
     if after_id:
+        order_value = transcript_order_value()
         anchor = conn.execute(
-            select(messages.c.created_at).where(messages.c.id == after_id)
+            select(order_value).where(messages.c.id == after_id)
         ).scalar_one_or_none()
         if anchor is not None:
             query = query.where(
                 or_(
-                    messages.c.created_at > anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id > after_id),
+                    order_value > anchor,
+                    and_(order_value == anchor, messages.c.id > after_id),
                 )
             )
-    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc()).limit(effective_limit + 1)
-    rows = _attach_agent_run_provenance(
+    order_value = transcript_order_value()
+    query = query.order_by(order_value.asc(), messages.c.id.asc()).limit(effective_limit + 1)
+    rows = _attach_harness_provenance(
         conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
     )
     # Probe one extra row against the clamped page size: a full page alone does
@@ -906,7 +965,7 @@ def list_inbox_sessions(
     """
 
     def _latest_message_value(
-        column_name: str,
+        column_name: Optional[str],
         *,
         author: Optional[str] = None,
         types: Optional[tuple[str, ...]] = None,
@@ -914,11 +973,13 @@ def list_inbox_sessions(
         input_turn_only: bool = False,
     ) -> Any:
         msg = messages.alias()
+        order_value = transcript_order_value(msg)
+        selected_value = order_value if column_name is None else getattr(msg.c, column_name)
         query = (
-            select(getattr(msg.c, column_name))
+            select(selected_value)
             .where(msg.c.session_id == agent_sessions.c.id)
             .where(msg.c.session_id.is_not(None))
-            .order_by(msg.c.created_at.desc(), msg.c.id.desc())
+            .order_by(order_value.desc(), msg.c.id.desc())
             .limit(1)
         )
         if platform is not None:
@@ -943,12 +1004,12 @@ def list_inbox_sessions(
     # Drive from the small session set and do top-1 index probes per session.
     # This preserves the inbox contract while avoiding full message-window
     # materialization as history grows.
-    last_activity_at = _latest_message_value("created_at", conversation_only=True)
+    last_activity_at = _latest_message_value(None, conversation_only=True)
     last_author = _latest_message_value("author", conversation_only=True)
     preview_id = _latest_message_value("id", types=_INBOX_PREVIEW_TYPES)
-    preview_at = _latest_message_value("created_at", types=_INBOX_PREVIEW_TYPES)
+    preview_at = _latest_message_value(None, types=_INBOX_PREVIEW_TYPES)
     last_terminal_id = _latest_message_value("id", types=_INBOX_SETTLES_REPLY_TYPES)
-    last_terminal_at = _latest_message_value("created_at", types=_INBOX_SETTLES_REPLY_TYPES)
+    last_terminal_at = _latest_message_value(None, types=_INBOX_SETTLES_REPLY_TYPES)
     last_turn_terminal_id = (
         select(session_turns.c.id)
         .where(
@@ -978,7 +1039,7 @@ def list_inbox_sessions(
         .scalar_subquery()
     )
     last_input_at = _latest_message_value(
-        "created_at", conversation_only=True, input_turn_only=True
+        None, conversation_only=True, input_turn_only=True
     )
     last_input_id = _latest_message_value("id", conversation_only=True, input_turn_only=True)
     last_input_turn_state = (
@@ -1094,11 +1155,9 @@ def list_inbox_sessions(
         unread = int(row["unread_count"] or 0)
         # Awaiting the agent: the latest human or harness input is newer than the
         # agent's latest reply. Persistent across a reload and stays set for the whole
-        # agent turn, unlike a literal "last author" check. ``created_at`` is
-        # second-resolution, so compare ``(created_at, id)`` tuples — the message
-        # id carries a microsecond-clock prefix (see ``_new_message_id``), giving
-        # the right order for a follow-up sent in the same second as the prior
-        # reply.
+        # agent turn, unlike a literal "last author" check. The timestamp values
+        # here are the same acceptance-or-creation positions used by the transcript;
+        # id remains the stable tie-break for legacy second-resolution rows.
         last_input_at = row["last_input_at"]
         last_input_id = row["last_input_id"]
         # Execution settlement belongs to SessionTurn. A visible result Message
@@ -1181,18 +1240,15 @@ def mark_session_read(
     )
     if until_message_id:
         anchor = conn.execute(
-            select(messages.c.created_at).where(messages.c.id == until_message_id)
+            select(transcript_order_value()).where(messages.c.id == until_message_id)
         ).scalar_one_or_none()
         if anchor is not None:
-            # ``created_at`` is stored at second precision, so a bare
-            # ``<= anchor`` would also mark newer messages created in the
-            # same second as read. Tie-break on ``id`` so only rows at-or-
-            # before the anchor message itself are affected.
+            order_value = transcript_order_value()
             base = base.where(
                 or_(
-                    messages.c.created_at < anchor,
+                    order_value < anchor,
                     and_(
-                        messages.c.created_at == anchor,
+                        order_value == anchor,
                         messages.c.id <= until_message_id,
                     ),
                 )
@@ -1212,7 +1268,7 @@ def list_messages_for_inbox_scope(
     query = (
         select(messages)
         .where(messages.c.scope_id == scope_id)
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
         .limit(min(max(int(limit), 1), 50))
     )
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]

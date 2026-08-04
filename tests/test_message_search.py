@@ -70,6 +70,7 @@ def _insert_msg(
     msg_type=None,
     source=None,
     msg_id=None,
+    delivered_at=None,
 ):
     """Direct insert so a test controls created_at / type / platform / text.
 
@@ -91,6 +92,7 @@ def _insert_msg(
             metadata_json="{}",
             created_at=created_at,
             updated_at=created_at,
+            delivered_at=delivered_at,
             read_at=None,
         )
     )
@@ -491,6 +493,40 @@ def test_search_limit_clamped_and_caps_matches(isolated_state):
         "2026-06-01T10:03:00Z",
     ]
     assert floored["total"] == 1
+
+
+def test_search_recency_uses_transcript_acceptance_order(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_search_order", "Search order")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_search_order",
+            "user",
+            "deploy queued",
+            "2026-08-04T00:00:01.000000Z",
+            msg_id="msg_001",
+            delivered_at="2026-08-04T00:00:04.000000Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_search_order",
+            "agent",
+            "deploy reply",
+            "2026-08-04T00:00:03.000000Z",
+            msg_id="msg_003",
+        )
+
+    with engine.connect() as conn:
+        result = messages_service.search_messages(conn, query="deploy")
+
+    assert [match["id"] for match in result["sessions"][0]["matches"]] == [
+        "msg_001",
+        "msg_003",
+    ]
 
 
 # --- list_session_messages around_id window ---------------------------------

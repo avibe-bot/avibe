@@ -285,6 +285,7 @@ def load_turn_checkpoint_context(
         from sqlalchemy import func, select, tuple_
 
         from storage.db import get_cached_sqlite_engine
+        from storage.messages_service import transcript_order_value
         from storage.models import (
             agent_runs,
             message_deliveries,
@@ -409,9 +410,10 @@ def load_turn_checkpoint_context(
                 messages.c.content_json,
                 messages.c.native_message_id,
             ).where(messages.c.session_id == session_id)
+            message_order = transcript_order_value(messages)
             if after is None:
                 message_query = message_query.order_by(
-                    messages.c.created_at.desc(), messages.c.id.desc()
+                    message_order.desc(), messages.c.id.desc()
                 ).limit(1)
             else:
                 message_query = (
@@ -420,8 +422,8 @@ def load_turn_checkpoint_context(
                             TURN_CHECKPOINT_INPUT_AUTHOR_TYPES
                         )
                     )
-                    .where(messages.c.created_at >= after)
-                    .order_by(messages.c.created_at.asc(), messages.c.id.asc())
+                    .where(message_order >= after)
+                    .order_by(message_order.asc(), messages.c.id.asc())
                     .limit(1)
                 )
             message_row = conn.execute(message_query).first()

@@ -37,13 +37,21 @@ import {
   resolveActivityLabel,
   sortBackgroundActivities,
 } from '../../lib/backgroundActivity';
-import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from '../../lib/chatTrigger';
+import {
+  chatTriggerLink,
+  harnessChipLabelKey,
+  needsHarnessProvenanceReconcile,
+} from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
-import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
+import {
+  isTranscriptWindowDisjoint,
+  mergeById,
+  insertMessageOrdered,
+} from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
@@ -775,9 +783,9 @@ export const ChatPage: React.FC = () => {
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
       const fresh = res.messages.filter(isTranscriptMessage);
       if (fresh.length) {
-        const tailOldestId = fresh[0].id;
+        const tailOldest = fresh[0];
         const previousOldestId = oldestLoadedIdRef.current;
-        const previousNewestId = newestLoadedIdRef.current;
+        const previousNewest = messagesRef.current[messagesRef.current.length - 1];
         setMessages((prev) => {
           const merged = mergeById(prev, fresh);
           // Following the tail: keep the window capped. A gap larger than the tail
@@ -791,7 +799,11 @@ export const ChatPage: React.FC = () => {
           }
           return merged;
         });
-        if (!previousOldestId || !previousNewestId || tailOldestId > previousNewestId) {
+        if (
+          !previousOldestId ||
+          !previousNewest ||
+          isTranscriptWindowDisjoint(previousNewest, tailOldest)
+        ) {
           setOlderCursor(res.next_before_id ?? null);
         }
       }
@@ -1126,10 +1138,9 @@ export const ChatPage: React.FC = () => {
           return;
         }
         appendMessage(msg);
-        // A9a: a live agent-callback prompt is published before its source
-        // session is resolved, so pull the enriched REST row (mergeById fills
-        // source_session_* in place) — the chip appears without a reload/refocus.
-        if (isUnresolvedAgentCallback(msg)) void reconcile();
+        // Harness live rows can precede read-side provenance enrichment. Pull
+        // the enriched REST row so trigger/source chips update without reload.
+        if (needsHarnessProvenanceReconcile(msg)) void reconcile();
         // Agent Activity: a terminal reply settles the turn → mark the generation
         // settled and rebuild groups from storage (chip, rows, status, duration all
         // come from the endpoint, never the lossy live buffer).

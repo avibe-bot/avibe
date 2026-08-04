@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
 from storage import messages_service, web_push_service
 from storage.models import agent_sessions, messages
@@ -141,7 +141,7 @@ def _web_push_user_keys_for_message(conn: Any, message_id: str | None) -> list[s
     agent_row = conn.execute(
         select(
             messages.c.session_id,
-            messages.c.created_at,
+            messages_service.transcript_order_value(messages).label("transcript_at"),
             messages.c.id,
             messages.c.type,
             messages.c.metadata_json,
@@ -156,7 +156,9 @@ def _web_push_user_keys_for_message(conn: Any, message_id: str | None) -> list[s
         _parse_metadata(agent_row[4]),
     ):
         return []
-    session_id, created_at, row_id = agent_row[0], agent_row[1], agent_row[2]
+    session_id, transcript_at, row_id = agent_row[0], agent_row[1], agent_row[2]
+
+    user_order = messages_service.transcript_order_value(messages)
 
     user_rows = conn.execute(
         select(messages.c.metadata_json)
@@ -172,10 +174,12 @@ def _web_push_user_keys_for_message(conn: Any, message_id: str | None) -> list[s
             )
         )
         .where(
-            (messages.c.created_at < created_at)
-            | ((messages.c.created_at == created_at) & (messages.c.id < row_id))
+            or_(
+                user_order < transcript_at,
+                and_(user_order == transcript_at, messages.c.id < row_id),
+            )
         )
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(user_order.desc(), messages.c.id.desc())
     ).all()
     for user_row in user_rows:
         try:

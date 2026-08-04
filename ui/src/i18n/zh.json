@@ -3058,6 +3058,8 @@
       "scheduled": "定时任务",
       "watch": "Watch 监听",
       "webhook": "Webhook",
+      "hook": "Hook",
+      "activityRecovery": "活动恢复",
       "showIntent": "页面操作",
       "harness": "来自 Agent",
       "from": "来自",
