@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { AlertCircle, Loader2, Search } from 'lucide-react';
 
+import { tabModifierLabel, type LaunchModifiers } from '../../../apps/appLaunch';
 import { useMessageSearch } from '../../../lib/useMessageSearch';
 import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
@@ -76,8 +77,10 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
     onClose();
   };
 
-  const handleAppSelect = (result: (typeof appResults)[number]) => {
-    openSearchApp(result);
+  // `launch` carries the activating event's modifiers, so ⌘/Ctrl+click AND
+  // ⌘/Ctrl+Enter open the app in a browser tab (§7.1m).
+  const handleAppSelect = (result: (typeof appResults)[number], launch?: LaunchModifiers) => {
+    openSearchApp(result, launch);
     onClose();
   };
 
@@ -108,7 +111,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
       // row activates instead of the (possibly different) arrow-selected one.
       if (document.activeElement !== inputRef.current) return;
       e.preventDefault();
-      if (selectedTarget?.kind === 'app') handleAppSelect(selectedTarget.result);
+      if (selectedTarget?.kind === 'app') handleAppSelect(selectedTarget.result, e);
       else if (selectedTarget) handleSelect(selectedTarget.sessionId, selectedTarget.messageId);
     }
   };
@@ -219,6 +222,15 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
           <div className="flex shrink-0 items-center gap-4 border-t border-border bg-foreground/[0.02] px-4 py-[11px]">
             <FooterHint keyLabel="↑↓" label={t('workbench.search.kbdNavigate')} />
             <FooterHint keyLabel="↵" label={t('workbench.search.kbdOpen')} />
+            {/* Only while an APP is highlighted: ⌘↵ opens it as a browser tab (§7.1m),
+                which a message hit has no equivalent of — so the hint appears with the
+                target it applies to instead of always sitting in the footer. */}
+            {selectedTarget?.kind === 'app' && (
+              <FooterHint
+                keyLabel={`${tabModifierLabel()}↵`}
+                label={t('workbench.search.kbdNewTab')}
+              />
+            )}
             <FooterHint keyLabel={t('workbench.search.kbdEsc')} label={t('workbench.search.kbdClose')} />
             {/* Archived opt-in — off on every open; archived hits open read-only. */}
             <label className="flex items-center gap-1.5 text-[11px] text-muted">

@@ -1298,7 +1298,7 @@
       }
     },
     "dock": {
-      "newInstanceHint": "⌘ 点击可新建窗口",
+      "newTabChord": "{{key}} 点击 → 新标签页",
       "switchShortcut": "⌥{{number}}",
       "newWindow": "新建窗口",
       "showAllWindows": "显示所有窗口",
@@ -1597,6 +1597,7 @@
       "kbdEsc": "Esc",
       "kbdNavigate": "切换",
       "kbdOpen": "打开",
+      "kbdNewTab": "新标签页",
       "kbdClose": "关闭",
       "footerNote": "应用与消息内容 · 全部会话",
       "scopeAll": "全部会话"

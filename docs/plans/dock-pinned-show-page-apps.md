@@ -759,6 +759,73 @@ Fix (structural):
   shared store. ShowPageShareControl's separate usage joins the same store.
 - No backend changes; icon endpoint caching unchanged.
 
+### 7.1m ⌘/Ctrl-click an app icon opens a browser tab (owner 2026-08-04)
+
+Owner request: clicking an app icon opens a workbench window; a **⌘/Ctrl-held click
+should open that app in a new BROWSER TAB** instead — the universal web convention.
+Modifier-click only; the plain click keeps opening a window.
+
+Rule (one shared, pure mapping in `ui/src/apps/appLaunch.ts`, so every launch surface
+behaves identically instead of re-deriving it):
+
+- `appLaunchIntent(modifiers)`: **the platform tab modifier → `newTab`**,
+  **Alt/Shift → `newWindow`**, otherwise `activate`. The tab modifier is **⌘ (without
+  Ctrl) on Apple, Ctrl (without ⌘) elsewhere** — the same `IS_APPLE` idiom the Editor
+  and Terminal chords use, because **macOS Ctrl+click is the right-click gesture** and
+  must not mean "new tab" there. The tab modifier wins when combined with Alt/Shift, so
+  a stray extra modifier still yields the requested tab. This RE-ASSIGNS the
+  pre-existing Dock behavior where ⌘/Ctrl/Alt all meant "another window": the tab
+  modifier now means the tab, and Alt keeps the window (Shift joins it as the browser's
+  own new-window modifier). New Window stays reachable from the tile's ＋ and its
+  right-click menu, so nothing is lost.
+- `isAppleContextClick(modifiers)`: a **mouse-only** guard — a Ctrl-held click on Apple
+  belongs to the context menu, so every mouse handler bails instead of also launching
+  (browsers differ on whether that click event fires at all). Deliberately NOT folded
+  into the intent: a **Ctrl+Enter keypress** is a normal launch, so only click paths ask.
+  It also requires `detail > 0`: Enter/Space on a `<button>` dispatches a synthetic
+  **click with `detail === 0`**, and without that check the guard would swallow the very
+  keyboard launch it is not meant to cover (Codex review 2026-08-04, Medium).
+- `IS_APPLE` was duplicated in `TerminalView` + `EditorApp`; this third consumer
+  promotes it to `ui/src/lib/platform.ts` (reuse ladder: extract on the third repeat).
+- `appTabHref(target)`: the app's own standalone browser surface — a Show Page →
+  `/show/<sid>/` (the SAME target as the tile's "Open in New Tab" menu item and the
+  window titlebar's external-open button, i.e. `registry.externalHref`), a built-in →
+  its in-shell `/apps/<id>` route. An app with **no** standalone surface returns null and
+  the click falls back to a window rather than doing nothing.
+  - That built-in mapping is an **allowlist** (`files` / `terminal` / `editor`), not
+    "every id has a route": `/apps/library` deliberately opens a Library WINDOW and
+    redirects the tab to `/` on desktop (it also serves the retired
+    `/admin/show-pages` bookmark), so treating it as a tab surface spawned a second
+    whole workbench instead of the app — and `preview` has no route at all. Both now
+    fall back to a window, and the Library tile's menu drops "Open in New Tab"
+    accordingly (Codex review 2026-08-04, High). A new app opts in there once its
+    standalone route exists.
+- Applies to every app-icon surface: the desktop **Dock** tiles, the **App Library**
+  rows (Apps + AI tabs), and the **⌘K / Search** app results — where ⌘/Ctrl+**Enter**
+  works too, since the intent reads modifiers off mouse AND keyboard events alike.
+- Discoverability (owner Q 2026-08-04 "do you show a hint for that shortcut?" — the
+  gesture was implemented with NO hint anywhere; these were added in answer):
+  - the Dock's **Open in New Tab** context item is no longer Show-Page-only — a built-in
+    has an `/apps/<id>` surface too, so every tile offers it as the visible twin of the
+    modifier-click — and it now carries a trailing **shortcut hint** (new optional
+    `shortcut` slot on the shared `ContextMenuItem`; the Dock menu widens to 268px only
+    when that row is present).
+  - **hover tooltips** spell the chord on the surfaces where a click is the only
+    affordance: the Dock tile (appended after the existing `⌥{n}` switch hint, and only
+    when the app HAS a tab surface), the App Library rows, and the Show Pages row's
+    open cluster.
+  - the **⌘K palette footer** gains a `⌘↵ New Tab` hint that appears **only while an app
+    result is highlighted** — a message hit has no tab equivalent, so the hint travels
+    with the target it applies to instead of always occupying the footer.
+  - the chord text is one interpolated string, `apps.dock.newTabChord` = `{{key}}-click →
+    new tab`, with `tabModifierLabel()` supplying `⌘`/`Ctrl` from the SAME `IS_APPLE`
+    used by `appLaunchIntent` (a test asserts the labelled key is the one that actually
+    opens a tab, so hint and behavior cannot drift). It replaces the orphan
+    `apps.dock.newInstanceHint` ("⌘-click for a new window"), which no code referenced
+    and which this change made false.
+- Mobile is untouched: no modifier keys there, and the tap paths (`/apps/*`,
+  `/apps/show/:sessionId`, §7.1b) keep the AppShell chrome as before.
+
 ### 7.2 Becoming an app: the ladder (owner Q&A 2026-07-13)
 
 Pinning **is** installing — no separate ceremony. Two entrances, one action:

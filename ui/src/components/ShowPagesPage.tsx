@@ -25,6 +25,7 @@ import { useWindowManager } from '../context/WindowManagerContext';
 import { copyTextToClipboard } from '../lib/utils';
 import { copyHref, displayLink, type ShowPageLinkInfo } from '../lib/showPageLinks';
 import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
+import { isAppleContextClick, tabModifierLabel, type LaunchModifiers } from '../apps/appLaunch';
 import { filterShowPages, type ShowPageFilter } from '../apps/appLibrary';
 import { SHARED_ACTION_ZONE } from '../apps/rowLayout';
 import { ShowPageAvatarTile } from '../apps/showPageAvatarTile';
@@ -53,7 +54,8 @@ interface RowProps {
   busy: boolean;
   copied: boolean;
   installed: boolean;
-  onOpen: () => void;
+  /** Receives the opening event so a ⌘/Ctrl-click can open a browser tab (§7.1m). */
+  onOpen: (launch?: LaunchModifiers) => void;
   onToggleExpand: () => void;
   onToggleInstall: (next: boolean) => void;
   onRename: (title: string | null) => Promise<void>;
@@ -126,8 +128,10 @@ function ShowPageRow({
         <div className="flex min-w-0 flex-1">
           <button
             type="button"
-            onClick={onOpen}
-            title={t('showPages.openApp')}
+            // A macOS Ctrl-click is the right-click gesture: leave it to the context menu.
+            onClick={(e) => !isAppleContextClick(e) && onOpen(e)}
+            // …plus the modifier gesture, which has no other tell here (§7.1m).
+            title={`${t('showPages.openApp')} · ${t('apps.dock.newTabChord', { key: tabModifierLabel() })}`}
             className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
           >
             <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} iconVersion={page.icon_version} />
@@ -472,7 +476,9 @@ export function ShowPagesView({
   onShareIdSaved,
   reload,
   onOpenApp,
-}: ShowPagesController & { onOpenApp?: (sessionId: string, title?: string) => void }) {
+}: ShowPagesController & {
+  onOpenApp?: (sessionId: string, title?: string, launch?: LaunchModifiers) => void;
+}) {
   const { t } = useTranslation();
   const { isPinned, pin, unpin } = useDock();
   const { windows, setParams, setTitle } = useWindowManager();
@@ -561,7 +567,7 @@ export function ShowPagesView({
               busy={busyId === page.session_id}
               copied={copiedId === page.session_id}
               installed={isPinned(page.session_id)}
-              onOpen={() => onOpenApp?.(page.session_id, page.title ?? undefined)}
+              onOpen={(launch) => onOpenApp?.(page.session_id, page.title ?? undefined, launch)}
               onToggleExpand={() => setExpandedId((id) => (id === page.session_id ? null : page.session_id))}
               onToggleInstall={(next) => (next ? pin(page.session_id) : unpin(page.session_id))}
               onRename={(title) => rename(page, title)}

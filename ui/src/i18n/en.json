@@ -1298,7 +1298,7 @@
       }
     },
     "dock": {
-      "newInstanceHint": "⌘-click for a new window",
+      "newTabChord": "{{key}}-click → new tab",
       "switchShortcut": "⌥{{number}}",
       "newWindow": "New Window",
       "showAllWindows": "Show All Windows",
@@ -1597,6 +1597,7 @@
       "kbdEsc": "Esc",
       "kbdNavigate": "Navigate",
       "kbdOpen": "Open",
+      "kbdNewTab": "New Tab",
       "kbdClose": "Close",
       "footerNote": "Apps and message content · all sessions",
       "scopeAll": "all sessions"

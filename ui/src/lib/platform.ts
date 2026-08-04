@@ -6,6 +6,14 @@
 // place so the detection can't drift between the InstallHint nudge and the
 // media-download helper.
 
+// Apple vs. non-Apple platform — the signal every "⌘ here, Ctrl there" chord or
+// gesture depends on (Editor/Terminal chords, app-icon modifier clicks). Detected
+// once at module load: ``navigator.platform`` is deprecated but remains the most
+// reliable signal, with userAgent as a fallback.
+export const IS_APPLE =
+  typeof navigator !== 'undefined' &&
+  /Mac|iP(hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
+
 // iPhone / iPad / iPod, plus iPadOS 13+ which reports as desktop "MacIntel"
 // while still exposing multi-touch.
 export function isIosDevice(): boolean {
