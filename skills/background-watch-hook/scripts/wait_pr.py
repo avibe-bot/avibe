@@ -516,19 +516,68 @@ def _state_file_scratch(target: Path) -> tuple[int, str]:
     return tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
 
 
-def _verify_state_file_writable(path: str | None) -> None:
-    """Fail before the first poll if the requested state file cannot be written.
+def _state_file_owner(target: Path) -> tuple[Any, Any] | None:
+    """Which PR the file at ``target`` currently claims, or ``None`` if it says nothing.
+
+    Missing and unusable files both answer ``None``, matching ``_load_state_file``:
+    there is no owner to respect, so the caller may take the path.
+    """
+
+    try:
+        with target.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
+        return None
+    return payload.get("repo"), payload.get("pr")
+
+
+def _claim_state_file(target: Path, *, repo: str, pr_number: int | None) -> bool:
+    """Take a currently missing state file for this PR, atomically.
+
+    ``O_EXCL`` is the whole point: two waiters starting together both see no file,
+    and exactly one of them creates it. The loser reads the winner's claim and stops
+    on the ownership check instead of quietly sharing the path and overwriting the
+    winner's cursors on its next advance -- a silent gap in the review loop.
+
+    Returns False when somebody else got there first; the caller then treats the path
+    as pre-existing and lets ``_load_state_file`` judge the owner.
+    """
+
+    try:
+        handle = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    except OSError as err:
+        raise StatePersistenceError(f"Cannot write state file {target}: {err}") from err
+
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump({"version": STATE_FILE_VERSION, "repo": repo, "pr": pr_number}, stream)
+    except OSError as err:
+        raise StatePersistenceError(f"Cannot write state file {target}: {err}") from err
+    return True
+
+
+def _verify_state_file_writable(path: str | None, *, repo: str, pr_number: int | None) -> None:
+    """Claim the requested state file, and fail before the first poll if it is unusable.
 
     A forever watch only discovers a read-only parent directory when the cycle it
     spent minutes on tries to save its cursors, and by then the activity that
     cycle observed is already unrecoverable.
 
-    The probe is the whole write, ``os.replace`` included, because that is the step
-    persistence actually depends on and the step a sibling-creation check cannot
-    speak for: a target that is a directory, or one in a sticky-bit directory owned
-    by somebody else, accepts new siblings all day and still refuses the rename.
-    An existing state file is rewritten with the bytes it already holds, so a watch
-    resuming from good cursors keeps them either way.
+    A missing state file is created here holding nothing but this PR's ownership, so
+    the path is owned before any polling starts rather than after the first cursor
+    advance. It carries no cursors, so this cycle still baselines from the current PR
+    exactly as it did before.
+
+    For a file that already exists the probe is the whole write, ``os.replace``
+    included, because that is the step persistence actually depends on and the step a
+    sibling-creation check cannot speak for: a target that is a directory, or one in a
+    sticky-bit directory owned by somebody else, accepts new siblings all day and
+    still refuses the rename. It is rewritten with the bytes it already holds, so a
+    watch resuming from good cursors keeps them either way.
     """
 
     if not path:
@@ -537,7 +586,17 @@ def _verify_state_file_writable(path: str | None) -> None:
     target = Path(path)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        existing: bytes | None = target.read_bytes() if target.exists() else None
+        exists = target.exists()
+    except OSError as err:
+        raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
+
+    if not exists and _claim_state_file(target, repo=repo, pr_number=pr_number):
+        # Creating the real file in the real directory is the write probe, and the
+        # rename in later cycles lands on a file this process owns.
+        return
+
+    try:
+        existing = target.read_bytes()
     except OSError as err:
         raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
 
@@ -545,13 +604,9 @@ def _verify_state_file_writable(path: str | None) -> None:
     try:
         handle, scratch = _state_file_scratch(target)
         with os.fdopen(handle, "wb") as stream:
-            stream.write(existing if existing is not None else b"")
+            stream.write(existing)
         os.replace(scratch, target)
         scratch = None
-        if existing is None:
-            # The probe must not leave a placeholder behind: an empty file here would
-            # be read next cycle as an unusable state file rather than a fresh start.
-            os.unlink(target)
     except OSError as err:
         raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
     finally:
@@ -569,6 +624,15 @@ def _write_state_file(path: str | None, *, repo: str, pr_number: int | None, **f
     payload = {"version": STATE_FILE_VERSION, "repo": repo, "pr": pr_number, **fields}
     target = Path(path)
     scratch = None
+    # Re-checked on every replace, not just at startup: the claim can lose a race with
+    # a waiter that created the file in the same instant, or a person can point another
+    # watch at the same path mid-run. Clobbering that watch's cursors would make it
+    # re-baseline and skip real activity, so hand the path back and stop instead.
+    owner = _state_file_owner(target)
+    if owner is not None and owner != (repo, pr_number):
+        raise StateFileOwnershipError(
+            f"State file {path} now belongs to {owner[0]}#{owner[1]}, not {repo}#{pr_number}"
+        )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         # Written aside and moved into place: a cycle killed mid-write must not
@@ -697,7 +761,7 @@ def main() -> int:
 
     token = get_token()
     cache = ResponseCache()
-    _verify_state_file_writable(args.state_file)
+    _verify_state_file_writable(args.state_file, repo=args.repo, pr_number=args.pr)
     saved = _load_state_file(args.state_file, repo=args.repo, pr_number=args.pr)
     token_fingerprint = _token_fingerprint(token)
     viewer_login = None

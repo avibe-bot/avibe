@@ -1862,21 +1862,78 @@ def test_state_file_preflight_leaves_saved_cursors_untouched(tmp_path) -> None:
     )
     state_file.write_text(saved, encoding="utf-8")
 
-    module._verify_state_file_writable(str(state_file))
+    module._verify_state_file_writable(str(state_file), repo="avibe-bot/avibe", pr_number=153)
 
     assert state_file.read_text(encoding="utf-8") == saved
     assert list(tmp_path.glob(".pr-153.json.*")) == []
 
 
-def test_state_file_preflight_leaves_no_placeholder_behind(tmp_path) -> None:
-    """A first cycle must start from "no state file", not from an empty one."""
+def test_state_file_preflight_claims_a_missing_path_before_polling(tmp_path) -> None:
+    """A missing state file is owned from the start, and carries no cursors.
+
+    Claiming before the first poll is what stops two watches that start together
+    from both seeing an unowned path; writing only ownership is what keeps this
+    cycle's baseline identical to the no-state-file case.
+    """
     module = _load_module()
     state_file = tmp_path / "cursors" / "pr-153.json"
 
-    module._verify_state_file_writable(str(state_file))
+    module._verify_state_file_writable(str(state_file), repo="avibe-bot/avibe", pr_number=153)
 
-    assert not state_file.exists()
-    assert list(state_file.parent.iterdir()) == []
+    assert json.loads(state_file.read_text(encoding="utf-8")) == {
+        "version": module.STATE_FILE_VERSION,
+        "repo": "avibe-bot/avibe",
+        "pr": 153,
+    }
+    # No cursors, so a resume is not attempted and the cycle baselines as before.
+    assert module._load_state_file(str(state_file), repo="avibe-bot/avibe", pr_number=153) == {
+        "version": module.STATE_FILE_VERSION,
+        "repo": "avibe-bot/avibe",
+        "pr": 153,
+    }
+    assert list(state_file.parent.glob(".pr-153.json.*")) == []
+
+
+def test_state_file_claim_is_visible_to_a_second_watch(tmp_path) -> None:
+    """The loser of the creation race must be turned away, not left sharing the path."""
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+
+    assert module._claim_state_file(state_file, repo="avibe-bot/avibe", pr_number=153) is True
+    # A concurrent waiter for another PR reaches its own claim a moment later.
+    assert module._claim_state_file(state_file, repo="avibe-bot/avibe", pr_number=158) is False
+    with pytest.raises(module.StateFileOwnershipError):
+        module._load_state_file(str(state_file), repo="avibe-bot/avibe", pr_number=158)
+
+
+def test_write_state_file_refuses_a_path_another_watch_now_owns(tmp_path) -> None:
+    """Ownership is verified on every replacement, not only at startup.
+
+    A waiter that lost the creation race by microseconds has already passed the
+    preflight, so the replace itself is the last place to notice -- and overwriting
+    the winner's cursors would make it re-baseline and skip real activity.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    other = json.dumps(
+        {
+            "version": module.STATE_FILE_VERSION,
+            "repo": "avibe-bot/avibe",
+            "pr": 158,
+            "review_comment_cursor": 400,
+        }
+    )
+    state_file.write_text(other, encoding="utf-8")
+
+    with pytest.raises(module.StateFileOwnershipError):
+        module._write_state_file(
+            str(state_file),
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            review_comment_cursor=999,
+        )
+
+    assert state_file.read_text(encoding="utf-8") == other
 
 
 def test_main_stops_when_persisting_advanced_cursors_fails(tmp_path) -> None:
@@ -1887,15 +1944,10 @@ def test_main_stops_when_persisting_advanced_cursors_fails(tmp_path) -> None:
     def _fake_fetch_state(repo, pr_number, token, **kwargs):
         return _pr_state(review_comments=[_review_comment(501)]), 1
 
-    real_replace = module.os.replace
-    replaces = {"count": 0}
-
     def _replace_then_break(src, dst):
-        # The preflight probe gets through; the disk goes away while the watch is
-        # already polling, which is the case this test is about.
-        replaces["count"] += 1
-        if replaces["count"] == 1:
-            return real_replace(src, dst)
+        # The preflight claims the missing file with an exclusive create, so every
+        # replace here belongs to a cursor write: the disk goes away while the watch
+        # is already polling, which is the case this test is about.
         raise OSError("disk went away")
 
     stderr = io.StringIO()

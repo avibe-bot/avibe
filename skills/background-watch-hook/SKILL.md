@@ -263,6 +263,13 @@ and a path already owned by another PR — and both stop the watch with exit `1`
 rather than polling on without the cursors it was asked to keep, or clobbering
 another watch's.
 
+Ownership is claimed, not assumed. A missing state file is created before the first
+poll holding nothing but the repo and PR it belongs to, so two watches started
+together cannot both see an unowned path; the one that loses that exclusive create
+reads the winner's claim and stops. Ownership is re-checked before every replacement
+as well, because the loser of a microsecond-wide race has already passed the
+startup check. Give each PR its own state file.
+
 GitHub-specific notes:
 
 - `--catch-up` reports activity that already exists at startup
