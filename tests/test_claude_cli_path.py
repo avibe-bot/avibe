@@ -1228,7 +1228,12 @@ def test_cached_claude_subagent_revalidates_memory_principal_and_guidance(
             return None
 
         @staticmethod
-        def ensure_agent_session_id(_settings_key, agent_name, _base_session_id):
+        def ensure_agent_session_id(
+            _settings_key,
+            agent_name,
+            _base_session_id,
+            **_kwargs,
+        ):
             assert agent_name == "claude"
             return "ses-subagent"
 
