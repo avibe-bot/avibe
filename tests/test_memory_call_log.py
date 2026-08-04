@@ -17,6 +17,7 @@ from core.memory.everos_insight import recorder
 from core.memory.everos_insight.recorder import (
     ProviderCallInput,
     RecorderHandle,
+    clear_call_log,
     initialize_call_log,
     maintain_call_log,
     normalize_provider_call,
@@ -391,8 +392,42 @@ def test_call_log_rejects_unowned_directory_before_open(tmp_path, monkeypatch) -
 
     with pytest.raises(OSError, match="owned by the current user"):
         initialize_call_log(db_path)
-
     assert not db_path.exists()
+
+
+def test_clear_call_log_removes_only_owned_database_files(tmp_path) -> None:
+    db_path = _private_db_path(tmp_path)
+    initialize_call_log(db_path)
+    allowed = [
+        db_path,
+        db_path.with_name(f"{db_path.name}-wal"),
+        db_path.with_name(f"{db_path.name}-shm"),
+        db_path.with_name(f"{db_path.name}-journal"),
+    ]
+    for path in allowed[1:]:
+        path.touch(mode=0o600)
+        path.chmod(0o600)
+    unexpected = db_path.parent / "keep.txt"
+    unexpected.write_text("keep", encoding="utf-8")
+
+    clear_call_log(db_path)
+
+    assert all(not path.exists() for path in allowed)
+    assert unexpected.read_text(encoding="utf-8") == "keep"
+    assert db_path.parent.is_dir()
+
+
+def test_clear_call_log_rejects_an_allowlisted_symlink(tmp_path) -> None:
+    db_path = _private_db_path(tmp_path)
+    target = tmp_path / "target"
+    target.write_text("keep", encoding="utf-8")
+    db_path.symlink_to(target)
+
+    with pytest.raises(OSError, match="regular file"):
+        clear_call_log(db_path)
+
+    assert db_path.is_symlink()
+    assert target.read_text(encoding="utf-8") == "keep"
 
 
 async def test_recorder_batches_and_reports_oldest_queue_drops(tmp_path, monkeypatch) -> None:

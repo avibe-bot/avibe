@@ -607,6 +607,37 @@ def maintain_call_log(db_path: Path, *, now_ms: int | None = None) -> str | None
     return None
 
 
+def clear_call_log(db_path: Path) -> None:
+    """Remove only the verified SQLite files owned by one call log."""
+
+    db_path = Path(db_path)
+    directory = db_path.parent
+    try:
+        os.lstat(directory)
+    except FileNotFoundError:
+        return
+    _validate_directory_chain(directory)
+    directory_info = os.lstat(directory)
+    if directory_info.st_uid != os.getuid() or stat.S_IMODE(directory_info.st_mode) != 0o700:
+        raise OSError("Call-log directory must be private and owned")
+    candidates = (
+        db_path,
+        db_path.with_name(f"{db_path.name}-wal"),
+        db_path.with_name(f"{db_path.name}-shm"),
+        db_path.with_name(f"{db_path.name}-journal"),
+    )
+    _validate_private_database_files(db_path)
+    for candidate in candidates:
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            continue
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+
+
 def _write_batch(
     conn: sqlite3.Connection,
     rows: list[ProviderCallRow],
