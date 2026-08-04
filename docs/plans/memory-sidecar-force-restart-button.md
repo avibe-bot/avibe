@@ -1,6 +1,6 @@
-# Add a forced sidecar restart action to Memory settings (rev14)
+# Add a forced sidecar restart action to Memory settings (rev15)
 
-> Rev14 keeps one public recovery action and a focused set of internal fixes:
+> Rev15 keeps one public recovery action and a focused set of internal fixes:
 > replayable configuration, config-wide write serialization, restart-specific
 > and lifecycle-intent admission, generation-fenced ready activation, complete
 > supervisor quiescing, bounded orphan recovery, disk/live replay convergence,
@@ -8,7 +8,7 @@
 > locked clear-marker recovery, bounded readiness, supervisor callback rebinding,
 > authoritative controller/UI settings refresh, queued-operation exclusion, and
 > disabled/fail-closed replay handling, explicit worker activation, and retained
-> processing-probe ownership.
+> processing-probe/module-store ownership with cross-lifecycle admission.
 > Timed-out work remains owned until it is either joined or proven unable to
 > mutate state. It does not add a lifecycle coordinator, explicit state machine,
 > provider/store port, or frontend DOM test framework.
@@ -126,6 +126,19 @@ Add private `_restart_config` and `_persisted_memory_snapshot` values to
   and disk converge without mutating an object from the settlement thread. A
   failed reconcile returns no applied candidate and leaves controller config at
   its previous value.
+- Explicit restart keeps the exact config returned by its convergence
+  transaction as an applied candidate even if old-process stop, replacement
+  start, worker activation, or their cleanup later fails. Its internal result
+  includes that candidate plus `config_committed=true`; pre-convergence failures
+  and busy results return no candidate and `config_committed=false`.
+  Runtime converts every ordinary post-convergence orchestration exception into
+  this structured failure pair rather than letting internal-server exception
+  mapping discard the candidate. `CancelledError` still propagates after
+  ownership cleanup because there is no response consumer to refresh.
+  `Controller.restart_memory()` installs a deep copy of every non-null applied
+  candidate into `Controller.config.memory` before exposing only the transport
+  result. Thus disk, Runtime, and Controller remain authoritative independently
+  of the later lifecycle outcome.
 
 These snapshots answer which configuration an explicit restart replays and
 which exact Memory block it may conditionally replace on disk. They do not
@@ -287,6 +300,17 @@ an abandoned restart, and a user retry can enqueue a second one.
   held, return
   `{ok: false, error: 'memory_restart_busy'}` without changing the process,
   claims, or worker.
+- Add a narrow `_retained_ownership_active` gate to `MemoryRuntime`. Any worker,
+  worker/module store task, processing probe, supervisor start, watcher/monitor,
+  or process cleanup owner that outlives its bound sets this gate synchronously
+  before lifecycle locks or `_explicit_restart_active` can be released. Clear,
+  reconcile, artifact activation, search/profile and interrupted-clear recovery,
+  and automatic ready activation check it before their first await and reject
+  without entering lifecycle queues or mutating state. Pure status projection
+  may report the retained error but cannot run recovery. `close()` joins retained
+  ownership; only an explicit restart retry may enter the locked settlement path
+  while the gate is set. That retry clears the sticky gate atomically only after
+  every retained registry is empty and before normal replacement continues.
 - When both are free, acquire them in the established order in the same event
   loop turn, with no intervening await. After acquiring `_reconcile_lock`, check
   `_artifact_installing` while that lock is owned. If installation is active,
@@ -324,6 +348,13 @@ an abandoned restart, and a user retry can enqueue a second one.
 - Bound worker store-task settlement separately. Cancelling an asyncio drain
   owner does not stop a write-capable `asyncio.to_thread()` call, so worker-task
   completion alone is not proof that lease ownership is quiescent.
+- Give `MemoryModule._store_call()` the same explicit shielded-task registry and
+  bounded `settle_store_calls()` contract as the worker. Clear, interrupted-clear
+  recovery, and failure recording retain SQLite-writing threads after coroutine
+  timeout/cancellation. Their reporting timeout enters bounded settlement; if an
+  exact task still outlives that bound, retain it and set the cross-lifecycle gate
+  before releasing locks. Include module-store settlement as its own restart
+  deadline component.
 - Bound settlement of processing-probe trees separately. Cancelling the drain
   task can make it terminal while probe termination is still incomplete; every
   retained probe owner must prove its process tree reaped before lease rotation
@@ -361,16 +392,18 @@ an abandoned restart, and a user retry can enqueue a second one.
   cancellation joins and one complete TERM/KILL cleanup round. Set
   `MEMORY_RESTART_TIMEOUT_SECONDS` strictly above the sum of two clear cleanup
   bounds, automatic-supervisor start settlement, process-owner settlement,
-  worker grace, worker cancellation cleanup, worker store-task settlement,
-  processing-probe settlement, a separate old-process stop retry, and the
-  all-inclusive replacement-start budget. Add a worker-activation bound after
-  replacement health plus a distinct replacement-activation cleanup allowance
-  containing another worker cancellation, store-task settlement, probe
-  settlement, and complete TERM/KILL stop round. The contract test imports the
-  source constants/helpers instead of copying numbers from comments. A deadline
-  cannot release either transaction while a non-cancellable config/store write
-  or owned probe tree is still live; its mandatory join is an ownership cleanup
-  tail rather than detached restart work.
+  worker grace, worker cancellation cleanup, worker and module store-task
+  settlement, processing-probe settlement, a separate old-process stop retry,
+  and the all-inclusive replacement-start budget. Add a worker-activation bound
+  after replacement health plus a distinct replacement-activation cleanup
+  allowance containing a non-awaiting supervisor fence, captured automatic-start
+  and watcher/monitor settlement, another worker cancellation, worker/module
+  store-task settlement, probe settlement, and complete TERM/KILL stop round.
+  The contract test imports the source constants/helpers instead of copying
+  numbers from comments. A deadline cannot release either transaction while a
+  non-cancellable config/store write or owned probe/process tree is still live;
+  its mandatory join is an ownership cleanup tail rather than detached restart
+  work.
 - A busy result is a completed, retryable business response. It is not
   `memory_restart_failed`, starts no background task, ends the UI spinner, and
   displays a localized reason.
@@ -402,8 +435,11 @@ cannot emit an unobserved-future warning. `_ensure_worker()` accepts and reuses 
 prepared activation future, creating one only for ordinary callers, and returns
 the exact future associated with the worker task instead of using task existence
 or liveness as success evidence. Explicit restart and automatic ready activation
-keep claims paused, await their exact future under the worker activation bound,
-and resume claims only after it resolves successfully.
+keep claims paused and use
+`wait_for(shield(activation_future), WORKER_ACTIVATION_TIMEOUT_SECONDS)` so the
+reporting timeout cannot cancel the shared handshake. Only explicit cancellation
+and joining of the worker may reject that generation. Resume claims only after
+the exact future resolves successfully.
 
 Make `_store_call()` create an explicit task for `asyncio.to_thread()` and await
 it under `shield()`. Keep every unfinished task in a private worker registry;
@@ -444,10 +480,11 @@ The locked sequence is fixed:
    Do not clear `_worker_task` until the exact task is done. If it outlives the
    bound, retain the task reference, keep claims fenced, and enter the
    fail-closed state below; do not rotate the lease or touch the process.
-6. After the exact drain task is terminal, call `settle_store_calls()` under its
-   own bound. If any shielded store thread remains live, retain its registry
-   entry, the old lease, and every existing process reference; keep claims
-   fenced and return fail-closed. A retry rejoins the same store task before it
+6. After the exact drain task is terminal, call `settle_store_calls()` on both
+   `MemoryWorker` and `MemoryModule` under their distinct bounds. If any shielded
+   store thread remains live, retain its registry entry, the old lease, and every
+   existing process reference; set the retained-ownership gate, keep claims
+   fenced, and return fail-closed. A retry rejoins the same store task before it
    can proceed.
 7. Ask the old supervisor to settle every retained processing-probe tree under
    the probe-settlement bound. `processing_healthy()` registers the exact probe,
@@ -487,10 +524,13 @@ The locked sequence is fixed:
    `start()` suppresses the automatic ready callback. While restart still owns
    `_reconcile_lock -> module._lifecycle_lock`, keep claims paused, call
    `begin_replacement_activation()`, start the worker, and await that exact
-   activation-generation future under the worker-activation bound. Only after
-   it resolves may runtime resume claims. Rejection or timeout cancels and joins
-   the new worker, settles its store calls and processing probes, then stops the
-   replacement under the distinct replacement-activation cleanup allowance.
+   activation-generation future with the shielded worker-activation wait. Only
+   after it resolves may runtime resume claims. On rejection or timeout, apply
+   the replacement supervisor's non-awaiting handoff fence before the first
+   cleanup await, capture its restart/watcher/monitor owners, then cancel and
+   join the new worker, settle module/worker store calls and processing probes,
+   settle captured process owners, and stop the replacement under the distinct
+   replacement-activation cleanup allowance.
    Any cleanup owner that outlives its bound is retained fail-closed. Return
    `{ok: true, state: 'ready'}` only after real activation succeeds.
 
@@ -623,8 +663,9 @@ exceptions use the transport-only `memory_restart_failed`.
    caller.
 2. `core/memory/runtime.py`: add `_restart_config`,
    `_persisted_memory_snapshot`, `_explicit_restart_active`,
-   `_clear_pending_count`, `_reconcile_pending_count`, lifecycle generation and
-   a retained ready activation task, and fail-fast `restart()`; refresh the
+   `_clear_pending_count`, `_reconcile_pending_count`,
+   `_retained_ownership_active`, lifecycle generation and a retained ready
+   activation task, and fail-fast `restart()`; refresh the
    persisted snapshot after every successful runtime-owned V2 mutation and
    rebase a successfully reconciled
    live/replay candidate from marker settlement's exact return; conditionally
@@ -632,8 +673,9 @@ exceptions use the transport-only `memory_restart_failed`.
    generation and retain worker/store/probe owners that outlive cancellation;
    reject restart while artifact installation is active; make only explicit
    restart admission fail fast. Make `restart()` return its transport
-   result plus the exact applied replay config on ready/disabled success and no
-   config on busy/failure. Add `reconcile_persisted()` to return the exact
+   result plus the exact applied replay config whenever convergence committed,
+   including later lifecycle failure, and no config before convergence or on
+   busy. Add `reconcile_persisted()` to return the exact
    successful candidate alongside the transport result while ordinary
    `reconcile()` preserves its dict contract.
    `Controller.reconcile_memory()` installs that returned candidate into
@@ -642,7 +684,10 @@ exceptions use the transport-only `memory_restart_failed`.
 3. `core/memory/module.py`: extract locked clear recovery while retaining the
    wrapper and existing queued lifecycle-lock behavior for read/Clear paths. Add
    the synchronous lifecycle-intent scope and `lifecycle_busy` property covering
-   active and queued search, profile, Clear, and recovery operations.
+   active and queued search, profile, Clear, and recovery operations. Shield and
+   retain explicit module store tasks and expose their bounded settlement. A
+   narrow Runtime-supplied admission predicate prevents search/profile recovery
+   and Clear from entering while retained ownership is fenced.
 4. `core/memory/worker.py`: retain and shield explicit store-thread tasks, expose
    bounded settlement, make activation return a generation-specific completion
    future, and rotate the lease owner only after prior ownership registries are
@@ -656,11 +701,12 @@ exceptions use the transport-only `memory_restart_failed`.
    cleanup budget, rebind re-armed ready callbacks to the current generation,
    and support callback-suppressed explicit start.
 6. `core/controller.py` / `core/internal_server.py`: add a controller-owned
-   restart wrapper and `POST /internal/memory/restart`. On ready or disabled
-   success, install a deep copy of the exact applied config returned by Runtime
-   into `Controller.config.memory`, then expose only the transport response.
-   Missing runtime returns `memory_runtime_missing`; unhandled exceptions map to
-   `memory_restart_failed`, not `memory_reconcile_failed`.
+   restart wrapper and `POST /internal/memory/restart`. Whenever Runtime returns
+   an applied config, including a post-convergence failure, install a deep copy
+   into `Controller.config.memory`, then expose only the transport response with
+   its `config_committed` flag. Missing runtime returns
+   `memory_runtime_missing`; unhandled exceptions map to `memory_restart_failed`,
+   not `memory_reconcile_failed`.
 7. `vibe/internal_client.py`: add `memory_restart()` with a deadline above the
    complete restart lifecycle budget; retain and join the shielded request task
    after a reporting timeout.
@@ -676,26 +722,28 @@ exceptions use the transport-only `memory_restart_failed`.
 1. `memoryRead.ts`: define and export `MemoryRuntimeRestartResult` and a pure
    normalizer near the current Memory response classifier. Accept `{ok:true}`;
    normalize `{ok:false,error}` and `{status:'failed',error}` as failures; fail
-   closed on malformed bodies.
+   closed on malformed bodies, and preserve a strict boolean `config_committed`.
 2. `ApiContext.tsx`: import that type and normalizer. `restartMemoryRuntime()`
    returns only the normalized result and does not create a reverse import.
 3. `useMemoryResource.ts`: expose a narrow `invalidate()` transition that drops
-   the last accepted payload without changing sticky forbidden state. Restart
-   success uses it before the authoritative settings reload; existing resources
-   otherwise keep their current retry policy.
+   the last accepted payload without changing sticky forbidden state. Any restart
+   response with `config_committed=true` uses it before the authoritative
+   settings reload; existing resources otherwise keep their current retry policy.
 4. `SettingsMemoryPage.tsx`: when `settings?.enabled === true` and the page is not
    cross-origin forbidden, render a page-level Status action row before the
    `remoteUnavailable` / `memorySetupStage()` branch. Use the existing secondary
    `xs` button with `RotateCw` / `Loader2`; disable it while restarting. Runtime
    required, setup loading, and status loading/error states share this action.
-   Await the result. On success, invalidate the pre-restart Memory settings
-   payload, keep its form unavailable, and await an authoritative
-   `getMemorySettings()` reload before ending the restart state; a failed reload
-   must expose the settings read error without restoring an editable stale C1
-   payload. Refresh dependency/status state as well. Show completion copy only
-   after the settings reload settles successfully. On restart failure, keep the
-   existing settings payload and show a localized reason plus literal error code,
-   with a generic fallback when no code exists.
+   Await the result. When `config_committed=true`, including a later lifecycle
+   failure, invalidate the pre-restart Memory settings payload, keep its form
+   unavailable, and await an authoritative `getMemorySettings()` reload before
+   ending the restart state. A failed reload exposes the settings read error
+   without restoring an editable stale C1 payload. Refresh dependency/status
+   state as well. Show completion copy only after a successful operation and
+   settings reload. After a failed operation, show its localized reason plus
+   literal error code only after the required reload settles; when no config was
+   committed, keep the existing settings payload and use the generic fallback
+   when no code exists.
 5. `MemoryStatusPanel.tsx`: remove the old engine-fault restart action and its
    props so the normal Status body cannot render a duplicate. Keep the credential
    fault's settings action.
@@ -740,6 +788,12 @@ exceptions use the transport-only `memory_restart_failed`.
     While that Clear is queued, `_clear_pending_count` also makes restart return
     busy through the lock-release/waiter-wakeup gap. Concurrent Clear requests
     retain independent counts until their complete Clear/reconcile paths exit.
+  - Force each retained-owner class past its settlement bound and prove the
+    retained-ownership gate remains set after `_explicit_restart_active` clears.
+    Clear, search/profile recovery, persisted/internal reconcile, artifact
+    activation, and automatic ready activation must reject before their first
+    lifecycle await. An explicit restart retry may enter, joins the exact owners,
+    and clears the gate only after every registry is empty.
   - Hung add and flush cases use shortened bounds; add can be reclaimed by the
     new owner, while flush becomes `unknown` and opens the fault.
   - A worker task that ignores its first cancellation is retained with the old
@@ -755,6 +809,11 @@ exceptions use the transport-only `memory_restart_failed`.
     restart admission: the exact probe-tree record remains on the supervisor,
     claims and lease stay fenced, and no process replacement occurs. A retry
     reaps that same record before continuing.
+  - Timeout interrupted-clear recovery while `MemoryModule._store_call()` owns a
+    blocked `get_meta`, `begin_clear`, `finish_clear`, or failure-recording
+    thread. Cancellation leaves the exact task shielded and registered, keeps
+    lifecycle/retained admission owned until it returns, and prevents a late
+    marker or epoch write from crossing a later operation.
   - If the old child exits during the five-second drain grace, its supervisor is
     already quiesced: no automatic restart can schedule ready activation, resume
     claims, or replace `_worker_task`. Pre-stop failure beside an alive but
@@ -793,6 +852,18 @@ exceptions use the transport-only `memory_restart_failed`.
     and replacement worker/store/probe settlement plus a complete process stop
     fit the distinct cleanup allowance. A stop exception followed by child exit
     must not auto-restart or report restored claims.
+  - Let the healthy replacement exit immediately after activation failure. The
+    non-awaiting replacement fence runs before worker/store/probe cleanup, so no
+    watcher can schedule a new start; if a start/process owner already entered,
+    cleanup captures and settles it inside the advertised allowance.
+  - Delay the real activation generation beyond its reporting bound and prove
+    `wait_for(shield(future))` leaves the handshake pending. Only subsequent
+    worker cancellation rejects it, without `InvalidStateError` or loss of the
+    real activation outcome.
+  - After convergence commits C0, fail old stop, replacement start, and explicit
+    activation in separate cases. Each failure returns the exact applied C0 and
+    `config_committed=true`; `Controller.config.memory`, Runtime, and disk all
+    remain C0. Pre-convergence failure returns no candidate and false.
   - Cancellation while stopping the worker and after a new child is spawned
     reaches the documented cleanup state and re-raises `CancelledError`.
 - `tests/test_memory_slice3.py`: a successful persisted reconcile that settles
@@ -801,7 +872,8 @@ exceptions use the transport-only `memory_restart_failed`.
   `Controller.config.memory`. Disk, controller, runtime live state, and replay
   state must match; the original marker-bearing request object is not installed.
   Failure returns no candidate and preserves the prior controller config.
-- `tests/test_internal_server.py`: success, missing runtime, and exception mapping.
+- `tests/test_internal_server.py`: success, missing runtime, exception mapping,
+  and post-convergence failure propagation without serializing the config object.
 - `tests/test_internal_client.py` / `tests/test_internal_client_timeouts.py`:
   POST and busy response passthrough; deadline computed from both clear phases,
   automatic-supervisor start settlement, watcher/monitor owner settlement,
@@ -816,7 +888,8 @@ exceptions use the transport-only `memory_restart_failed`.
   Hold one settings writer and queue a second; through the owner's
   release/waiter-wakeup gap, the synchronous pending count makes restart return
   busy without acquiring the lock. After every writer exits, restart may acquire
-  admission normally.
+  admission normally. A `config_committed=true` failure invalidates C1 and reloads
+  C0 before showing the lifecycle error; a pre-convergence failure keeps C1.
 - `tests/test_v2_config.py` / config route tests: a generic non-Memory save in a
   second process waits before loading while settlement owns the config
   transaction, then preserves both its C1 change and the cleared marker. Saving
@@ -836,14 +909,20 @@ exceptions use the transport-only `memory_restart_failed`.
   reports quiescence only after the registry is empty. Activation generations
   resolve only after full recovery, reject with the real recovery error before
   retry creates a new generation, and reject on cancellation.
+- `tests/test_memory_module.py`: clear/recovery store calls use explicit shielded
+  tasks; timeout and caller cancellation retain each SQLite-writing task through
+  terminal result, and settlement reports quiescence only when the registry is
+  empty.
 - `tests/test_memory_process.py`: stale recorded leader plus late helper and
   multiple unusable-record anchors share one outer reap deadline. Timeout keeps
   the record and prevents child launch. Idle watcher/monitor tasks cancel and
   join during handoff; active cleanup owners are retained and settle under the
   exported owner budget. A cancelled processing probe whose termination fails
   retains its exact tree and cleanup owner; settlement retries that record and
-  reports quiescence only after reap. Explicit start suppresses automatic ready
-  notification.
+  reports quiescence only after reap. A replacement handoff fence applied before
+  activation cleanup prevents an exit from scheduling restart, while an already
+  active start is captured and settled. Explicit start suppresses automatic
+  ready notification.
   A socket that appears just before the readiness deadline with a stalled health
   response cannot extend `_wait_for_ready()` beyond its outer cap, and the
   separately budgeted failed-start cleanup still runs.
@@ -851,7 +930,7 @@ exceptions use the transport-only `memory_restart_failed`.
 ### TypeScript
 
 - Table-test the pure normalizer with `ok:true`, `ok:false`, `status:'failed'`,
-  and malformed responses.
+  strict `config_committed` values, and malformed responses.
 - Reuse React SSR / `renderToStaticMarkup`, without a new DOM framework. Inject
   enabled plus runtime-missing state into `SettingsMemoryPage` and assert that
   the setup prompt and exactly one restart action coexist. Also cover status
@@ -860,13 +939,14 @@ exceptions use the transport-only `memory_restart_failed`.
 - Extend the existing Memory resource/state tests with the restart-success
   transition: invalidate displayed C1, settle the authoritative settings reload
   with C0, and expose only C0 to the form. The reload-failure case keeps no
-  editable C1 payload. Keep click/toast behavior in the single manual scenario
-  below.
+  editable C1 payload. Add the equivalent `config_committed=true` failure
+  transition: reload C0 before displaying the lifecycle error. A false flag
+  preserves C1. Keep click/toast behavior in the single manual scenario below.
 
 ## Validation
 
 1. `pytest tests/test_memory_runtime.py -k restart`
-2. `pytest tests/test_memory_worker.py -k 'store or cancel or activation'`
+2. `pytest tests/test_memory_worker.py tests/test_memory_module.py -k 'store or cancel or activation or clear'`
 3. `pytest tests/test_internal_server.py tests/test_internal_client.py tests/test_internal_client_timeouts.py tests/test_ui_memory_routes.py tests/test_v2_config.py -k 'memory or config or restart'`
 4. Run `ruff check` on every changed Python file.
 5. In `ui/`, run the relevant normalizer, `SettingsMemoryPage`, and
@@ -901,11 +981,15 @@ request, has one hard cap; delayed automatic activation and re-armed supervision
 are bound to the current lifecycle generation and both runtime locks; pending
 embeddings cannot bypass the root guard or remain in a successful replay
 snapshot; claimed rows require a new lease only after the old worker and every
-shielded store thread exit; activation success is observable; UI settings reload
-from the converged disk block; and clear markers serialize with root/child
-lifecycle. The implementation adds two private snapshots, three narrow admission
-fields, focused helpers, and two precise transport-only error codes while reusing
-existing locks, guards, recovery SQL, supervision, and UI primitives.
+shielded worker/module store thread exit; activation success is observable and
+its shared future is shielded from reporting timeout; post-convergence failure
+still propagates the committed block to Controller and UI; retained ownership
+excludes every other mutating lifecycle; replacement cleanup fences supervision
+before awaiting; and clear markers serialize with root/child lifecycle. The
+implementation adds two private snapshots, focused intent counters, one narrow
+retained-owner gate, focused helpers, and two precise transport-only error codes
+while reusing existing locks, guards, recovery SQL, supervision, and UI
+primitives.
 
 Do not introduce a general coordinator, explicit restart state machine, new
 port, database field, automatic restart policy, or frontend test framework. If
@@ -923,13 +1007,15 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] Worker lease rotation and add/flush recovery tests
 - [ ] Retained worker cancellation fail-closed state and retry
 - [ ] Shielded store-thread registry, bounded settlement, and retry
+- [ ] Module clear/recovery store-task retention and cross-lifecycle owner gate
 - [ ] Locked clear recovery and race regression
 - [ ] Restart/Clear intent admission, queued-Clear handoff, artifact admission
 - [ ] Queued read intent admission and waiter-handoff regression
 - [ ] Supervisor handoff/rebind, lifecycle-owner settlement, readiness/deadline contract
 - [ ] Lifecycle-generation ready activation and Clear/reconcile race regression
 - [ ] Complete orphan/start budgets, explicit activation, failed-start cleanup
+- [ ] Shielded activation handshake and fenced replacement-activation cleanup
 - [ ] Internal server/client, closed/busy errors, bounded timeout tests
 - [ ] UI route and response normalizer
-- [ ] Page action, deduplicated banner, settings invalidation/reload, toast/i18n
+- [ ] Page action, deduplicated banner, success/failure settings reload, toast/i18n
 - [ ] Focused Python/TypeScript validation and Incus `SIGSTOP` scenario
