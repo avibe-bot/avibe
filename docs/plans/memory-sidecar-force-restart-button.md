@@ -1,8 +1,8 @@
-# Memory 设置页增加 sidecar 强制重启按钮（rev3）
+# Memory 设置页增加 sidecar 强制重启按钮（rev4）
 
-> rev3 根据整体 review 收敛为一个公开入口和三个很小的内部修正：重启配置快照、
-> worker lease 轮换、clear marker 的锁内恢复。不新增 lifecycle coordinator、状态机、
-> provider/store port 或前端 DOM 测试框架。
+> rev4 根据整体 review 收敛为一个公开入口和四个很小的内部修正：重启配置快照、
+> lifecycle busy 快速失败、worker lease 轮换、clear marker 的锁内恢复。不新增
+> lifecycle coordinator、状态机、provider/store port 或前端 DOM 测试框架。
 
 ## 背景与目标
 
@@ -10,7 +10,7 @@
 
 本需求只做两件事：
 
-1. Memory 已启用时，在 Status 标题区始终提供“重启引擎”按钮。
+1. Memory 已启用时，在 setup-stage 分支之外的 Status 动作区始终提供“重启引擎”按钮；即使依赖 API 报告 runtime 未安装、status 尚未加载或读取失败，也不能隐藏入口。
 2. 点击后由 controller 强制停止旧 sidecar 并等待新 sidecar `ready`，不重启 Avibe 主进程、不重装 runtime、不从磁盘重新选择 restart 目标配置，也不做 processing 预探测。若启动快照仍带 durable embedding-change marker，则必须先完成既有 root 兼容性检查，并允许 settlement 为核对/清除 marker 读取持久化配置。
 
 非目标：自动健康重启、重做全部 Memory lifecycle、改变 provider/store 协议、重试历史 `unknown` flush、四平台全量回归。
@@ -58,7 +58,18 @@ UI
 
 这只是消除现有 check/use 窗口，不新建通用 lifecycle coordinator。
 
-### 3. 强制替换与 lease 交接
+### 3. 不排队的 restart 入口与有界 deadline
+
+显式 restart 不能排在另一个 lifecycle 操作后面静默等待。否则 transport 可能先超时，controller 随后仍执行已经失去调用方的 restart，用户重试还会再排入一次。
+
+- `restart()` 在任何 await 之前检查 `_reconcile_lock` 和 `module._lifecycle_lock`；任一已占用就立即返回 `{ok: false, error: 'memory_restart_busy'}`，不进入 lock waiter 队列，也不修改 process、claims 或 worker。
+- 两把锁都空闲时，在同一 event-loop turn 内按 `_reconcile_lock -> module._lifecycle_lock` 立即取得它们，中间不执行其他 await。这样并发 restart、Settings PATCH、artifact activation 和 clear 只有一个 owner；已有 reconcile/clear 保持原语义，只有人工 restart 使用 fail-fast 契约。
+- interrupted-clear recovery 和条件性的 embedding/root guard 复用 `CLEAR_CLEANUP_TIMEOUT_SECONDS` 作为上界。restart transport deadline 必须严格大于 `clear recovery/guard bound + 5s worker grace + process stop 的 TERM/KILL 两轮上界 + process startup bound`；测试直接从这些源常量计算，不复制注释里的数字。
+- lock-busy 是一个已完成、可重试的业务响应，不是 `memory_restart_failed`，也不能启动后台 task。前端显示本地化 busy 原因并结束 spinner。
+
+这不增加独立 restart lock 或队列；现有两把 lifecycle lock 就是 single-flight 所有权边界。
+
+### 4. 强制替换与 lease 交接
 
 `MemoryWorker._boot_id` 当前在对象创建后不变，而 `recover_after_boot()` 只回收“其他 lease owner”的 `processing` 行。若 restart cancel 了已经 claim add 的同一个 worker，再用原 owner 激活，该行会永久停在 `processing`。
 
@@ -76,7 +87,7 @@ UI
 
 `restart()` 不调用 `_probe_processing`。条件性的 embedding/root guard 是防止混用向量空间的持久化安全约束，不是 processing 健康预探测；其余真实 processing 故障继续由 worker 的既有分类路径报告。
 
-### 4. 失败后置条件
+### 5. 失败后置条件
 
 claims 被 fence 后的每条退出路径必须明确恢复到以下二者之一：
 
@@ -87,7 +98,7 @@ claims 被 fence 后的每条退出路径必须明确恢复到以下二者之一
 
 `start()` 正常返回 `False` 时沿用更具体的 `memory_sidecar_unavailable`；stop、factory 或其他 restart orchestration 异常使用新的 transport-only `memory_restart_failed`。
 
-### 5. 队列语义
+### 6. 队列语义
 
 - cancel 发生在 add 已 claim 之后：新 lease owner 的 activation 会把旧 owner 的行退回 `pending`，按既有 at-least-once 语义重投。若 provider 在取消前已接收但本地未观察到 ack，可能产生重复副作用；强制重启不能承诺 exactly-once。
 - cancel 发生在 flush `in_flight`：activation 会把它永久标记为 `unknown` 并打开 processing fault。历史 `unknown` 不会在 5 分钟后自动重试或消失；以后新的 pending work 成功 flush 可以关闭 fault，但不会改写该历史记录。
@@ -96,21 +107,21 @@ claims 被 fence 后的每条退出路径必须明确恢复到以下二者之一
 
 ### 后端与 transport
 
-1. `core/memory/runtime.py`：增加 `_restart_config` 和 `restart()`；成功 reconcile 提交快照；修正 `_stop_worker()` 对调用方取消的识别。
+1. `core/memory/runtime.py`：增加 `_restart_config` 和 fail-fast `restart()`；成功 reconcile 提交快照；修正 `_stop_worker()` 对调用方取消的识别。
 2. `core/memory/module.py`：抽出锁内 clear recovery helper；现有 wrapper 继续服务其他调用方。
 3. `core/memory/worker.py`：增加 replacement activation 时的 lease owner 轮换。
 4. `core/internal_server.py`：增加 `POST /internal/memory/restart`。runtime 缺失返回 `memory_runtime_missing`；未处理异常映射为 `memory_restart_failed`，不能复用语义错误的 `memory_reconcile_failed`。
-5. `vibe/internal_client.py`：增加 `memory_restart()` 和独立 timeout。timeout 必须大于 `5s grace + process stop bound + process startup bound`。
+5. `vibe/internal_client.py`：增加 `memory_restart()` 和独立 timeout。timeout 按上面的完整 restart lifecycle budget 计算，lock busy 不计入预算，因为它不等待。
 6. `vibe/ui_memory_routes.py`：现有 `/api/memory/runtime/restart` 改调 `memory_restart()`，保持同源校验和外部路径不变。
-7. `core/memory/types.py` 与前端 en/zh `errors`：加入 transport-only `memory_restart_failed`；不加入 SQLite 持久化 schema。
+7. `core/memory/types.py` 与前端 en/zh `errors`：加入 transport-only `memory_restart_failed` 和 `memory_restart_busy`；不加入 SQLite 持久化 schema。
 
 ### 前端
 
 1. `memoryRead.ts`：在现有 Memory response classifier 附近定义并导出 `MemoryRuntimeRestartResult` 及纯函数 normalizer。接受 `{ok:true}`；把 `{ok:false,error}` 和 `{status:'failed',error}` 统一为失败；malformed body 也必须 fail closed。
 2. `ApiContext.tsx`：导入该类型和 normalizer，`restartMemoryRuntime()` 只返回归一化结果，避免反向 import 形成循环依赖。
-3. `MemoryStatusPanel.tsx`：Status 标题右侧常驻 secondary `xs` 重启按钮，使用 `RotateCw` / `Loader2`；`restarting` 时 disabled。动作区放在依赖 `status` 的 body 分支之外，因此首次 status 尚在 loading 或请求失败时也不会消失。engine fault 横幅删除重复按钮，credential fault 的“打开设置”保持不变。
-4. `SettingsMemoryPage.tsx`：请求同步等待结果。成功 toast 使用完成式文案；失败 toast 显示本地化原因和字面 error code，无 code 时显示通用失败。
-5. `en.json` / `zh.json`：同步增加按钮、完成、失败、`memory_restart_failed` 文案，删除不再使用的 engine 横幅 action 文案。
+3. `SettingsMemoryPage.tsx`：当 `settings?.enabled === true` 且页面不是 cross-origin forbidden 状态时，在 `remoteUnavailable` / `memorySetupStage()` 条件树之前渲染 page-level Status 动作行。secondary `xs` 重启按钮使用 `RotateCw` / `Loader2`，`restarting` 时 disabled；因此 `runtime-required`、setup loading、status loading/error 都共享同一个入口。请求同步等待结果；成功 toast 使用完成式文案，失败 toast 显示本地化原因和字面 error code，无 code 时显示通用失败。
+4. `MemoryStatusPanel.tsx`：删除 engine fault 横幅中的旧重启按钮和相关 props，避免正常 Status body 出现第二个入口；credential fault 的“打开设置”保持不变。
+5. `en.json` / `zh.json`：同步增加按钮、完成、失败、`memory_restart_failed`、`memory_restart_busy` 文案，删除不再使用的 engine 横幅 action 文案。
 
 ## 最小充分测试
 
@@ -118,20 +129,21 @@ claims 被 fence 后的每条退出路径必须明确恢复到以下二者之一
 
 - `tests/test_memory_runtime.py`
   - 成功 restart：旧 process 确认 stop，新 process 启动并 ready，worker 恢复。
-  - C1 reconcile 失败且 rollback 也失败后，restart 重放最后成功的 C0；并发 restart/reconcile 由 `_reconcile_lock` 串行，终态使用最后成功配置。
+  - C1 reconcile 失败且 rollback 也失败后，restart 重放最后成功的 C0；无竞争时的 restart 仍在两把 lifecycle lock 内完成。
+  - 分别预占 `_reconcile_lock` 和 `module._lifecycle_lock`，以及同时发起两个 restart，验证竞争者立即返回 `memory_restart_busy`、不进入 waiter 队列且不修改 process/claims/worker。
   - 分别挂起 add 和 flush，使用缩短的 grace 验证有界完成；add 可由新 owner 再 claim，flush 变 `unknown` 并打开 fault。
   - durable clear marker 恢复与 replacement 位于同一 lifecycle 临界区；恢复失败不启动 child。
   - 初始 `_restart_config.embedding_change_pending=true` 时：有旧向量数据必须拒绝启动；空 root 完成 marker settlement 后才允许启动。
   - disabled 不 spawn；`start() is False`、factory exception、stop exception 分别验证错误码、`_process`/claims/worker 后置条件和无双 child。
   - lifecycle task 分别在 worker 停止期间、以及 new `start()` 已创建 child 后被 cancel：完成最小 cleanup，验证 child 被回收或仍由唯一 supervisor 持有、claims 后置条件正确，并重新抛出 `CancelledError`。
 - `tests/test_internal_server.py`：成功透传、runtime missing、未处理异常映射。
-- `tests/test_internal_client.py` / `tests/test_internal_client_timeouts.py`：POST 路径、响应透传、timeout 覆盖完整有界预算。
+- `tests/test_internal_client.py` / `tests/test_internal_client_timeouts.py`：POST 路径、busy 响应透传、timeout 从 clear/worker/process 源常量覆盖完整有界预算。
 - `tests/test_ui_memory_routes.py`：切到新 client、internal unavailable、既有 cross-origin 拒绝。
 
 ### TypeScript
 
 - 给纯 normalizer 做表驱动测试：`ok:true`、`ok:false`、`status:'failed'`、malformed。
-- 沿用 `renderToStaticMarkup` 的 `MemoryStatusPanel` 测试：down/no-fault 也有按钮，`status=null` 的 loading/error 状态仍有按钮，restarting 时 disabled，engine fault 全页只有一个重启入口，credential action 仍存在。
+- 沿用 React SSR / `renderToStaticMarkup`，不引入 DOM 框架：给 `SettingsMemoryPage` 注入 enabled + runtime-missing fixture，断言 setup prompt 与唯一重启按钮同时存在；另覆盖 status loading/error、restarting disabled。`MemoryStatusPanel` 测试断言 engine fault 不再渲染重启入口、credential action 仍存在。
 - 不为 click/toast 新引入 DOM 测试框架；由下面的单一手工场景覆盖。
 
 ## 验证
@@ -139,23 +151,23 @@ claims 被 fence 后的每条退出路径必须明确恢复到以下二者之一
 1. `pytest tests/test_memory_runtime.py -k restart`
 2. `pytest tests/test_internal_server.py tests/test_internal_client.py tests/test_internal_client_timeouts.py tests/test_ui_memory_routes.py -k 'memory and restart'`
 3. `ruff check` 所有改动的 Python 文件。
-4. `cd ui && npx vitest run` 相关 normalizer / `MemoryStatusPanel` 测试，然后 `npm run build`。
+4. `cd ui && npx vitest run` 相关 normalizer / `SettingsMemoryPage` / `MemoryStatusPanel` 测试，然后 `npm run build`。
 5. 只使用本地 Incus `master` 回归环境：先运行 `./scripts/run_regression.sh` 更新代码和检查服务健康，不重置配置。
 6. 通过 `python3 scripts/incus_regression.py shell --target master` 在容器内确认受管 sidecar PID 后发送 `SIGSTOP`，制造“进程存活但不可达”；在 Web UI 确认状态 down、按钮常驻、spinner/toast 正确，并验证点击后 PID 被替换且状态恢复 ready。若 replacement 未完成，清理时对原 PID 发送 `SIGCONT`。
 7. 再用 runner 检查 Avibe service health。不要重启本机 `vibe`，也不要用 `kill -9`（它只覆盖已有的 child-exit supervision，不是本需求场景）。
 
 ## 整体 review 结论
 
-方案的必要复杂度来自四个已有安全/并发契约：成功配置不能被失败候选覆盖、pending embedding 不能绕过 root guard、已 claim 行必须换 lease 才能恢复、clear marker 必须与 root/child lifecycle 串行。实现只增加一个私有快照、两个窄 helper 和一个准确的错误码，并复用现有 lock、guard、recovery SQL、supervisor 和 UI primitives。
+方案的必要复杂度来自五个已有安全/并发契约：成功配置不能被失败候选覆盖、人工 restart 不能在 transport 背后排队、pending embedding 不能绕过 root guard、已 claim 行必须换 lease 才能恢复、clear marker 必须与 root/child lifecycle 串行。实现只增加一个私有快照、两个窄 helper 和两个准确的 transport-only 错误码，并复用现有 lock、guard、recovery SQL、supervisor 和 UI primitives。
 
 本方案明确不引入通用 coordinator、显式 restart 状态机、新 port、新数据库字段、自动重启策略或新前端测试框架。实现中若需要这些内容，应先回到本计划重新论证，而不是顺手扩 scope。
 
 ## Todo
 
-- [ ] runtime snapshot + pending-embedding guard + force restart + focused tests
+- [ ] runtime snapshot + pending-embedding guard + fail-fast force restart + focused tests
 - [ ] worker lease rotation + add/flush recovery tests
 - [ ] locked clear recovery + race regression test
-- [ ] internal server/client + closed error + timeout tests
+- [ ] internal server/client + closed/busy errors + bounded timeout tests
 - [ ] UI route + response normalizer
-- [ ] status button + deduplicated banner + toast/i18n
+- [ ] page-level status action + deduplicated banner + runtime-missing render test + toast/i18n
 - [ ] focused Python/TypeScript validation + Incus `SIGSTOP` scenario
