@@ -157,6 +157,26 @@ def test_free_text_scrubs_forward_slash_windows_paths() -> None:
     assert row.error == "provider failed at [LOCAL_PATH]"
 
 
+def test_provider_url_scrub_normalizes_only_scheme_and_host() -> None:
+    configured_url = "HTTPS://LLM.Internal.Example/v1"
+
+    assert recorder._scrub_text(
+        "failed at https://llm.internal.example/v1/chat",
+        base_urls=(configured_url,),
+        exact_values=(),
+    ) == "failed at [PROVIDER_BASE_URL]/chat"
+    assert recorder._scrub_text(
+        "failed at https://llm.internal.example/V1/chat",
+        base_urls=(configured_url,),
+        exact_values=(),
+    ) == "failed at https://llm.internal.example/V1/chat"
+    assert recorder._scrub_text(
+        "failed at prefix]/Users/alice/private/secret.txt",
+        base_urls=(configured_url,),
+        exact_values=(),
+    ) == "failed at prefix][LOCAL_PATH]"
+
+
 def test_llm_capture_has_deterministic_message_and_payload_budgets() -> None:
     messages = [{"role": "user", "content": f"message-{index}-" + ("x" * 17_000)} for index in range(8)]
     row = normalize_provider_call(

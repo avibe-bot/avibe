@@ -738,7 +738,25 @@ class MemoryInsightReader:
                           AND pc.project_id = :project_id AND pc.owner_id = :owner_id
                         """,
                     ))
-                ctes.append(f"authorized_calls AS ({' UNION '.join(branches)})")
+                ctes.extend(
+                    (
+                        f"authorized_calls AS MATERIALIZED ({' UNION '.join(branches)})",
+                        """
+                        selected_calls AS MATERIALIZED (
+                            SELECT pc.id, pc.started_at_ms
+                            FROM provider_call AS pc
+                            WHERE pc.id IN (SELECT call_id FROM authorized_calls)
+                            ORDER BY pc.started_at_ms DESC, pc.id DESC
+                            LIMIT :limit
+                        )
+                        """,
+                        """
+                        call_total AS (
+                            SELECT COUNT(*) AS total_count FROM authorized_calls
+                        )
+                        """,
+                    )
+                )
                 rows = list(conn.execute(
                     f"""
                     WITH {', '.join(ctes)}
@@ -747,10 +765,11 @@ class MemoryInsightReader:
                            pc.completion_tokens, pc.request_json, pc.response_json, pc.request_bytes,
                            pc.response_bytes, pc.request_id, pc.run_id, pc.memcell_id, pc.app_id,
                            pc.project_id, pc.owner_id, pc.parent_type, pc.parent_id, pc.dropped_before,
-                           COUNT(*) OVER () AS total_count
-                    FROM provider_call AS pc
-                    WHERE pc.id IN (SELECT call_id FROM authorized_calls)
-                    ORDER BY pc.started_at_ms DESC, pc.id DESC LIMIT :limit
+                           call_total.total_count
+                    FROM selected_calls
+                    JOIN provider_call AS pc ON pc.id = selected_calls.id
+                    CROSS JOIN call_total
+                    ORDER BY selected_calls.started_at_ms DESC, selected_calls.id DESC
                     """,
                     {"memcell_id": str(memcell["memcell_id"]),
                      "message_ids_json": str(memcell["message_ids_json"]), "app_id": _APP_ID,
@@ -791,35 +810,15 @@ class MemoryInsightReader:
             with _read_only(self._paths.capture_db_path) as conn:
                 rows = list(conn.execute(
                     """
-                    WITH matched AS MATERIALIZED (
-                        SELECT session_id, principal_id, project_ref, provider_timestamp_ms,
-                               state, occurred_at_ms, add_request_id, flush_request_id
-                        FROM memory_capture_queue
-                        WHERE principal_id = :owner_id AND project_ref = :project_id
-                          AND EXISTS (
-                              SELECT 1 FROM json_each(:message_ids_json) AS message_id
-                              WHERE message_id.type = 'text' AND message_id.value =
-                                  'm_' || session_id || '_' || CAST(provider_timestamp_ms AS TEXT) || '_000'
-                          )
-                    ), candidate_requests AS MATERIALIZED (
-                        SELECT add_request_id AS request_id FROM matched
-                        WHERE typeof(add_request_id) = 'text' AND add_request_id != ''
-                        UNION
-                        SELECT flush_request_id FROM matched
-                        WHERE typeof(flush_request_id) = 'text' AND flush_request_id != ''
-                    )
                     SELECT session_id, principal_id, project_ref, provider_timestamp_ms,
                            state, occurred_at_ms, add_request_id, flush_request_id
                     FROM memory_capture_queue
-                    WHERE EXISTS (
-                        SELECT 1 FROM candidate_requests
-                        WHERE add_request_id = candidate_requests.request_id
-                           OR flush_request_id = candidate_requests.request_id
-                    )
-                    UNION
-                    SELECT session_id, principal_id, project_ref, provider_timestamp_ms,
-                           state, occurred_at_ms, add_request_id, flush_request_id
-                    FROM matched
+                    WHERE principal_id = :owner_id AND project_ref = :project_id
+                      AND EXISTS (
+                          SELECT 1 FROM json_each(:message_ids_json) AS message_id
+                          WHERE message_id.type = 'text' AND message_id.value =
+                              'm_' || session_id || '_' || CAST(provider_timestamp_ms AS TEXT) || '_000'
+                      )
                     """,
                     {
                         "owner_id": principal_id,
@@ -838,21 +837,35 @@ class MemoryInsightReader:
             with _read_only(self._paths.ome_db_path) as conn:
                 rows = list(conn.execute(
                     f"""
-                    SELECT run_id, strategy_name, status, attempt, started_at, finished_at,
-                           error, event_topic, event_payload, COUNT(*) OVER () AS total_count
-                    FROM run_record
-                    WHERE CASE WHEN json_valid(event_payload) THEN
-                        json_type(event_payload) = 'object'
-                        AND json_type(event_payload, '$.memcell_id') = 'text'
-                        AND json_extract(event_payload, '$.memcell_id') = :memcell_id
-                        AND json_extract(event_payload, '$.app_id') = :app_id
-                        AND json_extract(event_payload, '$.project_id') = :project_id
-                        AND (json_type(event_payload, '$.owner_id') IS NULL OR
-                             (json_type(event_payload, '$.owner_id') = 'text' AND
-                              json_extract(event_payload, '$.owner_id') = :owner_id))
-                    ELSE 0 END
-                    ORDER BY {_MEMCELL_TIMESTAMP_SQL.replace('timestamp', 'started_at')} DESC, run_id DESC
-                    LIMIT :limit
+                    WITH authorized_runs AS MATERIALIZED (
+                        SELECT run_id,
+                               {_MEMCELL_TIMESTAMP_SQL.replace('timestamp', 'started_at')} AS started_at_ms
+                        FROM run_record
+                        WHERE CASE WHEN json_valid(event_payload) THEN
+                            json_type(event_payload) = 'object'
+                            AND json_type(event_payload, '$.memcell_id') = 'text'
+                            AND json_extract(event_payload, '$.memcell_id') = :memcell_id
+                            AND json_extract(event_payload, '$.app_id') = :app_id
+                            AND json_extract(event_payload, '$.project_id') = :project_id
+                            AND (json_type(event_payload, '$.owner_id') IS NULL OR
+                                 (json_type(event_payload, '$.owner_id') = 'text' AND
+                                  json_extract(event_payload, '$.owner_id') = :owner_id))
+                        ELSE 0 END
+                    ), selected_runs AS MATERIALIZED (
+                        SELECT run_id, started_at_ms
+                        FROM authorized_runs
+                        ORDER BY started_at_ms DESC, run_id DESC
+                        LIMIT :limit
+                    ), run_total AS (
+                        SELECT COUNT(*) AS total_count FROM authorized_runs
+                    )
+                    SELECT rr.run_id, rr.strategy_name, rr.status, rr.attempt,
+                           rr.started_at, rr.finished_at, rr.error, rr.event_topic,
+                           rr.event_payload, run_total.total_count
+                    FROM selected_runs
+                    JOIN run_record AS rr ON rr.run_id = selected_runs.run_id
+                    CROSS JOIN run_total
+                    ORDER BY selected_runs.started_at_ms DESC, selected_runs.run_id DESC
                     """,
                     {"memcell_id": memcell_id, "app_id": _APP_ID, "project_id": project_id,
                      "owner_id": principal_id, "limit": _MAX_DETAIL_RUNS},

@@ -170,6 +170,74 @@ def test_strategy_capture_precedes_boundary_and_unscoped_calls_are_ignored(monke
     assert handle.calls[-1].kind == "embedding"
 
 
+def test_unscoped_chat_does_not_build_a_diagnostic_request(monkeypatch) -> None:
+    conversions = 0
+
+    class _Message:
+        def model_dump(self, **_kwargs):
+            nonlocal conversions
+            conversions += 1
+            return {"role": "user", "content": "ignored"}
+
+    async def chat(_self, _messages, **_kwargs):
+        return SimpleNamespace(content="ok", model="m", finish_reason=None, usage=None)
+
+    monkeypatch.setattr(patches, "_active_handle", _Handle())
+    monkeypatch.setattr(patches, "_strategy_context", lambda: {})
+    monkeypatch.setattr(patches, "_request_id", lambda: None)
+
+    result = asyncio.run(patches._chat_wrapper(chat)(SimpleNamespace(), [_Message()]))
+
+    assert result.content == "ok"
+    assert conversions == 0
+
+
+def test_chat_and_embedding_snapshots_apply_collection_caps_before_submit(
+    monkeypatch,
+) -> None:
+    converted: list[int] = []
+
+    class _Message:
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        def model_dump(self, **_kwargs):
+            converted.append(self.index)
+            return {"role": "user", "content": f"message-{self.index}"}
+
+    async def chat(_self, _messages, **_kwargs):
+        return SimpleNamespace(content="ok", model="m", finish_reason=None, usage=None)
+
+    async def embed(_self, chunk):
+        return [[1.0] for _ in chunk]
+
+    handle = _Handle()
+    monkeypatch.setattr(patches, "_active_handle", handle)
+    monkeypatch.setattr(patches, "_request_id", lambda: "request-bounded")
+
+    messages = [_Message(index) for index in range(100)]
+    with patches.boundary_request():
+        asyncio.run(patches._chat_wrapper(chat)(SimpleNamespace(), messages))
+        asyncio.run(
+            patches._embedding_wrapper(embed)(
+                SimpleNamespace(_model="embedding", _dimensions=256),
+                [f"input-{index}" for index in range(100)],
+            )
+        )
+
+    assert converted == [0, 99]
+    assert handle.calls[0].request["messages"] == [
+        {"role": "user", "content": "message-0"},
+        {"omitted_messages": 98},
+        {"role": "user", "content": "message-99"},
+    ]
+    assert handle.calls[1].request["input_count"] == 100
+    assert handle.calls[1].request["inputs"] == [
+        f"input-{index}" for index in range(16)
+    ]
+    assert handle.calls[1].request["omitted_inputs"] == 84
+
+
 def test_stage_binding_wrappers_capture_episode_and_cascade_fields(monkeypatch) -> None:
     seen: list[object] = []
 
@@ -237,7 +305,7 @@ def test_prepare_call_recorder_passes_configured_provider_keys_to_scrubber(
     try:
         handle = patches.prepare_call_recorder(tmp_path / "call-log.db")
         assert handle is not None
-        assert handle._writer._exact_redaction_values == (
+        assert handle._exact_redaction_values == (
             "plain-llm-credential",
             "plain-llm-credential",
             "plain-embedding-credential",

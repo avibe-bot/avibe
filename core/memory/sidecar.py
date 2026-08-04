@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlparse
 
 from core.memory.artifact import EVEROS_VERSION
 from core.memory.everos_insight import install_error_scrubbers, prepare_call_recorder
+from core.memory.everos_insight.patches import boundary_request
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
 
 
@@ -82,7 +83,7 @@ def serve(uds: Path) -> None:
             "/api/v2/memory/add",
             "/api/v2/memory/flush",
         }:
-            with recorder.boundary_request():
+            with boundary_request():
                 return await call_next(request)
         return await call_next(request)
 

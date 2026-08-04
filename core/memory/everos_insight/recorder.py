@@ -98,7 +98,9 @@ _LABELED_SECRET_RE = re.compile(
 )
 _PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:sk|rk|pk|api)-[A-Za-z0-9_-]{8,}")
 _FILE_URL_RE = re.compile(r"(?i)\bfile:///(?:[^\s\"'<>]|\\ )+")
-_POSIX_PATH_RE = re.compile(r"(?<![:/\w\]])/(?:[^\s\"'<>]|\\ )+")
+_POSIX_PATH_RE = re.compile(
+    r"(?<![:/\w])(?<!\[PROVIDER_BASE_URL\])/(?:[^\s\"'<>]|\\ )+"
+)
 _WINDOWS_PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>]+")
 
 
@@ -1008,6 +1010,14 @@ def _embedding_request(value: JsonValue) -> JsonValue:
     source = value if isinstance(value, dict) else {"input": value}
     raw_inputs = source.get("input", source.get("inputs", []))
     inputs = raw_inputs if isinstance(raw_inputs, list) else [raw_inputs]
+    declared_count = source.get("input_count")
+    input_count = (
+        declared_count
+        if isinstance(declared_count, int)
+        and not isinstance(declared_count, bool)
+        and declared_count >= len(inputs)
+        else len(inputs)
+    )
     excerpts: list[JsonValue] = []
     for item in inputs[:_EMBEDDING_INPUT_COUNT]:
         if isinstance(item, str):
@@ -1017,11 +1027,11 @@ def _embedding_request(value: JsonValue) -> JsonValue:
     result: dict[str, JsonValue] = {
         "model": source.get("model") if isinstance(source.get("model"), str) else None,
         "dimensions": source.get("dimensions") if isinstance(source.get("dimensions"), int) else None,
-        "input_count": len(inputs),
+        "input_count": input_count,
         "inputs": excerpts,
     }
-    if len(inputs) > _EMBEDDING_INPUT_COUNT:
-        result["omitted_inputs"] = len(inputs) - _EMBEDDING_INPUT_COUNT
+    if input_count > len(excerpts):
+        result["omitted_inputs"] = input_count - len(excerpts)
     return result
 
 

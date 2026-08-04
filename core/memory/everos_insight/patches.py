@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib
 import logging
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import wraps
@@ -14,8 +14,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .recorder import ProviderCallInput, ProviderKind, _scrub_text
-from .recorder import RecorderHandle as _WriterHandle
+from .recorder import (
+    _EMBEDDING_INPUT_COUNT,
+    ProviderCallInput,
+    ProviderKind,
+    RecorderHandle,
+    _scrub_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,39 +52,6 @@ _current_context: ContextVar[_CallContext | None] = ContextVar(
 _active_handle: RecorderHandle | Any | None = None
 _persisted_error_base_urls: tuple[str, ...] = ()
 _persisted_error_exact_values: tuple[str, ...] = ()
-
-
-class RecorderHandle:
-    """Small sidecar-facing facade over the recorder worker."""
-
-    def __init__(
-        self,
-        db_path: Path,
-        *,
-        provider_base_urls: Sequence[str] = (),
-        exact_redaction_values: Sequence[str] = (),
-    ) -> None:
-        self._writer = _WriterHandle(
-            db_path,
-            provider_base_urls=provider_base_urls,
-            exact_redaction_values=exact_redaction_values,
-        )
-
-    @property
-    def health(self) -> dict[str, str | None]:
-        return self._writer.health
-
-    def start(self) -> None:
-        self._writer.start()
-
-    def submit(self, call: ProviderCallInput) -> None:
-        self._writer.submit(call)
-
-    async def close(self, *, timeout: float = 1.0) -> None:
-        await self._writer.close(timeout=timeout)
-
-    def boundary_request(self) -> AbstractContextManager[None]:
-        return boundary_request()
 
 
 def prepare_call_recorder(db_path: Path) -> RecorderHandle | None:
@@ -242,15 +214,6 @@ def _chat_wrapper(original: Callable[..., Any]) -> Callable[..., Any]:
         response_format: Any = None,
         **extra: Any,
     ) -> Any:
-        request = _chat_request(
-            messages,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format=response_format,
-            extra=extra,
-        )
-
         return await _record_call(
             lambda: original(
                 self,
@@ -262,8 +225,17 @@ def _chat_wrapper(original: Callable[..., Any]) -> Callable[..., Any]:
                 **extra,
             ),
             kind="llm",
-            request=request,
-            model=model or _safe_configured_model(self),
+            request_builder=lambda: (
+                _chat_request(
+                    messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                    extra=extra,
+                ),
+                model or _safe_configured_model(self),
+            ),
             response_builder=_llm_response,
         )
 
@@ -272,12 +244,10 @@ def _chat_wrapper(original: Callable[..., Any]) -> Callable[..., Any]:
 
 def _embedding_wrapper(original: Callable[..., Any]) -> Callable[..., Any]:
     async def wrapped(self: Any, chunk: list[str]) -> Any:
-        request, model = _embedding_request(self, chunk)
         return await _record_call(
             lambda: original(self, chunk),
             kind="embedding",
-            request=request,
-            model=model,
+            request_builder=lambda: _embedding_request(self, chunk),
             response_builder=_embedding_response,
         )
 
@@ -330,8 +300,7 @@ async def _record_call(
     invoke: Callable[[], Any],
     *,
     kind: ProviderKind,
-    request: dict[str, Any],
-    model: str | None,
+    request_builder: Callable[[], tuple[dict[str, Any], str | None]],
     response_builder: Callable[[Any], tuple[dict[str, Any], dict[str, Any]]],
 ) -> Any:
     try:
@@ -340,6 +309,10 @@ async def _record_call(
         context = None
     if context is None or _active_handle is None:
         return await invoke()
+    try:
+        request, model = request_builder()
+    except BaseException:
+        request, model = {}, None
 
     started_at_ms = int(time.time() * 1000)
     started = time.monotonic()
@@ -508,8 +481,17 @@ def _chat_request(
     extra: Mapping[str, Any],
 ) -> dict[str, Any]:
     try:
+        selected_messages: list[Any]
+        if len(messages) > 2:
+            selected_messages = [
+                messages[0],
+                {"omitted_messages": len(messages) - 2},
+                messages[-1],
+            ]
+        else:
+            selected_messages = messages
         request: dict[str, Any] = {
-            "messages": [_message_value(message) for message in messages]
+            "messages": [_message_value(message) for message in selected_messages]
         }
         if model is not None:
             request["model"] = model
@@ -538,7 +520,12 @@ def _embedding_request(
                 "model": model,
                 "dimensions": getattr(provider, "_dimensions", None),
                 "input_count": len(chunk),
-                "inputs": list(chunk),
+                "inputs": list(chunk[:_EMBEDDING_INPUT_COUNT]),
+                **(
+                    {"omitted_inputs": len(chunk) - _EMBEDDING_INPUT_COUNT}
+                    if len(chunk) > _EMBEDDING_INPUT_COUNT
+                    else {}
+                ),
             },
             model,
         )

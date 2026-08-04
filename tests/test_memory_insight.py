@@ -812,6 +812,41 @@ def test_detail_preserves_internal_ids_and_enums_when_exact_key_is_short(
     assert detail["calls"][0]["error"] == "provider echoed [REDACTED]"
 
 
+def test_detail_call_from_an_older_omitted_run_remains_authorized(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_many_runs", ALICE, timestamp_ms=10_550)
+    event = {
+        "memcell_id": "mc_many_runs",
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "owner_id": ALICE,
+    }
+    for index in range(51):
+        _insert_run(
+            insight_paths,
+            f"run-{index:02d}",
+            "extract_atomic_facts",
+            event,
+            started_at=f"2026-08-04T00:{index:02d}:00+00:00",
+        )
+    _insert_call(
+        insight_paths,
+        "call-from-oldest-run",
+        run_id="run-00",
+        started_at_ms=1_900_000_000_000,
+    )
+
+    detail = MemoryInsightReader(insight_paths).entry_detail(
+        (ALICE, PROJECT), "mc_many_runs"
+    )
+
+    displayed_run_ids = {step.get("run_id") for step in detail["steps"]}
+    assert "run-00" not in displayed_run_ids
+    assert [call["id"] for call in detail["calls"]] == ["call-from-oldest-run"]
+    assert detail["omitted_step_count"] == 1
+
+
 def test_configured_provider_keys_are_scrubbed_from_run_and_current_state_errors(
     insight_paths: MemoryInsightPaths,
 ) -> None:
@@ -983,25 +1018,30 @@ def test_detail_has_fixed_bounds_omission_counts_and_response_ceiling(
     assert len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode()) <= 1_000_000
 
     detail_run_query = next(
-        statement
-        for statement in statements
-        if "COUNT(*) OVER () AS total_count" in statement and "FROM run_record" in statement
+        statement for statement in statements if "selected_runs AS MATERIALIZED" in statement
     )
     detail_call_query = next(
         statement
         for statement in statements
         if statement.lstrip().upper().startswith("WITH")
-        and "COUNT(*) OVER () AS total_count" in statement
+        and "selected_calls AS MATERIALIZED" in statement
     )
     capture_query = next(
         statement
         for statement in statements
-        if "WITH matched AS MATERIALIZED" in statement
+        if "FROM memory_capture_queue" in statement
+        and "json_each(" in statement
+        and "provider_timestamp_ms" in statement
     )
     assert "LIMIT 50" in detail_run_query
     assert "LIMIT 20" in detail_call_query
     assert "authorized_calls AS" in detail_call_query
+    assert "COUNT(*) OVER" not in detail_run_query
+    assert "COUNT(*) OVER" not in detail_call_query
+    assert detail_call_query.count("request_json") == 1
     assert "principal_id =" in capture_query
+    assert "candidate_requests" not in capture_query
+    assert capture_query.count("FROM memory_capture_queue") == 1
 
     with original_connect(insight_paths.call_log_db_path) as conn:
         conn.execute("ATTACH DATABASE ? AS capture", (str(insight_paths.capture_db_path),))
