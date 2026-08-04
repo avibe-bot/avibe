@@ -25,9 +25,16 @@ _MAX_PAYLOAD_FIELD_BYTES = 12_000
 _MAX_ERROR_BYTES = 1_024
 _MAX_RESPONSE_BYTES = 1_000_000
 _LIST_RUN_STATUSES = ("running", "success", "failed", "dead_letter", "crashed")
+# Keep SQL ordering identical to _timestamp_ms: stored numeric values are
+# already milliseconds, while ISO fractional seconds are truncated to millis.
 _MEMCELL_TIMESTAMP_SQL = (
-    "MAX(0, COALESCE(CAST(ROUND((julianday(timestamp) - 2440587.5) "
-    "* 86400000) AS INTEGER), 0))"
+    "CASE WHEN typeof(timestamp) IN ('integer', 'real') "
+    "THEN MAX(0, CAST(timestamp AS INTEGER)) "
+    "ELSE MAX(0, COALESCE("
+    "CAST(strftime('%s', timestamp) AS INTEGER) * 1000 + "
+    "CASE WHEN instr(timestamp, '.') > 0 THEN "
+    "CAST(CAST('0.' || substr(timestamp, instr(timestamp, '.') + 1) AS REAL) "
+    "* 1000 AS INTEGER) ELSE 0 END, 0)) END"
 )
 _CURSOR_RE = re.compile(r"[A-Za-z0-9_-]+")
 _ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}")
@@ -471,96 +478,107 @@ class MemoryInsightReader:
                     conn.execute("SELECT 1 FROM provider_call LIMIT 1").fetchone()
                     return {}, {"status": "available"}
 
-                counts: dict[str, int] = {}
-                for memcell in memcells:
-                    memcell_id = str(memcell["memcell_id"])
-                    clauses = [
-                        "pc.memcell_id = :memcell_id",
+                page_json = json.dumps(
+                    [
+                        {
+                            "memcell_id": str(memcell["memcell_id"]),
+                            "message_ids": sorted(_message_ids(memcell)),
+                        }
+                        for memcell in memcells
+                    ],
+                    separators=(",", ":"),
+                )
+                clauses = [
+                    "pc.memcell_id = page.memcell_id",
+                    """
+                    (pc.stage = 'cascade' AND pc.app_id = :app_id
+                     AND pc.project_id = :project_id AND pc.owner_id = :owner_id
+                     AND pc.parent_type = 'memcell' AND pc.parent_id = page.memcell_id)
+                    """,
+                ]
+                if capture_available:
+                    clauses.append(
                         """
+                        (typeof(pc.request_id) = 'text' AND pc.request_id != '' AND EXISTS (
+                            SELECT 1 FROM capture.memory_capture_queue AS owned_queue
+                            WHERE owned_queue.principal_id = :owner_id
+                              AND owned_queue.project_ref = :project_id
+                              AND (
+                                  owned_queue.add_request_id = pc.request_id
+                                  OR owned_queue.flush_request_id = pc.request_id
+                              )
+                              AND EXISTS (
+                                  SELECT 1 FROM json_each(page.message_ids_json) AS message_id
+                                  WHERE message_id.type = 'text'
+                                    AND message_id.value =
+                                        'm_' || owned_queue.session_id || '_'
+                                        || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                              )
+                        ) AND NOT EXISTS (
+                            SELECT 1 FROM capture.memory_capture_queue AS any_queue
+                            WHERE (
+                                any_queue.add_request_id = pc.request_id
+                                OR any_queue.flush_request_id = pc.request_id
+                            ) AND (
+                                any_queue.principal_id IS NOT :owner_id
+                                OR any_queue.project_ref IS NOT :project_id
+                            )
+                        ))
+                        """
+                    )
+                if runs_available:
+                    run_scope = """
+                        CASE WHEN json_valid(rr.event_payload) THEN
+                            json_type(rr.event_payload) = 'object'
+                            AND json_type(rr.event_payload, '$.memcell_id') = 'text'
+                            AND json_extract(rr.event_payload, '$.memcell_id') = page.memcell_id
+                            AND json_extract(rr.event_payload, '$.app_id') = :app_id
+                            AND json_extract(rr.event_payload, '$.project_id') = :project_id
+                            AND (
+                                json_type(rr.event_payload, '$.owner_id') IS NULL
+                                OR (
+                                    json_type(rr.event_payload, '$.owner_id') = 'text'
+                                    AND json_extract(rr.event_payload, '$.owner_id') = :owner_id
+                                )
+                            )
+                        ELSE 0 END
+                    """
+                    clauses.append(
+                        f"pc.run_id IN (SELECT rr.run_id FROM ome.run_record AS rr WHERE {run_scope})"
+                    )
+                    clauses.append(
+                        f"""
                         (pc.stage = 'cascade' AND pc.app_id = :app_id
                          AND pc.project_id = :project_id AND pc.owner_id = :owner_id
-                         AND pc.parent_type = 'memcell' AND pc.parent_id = :memcell_id)
-                        """,
-                    ]
-                    params: dict[str, object] = {
-                        "memcell_id": memcell_id,
+                         AND pc.parent_type = 'episode' AND pc.parent_id IN (
+                            SELECT json_extract(rr.event_payload, '$.episode_entry_id')
+                            FROM ome.run_record AS rr
+                            WHERE {run_scope}
+                              AND substr(rr.event_topic, -length(':EpisodeExtracted'))
+                                  = ':EpisodeExtracted'
+                              AND json_type(rr.event_payload, '$.episode_entry_id') = 'text'
+                         ))
+                        """
+                    )
+                rows = conn.execute(
+                    f"""
+                    SELECT page.memcell_id, COUNT(pc.id) AS total
+                    FROM (
+                        SELECT json_extract(page_item.value, '$.memcell_id') AS memcell_id,
+                               json_extract(page_item.value, '$.message_ids') AS message_ids_json
+                        FROM json_each(:page_json) AS page_item
+                    ) AS page
+                    LEFT JOIN provider_call AS pc ON ({' OR '.join(clauses)})
+                    GROUP BY page.memcell_id
+                    """,
+                    {
+                        "page_json": page_json,
                         "app_id": _APP_ID,
                         "project_id": project_id,
                         "owner_id": principal_id,
-                    }
-                    if capture_available:
-                        params["message_ids_json"] = json.dumps(
-                            sorted(_message_ids(memcell)),
-                            separators=(",", ":"),
-                        )
-                        clauses.append(
-                            """
-                            (pc.request_id IS NOT NULL AND EXISTS (
-                                SELECT 1 FROM capture.memory_capture_queue AS owned_queue
-                                WHERE owned_queue.principal_id = :owner_id
-                                  AND owned_queue.project_ref = :project_id
-                                  AND (
-                                      owned_queue.add_request_id = pc.request_id
-                                      OR owned_queue.flush_request_id = pc.request_id
-                                  )
-                                  AND EXISTS (
-                                      SELECT 1 FROM json_each(:message_ids_json) AS message_id
-                                      WHERE message_id.type = 'text'
-                                        AND message_id.value =
-                                            'm_' || owned_queue.session_id || '_'
-                                            || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
-                                  )
-                            ) AND NOT EXISTS (
-                                SELECT 1 FROM capture.memory_capture_queue AS any_queue
-                                WHERE (
-                                    any_queue.add_request_id = pc.request_id
-                                    OR any_queue.flush_request_id = pc.request_id
-                                ) AND (
-                                    any_queue.principal_id != :owner_id
-                                    OR any_queue.project_ref != :project_id
-                                )
-                            ))
-                            """
-                        )
-                    if runs_available:
-                        run_scope = """
-                            CASE WHEN json_valid(rr.event_payload) THEN
-                                json_type(rr.event_payload) = 'object'
-                                AND json_type(rr.event_payload, '$.memcell_id') = 'text'
-                                AND json_extract(rr.event_payload, '$.memcell_id') = :memcell_id
-                                AND json_extract(rr.event_payload, '$.app_id') = :app_id
-                                AND json_extract(rr.event_payload, '$.project_id') = :project_id
-                                AND (
-                                    json_type(rr.event_payload, '$.owner_id') IS NULL
-                                    OR (
-                                        json_type(rr.event_payload, '$.owner_id') = 'text'
-                                        AND json_extract(rr.event_payload, '$.owner_id') = :owner_id
-                                    )
-                                )
-                            ELSE 0 END
-                        """
-                        clauses.append(
-                            f"pc.run_id IN (SELECT rr.run_id FROM ome.run_record AS rr WHERE {run_scope})"
-                        )
-                        clauses.append(
-                            f"""
-                            (pc.stage = 'cascade' AND pc.app_id = :app_id
-                             AND pc.project_id = :project_id AND pc.owner_id = :owner_id
-                             AND pc.parent_type = 'episode' AND pc.parent_id IN (
-                                SELECT json_extract(rr.event_payload, '$.episode_entry_id')
-                                FROM ome.run_record AS rr
-                                WHERE {run_scope}
-                                  AND substr(rr.event_topic, -length(':EpisodeExtracted'))
-                                      = ':EpisodeExtracted'
-                                  AND json_type(rr.event_payload, '$.episode_entry_id') = 'text'
-                             ))
-                            """
-                        )
-                    row = conn.execute(
-                        f"SELECT COUNT(*) AS total FROM provider_call AS pc WHERE {' OR '.join(clauses)}",
-                        params,
-                    ).fetchone()
-                    counts[memcell_id] = int(row["total"])
+                    },
+                )
+                counts = {str(row["memcell_id"]): int(row["total"]) for row in rows}
                 return counts, {"status": "available"}
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}

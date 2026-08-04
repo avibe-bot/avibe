@@ -333,6 +333,34 @@ def test_cursor_is_canonical_and_orders_duplicate_timestamps(
             reader.list_entries((ALICE, PROJECT), cursor, 2)
 
 
+def test_cursor_truncates_submillisecond_timestamps_before_ordering(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_z", ALICE, timestamp_ms=2_000)
+    _insert_memcell(insight_paths, "mc_a", ALICE, timestamp_ms=2_000)
+    with sqlite3.connect(insight_paths.system_db_path) as conn:
+        conn.execute(
+            "UPDATE memcell SET timestamp = ? WHERE memcell_id = 'mc_z'",
+            ("1970-01-01T00:00:02.000400+00:00",),
+        )
+        conn.execute(
+            "UPDATE memcell SET timestamp = ? WHERE memcell_id = 'mc_a'",
+            ("1970-01-01T00:00:02.000600+00:00",),
+        )
+
+    reader = MemoryInsightReader(insight_paths)
+    first = reader.list_entries((ALICE, PROJECT), None, 1)
+    second = reader.list_entries((ALICE, PROJECT), first["next_cursor"], 1)
+
+    assert [(entry["memcell_id"], entry["timestamp_ms"]) for entry in first["entries"]] == [
+        ("mc_z", 2_000)
+    ]
+    assert [(entry["memcell_id"], entry["timestamp_ms"]) for entry in second["entries"]] == [
+        ("mc_a", 2_000)
+    ]
+    assert second["next_cursor"] is None
+
+
 def test_cursor_accepts_production_length_provider_message_ids(
     insight_paths: MemoryInsightPaths,
 ) -> None:
@@ -353,26 +381,17 @@ def test_list_page_bounds_history_before_python_projection(
     insight_paths: MemoryInsightPaths,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _insert_memcell(insight_paths, "mc_visible", ALICE, timestamp_ms=10_000)
-    _insert_run(
-        insight_paths,
-        "run-visible",
-        "extract_atomic_facts",
-        {
-            "memcell_id": "mc_visible",
-            "app_id": "avibe",
-            "project_id": PROJECT,
-            "owner_id": ALICE,
-        },
-    )
-    _insert_call(
-        insight_paths,
-        "call-visible",
-        memcell_id="mc_visible",
-        app_id="avibe",
-        project_id=PROJECT,
-        owner_id=ALICE,
-    )
+    expected_counts: dict[str, int] = {}
+    for index in range(50):
+        memcell_id = f"mc_visible_{index:02d}"
+        _insert_memcell(insight_paths, memcell_id, ALICE, timestamp_ms=10_000 + index)
+        expected_counts[memcell_id] = index % 3
+        for call_index in range(index % 3):
+            _insert_call(
+                insight_paths,
+                f"call-visible-{index:02d}-{call_index}",
+                memcell_id=memcell_id,
+            )
     for index in range(75):
         memcell_id = f"mc_foreign_{index:02d}"
         _insert_memcell(insight_paths, memcell_id, BOB, timestamp_ms=20_000 + index)
@@ -406,19 +425,19 @@ def test_list_page_bounds_history_before_python_projection(
 
     monkeypatch.setattr(sqlite3, "connect", traced_connect)
 
-    result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 1)
+    result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 50)
 
-    assert [entry["memcell_id"] for entry in result["entries"]] == ["mc_visible"]
-    assert result["entries"][0]["run_summary"] == {
-        "total": 1,
-        "statuses": {"success": 1},
+    assert {
+        entry["memcell_id"]: entry["authorized_call_count"] for entry in result["entries"]
+    } == expected_counts
+    assert {entry["memcell_id"]: entry["run_summary"] for entry in result["entries"]} == {
+        memcell_id: {"total": 0, "statuses": {}} for memcell_id in expected_counts
     }
-    assert result["entries"][0]["authorized_call_count"] == 1
     selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
     assert len(selects) == 4
-    assert "LIMIT 2" in selects[0]
+    assert "LIMIT 51" in selects[0]
     assert "COUNT(*) AS total" in selects[2]
-    assert "COUNT(*) AS total" in selects[3]
+    assert "COUNT(pc.id) AS total" in selects[3]
 
 
 def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsightPaths) -> None:
