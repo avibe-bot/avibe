@@ -108,10 +108,7 @@ class MemoryInsightReader:
             cursor_key=cursor_key,
             limit=limit + 1,
         )
-        capture_section = self._probe_table(
-            self._paths.capture_db_path,
-            "memory_capture_queue",
-        )
+        capture_section = self._capture_status()
         page = (memcells or [])[:limit]
         run_summaries, runs_section = self._read_run_summaries(
             page,
@@ -383,10 +380,13 @@ class MemoryInsightReader:
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}
 
-    def _probe_table(self, path: Path, table: str) -> dict[str, str]:
+    def _capture_status(self) -> dict[str, str]:
         try:
-            with _read_only(path) as conn:
-                conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            with _read_only(self._paths.capture_db_path) as conn:
+                conn.execute(
+                    "SELECT session_id, principal_id, project_ref, provider_timestamp_ms, "
+                    "add_request_id, flush_request_id FROM memory_capture_queue LIMIT 1"
+                ).fetchone()
             return {"status": "available"}
         except _Unavailable as unavailable:
             return {"status": "unavailable", "reason": unavailable.reason}

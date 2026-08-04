@@ -781,6 +781,22 @@ def test_list_keeps_direct_call_count_when_run_table_is_unavailable(
     assert result["entries"][0]["authorized_call_count"] == 1
 
 
+def test_list_keeps_direct_call_count_when_capture_table_is_malformed(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_malformed_capture", ALICE, timestamp_ms=11_600)
+    _insert_call(insight_paths, "call-malformed-capture", memcell_id="mc_malformed_capture")
+    with sqlite3.connect(insight_paths.capture_db_path) as conn:
+        conn.execute("DROP TABLE memory_capture_queue")
+        conn.execute("CREATE TABLE memory_capture_queue (session_id TEXT)")
+
+    result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
+
+    assert result["sections"]["capture"] == {"status": "unavailable", "reason": "malformed"}
+    assert result["sections"]["calls"] == {"status": "available"}
+    assert result["entries"][0]["authorized_call_count"] == 1
+
+
 def test_detail_has_fixed_bounds_omission_counts_and_response_ceiling(
     insight_paths: MemoryInsightPaths,
 ) -> None:
