@@ -79,6 +79,7 @@ export function requiresResourceAccessNarrowingConfirmation(
     scope: 1,
     public: 2,
   };
+  if (currentLevel === 'private') return nextLevel === 'scope';
   if (audienceBreadth[nextLevel] < audienceBreadth[currentLevel]) return true;
   if (currentLevel !== 'scope' || nextLevel !== 'scope') return false;
 

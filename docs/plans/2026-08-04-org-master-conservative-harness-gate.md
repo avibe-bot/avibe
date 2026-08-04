@@ -36,8 +36,9 @@ entitlement mirror before remote recurring execution can be enabled.
 1. The signed HTTP session projects remote `can_chat`, terminal, file, and
    system execution capabilities as false.
 2. The UI server rejects remote message dispatch, Show-event Agent dispatch,
-   terminal sockets, file operations, and Harness definition mutations before
-   invoking their underlying services.
+   Agent-definition and instruction mutations, service control, local
+   installers, terminal sockets, file operations, and Harness definition
+   mutations before invoking their underlying services.
 3. The durable Delivery owner retires remote-origin queue entries before the
    FIFO claim that starts an Agent turn.
 4. Task and Watch stores reject explicit remote definition writes.
@@ -64,6 +65,10 @@ substitute for either dependency.
 - Remote Workbench message and Show dispatch do not reserve or start a turn.
 - Remote terminal and file requests fail closed; trusted-local requests retain
   existing behavior.
+- Remote service control, installers, and Agent-definition mutations fail before
+  reaching their local runtime services.
+- Paired Project synchronization never forwards the device secret through an
+  HTTP redirect.
 - Remote Task and Watch add/update calls produce no definition write.
 - Existing remote-origin Tasks and Watches are disabled before command, waiter,
   or Agent dispatch.

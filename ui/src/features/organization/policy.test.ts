@@ -97,12 +97,13 @@ describe('Organization policy helpers', () => {
     expect(requiresProjectAccessNarrowingConfirmation('restricted', [viewer], 'inherit', [])).toBe(false);
   });
 
-  it('requires confirmation only when a Resource audience shrinks', () => {
+  it('requires confirmation for every Resource access narrowing', () => {
     expect(requiresResourceAccessNarrowingConfirmation('public', [], 'scope', ['group-1'])).toBe(true);
     expect(requiresResourceAccessNarrowingConfirmation('public', [], 'private', [])).toBe(true);
     expect(requiresResourceAccessNarrowingConfirmation('scope', ['group-1'], 'private', [])).toBe(true);
     expect(requiresResourceAccessNarrowingConfirmation('scope', ['group-1', 'group-2'], 'scope', ['group-1'])).toBe(true);
-    expect(requiresResourceAccessNarrowingConfirmation('private', [], 'scope', ['group-1'])).toBe(false);
+    expect(requiresResourceAccessNarrowingConfirmation('private', [], 'scope', ['group-1'])).toBe(true);
+    expect(requiresResourceAccessNarrowingConfirmation('private', [], 'public', [])).toBe(false);
     expect(requiresResourceAccessNarrowingConfirmation('scope', ['group-1'], 'public', [])).toBe(false);
     expect(requiresResourceAccessNarrowingConfirmation('scope', ['group-1'], 'scope', ['group-1', 'group-2'])).toBe(false);
   });

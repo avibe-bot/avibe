@@ -130,16 +130,6 @@ def _stop_macos_session_diagnostics(monitor: Any) -> None:
         logging.getLogger(__name__).debug("macOS session diagnostics cleanup failed")
 
 
-def _request_controller_loop_stop(controller: Any) -> bool:
-    """Ask a running controller loop to exit so its finally block can clean up."""
-
-    loop = getattr(controller, "_loop", None)
-    if loop is None or loop.is_closed() or not loop.is_running():
-        return False
-    loop.call_soon_threadsafe(loop.stop)
-    return True
-
-
 def main():
     """Main entry point"""
     lock_acquired = False
@@ -203,9 +193,6 @@ def main():
                 logger.info("Shutting down after signal %s", signum)
             except Exception:
                 pass
-            if _request_controller_loop_stop(controller):
-                return
-            _stop_macos_session_diagnostics(macos_session_diagnostics)
             controller.request_shutdown(f"signal {signum}")
 
         signal.signal(signal.SIGTERM, _handle_shutdown)

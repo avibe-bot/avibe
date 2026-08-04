@@ -2248,10 +2248,25 @@ def _is_remote_local_execution_request(method: str, path: str) -> bool:
     if normalized_method == "POST" and path == "/api/running-agents/end":
         return True
     if normalized_method == "POST" and path in {
+        "/api/agents",
+        "/api/agents/default",
+        "/api/agents/import",
+        "/api/control",
         "/api/skills",
         "/api/skills/update",
         "/api/skills/upload",
+        "/api/upgrade",
     }:
+        return True
+    if normalized_method == "POST" and re.fullmatch(
+        r"/api/(?:agent/[^/]+|dependencies/[^/]+)/install",
+        path,
+    ):
+        return True
+    if normalized_method in {"PATCH", "DELETE"} and re.fullmatch(
+        r"/api/agents/[^/]+",
+        path,
+    ):
         return True
     if normalized_method == "PUT" and (
         path == "/api/global-prompts"

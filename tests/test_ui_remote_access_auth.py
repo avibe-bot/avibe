@@ -961,6 +961,95 @@ def test_remote_session_archive_is_blocked_before_store_access(
 
 
 @pytest.mark.parametrize(
+    ("path", "json_body", "call_target"),
+    [
+        ("/api/control", {"action": "restart"}, "vibe.runtime.read_status"),
+        ("/api/upgrade", {}, "vibe.api.do_upgrade"),
+        ("/api/agent/codex/install", {}, "vibe.api.start_agent_install_job"),
+        (
+            "/api/dependencies/askill/install",
+            {},
+            "vibe.api.start_dependency_install_job",
+        ),
+    ],
+)
+def test_remote_system_operations_are_blocked_before_runtime_calls(
+    monkeypatch,
+    tmp_path,
+    path,
+    json_body,
+    call_target,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_runtime_call(*args, **kwargs):
+        raise AssertionError("remote system operation reached the local runtime")
+
+    monkeypatch.setattr(call_target, unexpected_runtime_call)
+    response = client.post(
+        path,
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body", "api_method"),
+    [
+        ("POST", "/api/agents", {"name": "remote"}, "create_vibe_agent"),
+        ("POST", "/api/agents/import", {}, "import_vibe_agents"),
+        ("POST", "/api/agents/default", {"name": "remote"}, "set_default_vibe_agent"),
+        ("PATCH", "/api/agents/remote", {"enabled": False}, "update_vibe_agent"),
+        ("DELETE", "/api/agents/remote", None, "remove_vibe_agent"),
+    ],
+)
+def test_remote_agent_definition_mutations_are_blocked_before_api_calls(
+    monkeypatch,
+    tmp_path,
+    method,
+    path,
+    json_body,
+    api_method,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_agent_call(*args, **kwargs):
+        raise AssertionError("remote Agent mutation reached the local Agent API")
+
+    monkeypatch.setattr(api, api_method, unexpected_agent_call)
+    response = client.request(
+        method,
+        path,
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
     ("method", "path", "json_body", "api_method"),
     [
         ("POST", "/api/skills", {"source": "gh:owner/repo"}, "add_skill"),
