@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.11.3
+version: 0.11.4
 ---
 
 # Background Watch Hook
@@ -284,7 +284,12 @@ events the other never reported. Pacing options such as `--interval` and `--sett
 are not part of it. When `vibe watch` runs the cycle it also names the watch in
 `AVIBE_WATCH_ID`, and the waiter records it as the owner, so even two watches
 configured identically down to the last filter are kept apart; a manual run has no
-id and adopts whatever it finds. Give each watch its own state file.
+id and adopts whatever it finds -- and a managed watch that starts on a file with no
+owner, from a manual run or an older version, stamps itself on it before polling,
+because an owner that is absent fits every watch and two of them would share the
+path. That decision is read-then-write, so it is taken under a `<state-file>.lock`
+sidecar; the lock lives beside the state file rather than on it, since the state file
+is replaced rather than rewritten. Give each watch its own state file.
 
 Arguments are validated before any of this: a rejected `--ignore-comment-pattern` or
 a missing token exits `2` without claiming the path, so the corrected re-run is not

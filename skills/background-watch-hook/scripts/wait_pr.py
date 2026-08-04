@@ -13,8 +13,14 @@ import tempfile
 import time
 import urllib.error
 import urllib.parse
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+try:  # POSIX only, which is every platform `vibe` runs the waiter on.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock
+    fcntl = None  # type: ignore[assignment]
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -660,6 +666,86 @@ def _claim_state_file(
     return True
 
 
+@contextmanager
+def _state_file_lock(target: Path) -> Iterator[None]:
+    """Serialize the ownership decision on ``target`` across processes.
+
+    Deciding who owns a state file is read-then-write, and two managed watches that
+    interleave those halves both conclude the path is theirs. A sidecar lock file
+    makes the decision one step. It is a separate file precisely because the state
+    file itself is replaced rather than rewritten: a lock held on an inode that has
+    since been renamed away guards nothing.
+
+    Best effort by design. A filesystem without working locks, or a directory that
+    refuses the lock file, must not stop the watch -- the write probe and the
+    ownership re-check on every replace still stand.
+    """
+
+    if fcntl is None:
+        yield
+        return
+
+    handle = None
+    try:
+        handle = os.open(target.with_name(f"{target.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except OSError:
+        if handle is not None:
+            os.close(handle)
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            os.close(handle)
+
+
+def _adopt_state_file(target: Path, *, watch_id: str, watch_identity: str | None) -> bool:
+    """Stamp this managed watch onto an ownerless state file, keeping its cursors.
+
+    A file written before owners existed, or by a manual run, names no owner -- and an
+    absent owner is compatible with every managed watch. Two of them would therefore
+    both adopt the same path, poll, and overwrite each other's cursors, skipping
+    activity for good. Claiming the name here, under the lock and before any polling,
+    turns that into a conflict the loser sees while it can still be told about it.
+
+    Returns False when the file says nothing usable, leaving it to the caller's probe.
+    """
+
+    try:
+        with target.open(encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
+        return False
+
+    payload["owner"] = watch_id
+    if payload.get("watch") is None and watch_identity is not None:
+        payload["watch"] = watch_identity
+
+    scratch = None
+    try:
+        handle, scratch = _state_file_scratch(target)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+        os.replace(scratch, target)
+        scratch = None
+    except OSError as err:
+        raise StatePersistenceError(f"Cannot write state file {target}: {err}") from err
+    finally:
+        if scratch is not None:
+            try:
+                os.unlink(scratch)
+            except OSError:
+                pass
+    return True
+
+
 def _verify_state_file_writable(
     path: str | None,
     *,
@@ -679,6 +765,11 @@ def _verify_state_file_writable(
     advance. It carries no cursors, so this cycle still baselines from the current PR
     exactly as it did before.
 
+    An existing file that names no owner is adopted here too, cursors intact, because
+    an absent owner is compatible with every managed watch and would otherwise let two
+    of them share the path. Both steps happen under a lock on the path, so the
+    read-then-write that decides ownership cannot interleave with another waiter's.
+
     For a file that already exists the probe is the whole write, ``os.replace``
     included, because that is the step persistence actually depends on and the step a
     sibling-creation check cannot speak for: a target that is a directory, or one in a
@@ -693,41 +784,65 @@ def _verify_state_file_writable(
     target = Path(path)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        exists = target.exists()
     except OSError as err:
         raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
 
-    if not exists and _claim_state_file(
-        target,
-        repo=repo,
-        pr_number=pr_number,
-        watch_identity=watch_identity,
-        watch_id=watch_id,
-    ):
-        # Creating the real file in the real directory is the write probe, and the
-        # rename in later cycles lands on a file this process owns.
-        return
+    with _state_file_lock(target):
+        try:
+            exists = target.exists()
+        except OSError as err:
+            raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
 
-    try:
-        existing = target.read_bytes()
-    except OSError as err:
-        raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
+        if not exists and _claim_state_file(
+            target,
+            repo=repo,
+            pr_number=pr_number,
+            watch_identity=watch_identity,
+            watch_id=watch_id,
+        ):
+            # Creating the real file in the real directory is the write probe, and the
+            # rename in later cycles lands on a file this process owns.
+            return
 
-    scratch = None
-    try:
-        handle, scratch = _state_file_scratch(target)
-        with os.fdopen(handle, "wb") as stream:
-            stream.write(existing)
-        os.replace(scratch, target)
+        # An ownerless file is adopted, not merely accepted: taking the name is what
+        # makes a second managed watch on the same path fail instead of sharing it.
+        # Only when nobody else's claim is on it -- another PR's or another watch's
+        # file is left exactly as it is, for `_load_state_file` to refuse.
+        if (
+            watch_id is not None
+            and _owner_conflict(
+                _state_file_owner(target),
+                repo=repo,
+                pr_number=pr_number,
+                watch_identity=watch_identity,
+                watch_id=watch_id,
+            )
+            is None
+            and _adopt_state_file(target, watch_id=watch_id, watch_identity=watch_identity)
+        ):
+            # Rewriting the real file is the write probe, as the claim is above.
+            return
+
+        try:
+            existing = target.read_bytes()
+        except OSError as err:
+            raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
+
         scratch = None
-    except OSError as err:
-        raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
-    finally:
-        if scratch is not None:
-            try:
-                os.unlink(scratch)
-            except OSError:
-                pass
+        try:
+            handle, scratch = _state_file_scratch(target)
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(existing)
+            os.replace(scratch, target)
+            scratch = None
+        except OSError as err:
+            raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
+        finally:
+            if scratch is not None:
+                try:
+                    os.unlink(scratch)
+                except OSError:
+                    pass
 
 
 def _write_state_file(

@@ -2579,3 +2579,134 @@ def test_main_new_prs_commits_the_cursor_only_after_the_event_is_reported(tmp_pa
     assert len(snapshots) == 1
     assert "pull_request #158" in snapshots[0]
     assert json.loads(state_file.read_text(encoding="utf-8"))["pr_cursor"] == 410
+
+
+def _ownerless_state(module, path, **fields) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_comment_cursor": 500,
+                **fields,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_preflight_adopts_an_ownerless_state_file_for_a_managed_watch(tmp_path) -> None:
+    """An absent owner fits every managed watch, so it must not stay absent.
+
+    A file left by a manual run would otherwise be adopted by two managed watches at
+    once; each would poll and then overwrite the other's cursors, skipping the
+    activity in between for good.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _ownerless_state(module, state_file)
+
+    module._verify_state_file_writable(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity="abc123",
+        watch_id="wat_first",
+    )
+
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["owner"] == "wat_first"
+    assert saved["watch"] == "abc123"
+    # Adoption takes the name, not the cursors: a resumed watch keeps its baseline.
+    assert saved["review_comment_cursor"] == 500
+
+    # The second managed watch now finds a claim instead of an open path: the preflight
+    # leaves it alone and the load refuses it.
+    module._verify_state_file_writable(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity="abc123",
+        watch_id="wat_second",
+    )
+    assert json.loads(state_file.read_text(encoding="utf-8"))["owner"] == "wat_first"
+    with pytest.raises(module.StateFileOwnershipError):
+        module._load_state_file(
+            str(state_file),
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            watch_identity="abc123",
+            watch_id="wat_second",
+        )
+
+
+def test_preflight_leaves_an_ownerless_state_file_alone_for_a_manual_run(tmp_path) -> None:
+    """Only a managed watch has a name to claim the path with.
+
+    A manual run must not stamp itself on a watch's file, or the watch's next cycle
+    would be refused its own state.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _ownerless_state(module, state_file)
+
+    module._verify_state_file_writable(
+        str(state_file), repo="avibe-bot/avibe", pr_number=153, watch_identity="abc123"
+    )
+
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved.get("owner") is None
+    assert saved["review_comment_cursor"] == 500
+
+
+def test_preflight_does_not_adopt_another_watchs_state_file(tmp_path) -> None:
+    """A path that already carries somebody else's claim is left untouched."""
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _ownerless_state(module, state_file, watch="abc123", owner="wat_first")
+
+    module._verify_state_file_writable(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity="abc123",
+        watch_id="wat_second",
+    )
+
+    assert json.loads(state_file.read_text(encoding="utf-8"))["owner"] == "wat_first"
+    with pytest.raises(module.StateFileOwnershipError):
+        module._load_state_file(
+            str(state_file),
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            watch_identity="abc123",
+            watch_id="wat_second",
+        )
+
+
+def test_state_file_lock_serializes_the_ownership_decision(tmp_path) -> None:
+    """The lock is held on a sidecar, not on the file that gets replaced.
+
+    A lock on the state file's own inode would be released into thin air by the
+    first atomic replace, leaving the second half of the decision unguarded.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _ownerless_state(module, state_file)
+    lock_file = tmp_path / "pr-153.json.lock"
+
+    with module._state_file_lock(state_file):
+        assert lock_file.exists()
+        held = lock_file.stat().st_ino
+
+    module._verify_state_file_writable(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity="abc123",
+        watch_id="wat_first",
+    )
+
+    # The state file was replaced; the lock's identity survived it.
+    assert lock_file.stat().st_ino == held
