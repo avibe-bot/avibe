@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
 import re
 import sqlite3
 import stat
-from collections.abc import Iterator, Sequence
+import threading
+import time
+from collections import deque
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -32,6 +36,14 @@ _MODEL_BYTES = 1024
 _PROVENANCE_BYTES = 1024
 _MD_PATH_BYTES = 2048
 _MAX_ROW_ENCODED_BYTES = 320 * 1024
+_QUEUE_CAPACITY = 256
+_WRITE_BATCH_SIZE = 32
+_MAX_CONSECUTIVE_WRITER_FAILURES = 20
+_RETENTION_AGE_MS = 14 * 24 * 60 * 60 * 1000
+_RETENTION_ROWS = 5_000
+_SOFT_STORAGE_BYTES = 128 * 1024 * 1024
+_VACUUM_STEPS = 256
+_MAX_VACUUM_PASSES = 4
 
 _SECRET_KEY_SUFFIXES = (
     "apikey",
@@ -146,6 +158,203 @@ class ProviderCallRow:
     dropped_before: int
 
 
+class RecorderHandle:
+    """Own one nonblocking provider-call queue and its SQLite writer thread."""
+
+    def __init__(self, db_path: Path, *, provider_base_urls: Sequence[str] = ()) -> None:
+        self._db_path = Path(db_path)
+        self._provider_base_urls = tuple(provider_base_urls)
+        self._condition = threading.Condition()
+        self._queue: deque[ProviderCallInput] = deque()
+        self._pending_dropped = 0
+        self._thread: threading.Thread | None = None
+        self._started = False
+        self._running = False
+        self._closing = False
+        self._close_deadline: float | None = None
+        self._close_requested = threading.Event()
+        self._health_state = "disabled"
+        self._health_reason: str | None = None
+        self._consecutive_writer_failures = 0
+
+    @property
+    def health(self) -> dict[str, str | None]:
+        with self._condition:
+            return {"state": self._health_state, "reason": self._health_reason}
+
+    def start(self) -> None:
+        try:
+            with self._condition:
+                if self._started:
+                    return
+                self._started = True
+                self._running = True
+                self._set_health_locked("active", None)
+                thread = threading.Thread(target=self._writer_main, name="memory-call-log", daemon=True)
+                self._thread = thread
+                thread.start()
+        except Exception:
+            with self._condition:
+                self._running = False
+                self._set_health_locked("degraded", "writer_failures")
+
+    def submit(self, call: ProviderCallInput) -> None:
+        try:
+            with self._condition:
+                if not self._running or self._closing or self._health_state == "disabled":
+                    return
+                if len(self._queue) == _QUEUE_CAPACITY:
+                    self._queue.popleft()
+                    self._pending_dropped += 1
+                self._queue.append(call)
+                self._condition.notify()
+        except Exception:
+            return
+
+    async def close(self, timeout: float = 1.0) -> None:
+        try:
+            with self._condition:
+                if not self._started:
+                    return
+                if not self._closing:
+                    self._closing = True
+                    self._close_deadline = time.monotonic() + max(0.0, timeout)
+                    self._close_requested.set()
+                    self._condition.notify_all()
+                thread = self._thread
+            if thread is not None:
+                await asyncio.to_thread(thread.join)
+        except Exception:
+            with self._condition:
+                self._set_health_locked("degraded", "writer_failures")
+
+    def _writer_main(self) -> None:
+        try:
+            with _database_connection(self._db_path) as conn:
+                _initialize_schema(conn)
+                self._writer_loop(conn)
+        except Exception as error:
+            reason = "call_log_corrupt" if _is_corruption(error) else "writer_failures"
+            with self._condition:
+                self._set_health_locked("degraded", reason)
+        finally:
+            with self._condition:
+                self._queue.clear()
+                self._pending_dropped = 0
+                self._running = False
+                if self._closing and self._health_reason not in {"call_log_corrupt", "writer_failures"}:
+                    self._set_health_locked("disabled", None)
+                self._condition.notify_all()
+
+    def _writer_loop(self, conn: sqlite3.Connection) -> None:
+        while True:
+            batch = self._next_batch()
+            if batch is None:
+                return
+            calls, dropped_before = batch
+            rows, trailing_dropped = self._normalize_batch(calls, dropped_before)
+            if trailing_dropped:
+                with self._condition:
+                    self._pending_dropped += trailing_dropped
+            if not rows:
+                continue
+            if not self._persist_batch(conn, rows):
+                return
+            if self._queue_is_empty():
+                try:
+                    _maintain_storage(conn, self._db_path)
+                except Exception as error:
+                    if _is_corruption(error):
+                        with self._condition:
+                            self._set_health_locked("degraded", "call_log_corrupt")
+                        return
+                    if not self._record_writer_failure():
+                        return
+
+    def _next_batch(self) -> tuple[list[ProviderCallInput], int] | None:
+        with self._condition:
+            while not self._queue:
+                if self._closing:
+                    return None
+                self._condition.wait()
+            if self._past_close_deadline_locked():
+                self._queue.clear()
+                self._pending_dropped = 0
+                return None
+            calls = [self._queue.popleft() for _ in range(min(_WRITE_BATCH_SIZE, len(self._queue)))]
+            dropped_before = self._pending_dropped
+            self._pending_dropped = 0
+            return calls, dropped_before
+
+    def _normalize_batch(
+        self,
+        calls: list[ProviderCallInput],
+        dropped_before: int,
+    ) -> tuple[list[ProviderCallRow], int]:
+        rows: list[ProviderCallRow] = []
+        gap = dropped_before
+        for call in calls:
+            try:
+                row = normalize_provider_call(call, provider_base_urls=self._provider_base_urls)
+            except Exception:
+                gap += 1
+                with self._condition:
+                    self._set_health_locked("degraded", "serialization_failed")
+                continue
+            if gap:
+                row = replace(row, dropped_before=row.dropped_before + gap)
+                gap = 0
+            rows.append(row)
+        return rows, gap
+
+    def _persist_batch(self, conn: sqlite3.Connection, rows: list[ProviderCallRow]) -> bool:
+        while True:
+            if self._past_close_deadline():
+                return False
+            try:
+                committed = _write_batch(conn, rows, self._past_close_deadline)
+            except Exception as error:
+                if _is_corruption(error):
+                    with self._condition:
+                        self._set_health_locked("degraded", "call_log_corrupt")
+                    return False
+                if not self._record_writer_failure():
+                    return False
+                continue
+            if not committed:
+                return False
+            with self._condition:
+                self._consecutive_writer_failures = 0
+                self._set_health_locked("active", None)
+            return True
+
+    def _record_writer_failure(self) -> bool:
+        with self._condition:
+            self._consecutive_writer_failures += 1
+            if self._consecutive_writer_failures >= _MAX_CONSECUTIVE_WRITER_FAILURES:
+                self._set_health_locked("disabled", "writer_failures")
+                self._queue.clear()
+                self._pending_dropped = 0
+                return False
+            self._set_health_locked("degraded", "writer_failures")
+            return True
+
+    def _past_close_deadline(self) -> bool:
+        with self._condition:
+            return self._past_close_deadline_locked()
+
+    def _past_close_deadline_locked(self) -> bool:
+        return self._closing and self._close_deadline is not None and time.monotonic() >= self._close_deadline
+
+    def _queue_is_empty(self) -> bool:
+        with self._condition:
+            return not self._queue
+
+    def _set_health_locked(self, state: str, reason: str | None) -> None:
+        self._health_state = state
+        self._health_reason = reason
+
+
 def normalize_provider_call(
     call: ProviderCallInput,
     *,
@@ -211,8 +420,12 @@ def initialize_call_log(db_path: Path) -> None:
 
     db_path = Path(db_path)
     with _database_connection(db_path) as conn:
-        conn.executescript(
-            """
+        _initialize_schema(conn)
+
+
+def _initialize_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
             CREATE TABLE IF NOT EXISTS provider_call (
                 id TEXT PRIMARY KEY NOT NULL,
                 started_at_ms INTEGER NOT NULL,
@@ -254,8 +467,112 @@ def initialize_call_log(db_path: Path) -> None:
             CREATE INDEX IF NOT EXISTS provider_call_parent_idx
                 ON provider_call(parent_type, parent_id);
             PRAGMA user_version = 1;
-            """
+        """
+    )
+
+
+def maintain_call_log(db_path: Path, *, now_ms: int | None = None) -> str | None:
+    """Prune an existing call log, returning a stable failure reason."""
+
+    db_path = Path(db_path)
+    try:
+        os.lstat(db_path)
+    except FileNotFoundError:
+        return None
+    try:
+        with _database_connection(db_path) as conn:
+            _initialize_schema(conn)
+            _maintain_storage(conn, db_path, now_ms=now_ms)
+    except Exception as error:
+        return "call_log_corrupt" if _is_corruption(error) else "writer_failures"
+    return None
+
+
+def _write_batch(
+    conn: sqlite3.Connection,
+    rows: list[ProviderCallRow],
+    should_abort: Callable[[], bool],
+) -> bool:
+    parameters = [asdict(row) for row in rows]
+    columns = tuple(parameters[0])
+    column_sql = ", ".join(columns)
+    placeholder_sql = ", ".join(f":{column}" for column in columns)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executemany(
+            f"INSERT INTO provider_call ({column_sql}) VALUES ({placeholder_sql}) ON CONFLICT(id) DO NOTHING",
+            parameters,
         )
+        if should_abort():
+            conn.execute("ROLLBACK")
+            return False
+        conn.execute("COMMIT")
+        return True
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
+def _maintain_storage(
+    conn: sqlite3.Connection,
+    db_path: Path,
+    *,
+    now_ms: int | None = None,
+) -> None:
+    reference_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    cutoff_ms = reference_ms - _RETENTION_AGE_MS
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM provider_call WHERE started_at_ms < ?", (cutoff_ms,))
+        conn.execute(
+            "DELETE FROM provider_call WHERE id IN ("
+            "SELECT id FROM provider_call "
+            "ORDER BY started_at_ms DESC, id DESC LIMIT -1 OFFSET ?)",
+            (_RETENTION_ROWS,),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    previous_size = _call_log_size_bytes(db_path)
+    for _ in range(_MAX_VACUUM_PASSES):
+        if previous_size <= _SOFT_STORAGE_BYTES:
+            break
+        conn.execute(f"PRAGMA incremental_vacuum({_VACUUM_STEPS})")
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        current_size = _call_log_size_bytes(db_path)
+        if current_size >= previous_size:
+            break
+        previous_size = current_size
+
+
+def _call_log_size_bytes(db_path: Path) -> int:
+    total = 0
+    for candidate in (
+        db_path,
+        db_path.with_name(f"{db_path.name}-wal"),
+        db_path.with_name(f"{db_path.name}-shm"),
+    ):
+        try:
+            total += os.lstat(candidate).st_size
+        except FileNotFoundError:
+            continue
+    return total
+
+
+def _is_corruption(error: BaseException) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int) and code & 0xFF in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+        return True
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in ("database disk image is malformed", "file is not a database", "database corruption")
+    )
 
 
 @contextmanager
@@ -268,6 +585,8 @@ def _database_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
         if version not in {0, 1}:
             raise RuntimeError(f"Unsupported call-log schema version: {version}")
         conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+        if conn.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+            raise RuntimeError("Call-log database does not use incremental auto-vacuum")
         conn.execute("PRAGMA journal_mode = WAL")
         _validate_private_database_files(db_path)
         conn.execute("PRAGMA busy_timeout = 1000")

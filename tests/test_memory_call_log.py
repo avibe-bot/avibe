@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
 import stat
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -12,7 +16,9 @@ import pytest
 from core.memory.everos_insight import recorder
 from core.memory.everos_insight.recorder import (
     ProviderCallInput,
+    RecorderHandle,
     initialize_call_log,
+    maintain_call_log,
     normalize_provider_call,
 )
 
@@ -387,3 +393,217 @@ def test_call_log_rejects_unowned_directory_before_open(tmp_path, monkeypatch) -
         initialize_call_log(db_path)
 
     assert not db_path.exists()
+
+
+async def test_recorder_batches_and_reports_oldest_queue_drops(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    batch_sizes: list[int] = []
+    original_connection = recorder._database_connection
+    original_write_batch = recorder._write_batch
+
+    @contextmanager
+    def gated_connection(path):
+        entered.set()
+        assert release.wait(2)
+        with original_connection(path) as conn:
+            yield conn
+
+    def observed_write_batch(conn, rows, should_abort):
+        batch_sizes.append(len(rows))
+        return original_write_batch(conn, rows, should_abort)
+
+    monkeypatch.setattr(recorder, "_database_connection", gated_connection)
+    monkeypatch.setattr(recorder, "_write_batch", observed_write_batch)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    assert entered.wait(2)
+
+    started_at_ms = int(time.time() * 1000)
+    for index in range(300):
+        handle.submit(_call(id=f"call-{index}", started_at_ms=started_at_ms + index))
+    release.set()
+    await handle.close()
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT started_at_ms, dropped_before FROM provider_call ORDER BY started_at_ms").fetchall()
+    assert len(rows) == 256
+    assert rows[0] == (started_at_ms + 44, 44)
+    assert rows[-1] == (started_at_ms + 299, 0)
+    assert batch_sizes
+    assert max(batch_sizes) <= recorder._WRITE_BATCH_SIZE
+    assert len(batch_sizes) < len(rows)
+
+
+async def test_recorder_swallows_bad_inputs_and_persists_the_next_call(tmp_path) -> None:
+    db_path = _private_db_path(tmp_path)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    handle.submit(_call(id="invalid", request={"bad": object()}))  # type: ignore[arg-type]
+    handle.submit(_call(id="valid", started_at_ms=int(time.time() * 1000)))
+    await handle.close()
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT id, dropped_before FROM provider_call").fetchall()
+    assert rows == [("valid", 1)]
+
+
+async def test_recorder_disables_after_twenty_consecutive_writer_failures(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    failed = threading.Event()
+    attempts = 0
+
+    def failing_write_batch(_conn, _rows, _should_abort):
+        nonlocal attempts
+        attempts += 1
+        if attempts == recorder._MAX_CONSECUTIVE_WRITER_FAILURES:
+            failed.set()
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr(recorder, "_write_batch", failing_write_batch)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    handle.submit(_call())
+    assert failed.wait(2)
+
+    assert attempts == recorder._MAX_CONSECUTIVE_WRITER_FAILURES
+    assert handle.health == {"state": "disabled", "reason": "writer_failures"}
+    await handle.close()
+
+
+async def test_recorder_resets_writer_failure_health_after_success(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    succeeded = threading.Event()
+    attempts = 0
+    original_write_batch = recorder._write_batch
+
+    def transient_write_batch(conn, rows, should_abort):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("locked")
+        result = original_write_batch(conn, rows, should_abort)
+        succeeded.set()
+        return result
+
+    monkeypatch.setattr(recorder, "_write_batch", transient_write_batch)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    handle.submit(_call())
+    assert succeeded.wait(2)
+    assert handle.health == {"state": "active", "reason": None}
+    await handle.close()
+
+
+async def test_close_deadline_rolls_back_and_connection_closes_on_writer_thread(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    insert_started = threading.Event()
+    release_insert = threading.Event()
+    created_threads: list[int] = []
+    closed_threads: list[int] = []
+    real_connect = sqlite3.connect
+
+    class BlockingConnection(sqlite3.Connection):
+        def executemany(self, sql, parameters):
+            result = super().executemany(sql, parameters)
+            insert_started.set()
+            assert release_insert.wait(2)
+            return result
+
+        def close(self):
+            closed_threads.append(threading.get_ident())
+            return super().close()
+
+    def tracking_connect(*args, **kwargs):
+        created_threads.append(threading.get_ident())
+        return real_connect(*args, **kwargs, factory=BlockingConnection)
+
+    monkeypatch.setattr(recorder.sqlite3, "connect", tracking_connect)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    handle.submit(_call())
+    assert insert_started.wait(2)
+
+    close_task = asyncio.create_task(handle.close(timeout=0.0))
+    assert await asyncio.to_thread(handle._close_requested.wait, 2)
+    release_insert.set()
+    await close_task
+
+    assert created_threads == closed_threads
+    assert len(created_threads) == 1
+    assert created_threads[0] != threading.get_ident()
+    with real_connect(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM provider_call").fetchone()[0] == 0
+
+
+def test_host_maintenance_prunes_age_and_count(tmp_path) -> None:
+    db_path = _private_db_path(tmp_path)
+    initialize_call_log(db_path)
+    now_ms = 2_000_000_000_000
+    cutoff_ms = now_ms - recorder._RETENTION_AGE_MS
+    calls = [
+        normalize_provider_call(_call(id=f"recent-{index}", started_at_ms=now_ms - index)) for index in range(5_005)
+    ]
+    calls.extend(
+        normalize_provider_call(_call(id=f"old-{index}", started_at_ms=cutoff_ms - index - 1)) for index in range(5)
+    )
+    parameters = [asdict(call) for call in calls]
+    columns = ", ".join(parameters[0])
+    placeholders = ", ".join(f":{column}" for column in parameters[0])
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(f"INSERT INTO provider_call ({columns}) VALUES ({placeholders})", parameters)
+
+    assert maintain_call_log(db_path, now_ms=now_ms) is None
+    with sqlite3.connect(db_path) as conn:
+        count, oldest = conn.execute("SELECT count(*), min(started_at_ms) FROM provider_call").fetchone()
+    assert count == 5_000
+    assert oldest >= cutoff_ms
+
+
+def test_host_maintenance_bounds_checkpoint_and_vacuum_passes(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    initialize_call_log(db_path)
+    statements: list[str] = []
+    size_reads = 0
+    original_connection = recorder._database_connection
+
+    @contextmanager
+    def traced_connection(path):
+        with original_connection(path) as conn:
+            conn.set_trace_callback(statements.append)
+            yield conn
+
+    def decreasing_oversize(_path):
+        nonlocal size_reads
+        size_reads += 1
+        return recorder._SOFT_STORAGE_BYTES + 100 - size_reads
+
+    monkeypatch.setattr(recorder, "_database_connection", traced_connection)
+    monkeypatch.setattr(recorder, "_call_log_size_bytes", decreasing_oversize)
+    assert maintain_call_log(db_path) is None
+
+    vacuum = [statement for statement in statements if "incremental_vacuum" in statement]
+    checkpoints = [statement for statement in statements if "wal_checkpoint" in statement]
+    assert len(vacuum) == recorder._MAX_VACUUM_PASSES
+    assert len(checkpoints) == recorder._MAX_VACUUM_PASSES + 1
+    assert size_reads == recorder._MAX_VACUUM_PASSES + 1
+
+
+async def test_corrupt_call_log_stays_degraded_and_is_never_recreated(tmp_path) -> None:
+    db_path = _private_db_path(tmp_path)
+    corrupt_bytes = b"not a sqlite database"
+    db_path.write_bytes(corrupt_bytes)
+    db_path.chmod(0o600)
+
+    assert maintain_call_log(db_path) == "call_log_corrupt"
+    assert maintain_call_log(db_path) == "call_log_corrupt"
+    assert db_path.read_bytes() == corrupt_bytes
+
+    handle = RecorderHandle(db_path)
+    handle.start()
+    handle.submit(_call())
+    await handle.close()
+    assert handle.health == {"state": "degraded", "reason": "call_log_corrupt"}
+    assert db_path.read_bytes() == corrupt_bytes
+    assert sorted(path.name for path in db_path.parent.iterdir()) == [db_path.name]
