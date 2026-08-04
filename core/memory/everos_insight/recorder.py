@@ -218,7 +218,7 @@ class RecorderHandle:
             except Exception:
                 with self._condition:
                     if self._running and not self._closing:
-                        self._carry_drop_locked(1)
+                        self._pending_dropped += 1
                         self._set_health_locked("degraded", "serialization_failed")
                 return
             with self._condition:

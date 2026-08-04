@@ -504,6 +504,40 @@ async def test_recorder_swallows_bad_inputs_and_persists_the_next_call(tmp_path)
     assert rows == [("valid", 1)]
 
 
+async def test_serialization_gap_is_attached_to_the_next_record(tmp_path, monkeypatch) -> None:
+    db_path = _private_db_path(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    original_connection = recorder._database_connection
+
+    @contextmanager
+    def gated_connection(path):
+        entered.set()
+        assert release.wait(2)
+        with original_connection(path) as conn:
+            yield conn
+
+    monkeypatch.setattr(recorder, "_database_connection", gated_connection)
+    handle = RecorderHandle(db_path)
+    handle.start()
+    assert entered.wait(2)
+
+    handle.submit(_call(id="before", started_at_ms=1))
+    handle.submit(_call(id="invalid", request={"bad": object()}))  # type: ignore[arg-type]
+    handle.submit(_call(id="after", started_at_ms=2))
+
+    assert [row.id for row in handle._queue] == ["before", "after"]
+    assert [row.dropped_before for row in handle._queue] == [0, 1]
+    release.set()
+    await handle.close()
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, dropped_before FROM provider_call ORDER BY started_at_ms"
+        ).fetchall()
+    assert rows == [("before", 0), ("after", 1)]
+
+
 async def test_recorder_disables_after_twenty_consecutive_writer_failures(tmp_path, monkeypatch) -> None:
     db_path = _private_db_path(tmp_path)
     failed = threading.Event()
