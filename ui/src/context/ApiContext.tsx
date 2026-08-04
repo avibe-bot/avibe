@@ -453,6 +453,8 @@ export type ApiContextType = {
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
   getMemoryProfile: () => Promise<MemoryItemsResult>;
   searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
+  getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
+  getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
   clearMemory: () => Promise<MemoryClearResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
@@ -1599,6 +1601,12 @@ export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
   processing: MemoryProcessingConfig;
+  diagnostics: {
+    log_provider_calls: boolean;
+    // Response-only. The backend derives this from direct-loopback admission;
+    // clients must not infer administrative authority from their hostname.
+    mutable: boolean;
+  };
 };
 
 // Omitting a field keeps its current value; an explicit `api_key: null` clears it
@@ -1614,6 +1622,9 @@ export type MemorySettingsPatch = {
   processing?: {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
+  };
+  diagnostics?: {
+    log_provider_calls: boolean;
   };
 };
 
@@ -1667,6 +1678,10 @@ export type MemoryStatus = {
   processing_fault_kind: 'credential' | 'engine' | null;
   processing_fault_since: string | null;
   processing_alert_active: boolean;
+  recorder?: {
+    state: 'active' | 'degraded' | 'disabled';
+    reason: string | null;
+  };
   error: string | null;
   data_exists: boolean;
 };
@@ -1719,6 +1734,96 @@ export type MemoryItem = {
 
 export type MemoryItemsResult =
   | { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null }
+  | MemoryFailure;
+
+export type MemoryLogSourceStatus = {
+  status: 'available' | 'partial' | 'unavailable';
+  reason?: string;
+};
+
+export type MemoryLogSections = {
+  everos: MemoryLogSourceStatus;
+  capture: MemoryLogSourceStatus;
+  calls: MemoryLogSourceStatus;
+};
+
+export type MemoryLogEntry = {
+  memcell_id: string;
+  timestamp_ms: number;
+  preview: string;
+  message_count: number;
+  run_summary: { total: number; statuses: Record<string, number> } | null;
+  authorized_call_count: number | null;
+};
+
+export type MemoryLogListResult =
+  | {
+      status: 'ok';
+      entries: MemoryLogEntry[];
+      next_cursor: string | null;
+      sections: MemoryLogSections;
+    }
+  | MemoryFailure;
+
+export type MemoryLogCapture =
+  | { status: 'available'; delivery_states: string[]; matched_message_count: number }
+  | { status: 'unavailable'; reason: string };
+
+export type MemoryLogStep = {
+  type: 'capture' | 'memcell' | 'strategy';
+  status: string;
+  timestamp_ms?: number;
+  started_at_ms?: number;
+  finished_at_ms?: number | null;
+  memcell_id?: string;
+  run_id?: string;
+  strategy?: string;
+  relation?: 'profile_trigger' | 'run';
+  attempt?: number;
+  error?: string | null;
+  reason?: string;
+};
+
+export type MemoryProviderCall = {
+  id: string;
+  started_at_ms: number;
+  duration_ms: number;
+  kind: string;
+  stage: string;
+  model: string | null;
+  status: string;
+  error: string | null;
+  finish_reason: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  request: unknown;
+  response: unknown;
+  request_bytes: number | null;
+  response_bytes: number | null;
+  dropped_before: number;
+};
+
+export type MemoryLogCurrentState =
+  | {
+      status: 'available';
+      profile: { status: 'present' | 'missing'; updated_at_ms: number | null };
+      indexing: { status: string; updated_at_ms?: number; error?: string | null };
+      label: 'current_state';
+    }
+  | { status: 'unavailable'; reason: string };
+
+export type MemoryLogDetailResult =
+  | {
+      status: 'ok';
+      entry: Pick<MemoryLogEntry, 'memcell_id' | 'timestamp_ms' | 'preview' | 'message_count'>;
+      capture: MemoryLogCapture;
+      steps: MemoryLogStep[];
+      calls: MemoryProviderCall[];
+      omitted_call_count: number;
+      omitted_step_count: number;
+      current_state: MemoryLogCurrentState;
+      sections: MemoryLogSections;
+    }
   | MemoryFailure;
 
 export type MemoryClearResult = { status: 'completed'; epoch: number } | MemoryFailure;
@@ -2760,6 +2865,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
     getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
     searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
+    getMemoryLog: (cursor = null, limit = 20) => {
+      const query = new URLSearchParams({ limit: String(limit) });
+      if (cursor) query.set('cursor', cursor);
+      return getJson(`/api/memory/log?${query.toString()}`, { handleError: false });
+    },
+    getMemoryLogEntry: (memcellId) =>
+      getJson(`/api/memory/log/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
     restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
