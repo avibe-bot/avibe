@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
+from core.memory.everos_insight import reader as reader_module
 
 
 ALICE = "u-" + "a" * 32
@@ -527,6 +528,112 @@ def test_capture_message_id_collision_with_foreign_scope_fails_closed(
     detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_collision")
     assert detail["capture"] == {"status": "unavailable", "reason": "expired"}
     assert detail["calls"] == []
+
+
+def test_oversized_memcell_json_is_not_decoded_or_used_for_capture_attribution(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memcell_id = "mc_bounded_json"
+    message_id = "m_bounded_6400_000"
+    _insert_memcell(
+        insight_paths,
+        memcell_id,
+        ALICE,
+        timestamp_ms=6_500,
+        message_ids=[message_id],
+    )
+    oversized_payload = _json(
+        {
+            "items": [
+                {
+                    "role": "user",
+                    "sender_id": ALICE,
+                    "content": "x" * reader_module._MAX_MEMCELL_PAYLOAD_JSON_BYTES,
+                }
+            ]
+        }
+    )
+    oversized_message_ids = _json(
+        [message_id, "x" * reader_module._MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES]
+    )
+    oversized_senders = _json(
+        [ALICE, "x" * reader_module._MAX_MEMCELL_SENDER_IDS_JSON_BYTES]
+    )
+    assert len(oversized_payload.encode()) > reader_module._MAX_MEMCELL_PAYLOAD_JSON_BYTES
+    assert (
+        len(oversized_message_ids.encode())
+        > reader_module._MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES
+    )
+    assert len(oversized_senders.encode()) > reader_module._MAX_MEMCELL_SENDER_IDS_JSON_BYTES
+    _insert_memcell(insight_paths, "mc_oversized_senders", ALICE, timestamp_ms=6_400)
+    with sqlite3.connect(insight_paths.system_db_path) as conn:
+        conn.execute(
+            """
+            UPDATE memcell
+            SET payload_json = ?, message_ids_json = ?
+            WHERE memcell_id = ?
+            """,
+            (oversized_payload, oversized_message_ids, memcell_id),
+        )
+        conn.execute(
+            "UPDATE memcell SET sender_ids_json = ? WHERE memcell_id = ?",
+            (oversized_senders, "mc_oversized_senders"),
+        )
+
+    _insert_queue(
+        insight_paths,
+        "bounded",
+        ALICE,
+        session="bounded",
+        timestamp_ms=6_400,
+        add_request_id="capture-request",
+    )
+    _insert_run(
+        insight_paths,
+        "run-bounded",
+        "extract_atomic_facts",
+        {
+            "memcell_id": memcell_id,
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "owner_id": ALICE,
+        },
+    )
+    _insert_call(insight_paths, "direct-bounded", memcell_id=memcell_id)
+    _insert_call(insight_paths, "run-bounded-call", run_id="run-bounded")
+    _insert_call(insight_paths, "capture-bounded-call", request_id="capture-request")
+
+    original_decode = reader_module._decode_json
+    decoded_values: list[str] = []
+
+    def guarded_decode(value: object) -> object:
+        if isinstance(value, str):
+            decoded_values.append(value)
+            assert value not in {
+                oversized_payload,
+                oversized_message_ids,
+                oversized_senders,
+            }
+        return original_decode(value)
+
+    monkeypatch.setattr(reader_module, "_decode_json", guarded_decode)
+    reader = MemoryInsightReader(insight_paths)
+    listed = reader.list_entries((ALICE, PROJECT), None, 10)
+    detail = reader.entry_detail((ALICE, PROJECT), memcell_id)
+
+    entry = next(item for item in listed["entries"] if item["memcell_id"] == memcell_id)
+    assert entry["preview"] == ""
+    assert entry["message_count"] == 0
+    assert entry["authorized_call_count"] == 2
+    assert detail["entry"]["preview"] == ""
+    assert detail["entry"]["message_count"] == 0
+    assert detail["capture"] == {"status": "unavailable", "reason": "expired"}
+    assert {call["id"] for call in detail["calls"]} == {
+        "direct-bounded",
+        "run-bounded-call",
+    }
+    assert decoded_values
 
 
 def test_expired_queue_link_is_explicit_and_has_no_fallback(

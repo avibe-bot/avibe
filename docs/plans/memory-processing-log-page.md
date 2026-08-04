@@ -405,6 +405,9 @@ Public adapter results:
   current-state labels. It returns at most the newest 20 call details and newest
   50 run/strategy timeline rows, with separate `omitted_call_count` and
   `omitted_step_count` values. Projection is a single bounded pass: each returned
+  memcell payload, message-id, and sender JSON value is capped before Python
+  decoding at 64 KB, 16 KB, and 1 KB respectively, with oversized values omitted
+  from preview, capture attribution, or ownership as appropriate; each returned
   request and response field has a 12,000-byte JSON-encoded representation cap,
   each returned error is capped at 1,024 UTF-8 bytes, and every other string uses
   its declared field cap. A field that exceeds its cap becomes an explicit

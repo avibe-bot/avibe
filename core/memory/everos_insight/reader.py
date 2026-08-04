@@ -24,6 +24,9 @@ _MAX_DETAIL_RUNS = 50
 _MAX_PAYLOAD_FIELD_BYTES = 12_000
 _MAX_ERROR_BYTES = 1_024
 _MAX_RESPONSE_BYTES = 1_000_000
+_MAX_MEMCELL_PAYLOAD_JSON_BYTES = 64_000
+_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES = 16_000
+_MAX_MEMCELL_SENDER_IDS_JSON_BYTES = 1_024
 _LIST_RUN_STATUSES = ("running", "success", "failed", "dead_letter", "crashed")
 # Keep SQL ordering identical to _timestamp_ms: stored numeric values are
 # already milliseconds, while ISO fractional seconds are truncated to millis.
@@ -360,11 +363,22 @@ class MemoryInsightReader:
                     SELECT memcell_id, app_id, project_id, message_ids_json,
                            sender_ids_json, payload_json, timestamp, timestamp_ms
                     FROM (
-                        SELECT memcell_id, app_id, project_id, message_ids_json,
-                               sender_ids_json, payload_json, timestamp,
+                        SELECT memcell_id, app_id, project_id,
+                               CASE WHEN length(CAST(message_ids_json AS BLOB))
+                                             <= {_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES}
+                                    THEN message_ids_json ELSE '[]' END AS message_ids_json,
+                               CASE WHEN length(CAST(sender_ids_json AS BLOB))
+                                             <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
+                                    THEN sender_ids_json ELSE '[]' END AS sender_ids_json,
+                               CASE WHEN length(CAST(payload_json AS BLOB))
+                                             <= {_MAX_MEMCELL_PAYLOAD_JSON_BYTES}
+                                    THEN payload_json ELSE NULL END AS payload_json,
+                               timestamp,
                                {_MEMCELL_TIMESTAMP_SQL} AS timestamp_ms
                         FROM memcell
                         WHERE app_id = ? AND project_id = ?
+                          AND length(CAST(sender_ids_json AS BLOB))
+                                <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
                           AND CASE WHEN json_valid(sender_ids_json) THEN
                                 json_type(sender_ids_json) = 'array'
                                 AND json_array_length(sender_ids_json) = 1
@@ -785,11 +799,22 @@ class MemoryInsightReader:
         try:
             with _read_only(self._paths.system_db_path) as conn:
                 row = conn.execute(
-                    """
-                    SELECT memcell_id, app_id, project_id, message_ids_json,
-                           sender_ids_json, payload_json, timestamp
+                    f"""
+                    SELECT memcell_id, app_id, project_id,
+                           CASE WHEN length(CAST(message_ids_json AS BLOB))
+                                         <= {_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES}
+                                THEN message_ids_json ELSE '[]' END AS message_ids_json,
+                           CASE WHEN length(CAST(sender_ids_json AS BLOB))
+                                         <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
+                                THEN sender_ids_json ELSE '[]' END AS sender_ids_json,
+                           CASE WHEN length(CAST(payload_json AS BLOB))
+                                         <= {_MAX_MEMCELL_PAYLOAD_JSON_BYTES}
+                                THEN payload_json ELSE NULL END AS payload_json,
+                           timestamp
                     FROM memcell
                     WHERE memcell_id = ? AND app_id = ? AND project_id = ?
+                      AND length(CAST(sender_ids_json AS BLOB))
+                            <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
                       AND CASE WHEN json_valid(sender_ids_json) THEN
                             json_type(sender_ids_json) = 'array'
                             AND json_array_length(sender_ids_json) = 1
