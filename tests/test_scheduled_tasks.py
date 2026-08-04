@@ -3679,6 +3679,141 @@ def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypa
     assert service._running is False
 
 
+def test_request_partitions_use_the_canonical_session_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from storage.sessions_service import SQLiteSessionsService
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    target = parse_session_key("slack::channel::C123")
+    sessions = SQLiteSessionsService(paths.get_sqlite_state_path())
+    try:
+        session_id = sessions.reserve_agent_session(
+            scope_key=target.session_scope,
+            agent_backend="codex",
+            session_anchor=session_anchor_for_target(target),
+        )
+    finally:
+        sessions.close()
+    assert session_id is not None
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=ScheduledTaskStore(tmp_path / "tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "requests"),
+    )
+    by_id = TaskExecutionRequest(
+        id="by-session-id",
+        request_type="hook_send",
+        session_id=session_id,
+    )
+    by_key = TaskExecutionRequest(
+        id="by-session-key",
+        request_type="hook_send",
+        session_key=target.to_key(),
+    )
+
+    assert service._request_partition_key(by_id) == service._request_partition_key(
+        by_key
+    )
+
+
+def test_request_capacity_is_reserved_before_claim(tmp_path: Path) -> None:
+    request_store = TaskExecutionStore(tmp_path / "requests")
+    first = request_store.enqueue_hook_send(
+        session_key="slack::channel::A",
+        prompt="first",
+    )
+    second = request_store.enqueue_hook_send(
+        session_key="slack::channel::B",
+        prompt="second",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=ScheduledTaskStore(tmp_path / "tasks.json"),
+        request_store=request_store,
+    )
+    service._running = True
+    for index in range(service._MAX_CONCURRENT_EXECUTIONS - 1):
+        service._inflight_executions[f"busy-{index}"] = Mock()
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+    claims: list[str] = []
+    spawned: list[str] = []
+
+    async def _run_sync(operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
+        if operation == service._claim_pending_request:
+            claims.append(args[0].id)
+            claim_started.set()
+            await release_claim.wait()
+        return operation(*args, **kwargs)
+
+    service._run_runtime_sync = _run_sync  # type: ignore[method-assign]
+    service._spawn_execution = (  # type: ignore[method-assign]
+        lambda request, _lock_key: spawned.append(request.id)
+    )
+
+    async def _exercise() -> None:
+        first_task = asyncio.create_task(service._process_pending_request(first))
+        await claim_started.wait()
+        assert await service._process_pending_request(second) is False
+        release_claim.set()
+        assert await first_task is True
+
+    asyncio.run(_exercise())
+
+    assert claims == [first.id]
+    assert spawned == [first.id]
+    assert service._request_capacity_reservations == set()
+
+
+def test_claimed_request_is_requeued_when_its_lane_generation_stops(
+    tmp_path: Path,
+) -> None:
+    request_store = TaskExecutionStore(tmp_path / "requests")
+    pending = request_store.enqueue_hook_send(
+        session_key="slack::channel::A",
+        prompt="run after restart",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=ScheduledTaskStore(tmp_path / "tasks.json"),
+        request_store=request_store,
+    )
+    service._running = True
+    token = RuntimeWorkRegistrationToken(RuntimeWorkLane.REQUESTS, 1)
+    service._runtime_work_tokens[RuntimeWorkLane.REQUESTS] = token
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+    spawned: list[str] = []
+
+    async def _run_sync(operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
+        if operation == service._claim_pending_request:
+            claim_started.set()
+            await release_claim.wait()
+        return operation(*args, **kwargs)
+
+    service._run_runtime_sync = _run_sync  # type: ignore[method-assign]
+    service._spawn_execution = (  # type: ignore[method-assign]
+        lambda request, _lock_key: spawned.append(request.id)
+    )
+
+    async def _exercise() -> None:
+        processing = asyncio.create_task(service._process_pending_request(pending))
+        await claim_started.wait()
+        service._running = False
+        service._runtime_work_tokens.pop(RuntimeWorkLane.REQUESTS)
+        release_claim.set()
+        assert await processing is True
+
+    asyncio.run(_exercise())
+
+    assert spawned == []
+    assert request_store.get_run(pending.id)["status"] == "queued"
+    assert service._request_capacity_reservations == set()
+
+
 def test_drain_requests_executes_hook_send(tmp_path: Path) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     request = request_store.enqueue_hook_send(
@@ -9141,6 +9276,69 @@ def test_hfr_176_legacy_file_probes_wake_only_their_mapped_lanes(
     monkeypatch.setattr(scheduled_tasks.asyncio, "sleep", _task_probe)
     asyncio.run(service._legacy_task_definition_probe())
     assert notifications == [(RuntimeWorkLane.TASK_DEFINITIONS,)]
+
+
+def test_failure_notice_scan_arms_the_earliest_retry_deadline() -> None:
+    retry_at = (datetime.now(timezone.utc) + timedelta(seconds=8)).isoformat()
+    sqlite_store = SimpleNamespace(
+        list_owed_failure_notices=lambda **_kwargs: [],
+        next_owed_failure_notice_at=lambda: retry_at,
+    )
+    schedule_wake = Mock()
+    service = SimpleNamespace(
+        request_store=SimpleNamespace(sqlite_backend=sqlite_store),
+        _schedule_runtime_work_wake=schedule_wake,
+    )
+    handler = scheduled_tasks._ScheduledRuntimeWorkHandler(
+        service,
+        RuntimeWorkLane.FAILURE_NOTICES,
+    )
+
+    items, has_more = handler.scan(limit=10, occupied=frozenset(), cursor=None)
+
+    assert items == []
+    assert has_more is False
+    lane, delay = schedule_wake.call_args.args
+    assert lane is RuntimeWorkLane.FAILURE_NOTICES
+    assert 0 < delay <= 8
+
+
+def test_stale_lane_applies_leaked_lock_cleanup_on_the_controller_loop(
+    tmp_path: Path,
+) -> None:
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=ScheduledTaskStore(tmp_path / "tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "requests"),
+    )
+    sweep_threads: list[int] = []
+    cleanup_threads: list[int] = []
+    service._propagate_requested_cancellations_async = AsyncMock()  # type: ignore[method-assign]
+
+    def _sweep(*, release_leaked_locks: bool = True) -> None:
+        assert release_leaked_locks is False
+        sweep_threads.append(threading.get_ident())
+
+    service._sweep_stale_runs = _sweep  # type: ignore[method-assign]
+    service._release_leaked_session_locks = (  # type: ignore[method-assign]
+        lambda: cleanup_threads.append(threading.get_ident()) or set()
+    )
+    handler = scheduled_tasks._ScheduledRuntimeWorkHandler(
+        service,
+        RuntimeWorkLane.STALE_RUNS,
+    )
+
+    async def _exercise() -> int:
+        loop_thread = threading.get_ident()
+        assert await handler.process(
+            scheduled_tasks.RuntimeWorkItem("stale-runs", None)
+        )
+        return loop_thread
+
+    loop_thread = asyncio.run(_exercise())
+
+    assert sweep_threads and sweep_threads[0] != loop_thread
+    assert cleanup_threads == [loop_thread]
 
 
 @pytest.mark.parametrize("stop_entrypoint", ["stop", "lease_loss"])

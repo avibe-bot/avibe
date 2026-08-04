@@ -3318,7 +3318,13 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
     ) -> tuple[list[RuntimeWorkItem], bool]:
         if self.lane is RuntimeWorkLane.TASK_DEFINITIONS:
             changed = self.service.store.maybe_reload()
-            return [RuntimeWorkItem("scheduled-tasks", changed)], False
+            return [
+                RuntimeWorkItem(
+                    "scheduled-tasks",
+                    changed,
+                    rearm_after_process=False,
+                )
+            ], False
         if self.lane is RuntimeWorkLane.REQUESTS:
             return self._scan_requests(limit=limit, occupied=occupied, cursor=cursor)
         if self.lane is RuntimeWorkLane.RUN_CALLBACKS:
@@ -3375,7 +3381,13 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
                 cursor=cursor,
             )
         if self.lane is RuntimeWorkLane.STALE_RUNS:
-            return [RuntimeWorkItem("stale-runs", None)], False
+            return [
+                RuntimeWorkItem(
+                    "stale-runs",
+                    None,
+                    rearm_after_process=False,
+                )
+            ], False
         return [], False
 
     def _scan_requests(
@@ -3507,6 +3519,25 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
             if len(parts) == 3:
                 after = (parts[0], parts[1], parts[2])
         rows = store.list_owed_failure_notices(limit=limit, after=after)
+        next_attempt_at = store.next_owed_failure_notice_at()
+        if next_attempt_at:
+            try:
+                next_attempt = datetime.fromisoformat(next_attempt_at)
+                if next_attempt.tzinfo is None:
+                    next_attempt = next_attempt.replace(tzinfo=timezone.utc)
+                delay = max(
+                    0.0,
+                    (next_attempt.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds(),
+                )
+                self.service._schedule_runtime_work_wake(
+                    RuntimeWorkLane.FAILURE_NOTICES,
+                    delay,
+                )
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Ignoring invalid failure-notice retry timestamp %r",
+                    next_attempt_at,
+                )
         items: list[RuntimeWorkItem] = []
         for row in rows:
             run_id = str(row.get("id") or "")
@@ -3564,7 +3595,11 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
             return True
         if self.lane is RuntimeWorkLane.STALE_RUNS:
             await self.service._propagate_requested_cancellations_async()
-            await self.service._run_runtime_sync(self.service._sweep_stale_runs)
+            await self.service._run_runtime_sync(
+                self.service._sweep_stale_runs,
+                release_leaked_locks=False,
+            )
+            self.service._release_leaked_session_locks()
             return True
         return True
 
@@ -3612,6 +3647,7 @@ class ScheduledTaskService:
         # Claimed requests currently executing, keyed by request id, so a
         # single slow/hung turn can't stall delivery of every other request.
         self._inflight_executions: Dict[str, "asyncio.Task[Any]"] = {}
+        self._request_capacity_reservations: set[str] = set()
         # Immutable loop-published view consumed by the off-thread recovery scan.
         # The handler rechecks it on the loop before the recovery CAS.
         self._live_claimed_run_ids: frozenset[str] = frozenset()
@@ -4492,7 +4528,8 @@ class ScheduledTaskService:
         return joined
 
     def _wake_runtime_work(self, *lanes: RuntimeWorkLane) -> None:
-        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        controller = getattr(self, "controller", None)
+        supervisor = getattr(controller, "runtime_work_supervisor", None)
         notify = getattr(supervisor, "notify", None)
         if callable(notify):
             notify(*lanes)
@@ -4811,6 +4848,7 @@ class ScheduledTaskService:
             if self._request_recovery_unregistration_task is request_recovery_stop:
                 self._request_recovery_unregistration_task = None
         self._inflight_executions.clear()
+        self._request_capacity_reservations.clear()
         self._live_claimed_run_ids = frozenset()
         self._inflight_requests.clear()
         self._inflight_cancellation_causes.clear()
@@ -4951,7 +4989,7 @@ class ScheduledTaskService:
             )
         return set(leaked)
 
-    def _sweep_stale_runs(self) -> None:
+    def _sweep_stale_runs(self, *, release_leaked_locks: bool = True) -> None:
         """Terminalize runs that nothing is executing any more (plan §4).
 
         Rides the existing store tick because the leak it repairs is the ABSENCE of
@@ -5010,7 +5048,8 @@ class ScheduledTaskService:
         )
         # Unconditional: the in-memory wedge and the stale rows are independent
         # failures, and either can outlive the other.
-        self._release_leaked_session_locks()
+        if release_leaked_locks:
+            self._release_leaked_session_locks()
         if swept:
             self._wake_runtime_work(
                 RuntimeWorkLane.REQUESTS,
@@ -5141,12 +5180,9 @@ class ScheduledTaskService:
             self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
 
     def _request_partition_key(self, request: TaskExecutionRequest) -> str:
-        session_id = str(request.session_id or "").strip()
-        if session_id:
-            return f"session:{session_id}"
-        session_key = str(request.session_key or "").strip()
-        if session_key:
-            return f"key:{session_key}"
+        lock_key = self._execution_lock_key(request)
+        if lock_key:
+            return lock_key
         return f"run:{request.id}"
 
     async def _process_pending_request(
@@ -5155,41 +5191,62 @@ class ScheduledTaskService:
     ) -> bool:
         if not self._owns_service_instance():
             return True
-        if len(self._inflight_executions) >= self._MAX_CONCURRENT_EXECUTIONS:
+        if pending.id in self._request_capacity_reservations:
+            return True
+        if (
+            len(self._inflight_executions) + len(self._request_capacity_reservations)
+            >= self._MAX_CONCURRENT_EXECUTIONS
+        ):
             return False
         if pending.id in self._inflight_executions:
             return True
-        if not self._transport_ready_for_request(pending):
-            await self._run_runtime_sync(
-                self.request_store.record_skip_reason,
-                pending.id,
-                reason=SKIP_REASON_TRANSPORT_UNAVAILABLE,
-            )
-            return False
-        lock_key = self._execution_lock_key(pending)
-        if lock_key is not None and lock_key in self._inflight_sessions:
-            await self._run_runtime_sync(
-                self.request_store.record_skip_reason,
-                pending.id,
-                reason=SKIP_REASON_SESSION_BUSY,
-            )
-            return False
-        command_definition_id = self._command_fire_definition_id(pending)
-        if command_definition_id is not None and await self._run_runtime_sync(
-            self._command_definition_has_live_worker,
-            command_definition_id,
-        ):
-            await self._run_runtime_sync(
-                self.request_store.record_skip_reason,
-                pending.id,
-                reason=SKIP_REASON_SESSION_BUSY,
-            )
-            return False
-        request = await self._run_runtime_sync(self._claim_pending_request, pending)
-        if request is None:
+        registration = self._runtime_work_tokens.get(RuntimeWorkLane.REQUESTS)
+        self._request_capacity_reservations.add(pending.id)
+        try:
+            if not self._transport_ready_for_request(pending):
+                await self._run_runtime_sync(
+                    self.request_store.record_skip_reason,
+                    pending.id,
+                    reason=SKIP_REASON_TRANSPORT_UNAVAILABLE,
+                )
+                return False
+            lock_key = self._execution_lock_key(pending)
+            if lock_key is not None and lock_key in self._inflight_sessions:
+                await self._run_runtime_sync(
+                    self.request_store.record_skip_reason,
+                    pending.id,
+                    reason=SKIP_REASON_SESSION_BUSY,
+                )
+                return False
+            command_definition_id = self._command_fire_definition_id(pending)
+            if command_definition_id is not None and await self._run_runtime_sync(
+                self._command_definition_has_live_worker,
+                command_definition_id,
+            ):
+                await self._run_runtime_sync(
+                    self.request_store.record_skip_reason,
+                    pending.id,
+                    reason=SKIP_REASON_SESSION_BUSY,
+                )
+                return False
+            request = await self._run_runtime_sync(self._claim_pending_request, pending)
+            if request is None:
+                return True
+            if registration is not None and (
+                not self._running
+                or self._runtime_work_tokens.get(RuntimeWorkLane.REQUESTS)
+                != registration
+                or not self._owns_service_instance()
+            ):
+                await self._run_runtime_sync(
+                    self.request_store.requeue,
+                    request.id,
+                )
+                return True
+            self._spawn_execution(request, lock_key)
             return True
-        self._spawn_execution(request, lock_key)
-        return True
+        finally:
+            self._request_capacity_reservations.discard(pending.id)
 
     async def _process_run_callback(self, run: dict[str, Any]) -> bool:
         run_id = str(run.get("id") or "")

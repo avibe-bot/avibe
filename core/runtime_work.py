@@ -50,6 +50,7 @@ class RuntimeWorkItem:
     partition_key: str
     observation: Any
     cursor_key: str | None = None
+    rearm_after_process: bool = True
 
 
 class RuntimeWorkHandler(Protocol):
@@ -609,7 +610,12 @@ class RuntimeWorkSupervisor:
                 if current is asyncio.current_task():
                     registration.workers.pop(partition, None)
                     registration.worker_started_at.pop(partition, None)
-                if registration.live and self._active and not self._stopping:
+                if (
+                    registration.live
+                    and self._active
+                    and not self._stopping
+                    and (should_backoff or item.rearm_after_process)
+                ):
                     registration.event.set()
 
     async def _reconcile_loop(self) -> None:

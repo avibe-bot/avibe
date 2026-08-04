@@ -129,7 +129,45 @@ async def test_hfr_170_guarded_noop_uses_partition_backoff() -> None:
     assert handler.attempts == 1
     release_backoff.set()
     await supervisor.stop()
+    await supervisor.stop()
     assert handler.attempts == 1
+
+
+@pytest.mark.anyio
+async def test_completed_maintenance_item_does_not_self_rearm() -> None:
+    scans = 0
+    processed = asyncio.Event()
+
+    class _Maintenance(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            nonlocal scans
+            del limit, occupied, cursor
+            scans += 1
+            return [
+                RuntimeWorkItem(
+                    "maintenance",
+                    {},
+                    rearm_after_process=False,
+                )
+            ], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            del item
+            processed.set()
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    supervisor.register(RuntimeWorkLane.TASK_DEFINITIONS, _Maintenance())
+    await supervisor.activate()
+    await asyncio.wait_for(processed.wait(), 1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert scans == 1
+
+    processed.clear()
+    supervisor.notify(RuntimeWorkLane.TASK_DEFINITIONS)
+    await asyncio.wait_for(processed.wait(), 1)
+    assert scans == 2
+    await supervisor.stop()
 
 
 @pytest.mark.anyio

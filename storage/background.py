@@ -5373,6 +5373,41 @@ class SQLiteBackgroundTaskStore:
                     break
         return owed
 
+    def next_owed_failure_notice_at(self, *, now: Optional[str] = None) -> Optional[str]:
+        """Earliest future retry deadline for an otherwise deliverable notice."""
+
+        instant = now or _utc_now_iso()
+        notice_state = literal_column(OWED_NOTICE_STATE_SQL)
+        notice_kind = literal_column(OWED_NOTICE_KIND_SQL)
+        next_attempt_at = literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL)
+        stmt = (
+            select(next_attempt_at)
+            .where(
+                or_(
+                    agent_runs.c.status.in_(
+                        [*_status_query_values("failed"), *_status_query_values("succeeded")]
+                    ),
+                    and_(
+                        agent_runs.c.status.in_(_status_query_values("canceled")),
+                        notice_kind == NOTICE_KIND_BINDING_CHANGE,
+                    ),
+                )
+            )
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(notice_state == NOTICE_PENDING)
+            .where(next_attempt_at > instant)
+            .order_by(next_attempt_at)
+            .limit(1)
+        )
+        with self.engine.connect() as conn:
+            value = conn.execute(stmt).scalar_one_or_none()
+        return str(value) if value else None
+
     def stamp_binding_change_notice(
         self,
         run_id: str,

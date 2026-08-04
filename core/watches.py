@@ -843,6 +843,7 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                     "changed": changed,
                     "watches": watches,
                 },
+                rearm_after_process=False,
             )
         ], False
 

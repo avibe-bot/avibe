@@ -1482,8 +1482,13 @@ def test_a_notice_whose_backoff_has_not_elapsed_is_not_listed(tmp_path: Path) ->
     )
 
     assert sqlite.list_owed_failure_notices(now="2026-07-27T11:00:00+00:00") == []
+    assert (
+        sqlite.next_owed_failure_notice_at(now="2026-07-27T11:00:00+00:00")
+        == "2026-07-27T12:00:00+00:00"
+    )
     ready = sqlite.list_owed_failure_notices(now="2026-07-27T13:00:00+00:00")
     assert [item["id"] for item in ready] == [run.id]
+    assert sqlite.next_owed_failure_notice_at(now="2026-07-27T13:00:00+00:00") is None
 
 
 def test_a_sent_notice_is_not_listed_again(tmp_path: Path) -> None:
