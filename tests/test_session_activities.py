@@ -110,6 +110,64 @@ def test_hfr_166_recovered_unbound_grace_uses_first_durable_completion(
     engine.dispose()
 
 
+def test_hfr_166_recovered_runtime_scan_applies_keyset_limit_in_registry() -> None:
+    completed_at = datetime.now(timezone.utc).isoformat()
+
+    class _Store:
+        @staticmethod
+        def list_activities():
+            return [
+                {
+                    "activity": SessionActivity(
+                        id=f"activity-{index}",
+                        backend="claude",
+                        runtime_key=f"runtime-{index:03d}",
+                        session_id=f"session-{index}",
+                        kind="background_task",
+                        status="completed",
+                        completed_at=completed_at,
+                        metadata={"output_batch_id": f"batch-{index}"},
+                    ).to_dict(),
+                    "phase": "awaiting_output",
+                }
+                for index in range(100)
+            ]
+
+    grace_calls = 0
+
+    def grace_seconds(_backend: str) -> float:
+        nonlocal grace_calls
+        grace_calls += 1
+        return 10.0
+
+    registry = SessionActivityRegistry(_Store())
+    page, has_more, retry_after = registry.scan_recovered_output_runtimes(
+        limit=2,
+        cursor=None,
+        grace_seconds=grace_seconds,
+    )
+
+    assert page == [
+        ("claude", "runtime-000"),
+        ("claude", "runtime-001"),
+    ]
+    assert has_more is True
+    assert retry_after is None
+    assert grace_calls == 3
+
+    next_page, has_more, _retry_after = registry.scan_recovered_output_runtimes(
+        limit=2,
+        cursor="claude\x1fruntime-001",
+        grace_seconds=grace_seconds,
+    )
+    assert next_page == [
+        ("claude", "runtime-002"),
+        ("claude", "runtime-003"),
+    ]
+    assert has_more is True
+    assert grace_calls == 6
+
+
 def test_activity_batch_claim_leaves_interleaved_output_in_place():
     registry = SessionActivityRegistry()
     for activity_id, turn_id in (

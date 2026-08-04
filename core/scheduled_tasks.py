@@ -1245,9 +1245,14 @@ class ScheduledTaskStore:
         #: Set when a failed write left this mirror INCOMPLETE, cleared by the reload
         #: that repairs it. See ``maybe_reload`` and ``_reload_after_lost_write``.
         self._reload_required = False
+        self._reload_lock = threading.RLock()
         self.load()
 
     def load(self) -> None:
+        with self._reload_lock:
+            self._load_unlocked()
+
+    def _load_unlocked(self) -> None:
         if self._sqlite is not None:
             self._tasks = {
                 item["id"]: ScheduledTask.from_dict(item)
@@ -1299,6 +1304,10 @@ class ScheduledTaskStore:
         so a reload that fails again keeps retrying on every later tick.
         """
 
+        with self._reload_lock:
+            return self._maybe_reload_unlocked()
+
+    def _maybe_reload_unlocked(self) -> bool:
         if self._sqlite is not None:
             changed = self._sqlite.maybe_reload()
             if self._reload_required:
@@ -1340,10 +1349,23 @@ class ScheduledTaskStore:
         self._signature = _path_signature(self.path)
 
     def list_tasks(self) -> list[ScheduledTask]:
-        return sorted(self._tasks.values(), key=lambda item: (item.created_at, item.id))
+        with self._reload_lock:
+            return sorted(
+                self._tasks.values(),
+                key=lambda item: (item.created_at, item.id),
+            )
 
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
-        return self._tasks.get(task_id)
+        with self._reload_lock:
+            return self._tasks.get(task_id)
+
+    def refresh_task(self, task_id: str) -> Optional[ScheduledTask]:
+        """Reload and read one scheduler definition under the same mirror lock."""
+
+        with self._reload_lock:
+            self._maybe_reload_unlocked()
+            task = self._tasks.get(task_id)
+            return ScheduledTask.from_dict(task.to_dict()) if task is not None else None
 
     def get_watch_definition(self, definition_id: str) -> Optional[Dict[str, Any]]:
         """The watch row for *definition_id*, or ``None`` when it is not a watch.
@@ -3363,43 +3385,27 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
             )
         if self.lane is RuntimeWorkLane.ACTIVITY_OUTPUTS:
             registry = self.service._activity_registry()
-            runtimes = (
-                registry.recovered_output_runtimes()
-                if registry is not None
-                else []
-            )
-            items: list[RuntimeWorkItem] = []
-            retry_after: float | None = None
-            for backend, runtime_key in runtimes:
-                partition = f"{backend}\x1f{runtime_key}"
-                delay = registry.recovered_output_delay_seconds(
-                    backend,
-                    runtime_key,
-                    grace_seconds=self.service._activity_output_grace_seconds(backend),
+            if registry is None:
+                return [], False
+            runtimes, has_more, retry_after = (
+                registry.scan_recovered_output_runtimes(
+                    limit=limit,
+                    cursor=cursor,
+                    grace_seconds=self.service._activity_output_grace_seconds,
                 )
-                if delay is None:
-                    continue
-                if delay > 0:
-                    retry_after = (
-                        delay
-                        if retry_after is None
-                        else min(retry_after, delay)
-                    )
-                    continue
-                if cursor is None or partition > cursor:
-                    items.append(
-                        RuntimeWorkItem(
-                            partition,
-                            (backend, runtime_key),
-                        )
-                    )
+            )
             if retry_after is not None:
                 self.service._schedule_runtime_work_wake(
                     RuntimeWorkLane.ACTIVITY_OUTPUTS,
                     retry_after,
                 )
-            items.sort(key=lambda item: item.partition_key)
-            return items[:limit], len(items) > limit
+            return [
+                RuntimeWorkItem(
+                    f"{backend}\x1f{runtime_key}",
+                    (backend, runtime_key),
+                )
+                for backend, runtime_key in runtimes
+            ], has_more
         if self.lane is RuntimeWorkLane.FAILURE_NOTICES:
             return self._scan_failure_notices(
                 limit=limit,
@@ -3407,6 +3413,15 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
                 cursor=cursor,
             )
         if self.lane is RuntimeWorkLane.STALE_RUNS:
+            retry_after = self.service._stale_run_sweep_delay_seconds()
+            if retry_after is None:
+                return [], False
+            if retry_after > 0:
+                self.service._schedule_runtime_work_wake(
+                    RuntimeWorkLane.STALE_RUNS,
+                    retry_after,
+                )
+                return [], False
             return [
                 RuntimeWorkItem(
                     "stale-runs",
@@ -3626,6 +3641,12 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
                 release_leaked_locks=False,
             )
             self.service._release_leaked_session_locks()
+            retry_after = self.service._stale_run_sweep_delay_seconds()
+            if retry_after is not None and retry_after > 0:
+                self.service._schedule_runtime_work_wake(
+                    RuntimeWorkLane.STALE_RUNS,
+                    retry_after,
+                )
             return True
         return True
 
@@ -4385,6 +4406,15 @@ class ScheduledTaskService:
             )
             return False
         self._settle_pending_recovered_activity_terminals()
+        has_recovered_output = getattr(registry, "has_recovered_output", None)
+        if callable(has_recovered_output) and has_recovered_output(
+            backend,
+            runtime_key,
+        ):
+            self._wake_runtime_work(
+                RuntimeWorkLane.ACTIVITY_OUTPUTS,
+                reset_cursor=True,
+            )
         return True
 
     def validate_platform(self, platform: str) -> None:
@@ -4576,12 +4606,19 @@ class ScheduledTaskService:
         self._request_recovery_unregistration_task = joined
         return joined
 
-    def _wake_runtime_work(self, *lanes: RuntimeWorkLane) -> None:
+    def _wake_runtime_work(
+        self,
+        *lanes: RuntimeWorkLane,
+        reset_cursor: bool = False,
+    ) -> None:
         controller = getattr(self, "controller", None)
         supervisor = getattr(controller, "runtime_work_supervisor", None)
         notify = getattr(supervisor, "notify", None)
         if callable(notify):
-            notify(*lanes)
+            if reset_cursor:
+                notify(*lanes, reset_cursor=True)
+            else:
+                notify(*lanes)
         else:
             self._drain_dirty = True
 
@@ -5111,6 +5148,17 @@ class ScheduledTaskService:
             )
             self._retire_swept_queue_segments(swept)
 
+    def _stale_run_sweep_delay_seconds(self) -> float | None:
+        interval = self._runtime_seconds(
+            "harness_run_sweep_interval_seconds",
+            DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS,
+        )
+        if interval <= 0:
+            return None
+        if not self._last_sweep_at:
+            return 0.0
+        return max(0.0, interval - (time.monotonic() - self._last_sweep_at))
+
     def _retire_swept_queue_segments(self, swept: list[Any]) -> None:
         """Drop the persisted Workbench queue rows a swept run left behind.
 
@@ -5218,8 +5266,7 @@ class ScheduledTaskService:
     async def _run_task(self, task_id: str) -> None:
         if not self._owns_service_instance():
             return
-        await self._run_runtime_sync(self.store.maybe_reload)
-        task = self.store.get_task(task_id)
+        task = await self._run_runtime_sync(self.store.refresh_task, task_id)
         if not task or not task.enabled:
             return
         queued = await self._run_runtime_sync(

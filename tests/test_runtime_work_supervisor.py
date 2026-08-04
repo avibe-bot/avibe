@@ -197,7 +197,7 @@ async def test_hfr_162_partition_backoff_state_is_lane_bounded() -> None:
     retry_entered = asyncio.Event()
     release_retry = asyncio.Event()
     later_partition_started = asyncio.Event()
-    overflow_partition_retried = asyncio.Event()
+    later_partition_retried = asyncio.Event()
     attempted: list[str] = []
     attempt_counts: dict[str, int] = {}
 
@@ -230,7 +230,7 @@ async def test_hfr_162_partition_backoff_state_is_lane_bounded() -> None:
             if attempt_counts[item.partition_key] == 1:
                 return False
             if item.partition_key == "partition-06":
-                overflow_partition_retried.set()
+                later_partition_retried.set()
             return True
 
     supervisor = RuntimeWorkSupervisor(
@@ -244,43 +244,59 @@ async def test_hfr_162_partition_backoff_state_is_lane_bounded() -> None:
     await supervisor.activate()
 
     await asyncio.wait_for(retry_entered.wait(), 1)
-    await asyncio.wait_for(later_partition_started.wait(), 1)
     for _ in range(10):
         await asyncio.sleep(0)
+    assert attempted == [f"partition-{index:02d}" for index in range(6)]
     registration = supervisor._registrations[RuntimeWorkLane.REQUESTS]
-    assert attempted == [f"partition-{index:02d}" for index in range(9)]
     assert len(registration.backoff_deadlines) == 6
-    assert registration.backoff_overflow_deadline is not None
     assert registration.backoff_task is not None
     assert not registration.backoff_task.done()
+    assert not later_partition_started.is_set()
+
+    supervisor.notify(RuntimeWorkLane.REQUESTS, reset_cursor=True)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not later_partition_started.is_set()
 
     release_retry.set()
-    await asyncio.wait_for(overflow_partition_retried.wait(), 1)
+    await asyncio.wait_for(later_partition_started.wait(), 1)
+    await asyncio.wait_for(later_partition_retried.wait(), 1)
     assert attempt_counts["partition-06"] == 2
     await supervisor.stop()
 
 
 @pytest.mark.anyio
-async def test_hfr_162_overflow_never_postpones_an_earlier_retry() -> None:
+async def test_hfr_162_backoff_budget_preserves_exact_partition_deadline() -> None:
     now = 0.0
-    loop = asyncio.get_running_loop()
-    retry_releases = [asyncio.Event(), asyncio.Event()]
+    release_retry = asyncio.Event()
     retry_delays: list[float] = []
-    scans: asyncio.Queue[None] = asyncio.Queue()
+    exact_retried = asyncio.Event()
+    later_started = asyncio.Event()
+    attempts: dict[str, int] = {}
 
     async def controlled_retry(delay: float) -> None:
-        index = len(retry_delays)
         retry_delays.append(delay)
-        await retry_releases[index].wait()
+        await release_retry.wait()
 
-    class _Idle(RuntimeWorkHandler):
+    class _TwoPartitions(RuntimeWorkHandler):
         def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
-            del limit, occupied, cursor
-            loop.call_soon_threadsafe(scans.put_nowait, None)
-            return [], False
+            rows = [
+                RuntimeWorkItem(partition, {}, cursor_key=partition)
+                for partition in ("exact", "later")
+                if partition not in occupied
+                and (cursor is None or partition > cursor)
+            ]
+            return rows[:limit], len(rows) > limit
 
-        async def process(self, item: RuntimeWorkItem) -> None:
-            raise AssertionError(item)
+        async def process(self, item: RuntimeWorkItem) -> bool:
+            attempts[item.partition_key] = attempts.get(item.partition_key, 0) + 1
+            if item.partition_key == "exact" and attempts[item.partition_key] == 1:
+                return False
+            if item.partition_key == "exact":
+                exact_retried.set()
+            else:
+                later_started.set()
+            return True
 
     supervisor = RuntimeWorkSupervisor(
         reconcile_interval=3600,
@@ -291,29 +307,28 @@ async def test_hfr_162_overflow_never_postpones_an_earlier_retry() -> None:
         retry_wait=controlled_retry,
         monotonic=lambda: now,
     )
-    supervisor.register(RuntimeWorkLane.REQUESTS, _Idle())
+    supervisor.register(RuntimeWorkLane.REQUESTS, _TwoPartitions())
     await supervisor.activate()
-    await asyncio.wait_for(scans.get(), 1)
-    registration = supervisor._registrations[RuntimeWorkLane.REQUESTS]
     try:
-        supervisor._start_partition_backoff(registration, "exact")
-        await asyncio.sleep(0)
-        assert retry_delays == [10.0]
-
-        now = 5.0
-        supervisor._start_partition_backoff(registration, "overflow-a")
-        now = 8.0
-        supervisor._start_partition_backoff(registration, "overflow-b")
-        assert registration.backoff_overflow_deadline == 15.0
-
-        retry_releases[0].set()
         for _ in range(10):
             await asyncio.sleep(0)
-            if len(retry_delays) == 2:
+            if retry_delays:
                 break
-        await asyncio.wait_for(scans.get(), 1)
-        assert retry_delays == [10.0, 7.0]
-        assert registration.backoff_overflow_deadline == 15.0
+        assert retry_delays == [10.0]
+        assert attempts == {"exact": 1}
+
+        now = 5.0
+        supervisor.notify(RuntimeWorkLane.REQUESTS, reset_cursor=True)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert attempts == {"exact": 1}
+        assert not later_started.is_set()
+
+        now = 10.0
+        release_retry.set()
+        await asyncio.wait_for(exact_retried.wait(), 1)
+        await asyncio.wait_for(later_started.wait(), 1)
+        assert attempts == {"exact": 2, "later": 1}
     finally:
         await supervisor.stop()
 

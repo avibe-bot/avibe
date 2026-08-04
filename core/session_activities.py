@@ -12,6 +12,7 @@ import logging
 import threading
 import time
 import uuid
+from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -262,6 +263,8 @@ class SessionActivityRegistry:
         ] = {}
         self._next_completed_output_sequence = 0
         self._recovered_output_ids: set[tuple[str, str, str]] = set()
+        self._recovered_output_counts: dict[tuple[str, str], int] = {}
+        self._recovered_runtime_keys: list[tuple[str, str]] = []
         self._recovered_terminals: deque[SessionActivity] = deque()
         self._restore()
 
@@ -281,6 +284,36 @@ class SessionActivityRegistry:
     @classmethod
     def _activity_key(cls, activity: SessionActivity) -> tuple[str, str, str]:
         return cls._key(activity.backend, activity.runtime_key, activity.id)
+
+    def _add_recovered_output_id(self, activity_key: tuple[str, str, str]) -> None:
+        if activity_key in self._recovered_output_ids:
+            return
+        self._recovered_output_ids.add(activity_key)
+        runtime_key = activity_key[:2]
+        count = self._recovered_output_counts.get(runtime_key, 0) + 1
+        self._recovered_output_counts[runtime_key] = count
+        if count == 1:
+            insort(self._recovered_runtime_keys, runtime_key)
+
+    def _discard_recovered_output_id(
+        self,
+        activity_key: tuple[str, str, str],
+    ) -> None:
+        if activity_key not in self._recovered_output_ids:
+            return
+        self._recovered_output_ids.discard(activity_key)
+        runtime_key = activity_key[:2]
+        count = self._recovered_output_counts.get(runtime_key, 0) - 1
+        if count > 0:
+            self._recovered_output_counts[runtime_key] = count
+            return
+        self._recovered_output_counts.pop(runtime_key, None)
+        index = bisect_left(self._recovered_runtime_keys, runtime_key)
+        if (
+            index < len(self._recovered_runtime_keys)
+            and self._recovered_runtime_keys[index] == runtime_key
+        ):
+            self._recovered_runtime_keys.pop(index)
 
     def _new_completed_output_entry(
         self,
@@ -399,7 +432,7 @@ class SessionActivityRegistry:
                 self._completed_outputs[connection_key].append(
                     self._new_completed_output_entry(activity)
                 )
-                self._recovered_output_ids.add(key)
+                self._add_recovered_output_id(key)
                 continue
 
             recovered = (
@@ -1187,7 +1220,7 @@ class SessionActivityRegistry:
                         retained.extend(queue)
                         self._completed_outputs[key] = retained
                         raise
-                    self._recovered_output_ids.discard(activity_key)
+                    self._discard_recovered_output_id(activity_key)
                     continue
                 turn_id = str(activity.turn_id or "").strip()
                 if identities is not None and turn_id not in identities:
@@ -1200,7 +1233,7 @@ class SessionActivityRegistry:
                         activity.metadata.get("_output_local_settlement_only")
                     ),
                 )
-                self._recovered_output_ids.discard(activity_key)
+                self._discard_recovered_output_id(activity_key)
                 claimed.append(activity)
             if retained:
                 self._completed_outputs[key] = retained
@@ -1229,7 +1262,7 @@ class SessionActivityRegistry:
                 key = (str(activity.backend), str(activity.runtime_key))
                 restored_by_runtime[key].append(claimed)
                 if claimed.recovered:
-                    self._recovered_output_ids.add(activity_key)
+                    self._add_recovered_output_id(activity_key)
             for key, restored in restored_by_runtime.items():
                 entries = list(self._completed_outputs.get(key) or ())
                 entries.extend(item.entry for item in restored)
@@ -1273,7 +1306,7 @@ class SessionActivityRegistry:
                 key = (str(activity.backend), str(activity.runtime_key))
                 restored_by_runtime[key].append(claimed)
                 if claimed.recovered if recovered is None else recovered:
-                    self._recovered_output_ids.add(activity_key)
+                    self._add_recovered_output_id(activity_key)
             for key, restored in restored_by_runtime.items():
                 entries = list(self._completed_outputs.get(key) or ())
                 entries.extend(item.entry for item in restored)
@@ -1357,7 +1390,7 @@ class SessionActivityRegistry:
             else:
                 queue.append(self._new_completed_output_entry(activity))
             if recovered:
-                self._recovered_output_ids.add(activity_key)
+                self._add_recovered_output_id(activity_key)
         return True
 
     @staticmethod
@@ -1533,7 +1566,7 @@ class SessionActivityRegistry:
             for activity in activities:
                 activity_key = self._activity_key(activity)
                 self._claimed_completed_outputs.pop(activity_key, None)
-                self._recovered_output_ids.discard(activity_key)
+                self._discard_recovered_output_id(activity_key)
                 released.append(activity)
             callback = self._output_settled_callback
 
@@ -1641,13 +1674,57 @@ class SessionActivityRegistry:
         """Runtime queues containing completion output restored after restart."""
 
         with self._lock:
-            runtimes = {
-                (entry.activity.backend, entry.activity.runtime_key)
-                for queue in self._completed_outputs.values()
-                for entry in queue
-                if self._activity_key(entry.activity) in self._recovered_output_ids
-            }
-        return sorted(runtimes)
+            return list(self._recovered_runtime_keys)
+
+    def has_recovered_output(self, backend: str, runtime_key: str) -> bool:
+        with self._lock:
+            return self._recovered_output_counts.get(
+                (str(backend), str(runtime_key)),
+                0,
+            ) > 0
+
+    def scan_recovered_output_runtimes(
+        self,
+        *,
+        limit: int,
+        cursor: str | None,
+        grace_seconds: Callable[[str], float],
+    ) -> tuple[list[tuple[str, str]], bool, float | None]:
+        """Return one due keyset page and the earliest deferred eligibility."""
+
+        page_limit = max(1, int(limit))
+        cursor_key: tuple[str, str] | None = None
+        if cursor and "\x1f" in cursor:
+            backend, runtime_key = cursor.split("\x1f", 1)
+            cursor_key = (backend, runtime_key)
+        instant = datetime.now(timezone.utc)
+        due: list[tuple[str, str]] = []
+        retry_after: float | None = None
+        has_more = False
+        with self._lock:
+            start = (
+                bisect_right(self._recovered_runtime_keys, cursor_key)
+                if cursor_key is not None
+                else 0
+            )
+            for runtime in self._recovered_runtime_keys[start:]:
+                delay = self._recovered_output_delay_seconds_unlocked(
+                    runtime,
+                    grace_seconds=grace_seconds(runtime[0]),
+                    now=instant,
+                )
+                if delay is None:
+                    continue
+                if delay > 0:
+                    retry_after = (
+                        delay if retry_after is None else min(retry_after, delay)
+                    )
+                    continue
+                if len(due) >= page_limit:
+                    has_more = True
+                    break
+                due.append(runtime)
+        return due, has_more, retry_after
 
     def recovered_output_delay_seconds(
         self,
@@ -1662,11 +1739,24 @@ class SessionActivityRegistry:
         key = (str(backend), str(runtime_key))
         instant = now or datetime.now(timezone.utc)
         with self._lock:
-            recovered = [
-                entry.activity
-                for entry in self._completed_outputs.get(key, ())
-                if self._activity_key(entry.activity) in self._recovered_output_ids
-            ]
+            return self._recovered_output_delay_seconds_unlocked(
+                key,
+                grace_seconds=grace_seconds,
+                now=instant,
+            )
+
+    def _recovered_output_delay_seconds_unlocked(
+        self,
+        key: tuple[str, str],
+        *,
+        grace_seconds: float,
+        now: datetime,
+    ) -> float | None:
+        recovered = [
+            entry.activity
+            for entry in self._completed_outputs.get(key, ())
+            if self._activity_key(entry.activity) in self._recovered_output_ids
+        ]
         if not recovered:
             return None
         if any(
@@ -1686,7 +1776,7 @@ class SessionActivityRegistry:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             completed.append(parsed.astimezone(timezone.utc))
         first = min(completed)
-        elapsed = max(0.0, (instant - first).total_seconds())
+        elapsed = max(0.0, (now - first).total_seconds())
         return max(0.0, float(grace_seconds) - elapsed)
 
     def drain_recovered_terminals(self) -> list[SessionActivity]:
@@ -1782,7 +1872,7 @@ class SessionActivityRegistry:
             for key in [key for key in self._claimed_completed_outputs if key[0] == identity]:
                 self._claimed_completed_outputs.pop(key, None)
             for activity in terminated_pending:
-                self._recovered_output_ids.discard(self._activity_key(activity))
+                self._discard_recovered_output_id(self._activity_key(activity))
         completed.extend(terminated_pending)
         return completed
 

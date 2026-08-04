@@ -87,7 +87,6 @@ class _Registration:
     workers: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
     worker_started_at: dict[str, float] = field(default_factory=dict)
     backoff_deadlines: dict[str, float] = field(default_factory=dict)
-    backoff_overflow_deadline: float | None = None
     backoff_task: asyncio.Task[None] | None = None
     scan_continuation_task: asyncio.Task[None] | None = None
     rewind_after_partitions: set[str] = field(default_factory=set)
@@ -228,7 +227,6 @@ class RuntimeWorkSupervisor:
             backoff.cancel()
             await asyncio.gather(backoff, return_exceptions=True)
         registration.backoff_deadlines.clear()
-        registration.backoff_overflow_deadline = None
         continuation = registration.scan_continuation_task
         if continuation is not None:
             continuation.cancel()
@@ -619,7 +617,16 @@ class RuntimeWorkSupervisor:
                 if not self._owns_service_instance():
                     self._stop_for_lost_lease()
                     return
-                capacity = self._lane_capacity - len(registration.workers)
+                # Every admitted worker reserves room for its exact partition in
+                # the bounded backoff ledger. Once that ledger is full, wait for an
+                # existing deadline instead of accepting failures whose identity
+                # could not be retained safely.
+                capacity = min(
+                    self._lane_capacity - len(registration.workers),
+                    self._backoff_partition_limit
+                    - len(registration.backoff_deadlines)
+                    - len(registration.workers),
+                )
                 if capacity <= 0:
                     break
                 occupied = frozenset(
@@ -666,11 +673,7 @@ class RuntimeWorkSupervisor:
                     if last_cursor:
                         page_advanced = last_cursor != scan_cursor
                         registration.scan_cursor = last_cursor
-                elif (
-                    registration.scan_cursor is not None
-                    and not has_more
-                    and registration.backoff_overflow_deadline is None
-                ):
+                elif registration.scan_cursor is not None and not has_more:
                     # Reset for the next real wake. Immediately scanning from the
                     # beginning would spin on occupied rows until their owner exits.
                     registration.scan_cursor = None
@@ -786,18 +789,12 @@ class RuntimeWorkSupervisor:
     ) -> None:
         deadline = self._monotonic() + self._retry_backoff
         if (
-            partition in registration.backoff_deadlines
-            or len(registration.backoff_deadlines) < self._backoff_partition_limit
+            partition not in registration.backoff_deadlines
+            and len(registration.backoff_deadlines)
+            >= self._backoff_partition_limit
         ):
-            registration.backoff_deadlines[partition] = deadline
-        else:
-            # Exact retry identities are bounded. Overflow coalesces at the
-            # earliest retry point so later failures can never postpone work
-            # whose own backoff already elapsed.
-            registration.backoff_overflow_deadline = min(
-                registration.backoff_overflow_deadline or deadline,
-                deadline,
-            )
+            raise RuntimeError("runtime work backoff reservation invariant violated")
+        registration.backoff_deadlines[partition] = deadline
         existing = registration.backoff_task
         if existing is not None and not existing.done():
             return
@@ -808,8 +805,6 @@ class RuntimeWorkSupervisor:
         registration: _Registration,
     ) -> None:
         deadlines = list(registration.backoff_deadlines.values())
-        if registration.backoff_overflow_deadline is not None:
-            deadlines.append(registration.backoff_overflow_deadline)
         if not deadlines:
             registration.backoff_task = None
             return
@@ -840,13 +835,6 @@ class RuntimeWorkSupervisor:
                     )
                     if partition_deadline > deadline
                 }
-                overflow_deadline = registration.backoff_overflow_deadline
-                overflow_completed = (
-                    overflow_deadline is not None
-                    and overflow_deadline <= deadline
-                )
-                if overflow_completed:
-                    registration.backoff_overflow_deadline = None
             if (
                 completed
                 and registration.live
@@ -855,10 +843,7 @@ class RuntimeWorkSupervisor:
             ):
                 registration.rewind_requested = True
                 registration.event.set()
-            if registration.live and (
-                registration.backoff_deadlines
-                or registration.backoff_overflow_deadline is not None
-            ):
+            if registration.live and registration.backoff_deadlines:
                 self._start_next_partition_backoff(registration)
 
     async def _reconcile_loop(self) -> None:

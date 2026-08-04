@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1640,13 +1641,15 @@ def test_hfr_166_activity_scan_never_sleeps_ahead_of_due_runtime() -> None:
 
     class _Registry:
         @staticmethod
-        def recovered_output_runtimes():
-            return [("claude", "a-not-due"), ("claude", "b-due")]
-
-        @staticmethod
-        def recovered_output_delay_seconds(backend, runtime_key, *, grace_seconds):  # noqa: ANN001, ANN202
-            del backend, grace_seconds
-            return 30.0 if runtime_key == "a-not-due" else 0.0
+        def scan_recovered_output_runtimes(
+            *,
+            limit,
+            cursor,
+            grace_seconds,
+        ):  # noqa: ANN001, ANN202
+            del limit, cursor
+            assert grace_seconds("claude") == 10.0
+            return [("claude", "b-due")], False, 30.0
 
     service = SimpleNamespace(
         _activity_registry=lambda: _Registry(),
@@ -1669,6 +1672,123 @@ def test_hfr_166_activity_scan_never_sleeps_ahead_of_due_runtime() -> None:
     assert [item.partition_key for item in items] == ["claude\x1fb-due"]
     assert has_more is False
     assert scheduled == [(RuntimeWorkLane.ACTIVITY_OUTPUTS, 30.0)]
+
+
+@pytest.mark.anyio
+async def test_hfr_166_recovered_runtime_rewinds_until_every_batch_is_drained() -> None:
+    activities = [SimpleNamespace(id="activity-a"), SimpleNamespace(id="activity-b")]
+
+    class _Registry:
+        def claim_completed_output(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+            return activities.pop(0) if activities else None
+
+        @staticmethod
+        def has_completed_output(*_args):  # noqa: ANN002, ANN205
+            return bool(activities)
+
+        @staticmethod
+        def has_recovered_output(*_args):  # noqa: ANN002, ANN205
+            return bool(activities)
+
+    registry = _Registry()
+    wake = Mock()
+    service = SimpleNamespace(
+        _activity_registry=lambda: registry,
+        _deliver_recovered_activity_output=AsyncMock(),
+        _settle_pending_recovered_activity_terminals=Mock(),
+        _wake_runtime_work=wake,
+    )
+
+    assert await ScheduledTaskService._process_recovered_activity_output(
+        service,
+        "claude",
+        "runtime-a",
+    )
+    wake.assert_called_once_with(
+        RuntimeWorkLane.ACTIVITY_OUTPUTS,
+        reset_cursor=True,
+    )
+    assert [activity.id for activity in activities] == ["activity-b"]
+
+    assert await ScheduledTaskService._process_recovered_activity_output(
+        service,
+        "claude",
+        "runtime-a",
+    )
+    assert activities == []
+    assert wake.call_count == 1
+
+
+def test_hfr_168_stale_lane_arms_its_configured_remaining_interval() -> None:
+    scheduled: list[tuple[RuntimeWorkLane, float]] = []
+    service = SimpleNamespace(
+        _stale_run_sweep_delay_seconds=lambda: 5.0,
+        _schedule_runtime_work_wake=(
+            lambda lane, delay: scheduled.append((lane, delay))
+        ),
+    )
+    handler = scheduled_tasks._ScheduledRuntimeWorkHandler(
+        service,
+        RuntimeWorkLane.STALE_RUNS,
+    )
+
+    assert handler.scan(limit=1, occupied=frozenset(), cursor=None) == ([], False)
+    assert scheduled == [(RuntimeWorkLane.STALE_RUNS, 5.0)]
+
+
+def test_task_reload_and_scheduler_snapshot_share_one_mirror_lock(
+    tmp_path: Path,
+) -> None:
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    enabled = ScheduledTask(
+        id="task-a",
+        name=None,
+        session_key="slack::channel::C123",
+        prompt="run",
+        schedule_type="cron",
+        cron="* * * * *",
+    )
+    disabled = ScheduledTask.from_dict({**enabled.to_dict(), "enabled": False})
+    store._tasks = {enabled.id: enabled}
+    load_started = threading.Event()
+    release_load = threading.Event()
+
+    class _SQLite:
+        probes = 0
+
+        def maybe_reload(self) -> bool:
+            self.probes += 1
+            return self.probes == 1
+
+        @staticmethod
+        def list_scheduled_tasks():
+            load_started.set()
+            assert release_load.wait(timeout=1)
+            return [disabled.to_dict()]
+
+    store._sqlite = _SQLite()  # type: ignore[assignment]
+    refresh_entered = threading.Event()
+
+    def refresh() -> ScheduledTask | None:
+        refresh_entered.set()
+        return store.refresh_task(enabled.id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reload_future = executor.submit(store.maybe_reload)
+        assert load_started.wait(timeout=1)
+        refresh_future = executor.submit(refresh)
+        assert refresh_entered.wait(timeout=1)
+        try:
+            with pytest.raises(FutureTimeoutError):
+                refresh_future.result(timeout=0.05)
+        finally:
+            release_load.set()
+
+        assert reload_future.result(timeout=1) is True
+        refreshed = refresh_future.result(timeout=1)
+
+    assert refreshed is not None
+    assert refreshed.enabled is False
 
 
 def test_hfr_165_vault_scan_arms_exact_pending_expiry(
@@ -9567,6 +9687,9 @@ def test_stale_lane_applies_leaked_lock_cleanup_on_the_controller_loop(
     service._release_leaked_session_locks = (  # type: ignore[method-assign]
         lambda: cleanup_threads.append(threading.get_ident()) or set()
     )
+    scheduled = Mock()
+    service._stale_run_sweep_delay_seconds = lambda: 7.0  # type: ignore[method-assign]
+    service._schedule_runtime_work_wake = scheduled  # type: ignore[method-assign]
     handler = scheduled_tasks._ScheduledRuntimeWorkHandler(
         service,
         RuntimeWorkLane.STALE_RUNS,
@@ -9583,6 +9706,7 @@ def test_stale_lane_applies_leaked_lock_cleanup_on_the_controller_loop(
 
     assert sweep_threads and sweep_threads[0] != loop_thread
     assert cleanup_threads == [loop_thread]
+    scheduled.assert_called_once_with(RuntimeWorkLane.STALE_RUNS, 7.0)
 
 
 @pytest.mark.parametrize("stop_entrypoint", ["stop", "lease_loss"])
