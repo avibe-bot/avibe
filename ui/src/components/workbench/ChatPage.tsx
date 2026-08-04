@@ -37,7 +37,11 @@ import {
   resolveActivityLabel,
   sortBackgroundActivities,
 } from '../../lib/backgroundActivity';
-import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from '../../lib/chatTrigger';
+import {
+  chatTriggerLink,
+  harnessChipLabelKey,
+  needsHarnessProvenanceReconcile,
+} from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
@@ -1126,10 +1130,9 @@ export const ChatPage: React.FC = () => {
           return;
         }
         appendMessage(msg);
-        // A9a: a live agent-callback prompt is published before its source
-        // session is resolved, so pull the enriched REST row (mergeById fills
-        // source_session_* in place) — the chip appears without a reload/refocus.
-        if (isUnresolvedAgentCallback(msg)) void reconcile();
+        // Harness live rows can precede read-side provenance enrichment. Pull
+        // the enriched REST row so trigger/source chips update without reload.
+        if (needsHarnessProvenanceReconcile(msg)) void reconcile();
         // Agent Activity: a terminal reply settles the turn → mark the generation
         // settled and rebuild groups from storage (chip, rows, status, duration all
         // come from the endpoint, never the lossy live buffer).

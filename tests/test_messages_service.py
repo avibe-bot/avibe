@@ -330,6 +330,117 @@ def test_agent_run_provenance_skips_missing_source_session(isolated_state):
     assert "source_session_id" not in by_id["msg_ghost"]
 
 
+@pytest.mark.parametrize(
+    ("native_message_id", "expected_kind", "expected_definition_id"),
+    [
+        ("watch:def_watch:run_1", "watch", "def_watch"),
+        ("watch:run_legacy", "watch", None),
+        ("scheduled:def_task:run_2", "scheduled", "def_task"),
+        ("scheduled:run_legacy", "scheduled", None),
+        ("webhook:def_hook:run_3", "webhook", "def_hook"),
+        ("webhook:run_legacy", "webhook", None),
+        ("hook:run_4", "hook", None),
+        ("agent_run:run_5", "agent_run", None),
+    ],
+)
+def test_legacy_queued_harness_message_recovers_native_provenance(
+    isolated_state,
+    native_message_id,
+    expected_kind,
+    expected_definition_id,
+):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_target")
+        _insert_harness_msg(
+            conn,
+            scope_id,
+            "ses_target",
+            author_name=None,
+            native_message_id=native_message_id,
+            msg_id="msg_trigger",
+            created_at="2026-08-04T00:00:00Z",
+        )
+
+    with engine.connect() as conn:
+        [message] = messages_service.list_session_messages(
+            conn,
+            session_id="ses_target",
+        )["messages"]
+
+    assert message["author_name"] == expected_kind
+    assert message.get("author_id") == expected_definition_id
+
+
+def test_transcript_orders_queued_input_at_acceptance_across_all_cursors(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_order")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_order",
+            "user",
+            "first prompt",
+            "2026-08-04T00:00:00Z",
+            msg_id="msg_001",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_order",
+            "agent",
+            "reply before queued input starts",
+            "2026-08-04T00:00:02Z",
+            msg_id="msg_003",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_order",
+            "user",
+            "submitted while busy",
+            "2026-08-04T00:00:01Z",
+            msg_id="msg_002",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == "msg_002")
+            .values(delivered_at="2026-08-04T00:00:03.500000+00:00")
+        )
+
+    with engine.connect() as conn:
+        all_rows = messages_service.list_session_messages(
+            conn,
+            session_id="ses_order",
+        )["messages"]
+        tail = messages_service.list_session_messages(
+            conn,
+            session_id="ses_order",
+            tail=True,
+            limit=2,
+        )["messages"]
+        before = messages_service.list_session_messages(
+            conn,
+            session_id="ses_order",
+            before_id="msg_002",
+            limit=2,
+        )["messages"]
+        around = messages_service.list_session_messages(
+            conn,
+            session_id="ses_order",
+            around_id="msg_003",
+            limit=1,
+        )["messages"]
+
+    assert [row["id"] for row in all_rows] == ["msg_001", "msg_003", "msg_002"]
+    assert [row["id"] for row in tail] == ["msg_003", "msg_002"]
+    assert [row["id"] for row in before] == ["msg_001", "msg_003"]
+    assert [row["id"] for row in around] == ["msg_001", "msg_003", "msg_002"]
+
+
 def test_mark_session_read_ties_break_on_id(isolated_state):
     """When ``until_message_id`` points at a message whose ``created_at``
     is shared by newer messages (second precision), only rows at-or-before

@@ -17,14 +17,15 @@ export const timestampOrderTimeMs = (timestamp: string): number => {
   return milliseconds + (microseconds % 1_000) / 1_000;
 };
 
-/** Best available wall-clock position for a durable transcript row.
+/** Best available wall-clock position for a durable message row.
  *
- * Persisted message timestamps are second-resolution. Canonical `msg_` ids add
- * a microsecond clock prefix specifically to preserve ordering inside that
- * second, so prefer it whenever present and retain `created_at` for imported or
- * historical ids.
+ * Canonical `msg_` ids add a microsecond clock to second-resolution created_at;
+ * imported ids fall back to created_at. Placement helpers outside the transcript
+ * use this authored-time position.
  */
-export const messageOrderTimeMs = (message: Pick<WorkbenchMessage, 'id' | 'created_at'>): number => {
+export const messageOrderTimeMs = (
+  message: Pick<WorkbenchMessage, 'id' | 'created_at'>,
+): number => {
   const idTime = TIME_SORTABLE_MESSAGE_ID_RE.exec(message.id)?.[1];
   if (idTime) {
     const microseconds = Number.parseInt(idTime, 16);
@@ -33,17 +34,22 @@ export const messageOrderTimeMs = (message: Pick<WorkbenchMessage, 'id' | 'creat
   return timestampOrderTimeMs(message.created_at);
 };
 
-// Pure ordering/merge helpers for the chat transcript, kept transport-agnostic
-// (they only read ``created_at`` / ``id``) so the ordering contract can be unit
-// tested independently of the ChatPage component. The chat keeps its ``messages``
-// array sorted in durable (created_at, id) order at all times; these helpers are
-// the only things that decide where a row lands.
+/** When the row became part of the visible transcript. */
+export const transcriptOrderTimeMs = (
+  message: Pick<WorkbenchMessage, 'created_at' | 'delivered_at'>,
+): number => timestampOrderTimeMs(message.delivered_at || message.created_at);
 
-// Durable transcript order: ``created_at`` is second-resolution, so the message
-// id (a microsecond-clock prefix, see messages_service._new_message_id) is the
-// tie-break — matching the server's ``(created_at, id)`` ordering.
+// Pure ordering/merge helpers for the chat transcript, kept transport-agnostic
+// so the ordering contract can be unit tested independently of ChatPage. The
+// chat keeps its rows sorted by transcript-entry time plus id at all times.
+
+// Durable transcript order matches storage.messages_service: acceptance time
+// for queued Deliveries, otherwise creation time with the canonical id's
+// microsecond position, then id as the stable tie-break.
 export const byCreatedThenId = (a: WorkbenchMessage, b: WorkbenchMessage): number => {
-  if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+  const aTime = transcriptOrderTimeMs(a);
+  const bTime = transcriptOrderTimeMs(b);
+  if (aTime !== bTime) return aTime < bTime ? -1 : 1;
   if (a.id === b.id) return 0;
   return a.id < b.id ? -1 : 1;
 };
@@ -69,12 +75,23 @@ export const mergeById = (
   // untouched, and unseen incoming ids are appended as before.
   const patched = existing.map((m) => {
     const inc = incomingById.get(m.id);
-    if (inc && m.source_session_id == null && inc.source_session_id != null) {
+    if (
+      inc &&
+      ((m.source_session_id == null && inc.source_session_id != null) ||
+        (m.author_name == null && inc.author_name != null) ||
+        (m.author_id == null && inc.author_id != null))
+    ) {
       return {
         ...m,
-        source_session_id: inc.source_session_id,
-        source_session_title: inc.source_session_title,
-        source_session_agent_name: inc.source_session_agent_name,
+        ...(m.source_session_id == null && inc.source_session_id != null
+          ? {
+              source_session_id: inc.source_session_id,
+              source_session_title: inc.source_session_title,
+              source_session_agent_name: inc.source_session_agent_name,
+            }
+          : {}),
+        ...(m.author_name == null && inc.author_name != null ? { author_name: inc.author_name } : {}),
+        ...(m.author_id == null && inc.author_id != null ? { author_id: inc.author_id } : {}),
       };
     }
     return m;

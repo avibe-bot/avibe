@@ -2353,9 +2353,22 @@ def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) ->
     assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
 
 
-def test_submit_reports_the_requeued_state_after_prewrite_failure(
+@pytest.mark.parametrize(
+    ("trigger_kind", "definition_id"),
+    [
+        ("scheduled", "task_123"),
+        ("watch", "watch_123"),
+        ("webhook", "webhook_123"),
+        ("hook", None),
+        ("agent_run", None),
+        ("activity_recovery", None),
+    ],
+)
+def test_scheduled_submit_preserves_trigger_provenance_after_prewrite_failure(
     managers,
     monkeypatch,
+    trigger_kind,
+    definition_id,
 ) -> None:
     manager, _other, engine, _engine_b, starts = managers
     published: list[tuple[str, dict]] = []
@@ -2369,10 +2382,17 @@ def test_submit_reports_the_requeued_state_after_prewrite_failure(
         lambda event, payload: published.append((event, payload)),
     )
 
+    context = _context()
+    context.platform_specific.update(
+        {
+            "task_trigger_kind": trigger_kind,
+            "task_definition_id": definition_id,
+        }
+    )
     result = asyncio.run(
         manager.submit(
             "ses_fsm",
-            _context(),
+            context,
             "retry exact scheduled work",
             source=SOURCE_SCHEDULED,
         )
@@ -2384,6 +2404,9 @@ def test_submit_reports_the_requeued_state_after_prewrite_failure(
     rows = _rows(engine)
     assert len(rows) == 1
     assert rows[0]["state"] == "queued"
+    payload = delivery_store.delivery_payload(rows[0])
+    assert payload["author_name"] == trigger_kind
+    assert payload["author_id"] == definition_id
     assert ("queue.updated", {"session_id": "ses_fsm"}) in published
 
 

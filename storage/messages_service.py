@@ -103,11 +103,30 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
 _AGENT_RUN_NATIVE_PREFIX = "agent_run:"
 
 
-def _attach_agent_run_provenance(
+def _native_harness_provenance(native_message_id: Any) -> tuple[str | None, str | None]:
+    """Recover trigger kind/definition from the stable native Message identity.
+
+    Delivery snapshots written before provenance was carried through the durable
+    queue can have null ``author_name``/``author_id`` even though the native id
+    still records the exact trigger. This is read compatibility for those rows;
+    current writers persist the same values directly.
+    """
+
+    parts = str(native_message_id or "").split(":")
+    kind = parts[0] if parts else ""
+    if kind in {"watch", "webhook", "scheduled"}:
+        return kind, parts[1] if len(parts) >= 3 and parts[1] else None
+    if kind in {"hook", "agent_run"}:
+        return kind, None
+    return None, None
+
+
+def _attach_harness_provenance(
     conn: Connection, payloads: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Read-side provenance for agent-callback ("自动触发") chat messages (A9a).
+    """Read-side provenance for every durable Harness chat message.
 
+    Stable native ids repair legacy queued rows whose trigger fields were lost.
     A harness ``agent_run`` prompt is stored as ``native_message_id =
     "agent_run:<execution_id>"`` with no source-session pointer (the write path
     records none). Resolve it read-side: message → its ``agent_runs`` row
@@ -120,6 +139,12 @@ def _attach_agent_run_provenance(
     exec_by_msg: dict[str, str] = {}
     for payload in payloads:
         native_id = payload.get("native_message_id")
+        if payload.get("source") == "harness":
+            kind, definition_id = _native_harness_provenance(native_id)
+            if not payload.get("author_name") and kind:
+                payload["author_name"] = kind
+            if not payload.get("author_id") and definition_id:
+                payload["author_id"] = definition_id
         if (
             payload.get("source") == "harness"
             and isinstance(native_id, str)
@@ -214,6 +239,22 @@ def _attach_agent_run_provenance(
             payload["source_session_title"] = meta.get("title")
             payload["source_session_agent_name"] = meta.get("agent_name")
     return payloads
+
+
+def _transcript_order_value() -> Any:
+    """SQLite ordering key for when a Message entered the transcript.
+
+    A queued Delivery may be submitted while another Turn is active. Its Message
+    is authored then but enters the transcript only when native start accepts it,
+    recorded in ``delivered_at``. Directly accepted rows have no ``delivered_at``
+    and keep their normal ``created_at`` plus id tie-break.
+    """
+
+    return func.coalesce(
+        func.julianday(messages.c.delivered_at),
+        func.julianday(messages.c.created_at),
+        0.0,
+    )
 
 
 _WS_RE = re.compile(r"\s+")
@@ -629,8 +670,9 @@ def list_session_messages(
         # yields an empty window. ``query`` already carries the type/metadata
         # filter, so the older/anchor/newer sub-queries inherit it — the anchor
         # only appears if it is itself transcript-visible.
+        order_value = _transcript_order_value()
         anchor = conn.execute(
-            select(messages.c.created_at).where(
+            select(order_value).where(
                 messages.c.id == around_id, messages.c.session_id == session_id
             )
         ).scalar_one_or_none()
@@ -640,11 +682,11 @@ def list_session_messages(
         older_q = (
             query.where(
                 or_(
-                    messages.c.created_at < anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id < around_id),
+                    order_value < anchor,
+                    and_(order_value == anchor, messages.c.id < around_id),
                 )
             )
-            .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+            .order_by(order_value.desc(), messages.c.id.desc())
             .limit(effective_limit + 1)
         )
         older = [_row_to_payload(dict(row)) for row in conn.execute(older_q).mappings().all()]
@@ -660,18 +702,18 @@ def list_session_messages(
         newer_q = (
             query.where(
                 or_(
-                    messages.c.created_at > anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id > around_id),
+                    order_value > anchor,
+                    and_(order_value == anchor, messages.c.id > around_id),
                 )
             )
-            .order_by(messages.c.created_at.asc(), messages.c.id.asc())
+            .order_by(order_value.asc(), messages.c.id.asc())
             .limit(effective_limit + 1)
         )
         newer = [_row_to_payload(dict(row)) for row in conn.execute(newer_q).mappings().all()]
         has_newer = len(newer) > effective_limit
         newer = newer[:effective_limit]
 
-        merged = _attach_agent_run_provenance(conn, older + anchor_rows + newer)
+        merged = _attach_harness_provenance(conn, older + anchor_rows + newer)
         return {
             "messages": merged,
             "next_after_id": newer[-1]["id"] if has_newer and newer else None,
@@ -679,8 +721,9 @@ def list_session_messages(
         }
     if tail:
         # Newest ``limit`` rows, then flip back to chronological for the caller.
-        query = query.order_by(messages.c.created_at.desc(), messages.c.id.desc()).limit(effective_limit + 1)
-        rows = _attach_agent_run_provenance(
+        order_value = _transcript_order_value()
+        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(effective_limit + 1)
+        rows = _attach_harness_provenance(
             conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
         )
         has_older = len(rows) > effective_limit
@@ -692,18 +735,19 @@ def list_session_messages(
             "next_before_id": rows[0]["id"] if has_older and rows else None,
         }
     if before_id:
+        order_value = _transcript_order_value()
         anchor = conn.execute(
-            select(messages.c.created_at).where(messages.c.id == before_id)
+            select(order_value).where(messages.c.id == before_id)
         ).scalar_one_or_none()
         if anchor is not None:
             query = query.where(
                 or_(
-                    messages.c.created_at < anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id < before_id),
+                    order_value < anchor,
+                    and_(order_value == anchor, messages.c.id < before_id),
                 )
             )
-        query = query.order_by(messages.c.created_at.desc(), messages.c.id.desc()).limit(effective_limit + 1)
-        rows = _attach_agent_run_provenance(
+        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(effective_limit + 1)
+        rows = _attach_harness_provenance(
             conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
         )
         has_older = len(rows) > effective_limit
@@ -715,18 +759,20 @@ def list_session_messages(
             "next_before_id": rows[0]["id"] if has_older and rows else None,
         }
     if after_id:
+        order_value = _transcript_order_value()
         anchor = conn.execute(
-            select(messages.c.created_at).where(messages.c.id == after_id)
+            select(order_value).where(messages.c.id == after_id)
         ).scalar_one_or_none()
         if anchor is not None:
             query = query.where(
                 or_(
-                    messages.c.created_at > anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id > after_id),
+                    order_value > anchor,
+                    and_(order_value == anchor, messages.c.id > after_id),
                 )
             )
-    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc()).limit(effective_limit + 1)
-    rows = _attach_agent_run_provenance(
+    order_value = _transcript_order_value()
+    query = query.order_by(order_value.asc(), messages.c.id.asc()).limit(effective_limit + 1)
+    rows = _attach_harness_provenance(
         conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
     )
     # Probe one extra row against the clamped page size: a full page alone does
