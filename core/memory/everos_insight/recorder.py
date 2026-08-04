@@ -8,7 +8,7 @@ import sqlite3
 import stat
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -26,16 +26,25 @@ _MULTIMODAL_STRING_BYTES = 4 * 1024
 _EMBEDDING_INPUT_BYTES = 2 * 1024
 _EMBEDDING_INPUT_COUNT = 16
 _ERROR_BYTES = 4 * 1024
+_IDENTITY_BYTES = 256
+_LABEL_BYTES = 128
+_MODEL_BYTES = 1024
+_PROVENANCE_BYTES = 1024
+_MD_PATH_BYTES = 2048
+_MAX_ROW_ENCODED_BYTES = 320 * 1024
 
 _SECRET_KEY_SUFFIXES = (
-    "accesstoken",
     "apikey",
     "authorization",
-    "authtoken",
-    "clientsecret",
-    "providertoken",
-    "refreshtoken",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "passwd",
+    "privatekey",
+    "secret",
     "secretkey",
+    "token",
 )
 _ATTACHMENT_KEYS = frozenset(
     {
@@ -64,8 +73,9 @@ _ATTACHMENT_PART_TYPES = frozenset(
     }
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_AUTHORIZATION_VALUE_RE = re.compile(r"(?im)(\b(?:proxy[-_ ]?)?authorization\s*[:=]\s*)[^\r\n]*")
 _LABELED_SECRET_RE = re.compile(
-    r"(?i)(\b(?:api[-_ ]?key|authorization|access[-_ ]?token|auth[-_ ]?token)\s*[:=]\s*)"
+    r"(?i)(\b(?:api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|refresh[-_ ]?token)\s*[:=]\s*)"
     r"([^\s,;]+)"
 )
 _PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:sk|rk|pk|api)-[A-Za-z0-9_-]{8,}")
@@ -161,44 +171,45 @@ def normalize_provider_call(
         response = _bounded_json(response, _LLM_PAYLOAD_BYTES) if response is not None else None
 
     scrub = lambda value: _scrub_optional_text(value, base_urls=base_urls)
-    return ProviderCallRow(
-        id=scrub(call.id) or "",
+    row = ProviderCallRow(
+        id=_required_bounded_text(scrub(call.id), _IDENTITY_BYTES, "id"),
         started_at_ms=call.started_at_ms,
         duration_ms=call.duration_ms,
         kind=call.kind,
-        stage=scrub(call.stage) or "",
-        model=scrub(call.model),
-        status=scrub(call.status) or "",
+        stage=_required_bounded_text(scrub(call.stage), _LABEL_BYTES, "stage"),
+        model=_bounded_text(scrub(call.model), _MODEL_BYTES),
+        status=_required_bounded_text(scrub(call.status), _LABEL_BYTES, "status"),
         error=_bounded_text(scrub(call.error), _ERROR_BYTES),
-        finish_reason=scrub(call.finish_reason),
+        finish_reason=_bounded_text(scrub(call.finish_reason), _LABEL_BYTES),
         prompt_tokens=call.prompt_tokens,
         completion_tokens=call.completion_tokens,
-        request_json=_encode_json(request),
-        response_json=_encode_json(response) if response is not None else None,
+        request_json=_serialize_payload(request, _LLM_PAYLOAD_BYTES),
+        response_json=_serialize_payload(response, _LLM_PAYLOAD_BYTES) if response is not None else None,
         request_bytes=request_bytes,
         response_bytes=response_bytes,
-        request_id=scrub(call.request_id),
-        strategy_name=scrub(call.strategy_name),
-        run_id=scrub(call.run_id),
+        request_id=_bounded_provenance(scrub(call.request_id)),
+        strategy_name=_bounded_text(scrub(call.strategy_name), _PROVENANCE_BYTES),
+        run_id=_bounded_provenance(scrub(call.run_id)),
         attempt=call.attempt,
-        memcell_id=scrub(call.memcell_id),
-        app_id=scrub(call.app_id),
-        project_id=scrub(call.project_id),
-        owner_id=scrub(call.owner_id),
-        md_path=scrub(call.md_path),
-        entry_id=scrub(call.entry_id),
-        parent_type=scrub(call.parent_type),
-        parent_id=scrub(call.parent_id),
+        memcell_id=_bounded_provenance(scrub(call.memcell_id)),
+        app_id=_bounded_provenance(scrub(call.app_id)),
+        project_id=_bounded_provenance(scrub(call.project_id)),
+        owner_id=_bounded_provenance(scrub(call.owner_id)),
+        md_path=_bounded_provenance(scrub(call.md_path), _MD_PATH_BYTES),
+        entry_id=_bounded_provenance(scrub(call.entry_id)),
+        parent_type=_bounded_provenance(scrub(call.parent_type)),
+        parent_id=_bounded_provenance(scrub(call.parent_id)),
         dropped_before=call.dropped_before,
     )
+    if _json_size(asdict(row)) > _MAX_ROW_ENCODED_BYTES:
+        raise ValueError("normalized provider call exceeds the encoded row budget")
+    return row
 
 
 def initialize_call_log(db_path: Path) -> None:
     """Initialize the v1 call-log schema without retaining a connection."""
 
     db_path = Path(db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _enforce_private_directory(db_path.parent)
     with _database_connection(db_path) as conn:
         conn.executescript(
             """
@@ -249,20 +260,21 @@ def initialize_call_log(db_path: Path) -> None:
 
 @contextmanager
 def _database_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
+    _prepare_private_database_path(db_path)
     conn = sqlite3.connect(db_path, timeout=1.0, isolation_level=None)
     try:
-        _enforce_private_database_files(db_path)
+        _validate_private_database_files(db_path)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version not in {0, 1}:
             raise RuntimeError(f"Unsupported call-log schema version: {version}")
         conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
         conn.execute("PRAGMA journal_mode = WAL")
-        _enforce_private_database_files(db_path)
+        _validate_private_database_files(db_path)
         conn.execute("PRAGMA busy_timeout = 1000")
         yield conn
     finally:
         conn.close()
-        _enforce_private_database_files(db_path)
+        _validate_private_database_files(db_path)
 
 
 def _validate_call(call: ProviderCallInput) -> None:
@@ -349,6 +361,7 @@ def _scrub_text(value: str, *, base_urls: tuple[str, ...]) -> str:
     scrubbed = value
     for base_url in sorted(base_urls, key=len, reverse=True):
         scrubbed = scrubbed.replace(base_url, _PROVIDER_BASE_URL)
+    scrubbed = _AUTHORIZATION_VALUE_RE.sub(lambda match: match.group(1) + _REDACTED, scrubbed)
     scrubbed = _BEARER_RE.sub("Bearer " + _REDACTED, scrubbed)
     scrubbed = _LABELED_SECRET_RE.sub(lambda match: match.group(1) + _REDACTED, scrubbed)
     scrubbed = _PREFIXED_KEY_RE.sub(_REDACTED, scrubbed)
@@ -454,8 +467,28 @@ def _embedding_response(value: JsonValue | None) -> JsonValue | None:
     return {
         "vector_count": vector_count,
         "dimension": dimension if isinstance(dimension, int) else None,
-        "usage": usage if isinstance(usage, dict) else None,
+        "usage": _embedding_usage(usage),
     }
+
+
+def _embedding_usage(value: JsonValue | None) -> JsonValue:
+    if not isinstance(value, dict):
+        return None
+    allowed = {
+        "cached_tokens",
+        "completion_tokens",
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "total_tokens",
+    }
+    usage: dict[str, JsonValue] = {}
+    for key in sorted(allowed):
+        item = value.get(key)
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            if item >= 0 and (isinstance(item, int) or math.isfinite(item)):
+                usage[key] = item
+    return usage or None
 
 
 def _bounded_json(value: JsonValue, limit: int) -> JsonValue:
@@ -488,26 +521,66 @@ def _bounded_json(value: JsonValue, limit: int) -> JsonValue:
 
 def _excerpt(value: str, limit: int) -> JsonValue:
     encoded = value.encode("utf-8")
-    if len(encoded) <= limit:
+    if _json_size(value) <= limit:
         return value
-    marker_overhead = len(_encode_json({"excerpt": "", "omitted_bytes": len(encoded)}).encode("utf-8"))
-    excerpt_limit = max(0, limit - marker_overhead)
-    excerpt = encoded[:excerpt_limit].decode("utf-8", errors="ignore")
-    omitted = len(encoded) - len(excerpt.encode("utf-8"))
-    return {"excerpt": excerpt, "omitted_bytes": omitted}
+    best: JsonValue = {"omitted_bytes": len(encoded)}
+    lower = 0
+    upper = len(encoded)
+    while lower <= upper:
+        midpoint = (lower + upper) // 2
+        excerpt = encoded[:midpoint].decode("utf-8", errors="ignore")
+        omitted = len(encoded) - len(excerpt.encode("utf-8"))
+        candidate: JsonValue = {"excerpt": excerpt, "omitted_bytes": omitted}
+        if _json_size(candidate) <= limit:
+            best = candidate
+            lower = midpoint + 1
+        else:
+            upper = midpoint - 1
+    return best
 
 
 def _bounded_text(value: str | None, limit: int) -> str | None:
     if value is None:
         return None
     encoded = value.encode("utf-8")
-    if len(encoded) <= limit:
+    if _json_size(value) <= limit:
         return value
-    suffix = f" [omitted_bytes={len(encoded)}]"
-    prefix_limit = max(0, limit - len(suffix.encode("utf-8")))
-    prefix = encoded[:prefix_limit].decode("utf-8", errors="ignore")
-    omitted = len(encoded) - len(prefix.encode("utf-8"))
-    return f"{prefix} [omitted_bytes={omitted}]"
+    best = f"[omitted_bytes={len(encoded)}]"
+    lower = 0
+    upper = len(encoded)
+    while lower <= upper:
+        midpoint = (lower + upper) // 2
+        prefix = encoded[:midpoint].decode("utf-8", errors="ignore")
+        omitted = len(encoded) - len(prefix.encode("utf-8"))
+        candidate = f"{prefix} [omitted_bytes={omitted}]"
+        if _json_size(candidate) <= limit:
+            best = candidate
+            lower = midpoint + 1
+        else:
+            upper = midpoint - 1
+    return best
+
+
+def _required_bounded_text(value: str | None, limit: int, name: str) -> str:
+    if value is None:
+        raise ValueError(f"{name} must be present")
+    if _json_size(value) > limit:
+        raise ValueError(f"{name} exceeds its encoded byte budget")
+    return value
+
+
+def _bounded_provenance(value: str | None, limit: int = _PROVENANCE_BYTES) -> str | None:
+    if value is None or _json_size(value) <= limit:
+        return value
+    return None
+
+
+def _serialize_payload(value: JsonValue, limit: int) -> str:
+    bounded = _bounded_json(value, limit)
+    serialized = _encode_json(bounded)
+    if len(serialized.encode("utf-8")) > limit:
+        raise ValueError("normalized payload exceeds its encoded field budget")
+    return serialized
 
 
 def _json_size(value: JsonValue) -> int:
@@ -518,20 +591,47 @@ def _encode_json(value: JsonValue) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _enforce_private_directory(directory: Path) -> None:
-    info = os.lstat(directory)
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise OSError("Call-log directory must be a directory")
-    os.chmod(directory, 0o700)
-    if stat.S_IMODE(os.lstat(directory).st_mode) != 0o700:
-        raise OSError("Call-log directory is not owner-only")
+def _prepare_private_database_path(db_path: Path) -> None:
+    if not db_path.is_absolute() or ".." in db_path.parts:
+        raise OSError("Call-log database path must be a lexical absolute path")
+    _validate_directory_chain(db_path.parent)
+    directory_info = os.lstat(db_path.parent)
+    if directory_info.st_uid != os.getuid():
+        raise OSError("Call-log directory must be owned by the current user")
+    if stat.S_IMODE(directory_info.st_mode) != 0o700:
+        raise OSError("Call-log directory must have mode 0700")
+
+    try:
+        os.lstat(db_path)
+    except FileNotFoundError:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(db_path, flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise OSError("Call-log database must be a regular owned file")
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                raise OSError("Call-log database must have mode 0600")
+        finally:
+            os.close(fd)
+    _validate_private_database_files(db_path)
 
 
-def _enforce_private_database_files(db_path: Path) -> None:
+def _validate_directory_chain(directory: Path) -> None:
+    for candidate in (*reversed(directory.parents), directory):
+        info = os.lstat(candidate)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise OSError("Call-log parent chain must contain only directories")
+
+
+def _validate_private_database_files(db_path: Path) -> None:
     for candidate in (
         db_path,
         db_path.with_name(f"{db_path.name}-wal"),
         db_path.with_name(f"{db_path.name}-shm"),
+        db_path.with_name(f"{db_path.name}-journal"),
     ):
         try:
             info = os.lstat(candidate)
@@ -539,6 +639,7 @@ def _enforce_private_database_files(db_path: Path) -> None:
             continue
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             raise OSError("Call-log database path must be a regular file")
-        os.chmod(candidate, 0o600)
-        if stat.S_IMODE(os.lstat(candidate).st_mode) != 0o600:
-            raise OSError("Call-log database is not owner-only")
+        if info.st_uid != os.getuid():
+            raise OSError("Call-log database must be owned by the current user")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise OSError("Call-log database must have mode 0600")
