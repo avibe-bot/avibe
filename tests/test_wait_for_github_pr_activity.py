@@ -1731,7 +1731,15 @@ def test_main_ignores_a_partial_state_file(tmp_path) -> None:
     assert since_values == [None]
 
 
-def test_main_ignores_an_unreadable_state_file(tmp_path) -> None:
+def test_main_refuses_to_poll_past_an_unreadable_state_file(tmp_path) -> None:
+    """A corrupt state file is terminal, because its cursors are unknown.
+
+    Warning and re-baselining looks like recovery and is a silent loss: the file DID
+    hold a cursor, and everything that arrived between it and the fresh snapshot is
+    skipped -- then the only evidence of how far the watch had got is overwritten. A
+    forever watch would do that on every cycle. Stopping instead puts the choice with
+    whoever can make it.
+    """
     module = _load_module()
     state_file = tmp_path / "pr-153.json"
     state_file.write_text("{ this is not json", encoding="utf-8")
@@ -1763,12 +1771,85 @@ def test_main_ignores_an_unreadable_state_file(tmp_path) -> None:
         ),
         patch("sys.stderr", stderr),
     ):
-        rc = module.main()
+        rc = module.run_cli()
+
+    assert rc == 1
+    assert "is corrupt" in stderr.getvalue()
+    # Left exactly as found: the operator decides, and the bytes are the evidence.
+    assert state_file.read_text(encoding="utf-8") == "{ this is not json"
+
+
+def test_main_refuses_a_state_file_it_does_not_recognise(tmp_path) -> None:
+    """Valid JSON of the wrong shape or version is unusable for the same reason.
+
+    Its cursors may mean something else, or nothing this waiter can read, so resuming
+    from them and overwriting them are both guesses about how far the watch had got.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    original = json.dumps({"version": module.STATE_FILE_VERSION + 1, "review_comment_cursor": 500})
+    state_file.write_text(original, encoding="utf-8")
+
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.run_cli()
+
+    assert rc == 1
+    assert "not in a recognised format" in stderr.getvalue()
+    assert state_file.read_text(encoding="utf-8") == original
+
+
+def test_main_starts_over_from_an_empty_state_file(tmp_path) -> None:
+    """A zero-byte file is an interrupted claim, not corruption.
+
+    The claim creates the path exclusively and then writes it, so a cycle killed in
+    between leaves nothing behind. No cursor was ever recorded there, so there is
+    none to lose and refusing would strand the watch on a file only it created.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text("", encoding="utf-8")
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.run_cli()
 
     assert rc == 124
-    assert "Ignoring unusable state file" in stderr.getvalue()
-    # A corrupt file is replaced by a usable one rather than breaking every cycle.
-    assert json.loads(state_file.read_text(encoding="utf-8"))["repo"] == "avibe-bot/avibe"
+    assert json.loads(state_file.read_text(encoding="utf-8"))["review_comment_cursor"] == 501
 
 
 def test_main_refuses_to_poll_when_the_state_file_cannot_be_written(tmp_path) -> None:
@@ -2604,10 +2685,10 @@ def _managed_state(module, path, watch_id: str, **fields) -> None:
     )
 
 
-def _run_managed(module, state_file, fetch, *, delivered: bool):
-    """One managed cycle over ``state_file``, told whether the last report was queued."""
+def _run_managed(module, state_file, fetch, *, delivery: str = ""):
+    """One managed cycle over ``state_file``, told when this watch last delivered."""
 
-    env = {module.WATCH_ID_ENV: "wat_9", module.EVENT_DELIVERED_ENV: "1" if delivered else ""}
+    env = {module.WATCH_ID_ENV: "wat_9", module.LAST_DELIVERY_ENV: delivery}
     stdout = io.StringIO()
     with (
         patch.dict("os.environ", env, clear=False),
@@ -2642,24 +2723,37 @@ def test_a_managed_run_stages_the_cursors_that_cover_its_report(tmp_path) -> Non
     def _fetch(repo, pr_number, token, **kwargs):
         return _pr_state(review_comments=[_review_comment(501)]), 1
 
-    rc, stdout, payload = _run_managed(module, state_file, _fetch, delivered=False)
+    rc, stdout, payload = _run_managed(module, state_file, _fetch, delivery="2026-08-04T10:00:00+00:00")
 
     assert rc == 0
     assert "review_comment #501" in stdout
     # Still pointing before the event that was just reported.
     assert payload["review_comment_cursor"] == 500
-    assert payload[module.STAGED_KEY]["review_comment_cursor"] == 501
+    assert payload[module.STAGED_KEY]["cursors"]["review_comment_cursor"] == 501
+    # Stamped with the delivery this cycle started from, which is what a later cycle
+    # compares against to learn whether this report was queued.
+    assert payload[module.STAGED_KEY]["delivered_after"] == "2026-08-04T10:00:00+00:00"
 
 
-def test_a_managed_run_promotes_the_staged_cursors_once_the_report_is_acknowledged(tmp_path) -> None:
-    """The acknowledged report is durable, so the next cycle may start after it."""
+def test_a_managed_run_promotes_the_staged_cursors_once_the_report_was_delivered(tmp_path) -> None:
+    """A delivery stamp that has moved since staging means the report was queued.
+
+    The comparison is what makes this survive a restart, and makes a ``once`` watch
+    resumed long after its single report promote rather than replay it: the stamp is
+    still on the watch, so "was it delivered" is answerable at any later time.
+    """
     module = _load_module()
     state_file = tmp_path / "pr-153.json"
     _managed_state(
         module,
         state_file,
         "wat_9",
-        **{module.STAGED_KEY: {"review_comment_cursor": 501, "review_cursor": 0}},
+        **{
+            module.STAGED_KEY: {
+                "delivered_after": "2026-08-04T10:00:00+00:00",
+                "cursors": {"review_comment_cursor": 501, "review_cursor": 0},
+            }
+        },
     )
 
     saved = module._load_state_file(
@@ -2669,7 +2763,7 @@ def test_a_managed_run_promotes_the_staged_cursors_once_the_report_is_acknowledg
         resolved = module._resolve_staged_state(
             str(state_file),
             saved,
-            delivered=True,
+            delivery="2026-08-04T10:05:00+00:00",
             repo="avibe-bot/avibe",
             pr_number=153,
             watch_identity=None,
@@ -2684,8 +2778,8 @@ def test_a_managed_run_promotes_the_staged_cursors_once_the_report_is_acknowledg
     assert module.STAGED_KEY not in payload
 
 
-def test_a_managed_run_reports_the_event_again_when_the_report_was_not_acknowledged(tmp_path) -> None:
-    """No acknowledgement means the report may never have been queued: replay it.
+def test_a_managed_run_reports_the_event_again_when_it_was_never_delivered(tmp_path) -> None:
+    """An unchanged delivery stamp means the report was never queued: replay it.
 
     One repeated Agent turn is the cost of the staged cursors being dropped; the
     alternative -- promoting them anyway -- is an event nobody ever hears about.
@@ -2696,18 +2790,23 @@ def test_a_managed_run_reports_the_event_again_when_the_report_was_not_acknowled
         module,
         state_file,
         "wat_9",
-        **{module.STAGED_KEY: {"review_comment_cursor": 501, "review_cursor": 0}},
+        **{
+            module.STAGED_KEY: {
+                "delivered_after": "2026-08-04T10:00:00+00:00",
+                "cursors": {"review_comment_cursor": 501, "review_cursor": 0},
+            }
+        },
     )
 
     def _fetch(repo, pr_number, token, **kwargs):
         return _pr_state(review_comments=[_review_comment(501)]), 1
 
-    rc, stdout, payload = _run_managed(module, state_file, _fetch, delivered=False)
+    rc, stdout, payload = _run_managed(module, state_file, _fetch, delivery="2026-08-04T10:00:00+00:00")
 
     assert rc == 0
     assert "review_comment #501" in stdout
     assert payload["review_comment_cursor"] == 500
-    assert payload[module.STAGED_KEY]["review_comment_cursor"] == 501
+    assert payload[module.STAGED_KEY]["cursors"]["review_comment_cursor"] == 501
 
 
 def test_a_manual_run_stages_nothing_because_printing_is_its_delivery(tmp_path) -> None:
@@ -2721,7 +2820,7 @@ def test_a_manual_run_stages_nothing_because_printing_is_its_delivery(tmp_path) 
 
     stdout = io.StringIO()
     with (
-        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.EVENT_DELIVERED_ENV: ""}, clear=False),
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: ""}, clear=False),
         patch.object(module, "_fetch_state", side_effect=_fetch),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value=None),

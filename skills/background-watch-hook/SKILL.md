@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.11.5
+version: 0.11.6
 ---
 
 # Background Watch Hook
@@ -260,23 +260,30 @@ The login is reused only while the token still fingerprints to the account it wa
 resolved for, and an explicit `--since-review-comment-id` /
 `--since-issue-comment-id` drops the matching saved `since` so the replay it asks
 for is not narrowed away. It is written on every cursor advance and on timeout,
-replaced atomically, and ignored when unreadable. Cursors that cover a reported event
-are not committed by the cycle that reports it. A waiter cannot observe its own
-delivery — `vibe watch` reads its stdout only after the process exits — so those
-cursors are staged under `pending` while the committed ones stay before the event,
-and the next cycle promotes them only when the supervisor sets
-`AVIBE_WATCH_EVENT_DELIVERED`, which it does for exactly one cycle after the
-follow-up is durably queued. No acknowledgement means the report may never have been
-queued, so the staged cursors are dropped and the event is reported again: at-least-once,
-costing one repeated Agent turn instead of losing the activity for good. A manual run
-has no next cycle and no supervisor, and there printing *is* the delivery, so it
-commits straight after reporting. Progress made by filtering — new activity that was
-deliberately not reported — commits immediately either way, since there is no
-delivery to wait for. Two failures are terminal rather
-than a warning — a path that cannot be written to (checked before the first poll)
-and a path already owned by another watch — and both stop the watch with exit `1`
-rather than polling on without the cursors it was asked to keep, or clobbering
-another watch's.
+replaced atomically. Cursors that cover a reported event are not committed by the
+cycle that reports it. A waiter cannot observe its own delivery — `vibe watch` reads
+its stdout only after the process exits — so those cursors are staged under `pending`
+while the committed ones stay before the event, together with the value of
+`AVIBE_WATCH_LAST_DELIVERY` the cycle started from. That variable is when this watch
+last had a report durably queued, stamped in the same transaction as the follow-up, so
+any later cycle that reads a *different* value knows the report was delivered and
+promotes the staged cursors. An unchanged value means it may never have been queued,
+so they are dropped and the event is reported again: at-least-once, costing one
+repeated Agent turn instead of losing the activity for good. Comparing a durable stamp
+rather than consuming a one-shot acknowledgement is what makes this correct across a
+service restart, and for a `once` watch, whose one report is followed by no cycle at
+all until the user resumes it. A manual run has no supervisor, and there printing *is*
+the delivery, so it commits straight after reporting. Progress made by filtering — new
+activity that was deliberately not reported — commits immediately either way, since
+there is no delivery to wait for. Three failures are terminal rather than a warning —
+a path that cannot be written to (checked before the first poll), a path already owned
+by another watch, and an existing file whose cursors cannot be read — and each stops
+the watch with exit `1` rather than polling on without the cursors it was asked to
+keep, or clobbering another watch's. A corrupt or unrecognised state file is left
+exactly as found: re-baselining from the current PR would skip everything that
+arrived after the cursor it did hold and then overwrite the only evidence of how far
+the watch had got. An empty file is the one exception, since it is a claim caught
+between its exclusive create and its first write and never held a cursor at all.
 
 Ownership is claimed, not assumed. A missing state file is created before the first
 poll holding nothing but the identity it belongs to, so two watches started together

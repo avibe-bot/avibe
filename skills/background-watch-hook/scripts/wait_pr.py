@@ -28,12 +28,12 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _github_wait_common import (  # noqa: E402
-    EVENT_DELIVERED_ENV,
     filter_new,
     get_authenticated_login,
     get_token,
     github_get,
     is_retryable_http_error,
+    LAST_DELIVERY_ENV,
     later_since,
     list_paginated,
     list_paginated_with_count,
@@ -64,11 +64,12 @@ DEFAULT_NOISE_COMMENT_PATTERNS = (
 # Agent's own doing, so they are noise in --actionable-only mode.
 ACTIONABLE_PR_STATUSES = frozenset({"merged", "closed"})
 STATE_FILE_VERSION = 1
-# Cursors that cover a REPORTED event, held here instead of committed. A waiter cannot
-# see its own delivery -- the supervisor reads its output only after the process exits
-# -- so committing them at report time loses the event whenever the service stops in
-# between. They are promoted by the next cycle, which the supervisor tells whether the
-# report was durably queued, and replayed when it was not.
+# Cursors that cover a REPORTED event, held here instead of committed, next to the
+# supervisor's last-delivery stamp as it read at report time. A waiter cannot see its
+# own delivery -- the supervisor reads its output only after the process exits -- so
+# committing them at report time loses the event whenever the service stops in
+# between. A later cycle that reads a different stamp knows the report was delivered
+# and promotes them; an unchanged stamp replays the report.
 STAGED_KEY = "pending"
 STATE_CURSOR_KEYS = (
     "review_cursor",
@@ -93,6 +94,15 @@ class StateFileError(RuntimeError):
 
 class StatePersistenceError(StateFileError):
     """The cursors an explicit ``--state-file`` promised could not be saved."""
+
+
+class StateFileUnusableError(StateFileError):
+    """An existing ``--state-file`` cannot be read, so its cursors are unknown.
+
+    Not recoverable by starting over: re-baselining from the current PR skips
+    everything that arrived after the last cursor this file did hold, and then
+    overwrites the evidence. The corrupt file has to be removed deliberately.
+    """
 
 
 class StateFileOwnershipError(StateFileError):
@@ -575,17 +585,24 @@ def _load_state_file(
         return {}
 
     try:
-        with open(path, encoding="utf-8") as handle:
-            payload = json.load(handle)
+        raw = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError) as err:
-        print(f"Ignoring unusable state file {path}: {err}", file=sys.stderr)
-        return {}
+    except OSError as err:
+        raise StateFileUnusableError(f"State file {path} cannot be read: {err}") from err
 
-    if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
-        print(f"Ignoring state file {path}: unrecognised format", file=sys.stderr)
+    # An empty file is the claim below caught between its exclusive create and its
+    # first write, so no cursor was ever recorded in it and there is none to lose.
+    # Anything else that will not parse HAD cursors, and how far they reached is now
+    # unknown -- which is why this is terminal rather than a fresh baseline.
+    if not raw.strip():
         return {}
+    try:
+        payload = json.loads(raw)
+    except ValueError as err:
+        raise StateFileUnusableError(f"State file {path} is corrupt: {err}") from err
+    if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
+        raise StateFileUnusableError(f"State file {path} is not in a recognised format")
     # Resuming from somebody else's cursors would skip the history they cover, and
     # carrying on would overwrite them on the first cursor advance -- so this is
     # terminal rather than a fresh baseline. A file left behind by another watch has
@@ -937,46 +954,54 @@ def _saved_str(saved: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _event_delivery_acknowledged() -> bool:
-    """Did the supervisor confirm the previous cycle's report reached its outbox?
+def _last_delivery() -> str | None:
+    """When the supervisor last queued a report from this watch, as it sees it.
 
-    Only ``vibe watch`` can answer this, so a manual run says no -- and does not need
-    a yes, because there printing the report IS delivering it and nothing is staged.
+    ``None`` for a manual run, which has no supervisor -- and needs none, because
+    there printing the report IS delivering it and nothing is ever staged.
     """
 
-    return bool(os.environ.get(EVENT_DELIVERED_ENV, "").strip())
+    return os.environ.get(LAST_DELIVERY_ENV, "").strip() or None
 
 
 def _resolve_staged_state(
     path: str | None,
     saved: dict[str, Any],
     *,
-    delivered: bool,
+    delivery: str | None,
     repo: str,
     pr_number: int | None,
     watch_identity: str | None,
     watch_id: str | None,
 ) -> dict[str, Any]:
-    """Promote or drop the cursors staged for the previous cycle's report.
+    """Promote or drop the cursors staged for an earlier cycle's report.
 
-    Promoted when the supervisor acknowledged the report: it is durable, so the next
-    poll may start after it. Dropped otherwise, which replays the report -- one
-    repeated Agent turn, against an event lost for good. Either way the decision is
-    written down before polling, so it is taken once.
+    Promoted when the supervisor's last-delivery stamp has moved since the report was
+    staged: the report was queued, so polling may start after it. Dropped when the
+    stamp is unchanged, which replays the report -- one repeated Agent turn, against
+    an event lost for good. Comparing stamps rather than consuming a one-shot ack is
+    what makes this survive a restart, and makes a ``once`` watch resumed long after
+    its one report promote instead of replaying. Either way the decision is written
+    down before polling, so it is taken once.
     """
 
     staged = saved.get(STAGED_KEY)
     if not isinstance(staged, dict):
         return saved
+    cursors = staged.get("cursors")
+    # A staged block this waiter cannot read is dropped, not guessed at: replaying
+    # the report it covered costs a turn, promoting cursors of unknown reach loses
+    # whatever they skip.
+    delivered = isinstance(cursors, dict) and staged.get("delivered_after") != delivery
 
     resolved = {key: value for key, value in saved.items() if key != STAGED_KEY}
     if delivered:
-        resolved.update(staged)
+        resolved.update(cursors)
     print(
         (
-            "Previous cycle's report was acknowledged; advancing past it."
+            "An earlier report was delivered; advancing past it."
             if delivered
-            else "Previous cycle's report was not acknowledged; reporting it again."
+            else "An earlier report was never delivered; reporting it again."
         ),
         file=sys.stderr,
     )
@@ -1118,6 +1143,7 @@ def main() -> int:
 
     watch_identity = _watch_identity(args)
     watch_id = _managed_watch_id()
+    delivery_stamp = _last_delivery()
     # Only a managed run has a next cycle to promote staged cursors, and only it gets
     # told whether the report was queued. A manual run is one process whose stdout is
     # the delivery, so staging there would leave cursors nobody ever promotes.
@@ -1139,7 +1165,7 @@ def main() -> int:
     saved = _resolve_staged_state(
         args.state_file,
         saved,
-        delivered=_event_delivery_acknowledged(),
+        delivery=delivery_stamp,
         repo=args.repo,
         pr_number=args.pr,
         watch_identity=watch_identity,
@@ -1325,8 +1351,12 @@ def main() -> int:
             fields = _pr_state_fields()
             if previous is not None:
                 # Committed state stays where the reported event is still unseen; the
-                # cursors past it wait under STAGED_KEY for the acknowledgement.
-                fields = {**previous, STAGED_KEY: fields}
+                # cursors past it wait under STAGED_KEY, stamped with the delivery this
+                # waiter started from so a later cycle can tell whether it has moved.
+                fields = {
+                    **previous,
+                    STAGED_KEY: {"delivered_after": delivery_stamp, "cursors": fields},
+                }
             _write_state_file(
                 args.state_file,
                 repo=args.repo,
@@ -1457,7 +1487,13 @@ def main() -> int:
         def _persist_new_pr_state(*, previous: int | None = None) -> None:
             fields: dict[str, Any] = {"pr_cursor": pr_cursor}
             if previous is not None:
-                fields = {"pr_cursor": previous, STAGED_KEY: {"pr_cursor": pr_cursor}}
+                fields = {
+                    "pr_cursor": previous,
+                    STAGED_KEY: {
+                        "delivered_after": delivery_stamp,
+                        "cursors": {"pr_cursor": pr_cursor},
+                    },
+                }
             _write_state_file(
                 args.state_file,
                 repo=args.repo,
@@ -1612,18 +1648,18 @@ def main() -> int:
 def run_cli() -> int:
     """``main`` plus the terminal handling of an unusable ``--state-file``.
 
-    Exit 1 and not the retryable 75: neither a directory that cannot be written
-    to nor a path already owned by another PR starts working on the next cycle,
-    and a forever watch retrying into one would poll indefinitely while losing
-    the activity it saw.
+    Exit 1 and not the retryable 75: a directory that cannot be written to, a path
+    already owned by another PR, and a file whose cursors cannot be read do not start
+    working on the next cycle, and a forever watch retrying into one would poll
+    indefinitely while losing the activity it saw.
     """
 
     try:
         return main()
     except StateFileError as err:
         print(
-            f"{err}. Give this watch its own --state-file path (or fix this one), "
-            "then recreate the watch.",
+            f"{err}. Give this watch its own --state-file path (or fix or remove "
+            "this one), then recreate the watch.",
             file=sys.stderr,
         )
         return 1

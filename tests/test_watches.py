@@ -23,7 +23,7 @@ from core.process_isolation import (
 )
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import (
-    EVENT_DELIVERED_ENV,
+    LAST_DELIVERY_ENV,
     NO_EVENT_EXIT_CODE,
     NO_EVENT_MARKER,
     WATCH_ID_ENV,
@@ -2519,7 +2519,7 @@ def test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim(tmp_path: Path)
 
     cycles: list[str] = []
 
-    async def _spy_cycle(watch_arg, *, timeout_seconds, event_delivered=False):  # noqa: ANN001
+    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
         cycles.append(watch_arg.id)
         return _CycleResult(exit_code=0, stdout="ci is green", stderr="", timed_out=False)
 
@@ -2711,7 +2711,7 @@ def _hook_branch_service(tmp_path: Path, branch: str, *, request_store=None) -> 
     results = list(spec["cycles"])
     calls: list[str] = []
 
-    async def _spy_cycle(watch_arg, *, timeout_seconds, event_delivered=False):  # noqa: ANN001
+    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
         calls.append(watch_arg.id)
         return results[min(len(calls) - 1, len(results) - 1)]
 
@@ -3535,19 +3535,22 @@ def test_quiet_cycle_summary_keeps_the_end_of_a_long_waiter_report() -> None:
     assert squashed.startswith("…")
 
 
-def test_only_the_cycle_after_a_delivered_event_is_told_the_report_was_queued(tmp_path: Path) -> None:
-    """A waiter learns its previous report is durable, and only once it truly is.
+def test_a_cycle_is_told_when_this_watch_last_had_a_report_delivered(tmp_path: Path) -> None:
+    """A waiter learns whether an earlier report of its own was ever delivered.
 
     A waiter cannot observe its own delivery: its stdout reaches the supervisor only
     after the process exits, so a waiter that wants to advance its own cursors past a
-    reported event has to be told the report was durably queued. That fact is known
-    exactly here -- after ``_commit_cycle_result`` commits the result stamp and the
-    follow-up hook together -- and it is true for exactly ONE cycle: the next one.
+    reported event has to be told. What it is told is ``last_event_at``, stamped by
+    ``_commit_cycle_result`` in the same transaction as the follow-up hook -- so a
+    waiter that staged cursors alongside the value it saw can compare, and a CHANGED
+    value means its report was queued.
 
-    So: not on the first cycle (nothing has been reported yet), set on the cycle after
-    the event, and cleared again after a quiet cycle, which queued no hook. Getting the
-    last case wrong is the harmful one -- a waiter would promote cursors covering a
-    report that was never delivered and skip the activity for good.
+    A durable stamp rather than a one-shot flag handed to the next cycle: it is still
+    correct after a restart, and for a ``once`` watch, whose one report is followed by
+    no cycle at all until the user resumes it -- where a lost flag would replay an
+    event that was delivered long ago. And it must NOT move on a quiet cycle, which
+    queued nothing: a waiter would then promote cursors covering a report that was
+    never delivered and skip the activity for good.
     """
     store = ManagedWatchStore()
     assert store._sqlite is not None, "this test needs the SQLite-backed store"
@@ -3588,10 +3591,10 @@ def test_only_the_cycle_after_a_delivered_event_is_told_the_report_was_queued(tm
         _CycleResult(exit_code=NO_EVENT_EXIT_CODE, stdout="", stderr=NO_EVENT_MARKER, timed_out=False),
         _CycleResult(exit_code=NO_EVENT_EXIT_CODE, stdout="", stderr=NO_EVENT_MARKER, timed_out=False),
     ]
-    told: list[bool] = []
+    told: list[str] = []
 
-    async def _spy_cycle(watch_arg, *, timeout_seconds, event_delivered=False):  # noqa: ANN001
-        told.append(event_delivered)
+    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
+        told.append(_cycle_env(watch_arg)[LAST_DELIVERY_ENV])
         if len(told) >= len(scripted):
             service._running = False
         return scripted[min(len(told) - 1, len(scripted) - 1)]
@@ -3600,17 +3603,20 @@ def test_only_the_cycle_after_a_delivered_event_is_told_the_report_was_queued(tm
 
     asyncio.run(service._run_watch(watch.id))
 
-    assert told[:3] == [False, True, False]
+    assert told[0] == "", "nothing has been reported yet"
+    assert told[1], "the event was delivered, so the stamp has to have moved"
+    assert told[2] == told[1], "a quiet cycle queued no hook; the stamp must not move"
 
 
-def test_the_cycle_environment_only_carries_the_ack_when_a_report_was_delivered() -> None:
-    """The flag reaches the waiter as an environment variable, or not at all."""
-    watch = SimpleNamespace(id="wat_9")
-
-    assert _cycle_env(watch, event_delivered=False) == {WATCH_ID_ENV: "wat_9"}
-    assert _cycle_env(watch, event_delivered=True) == {
+def test_the_cycle_environment_carries_the_watch_and_its_last_delivery() -> None:
+    """Both facts reach the waiter as environment variables, empty for never."""
+    assert _cycle_env(SimpleNamespace(id="wat_9", last_event_at=None)) == {
         WATCH_ID_ENV: "wat_9",
-        EVENT_DELIVERED_ENV: "1",
+        LAST_DELIVERY_ENV: "",
+    }
+    assert _cycle_env(SimpleNamespace(id="wat_9", last_event_at="2026-08-04T11:00:00+00:00")) == {
+        WATCH_ID_ENV: "wat_9",
+        LAST_DELIVERY_ENV: "2026-08-04T11:00:00+00:00",
     }
 
 

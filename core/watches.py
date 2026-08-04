@@ -70,12 +70,15 @@ NO_EVENT_SUMMARY_LOG_LIMIT = 1000
 # per-watch state on disk use it as the owner of that state, so two identically
 # configured watches cannot silently share one file.
 WATCH_ID_ENV = "AVIBE_WATCH_ID"
-# Set on the cycle that follows one whose event report was durably queued as a
-# follow-up. A waiter cannot see delivery for itself -- its output only reaches the
+# When this watch last had an event report durably queued as a follow-up, or empty
+# for never. A waiter cannot see delivery for itself -- its output only reaches the
 # service once the process has exited -- so a waiter that stages the cursors covering
-# a reported event needs this to know the report is safe to advance past. Withheld
-# after a restart that loses the flag, which replays the report rather than losing it.
-EVENT_DELIVERED_ENV = "AVIBE_WATCH_EVENT_DELIVERED"
+# a reported event records this value alongside them, and a later cycle that reads a
+# DIFFERENT value knows the report was delivered and the staged cursors are safe to
+# promote. It is ``last_event_at``, stamped in the same transaction as the follow-up
+# and therefore durable: the answer survives a restart, and survives a ``once`` watch
+# being resumed long after its one report, neither of which an in-memory flag does.
+LAST_DELIVERY_ENV = "AVIBE_WATCH_LAST_DELIVERY"
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
@@ -800,18 +803,15 @@ class _CycleResult:
     timed_out: bool
 
 
-def _cycle_env(watch: ManagedWatch, *, event_delivered: bool) -> dict[str, str]:
+def _cycle_env(watch: ManagedWatch) -> dict[str, str]:
     """What one waiter cycle is told about itself.
 
     The watch id lets a waiter own its on-disk state, so two identically configured
-    watches cannot silently share a state file. The delivery ack lets a waiter that
-    staged cursors for a reported event know the report is durable.
+    watches cannot silently share a state file. The last delivery stamp lets a waiter
+    that staged cursors for a reported event tell whether that report was delivered.
     """
 
-    env = {WATCH_ID_ENV: watch.id}
-    if event_delivered:
-        env[EVENT_DELIVERED_ENV] = "1"
-    return env
+    return {WATCH_ID_ENV: watch.id, LAST_DELIVERY_ENV: watch.last_event_at or ""}
 
 
 class ManagedWatchService:
@@ -1330,12 +1330,6 @@ class ManagedWatchService:
         return False
 
     async def _run_watch(self, watch_id: str) -> None:
-        # Whether the PREVIOUS cycle's event report reached the durable outbox. The
-        # next cycle is told, because a waiter staging cursors for a reported event has
-        # no other way to learn that advancing past it is safe. In-memory on purpose:
-        # a service that restarts mid-delivery withholds the ack, and the waiter
-        # replays the report instead of skipping the activity behind it.
-        event_delivered = False
         lifetime_started = asyncio.get_running_loop().time()
         self._watch_started_at[watch_id] = _utc_now_iso()
         self._runtime_state_dirty = True
@@ -1400,14 +1394,7 @@ class ManagedWatchService:
                 self._stop_watch_for_missing_cwd(watch, error_text=cwd_error)
                 return
             try:
-                result = await self._run_cycle(
-                    watch,
-                    timeout_seconds=cycle_timeout,
-                    event_delivered=event_delivered,
-                )
-                # The ack covers exactly the cycle that follows the delivery, and this
-                # is it. Whatever this cycle reports needs its own.
-                event_delivered = False
+                result = await self._run_cycle(watch, timeout_seconds=cycle_timeout)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1437,9 +1424,9 @@ class ManagedWatchService:
                     prompt=_build_prompt(watch.message or watch.prefix, result.stdout),
                 ):
                     return
-                # The hook is committed, so the report is durable: the next cycle may
-                # advance past the event it covered.
-                event_delivered = True
+                # ``last_event_at`` moved in the same transaction as the hook, so the
+                # report is durable and every later cycle can see that it was. Nothing
+                # to carry in memory: the next iteration re-reads the watch.
                 if watch.mode != "forever":
                     return
                 continue
@@ -1525,7 +1512,6 @@ class ManagedWatchService:
         watch: ManagedWatch,
         *,
         timeout_seconds: float,
-        event_delivered: bool = False,
     ) -> _CycleResult:
         """Run one waiter cycle through the shared supervised-command runner.
 
@@ -1563,7 +1549,7 @@ class ManagedWatchService:
                 # state per watch -- cursor files, locks -- cannot otherwise tell
                 # itself apart from an identically configured sibling watch, and two
                 # of them sharing one file lose whichever events the other reports.
-                extra_env=_cycle_env(watch, event_delivered=event_delivered),
+                extra_env=_cycle_env(watch),
             )
         except SupervisedCommandStartupError as exc:
             detail = self._localize_watch_worker_error(exc.detail)
