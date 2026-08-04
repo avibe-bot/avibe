@@ -181,10 +181,15 @@ The disposable resource key and durable Activity runtime key are separate
 identities. For example, one Codex transport resource is keyed by cwd, while its
 Activity/Turn keys are `base_session_id:cwd`; one cwd can therefore map to many
 Activity runtime keys. Each backend exposes its exact current resource key,
-candidate Session bases, and the set of Activity runtime keys belonging to that
-resource. The provider never derives this relation by splitting strings.
+candidate Session bindings, and the set of Activity runtime keys belonging to
+that resource. Every binding carries the stable `agent_sessions.id` as its
+ownership identity; `session_anchor` and workdir remain adapter routing facts,
+not ownership keys. Archive may rewrite an anchor to vacate an admission alias,
+but it cannot transfer or erase unresolved ownership. The provider never
+derives this relation by splitting strings or by scanning same-workdir Sessions.
 
-The shared provider resolves those bases to durable `agent_sessions` rows and
+The shared provider resolves those exact Session IDs to durable
+`agent_sessions` rows and
 computes each Session snapshot in one SQLite transaction. The same query
 collects active Activity rows for the backend and matches them through the
 adapter-supplied resource-to-Activity-key mapping even when `session_id` is NULL;
@@ -723,8 +728,9 @@ keeping a backend process alive forever.
    rules into adapters. A shared Codex cwd transport may be reclaimed only when
    every associated Session is `runnable|waiting|reclaimable`, after all
    runnable members have been woken and the locked recheck still finds no live
-   owner. Claude composite keys must be mapped by persisted anchor/workdir
-   identity, not string-prefix guesses.
+   owner. Claude composite keys must be mapped by the stable Session row ID
+   plus the adapter's exact runtime keys, not by a mutable admission anchor or
+   string-prefix guesses.
    Inventory every path that can change a target from
    `runnable|waiting|reclaimable` to `transitioning|active`, including backend
    receivers and standalone fallback Run claim/execution start. It must enter
@@ -840,9 +846,11 @@ keeping a backend process alive forever.
   another item; the fallback Run recovery is live in PR3 before PR4 broadens the
   lane;
 - `HFR-150`: Session-less IM/CLI fallback Runs map from persisted route and
-  backend identity to the exact runtime target; queued, pre-execution claimed,
-  and PID-started rows derive `runnable`, `transitioning`, and `active`, while an
-  unmappable nonterminal row fails closed instead of disappearing;
+  backend identity to the exact runtime target; archived Session-bound Runs
+  remain visible through the resource's durable Session membership even after
+  an admission anchor is reused. Queued, pre-execution claimed, and PID-started
+  rows derive `runnable`, `transitioning`, and `active`, while an unmappable
+  nonterminal row fails closed instead of disappearing;
 - `HFR-139`: unrelated sessions are not pinned;
 - `HFR-140`: one positively missing binding fails open, while a per-binding
   lookup exception or provider failure aborts the cycle;
@@ -861,7 +869,8 @@ keeping a backend process alive forever.
   work resumes without loss or replay;
 - `HFR-146`: one active Session prevents reclamation of a shared Codex cwd
   transport while an unrelated held Session on that transport does not create
-  fake activity; Claude composite-key mapping uses the exact durable binding.
+  fake activity; Claude composite-key mapping uses the stable Session row ID
+  plus its exact adapter runtime keys.
 
 Exit criterion: open work is activated, held work remains durable without
 pinning resources, no productive or transitioning owner is reclaimed, and the

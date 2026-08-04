@@ -735,6 +735,9 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
         def set_request_session(self, *args):
             return None
 
+        def set_agent_session_id(self, *_args):
+            return None
+
         def mark_initialized(self, session_id):
             return False
 
@@ -1098,6 +1101,9 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
         def set_request_session(self, *args):
             return None
 
+        def set_agent_session_id(self, *_args):
+            return None
+
         def mark_initialized(self, session_id):
             return False
 
@@ -1294,6 +1300,9 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
             return "oc-session"
 
         def set_request_session(self, *args):
+            return None
+
+        def set_agent_session_id(self, *_args):
             return None
 
         def mark_initialized(self, session_id):

@@ -18,11 +18,12 @@ import asyncio
 import json
 import logging
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -64,6 +65,11 @@ from storage.models import (
 )
 from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
+from core.runtime_activation import (
+    RuntimeActivationIdentity,
+    RuntimeActivationRegistry,
+    RuntimeActivationResolution,
+)
 from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
@@ -145,6 +151,38 @@ _UNKNOWN_START_REPLAY_INSTRUCTION = (
     "[Avibe recovery: this request may have been delivered before restart. "
     "Before any irreversible action, check whether the work is already complete.]\n\n"
 )
+
+
+@dataclass(frozen=True)
+class RuntimeDeliveryObservation:
+    session_id: str
+    kind: str
+    delivery_id: str | None
+    delivery_state: str | None
+    delivery_version: int | None
+    delivery_attempt_id: str | None
+    delivery_target_turn_id: str | None
+    delivery_expected_native_turn_id: str | None
+    turn_id: str | None
+    turn_state: str | None
+    turn_version: int | None
+    start_attempt_id: str | None
+    native_turn_id: str | None
+    predecessor_turn_id: str | None = None
+    predecessor_state: str | None = None
+    predecessor_version: int | None = None
+    predecessor_control_state: str | None = None
+    predecessor_control_mode: str | None = None
+    predecessor_control_attempt_id: str | None = None
+    predecessor_control_expected_native_turn_id: str | None = None
+    predecessor_control_receipt_outcome: str | None = None
+    predecessor_successor_delivery_id: str | None = None
+    predecessor_successor_turn_id: str | None = None
+    predecessor_terminal_outcome: str | None = None
+    predecessor_settled_by: str | None = None
+    predecessor_terminal_evidence_kind: str | None = None
+    predecessor_terminal_evidence_json: str | None = None
+    predecessor_terminal_at: str | None = None
 
 
 def _start_replay_count(deliveries: list[dict[str, Any]]) -> int:
@@ -462,6 +500,18 @@ class TurnSubmissionResult:
     target_was_busy: bool = False
     delivery_status: str | None = None
     delivery_owner_transferred: bool = False
+
+
+@dataclass(frozen=True)
+class _RuntimeStartOwner:
+    """Proof that one exact Session runtime boundary owns this transaction."""
+
+    session_id: str
+    backend: str
+    session_anchor: str
+    workdir: str | None
+    admitted: bool
+    identity: RuntimeActivationIdentity | None = None
 
 
 class SessionTurnManager:
@@ -934,6 +984,124 @@ class SessionTurnManager:
             raise RuntimeError(f"Session {session_id} has no resolved backend")
         return backend, resolved
 
+    @contextmanager
+    def _runtime_start_owner(
+        self,
+        session_id: str,
+        backend: str,
+    ) -> Iterator[_RuntimeStartOwner]:
+        """Hold the exact runtime generation through the owning SQLite commit."""
+
+        with self._sqlite_engine().connect() as conn:
+            binding = conn.execute(
+                select(
+                    agent_sessions.c.agent_backend,
+                    agent_sessions.c.session_anchor,
+                    agent_sessions.c.workdir,
+                ).where(agent_sessions.c.id == session_id)
+            ).mappings().one_or_none()
+        durable_backend = str((binding or {}).get("agent_backend") or "").strip()
+        requested_backend = str(backend or "").strip()
+        session_anchor = str((binding or {}).get("session_anchor") or "").strip()
+        workdir = (binding or {}).get("workdir")
+        if binding is None or not durable_backend or not session_anchor:
+            logger.warning(
+                "Refusing runtime start with incomplete durable Session binding: "
+                "session=%s",
+                session_id,
+            )
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend or requested_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=False,
+            )
+            return
+        if requested_backend and durable_backend != requested_backend:
+            logger.warning(
+                "Refusing runtime start against stale Session backend: "
+                "session=%s requested=%s durable=%s",
+                session_id,
+                requested_backend,
+                durable_backend,
+            )
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=False,
+            )
+            return
+        service = getattr(self.controller, "agent_service", None)
+        registry = getattr(service, "activation_registry", None) or getattr(
+            self.controller,
+            "runtime_activation",
+            None,
+        )
+        if not isinstance(registry, RuntimeActivationRegistry):
+            registry = None
+        resolve = getattr(
+            service,
+            "runtime_activation_identity_for_session_binding",
+            None,
+        )
+        resolution = RuntimeActivationResolution(authoritative=False)
+        if callable(resolve):
+            resolved = resolve(
+                durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+            )
+            if isinstance(resolved, RuntimeActivationResolution):
+                resolution = resolved
+        if registry is not None and not resolution.authoritative:
+            logger.warning(
+                "Refusing runtime start after inconclusive activation lookup: "
+                "session=%s backend=%s",
+                session_id,
+                durable_backend,
+            )
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=False,
+            )
+            return
+        identity = resolution.identity
+        if registry is None or identity is None:
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=True,
+            )
+            return
+        hold = getattr(registry, "hold_if_current", None)
+        if not callable(hold):
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=False,
+                identity=identity,
+            )
+            return
+        with hold(identity) as admitted:
+            yield _RuntimeStartOwner(
+                session_id=session_id,
+                backend=durable_backend,
+                session_anchor=session_anchor,
+                workdir=workdir,
+                admitted=bool(admitted),
+                identity=identity,
+            )
+
     @staticmethod
     def _delivery_snapshot(request: DeliveryRequest) -> dict[str, Any]:
         if request.content is None:
@@ -1009,18 +1177,56 @@ class SessionTurnManager:
             turn_id or None,
         )
 
-    @staticmethod
+    @classmethod
     def _claim_start_batch(
+        cls,
         conn: Connection,
         *,
+        owner: _RuntimeStartOwner,
         turn_id: str,
         session_id: str,
         backend: str,
         deliveries: list[dict[str, Any]],
         dispatch_text: str,
         attempt_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Claim a Delivery batch and all linked Agent Runs atomically."""
+
+        if owner.session_id != session_id:
+            raise RuntimeError("runtime start owner does not match Delivery claim target")
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_backend,
+                agent_sessions.c.session_anchor,
+                agent_sessions.c.workdir,
+            ).where(agent_sessions.c.id == session_id)
+        ).mappings().one_or_none()
+        binding_current = bool(
+            binding is not None
+            and str(binding["agent_backend"] or "").strip() == owner.backend
+            and owner.backend == str(backend or "").strip()
+            and str(binding["session_anchor"] or "").strip() == owner.session_anchor
+            and binding["workdir"] == owner.workdir
+        )
+        if not owner.admitted or not binding_current:
+            for delivery in deliveries:
+                if delivery.get("state") != "reserved":
+                    continue
+                queued = delivery_store.cas_delivery(
+                    conn,
+                    str(delivery["id"]),
+                    expected_version=int(delivery["version"]),
+                    expected_states=("reserved",),
+                    values={"priority": "p3", "state": "queued"},
+                    history_event={
+                        "kind": "admission",
+                        "turn_id": turn_id,
+                        "outcome": "runtime_generation_retired_before_claim",
+                    },
+                )
+                if queued is None:
+                    raise RuntimeError("runtime-rejected Delivery queue fallback lost")
+            return None
 
         run_ids = list(
             dict.fromkeys(
@@ -1105,8 +1311,11 @@ class SessionTurnManager:
         self,
         conn: Connection,
         *,
+        owner: _RuntimeStartOwner,
         session_id: str,
         backend: str,
+        expected_head_id: str | None = None,
+        expected_head_version: int | None = None,
     ) -> str | None:
         """Claim the exact open FIFO head while the caller owns SQLite's writer slot."""
 
@@ -1120,6 +1329,11 @@ class SessionTurnManager:
             head = delivery_store.claimable_fifo_head(conn, session_id)
             queued = delivery_store.claimable_fifo_prefix(conn, session_id)
             if head is None or not queued or str(queued[0]["id"]) != str(head["id"]):
+                return None
+            if expected_head_id is not None and (
+                str(head["id"]) != expected_head_id
+                or int(head["version"]) != expected_head_version
+            ):
                 return None
             segment_payloads = _collect_delivery_segment(queued)
             segment = [
@@ -1168,15 +1382,16 @@ class SessionTurnManager:
                     )
                 continue
             turn_id = delivery_store.new_turn_id()
-            self._claim_start_batch(
+            claimed = self._claim_start_batch(
                 conn,
+                owner=owner,
                 turn_id=turn_id,
                 session_id=session_id,
                 backend=backend,
                 deliveries=delivery_rows,
                 dispatch_text=_segment_dispatch_text(segment_payloads),
             )
-            return turn_id
+            return turn_id if claimed is not None else None
 
     def _hydrate_delivery_context(
         self,
@@ -1570,7 +1785,7 @@ class SessionTurnManager:
         start_context: MessageContext | None = None
         delivery: dict[str, Any]
         backend_draining = backend in self._draining_backends
-        with self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == request.session_id)
@@ -1645,13 +1860,16 @@ class SessionTurnManager:
                     turn_id = delivery_store.new_turn_id()
                     claimed_batch = self._claim_start_batch(
                         conn,
+                        owner=start_owner,
                         turn_id=turn_id,
                         session_id=request.session_id,
                         backend=backend,
                         deliveries=[row for row in segment if row is not None],
                         dispatch_text=_segment_dispatch_text(segment_payloads),
                     )
-                    for claimed in claimed_batch["deliveries"]:
+                    if claimed_batch is None:
+                        turn_id = None
+                    for claimed in (claimed_batch or {}).get("deliveries", []):
                         if str(claimed["id"]) == str(delivery["id"]):
                             delivery = claimed
                             delivery_turn_id = turn_id
@@ -1696,7 +1914,7 @@ class SessionTurnManager:
         turn_id: str | None = None
         steer_backend = backend
         delivery: dict[str, Any]
-        with self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == request.session_id)
@@ -1787,13 +2005,18 @@ class SessionTurnManager:
                     ) or delivery
                 claimed_batch = self._claim_start_batch(
                     conn,
+                    owner=start_owner,
                     turn_id=turn_id,
                     session_id=request.session_id,
                     backend=backend,
                     deliveries=[delivery],
                     dispatch_text=str(delivery.get("dispatch_text") or ""),
                 )
-                delivery = claimed_batch["deliveries"][0]
+                if claimed_batch is None:
+                    delivery = delivery_store.get_delivery(conn, str(delivery["id"])) or delivery
+                    turn_id = None
+                else:
+                    delivery = claimed_batch["deliveries"][0]
             elif observed_id and str(current["id"]) == observed_id:
                 attempt_id = delivery_store.new_attempt_id()
                 pending_rows = delivery_store.open_pending_steer_batch(
@@ -1884,7 +2107,7 @@ class SessionTurnManager:
         steer_backend = backend
         claimed_rows: list[dict[str, Any]] = []
         dispatch_text = _segment_dispatch_text(observed_segment_payloads)
-        with self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
@@ -1925,13 +2148,17 @@ class SessionTurnManager:
                 turn_id = delivery_store.new_turn_id()
                 claimed = self._claim_start_batch(
                     conn,
+                    owner=start_owner,
                     turn_id=turn_id,
                     session_id=session_id,
                     backend=backend,
                     deliveries=delivery_rows,
                     dispatch_text=dispatch_text,
                 )
-                claimed_rows = claimed["deliveries"]
+                if claimed is None:
+                    turn_id = None
+                else:
+                    claimed_rows = claimed["deliveries"]
             elif any(
                 self._delivery_has_attachment_references(row)
                 for row in delivery_rows
@@ -2194,7 +2421,7 @@ class SessionTurnManager:
         interrupt_target_id: str | None = None
         should_interrupt = False
         joined = False
-        with self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             session_status = conn.execute(
                 select(agent_sessions.c.status).where(
@@ -2242,14 +2469,17 @@ class SessionTurnManager:
                 )
                 delivery_id = str(delivery["id"])
                 successor_id = delivery_store.new_turn_id()
-                self._claim_start_batch(
+                claimed = self._claim_start_batch(
                     conn,
+                    owner=start_owner,
                     turn_id=successor_id,
                     session_id=request.session_id,
                     backend=backend,
                     deliveries=[delivery],
                     dispatch_text=str(delivery.get("dispatch_text") or ""),
                 )
+                if claimed is None:
+                    successor_id = None
             else:
                 interrupt_target_id = current_id
                 delivery = None
@@ -2431,6 +2661,8 @@ class SessionTurnManager:
                 str(delivery_id),
                 attempted_turn_id=successor_id,
             )
+        if current is None and delivery_id:
+            return self._committed_delivery_result(delivery_id)
         if joined:
             return DeliveryResult(
                 delivery_id,
@@ -2738,11 +2970,18 @@ class SessionTurnManager:
         turn_id: str,
         *,
         context: Optional["MessageContext"] = None,
+        expected_start_attempt_id: str | None = None,
     ) -> bool:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, turn_id)
             if turn is None or turn["state"] != "starting":
+                return False
+            if (
+                expected_start_attempt_id is not None
+                and str(turn.get("start_attempt_id") or "")
+                != expected_start_attempt_id
+            ):
                 return False
             backend = str(turn.get("backend") or "").strip()
             if backend in self._draining_backends:
@@ -2801,6 +3040,11 @@ class SessionTurnManager:
                 latest is None
                 or latest["state"] != "starting"
                 or latest.get("start_attempt_id") != attempt_id
+                or (
+                    expected_start_attempt_id is not None
+                    and str(latest.get("start_attempt_id") or "")
+                    != expected_start_attempt_id
+                )
                 or fresh_delivery is None
                 or latest.get("initial_delivery_id") != fresh_delivery.get("id")
                 or any(row["state"] != "claimed" for row in fresh_deliveries)
@@ -2975,10 +3219,15 @@ class SessionTurnManager:
                     )
             return False
 
-    async def drain_delivery_queue(self, session_id: str) -> bool:
+    async def drain_delivery_queue(
+        self,
+        session_id: str,
+        *,
+        expected_head_id: str | None = None,
+        expected_head_version: int | None = None,
+    ) -> bool:
         turn_id: str | None = None
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
+        with self._sqlite_engine().connect() as conn:
             backend = str(
                 conn.execute(
                     select(agent_sessions.c.agent_backend).where(
@@ -2987,8 +3236,10 @@ class SessionTurnManager:
                 ).scalar_one_or_none()
                 or ""
             ).strip()
-            if not backend:
-                raise RuntimeError(f"Session {session_id} has no resolved backend")
+        if not backend:
+            raise RuntimeError(f"Session {session_id} has no resolved backend")
+        with self._runtime_start_owner(session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
             if backend in self._draining_backends:
                 self._deferred_restart_sessions.setdefault(backend, set()).add(
                     session_id
@@ -2996,8 +3247,11 @@ class SessionTurnManager:
                 return False
             turn_id = self._claim_fifo_batch_in_transaction(
                 conn,
+                owner=start_owner,
                 session_id=session_id,
                 backend=backend,
+                expected_head_id=expected_head_id,
+                expected_head_version=expected_head_version,
             )
             if turn_id is None:
                 return False
@@ -3054,7 +3308,13 @@ class SessionTurnManager:
         unknown_start_exhausted = False
         unknown_start_run_ids: list[str] = []
         forced_retire_ids = retire_unwritten_delivery_ids or set()
-        with self._sqlite_engine().begin() as conn:
+        start_deferred = False
+        linked_activation_deferred = False
+        with self._sqlite_engine().connect() as conn:
+            observed_turn = delivery_store.get_turn(conn, turn_id)
+        owner_session_id = str((observed_turn or {}).get("session_id") or "")
+        owner_backend = str((observed_turn or {}).get("backend") or "")
+        with self._runtime_start_owner(owner_session_id, owner_backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, turn_id)
             if (
@@ -3319,16 +3579,19 @@ class SessionTurnManager:
                                 if retired is None:
                                     raise RuntimeError("archived P0 successor retirement lost")
                             elif resume_successors:
-                                started = delivery_store.activate_waiting_successor(
+                                terminal_predecessor = delivery_store.get_turn(
+                                    conn, turn_id
+                                )
+                                started = self._activate_linked_waiting_successor(
                                     conn,
-                                    turn=successor,
-                                    delivery=successor_delivery,
+                                    owner=start_owner,
+                                    predecessor=terminal_predecessor,
                                 )
                                 if started is None:
-                                    raise RuntimeError(
-                                        "P0 successor claim lost after terminal proof"
-                                    )
-                                claimed_successor = successor_turn_id
+                                    start_deferred = True
+                                    linked_activation_deferred = True
+                                else:
+                                    claimed_successor = successor_turn_id
                             else:
                                 deferred = self._write_terminal_snapshot(
                                     conn,
@@ -3375,8 +3638,9 @@ class SessionTurnManager:
                                 "unknown start recovery lost its replayable Delivery batch"
                             )
                         claimed_successor = delivery_store.new_turn_id()
-                        self._claim_start_batch(
+                        claimed = self._claim_start_batch(
                             conn,
+                            owner=start_owner,
                             turn_id=claimed_successor,
                             session_id=session_id,
                             backend=str(turn["backend"]),
@@ -3386,6 +3650,9 @@ class SessionTurnManager:
                                 + str(turn.get("dispatch_text") or "")
                             ),
                         )
+                        if claimed is None:
+                            claimed_successor = None
+                            start_deferred = True
                     if (
                         claimed_successor is None
                         and resume_successors
@@ -3394,16 +3661,27 @@ class SessionTurnManager:
                     ):
                         claimed_successor = self._claim_fifo_batch_in_transaction(
                             conn,
+                            owner=start_owner,
                             session_id=session_id,
                             backend=str(turn["backend"]),
                         )
+                        if (
+                            claimed_successor is None
+                            and delivery_store.claimable_fifo_head(conn, session_id)
+                            is not None
+                        ):
+                            start_deferred = True
                     latest_turn = delivery_store.get_turn(conn, turn_id)
-                    if latest_turn is not None and latest_turn.get("control_state") in {
+                    if (
+                        not linked_activation_deferred
+                        and latest_turn is not None
+                        and latest_turn.get("control_state") in {
                         "pending",
                         "interrupting",
                         "waiting_terminal",
                         "reconciling",
-                    }:
+                        }
+                    ):
                         delivery_store.cas_turn(
                             conn,
                             turn_id,
@@ -3420,7 +3698,10 @@ class SessionTurnManager:
                         "changed": True,
                         "successor_turn_id": claimed_successor,
                         "delivery_id": materialized_id,
-                        "preserve_queue": delivery_store.queue_is_held(conn, session_id),
+                        "preserve_queue": (
+                            delivery_store.queue_is_held(conn, session_id)
+                            or start_deferred
+                        ),
                         "unknown_start_exhausted": unknown_start_exhausted,
                     }
                     terminal_run_ids = (
@@ -3595,12 +3876,44 @@ class SessionTurnManager:
         self,
         session_id: str,
         logical_turn_id: str,
-    ) -> None:
+        *,
+        expected_state: str | None = None,
+        expected_version: int | None = None,
+        expected_control_state: str | None = None,
+        expected_control_attempt_id: str | None = None,
+        expected_native_turn_id: str | None = None,
+        expected_successor_delivery_id: str | None = None,
+        expected_successor_turn_id: str | None = None,
+    ) -> bool:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             pending = delivery_store.pending_control_for_turn(conn, logical_turn_id)
             if pending is None:
-                return
+                return False
+            if (
+                str(pending.get("session_id") or "") != session_id
+                or (
+                    expected_version is not None
+                    and (
+                        int(pending.get("version") or 0) != expected_version
+                        or str(pending.get("state") or "")
+                        != str(expected_state or "")
+                        or str(pending.get("control_state") or "")
+                        != str(expected_control_state or "")
+                        or str(pending.get("control_attempt_id") or "")
+                        != str(expected_control_attempt_id or "")
+                        or str(
+                            pending.get("control_expected_native_turn_id") or ""
+                        )
+                        != str(expected_native_turn_id or "")
+                        or str(pending.get("control_successor_delivery_id") or "")
+                        != str(expected_successor_delivery_id or "")
+                        or str(pending.get("control_successor_turn_id") or "")
+                        != str(expected_successor_turn_id or "")
+                    )
+                )
+            ):
+                return False
             claimed = delivery_store.cas_turn(
                 conn,
                 logical_turn_id,
@@ -3610,6 +3923,8 @@ class SessionTurnManager:
             )
         if claimed is not None:
             await self._interrupt_durable_turn(session_id, logical_turn_id)
+            return True
+        return False
 
     async def _run_pending_steers(
         self,
@@ -3891,6 +4206,557 @@ class SessionTurnManager:
                 name=f"durable-terminal-resume:{session_id}",
             )
         return None
+
+    def scan_runtime_delivery_recovery(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None = None,
+    ) -> tuple[list[RuntimeDeliveryObservation], bool]:
+        """Return a bounded keyset page of exact Session recovery owners."""
+
+        page_limit = max(1, int(limit))
+        with self._sqlite_engine().connect() as conn:
+            predecessor_rows = session_turn_rows.alias("recovery_predecessor")
+            live_turn = exists(
+                select(session_turn_rows.c.id)
+                .where(
+                    session_turn_rows.c.session_id == agent_sessions.c.id,
+                    session_turn_rows.c.state.in_(delivery_store.TURN_OWNER_STATES),
+                )
+                .correlate(agent_sessions)
+            )
+            head_id = (
+                select(delivery_rows.c.id)
+                .where(
+                    delivery_rows.c.session_id == agent_sessions.c.id,
+                    delivery_rows.c.state == "queued",
+                )
+                .order_by(delivery_rows.c.submitted_at, delivery_rows.c.id)
+                .limit(1)
+                .correlate(agent_sessions)
+                .scalar_subquery()
+            )
+            open_query = (
+                select(
+                    agent_sessions.c.id.label("session_id"),
+                    literal("open_head").label("kind"),
+                    delivery_rows.c.id.label("delivery_id"),
+                    delivery_rows.c.state.label("delivery_state"),
+                    delivery_rows.c.version.label("delivery_version"),
+                    delivery_rows.c.current_attempt_id.label("delivery_attempt_id"),
+                    delivery_rows.c.current_target_turn_id.label(
+                        "delivery_target_turn_id"
+                    ),
+                    delivery_rows.c.current_expected_native_turn_id.label(
+                        "delivery_expected_native_turn_id"
+                    ),
+                    literal(None).label("turn_id"),
+                    literal(None).label("turn_state"),
+                    literal(None).label("turn_version"),
+                    literal(None).label("start_attempt_id"),
+                    literal(None).label("native_turn_id"),
+                )
+                .join(delivery_rows, delivery_rows.c.id == head_id)
+                .where(
+                    agent_sessions.c.status == "active",
+                    agent_sessions.c.queue_hold_state == "open",
+                    ~live_turn,
+                )
+                .order_by(
+                    agent_sessions.c.id,
+                    delivery_rows.c.submitted_at,
+                    delivery_rows.c.id,
+                )
+                .limit(page_limit + 1)
+            )
+            if cursor:
+                open_query = open_query.where(agent_sessions.c.id > cursor)
+            if occupied:
+                open_query = open_query.where(~agent_sessions.c.id.in_(occupied))
+            open_rows = [dict(row) for row in conn.execute(open_query).mappings()]
+
+            turn_candidates = (
+                select(
+                    session_turn_rows.c.session_id.label("session_id"),
+                    literal("turn_owner").label("kind"),
+                    delivery_rows.c.id.label("delivery_id"),
+                    delivery_rows.c.state.label("delivery_state"),
+                    delivery_rows.c.version.label("delivery_version"),
+                    delivery_rows.c.current_attempt_id.label("delivery_attempt_id"),
+                    delivery_rows.c.current_target_turn_id.label(
+                        "delivery_target_turn_id"
+                    ),
+                    delivery_rows.c.current_expected_native_turn_id.label(
+                        "delivery_expected_native_turn_id"
+                    ),
+                    session_turn_rows.c.id.label("turn_id"),
+                    session_turn_rows.c.state.label("turn_state"),
+                    session_turn_rows.c.version.label("turn_version"),
+                    session_turn_rows.c.start_attempt_id.label("start_attempt_id"),
+                    session_turn_rows.c.native_turn_id.label("native_turn_id"),
+                    predecessor_rows.c.id.label("predecessor_turn_id"),
+                    predecessor_rows.c.state.label("predecessor_state"),
+                    predecessor_rows.c.version.label("predecessor_version"),
+                    predecessor_rows.c.control_state.label(
+                        "predecessor_control_state"
+                    ),
+                    predecessor_rows.c.control_mode.label(
+                        "predecessor_control_mode"
+                    ),
+                    predecessor_rows.c.control_attempt_id.label(
+                        "predecessor_control_attempt_id"
+                    ),
+                    predecessor_rows.c.control_expected_native_turn_id.label(
+                        "predecessor_control_expected_native_turn_id"
+                    ),
+                    predecessor_rows.c.control_receipt_outcome.label(
+                        "predecessor_control_receipt_outcome"
+                    ),
+                    predecessor_rows.c.control_successor_delivery_id.label(
+                        "predecessor_successor_delivery_id"
+                    ),
+                    predecessor_rows.c.control_successor_turn_id.label(
+                        "predecessor_successor_turn_id"
+                    ),
+                    predecessor_rows.c.terminal_outcome.label(
+                        "predecessor_terminal_outcome"
+                    ),
+                    predecessor_rows.c.settled_by.label("predecessor_settled_by"),
+                    predecessor_rows.c.terminal_evidence_kind.label(
+                        "predecessor_terminal_evidence_kind"
+                    ),
+                    predecessor_rows.c.terminal_evidence_json.label(
+                        "predecessor_terminal_evidence_json"
+                    ),
+                    predecessor_rows.c.terminal_at.label("predecessor_terminal_at"),
+                    session_turn_rows.c.created_at.label("sort_at"),
+                    literal(0).label("sort_kind"),
+                )
+                .join(
+                    delivery_rows,
+                    delivery_rows.c.id == session_turn_rows.c.initial_delivery_id,
+                )
+                .outerjoin(
+                    predecessor_rows,
+                    and_(
+                        predecessor_rows.c.session_id
+                        == session_turn_rows.c.session_id,
+                        predecessor_rows.c.control_successor_turn_id
+                        == session_turn_rows.c.id,
+                        predecessor_rows.c.control_successor_delivery_id
+                        == delivery_rows.c.id,
+                    ),
+                )
+                .where(
+                    or_(
+                        session_turn_rows.c.state.in_(("waiting", "starting")),
+                        and_(
+                            session_turn_rows.c.state == "active",
+                            session_turn_rows.c.control_state.in_(
+                                (
+                                    "pending",
+                                    "interrupting",
+                                    "waiting_terminal",
+                                    "reconciling",
+                                )
+                            ),
+                        ),
+                    )
+                )
+                .order_by(
+                    session_turn_rows.c.session_id,
+                    session_turn_rows.c.created_at,
+                    session_turn_rows.c.id,
+                )
+                .limit(page_limit + 1)
+            )
+            if cursor:
+                turn_candidates = turn_candidates.where(
+                    session_turn_rows.c.session_id > cursor
+                )
+            if occupied:
+                turn_candidates = turn_candidates.where(
+                    ~session_turn_rows.c.session_id.in_(occupied)
+                )
+            fence_candidates = (
+                select(
+                    delivery_rows.c.session_id.label("session_id"),
+                    literal("delivery_fence").label("kind"),
+                    delivery_rows.c.id.label("delivery_id"),
+                    delivery_rows.c.state.label("delivery_state"),
+                    delivery_rows.c.version.label("delivery_version"),
+                    delivery_rows.c.current_attempt_id.label("delivery_attempt_id"),
+                    delivery_rows.c.current_target_turn_id.label(
+                        "delivery_target_turn_id"
+                    ),
+                    delivery_rows.c.current_expected_native_turn_id.label(
+                        "delivery_expected_native_turn_id"
+                    ),
+                    session_turn_rows.c.id.label("turn_id"),
+                    session_turn_rows.c.state.label("turn_state"),
+                    session_turn_rows.c.version.label("turn_version"),
+                    session_turn_rows.c.start_attempt_id.label("start_attempt_id"),
+                    session_turn_rows.c.native_turn_id.label("native_turn_id"),
+                    delivery_rows.c.submitted_at.label("sort_at"),
+                    literal(1).label("sort_kind"),
+                )
+                .select_from(
+                    delivery_rows.outerjoin(
+                        session_turn_rows,
+                        session_turn_rows.c.id
+                        == delivery_rows.c.current_target_turn_id,
+                    )
+                )
+                .where(delivery_rows.c.state.in_(delivery_store.FENCE_STATES))
+                .order_by(
+                    delivery_rows.c.session_id,
+                    delivery_rows.c.submitted_at,
+                    delivery_rows.c.id,
+                )
+                .limit(page_limit + 1)
+            )
+            if cursor:
+                fence_candidates = fence_candidates.where(
+                    delivery_rows.c.session_id > cursor
+                )
+            if occupied:
+                fence_candidates = fence_candidates.where(
+                    ~delivery_rows.c.session_id.in_(occupied)
+                )
+            turn_rows = [
+                dict(row) for row in conn.execute(turn_candidates).mappings()
+            ]
+            fence_rows = [
+                dict(row) for row in conn.execute(fence_candidates).mappings()
+            ]
+
+        by_session: dict[str, dict[str, Any]] = {}
+        for row in turn_rows + fence_rows + open_rows:
+            session_id = str(row["session_id"])
+            current = by_session.get(session_id)
+            if current is None or (
+                row.get("turn_state") == "waiting"
+                and current.get("turn_state") != "waiting"
+            ):
+                by_session[session_id] = row
+        selected = [
+            by_session[session_id]
+            for session_id in sorted(by_session)[:page_limit]
+        ]
+        observations = [
+            RuntimeDeliveryObservation(
+                session_id=str(row["session_id"]),
+                kind=str(row["kind"]),
+                delivery_id=str(row.get("delivery_id") or "") or None,
+                delivery_state=str(row.get("delivery_state") or "") or None,
+                delivery_version=(
+                    int(row["delivery_version"])
+                    if row.get("delivery_version") is not None
+                    else None
+                ),
+                delivery_attempt_id=(
+                    str(row.get("delivery_attempt_id") or "") or None
+                ),
+                delivery_target_turn_id=(
+                    str(row.get("delivery_target_turn_id") or "") or None
+                ),
+                delivery_expected_native_turn_id=(
+                    str(row.get("delivery_expected_native_turn_id") or "") or None
+                ),
+                turn_id=str(row.get("turn_id") or "") or None,
+                turn_state=str(row.get("turn_state") or "") or None,
+                turn_version=(
+                    int(row["turn_version"])
+                    if row.get("turn_version") is not None
+                    else None
+                ),
+                start_attempt_id=str(row.get("start_attempt_id") or "") or None,
+                native_turn_id=str(row.get("native_turn_id") or "") or None,
+                predecessor_turn_id=(
+                    str(row.get("predecessor_turn_id") or "") or None
+                ),
+                predecessor_state=(
+                    str(row.get("predecessor_state") or "") or None
+                ),
+                predecessor_version=(
+                    int(row["predecessor_version"])
+                    if row.get("predecessor_version") is not None
+                    else None
+                ),
+                predecessor_control_state=(
+                    str(row.get("predecessor_control_state") or "") or None
+                ),
+                predecessor_control_mode=(
+                    str(row.get("predecessor_control_mode") or "") or None
+                ),
+                predecessor_control_attempt_id=(
+                    str(row.get("predecessor_control_attempt_id") or "") or None
+                ),
+                predecessor_control_expected_native_turn_id=(
+                    str(
+                        row.get("predecessor_control_expected_native_turn_id")
+                        or ""
+                    )
+                    or None
+                ),
+                predecessor_control_receipt_outcome=(
+                    str(row.get("predecessor_control_receipt_outcome") or "")
+                    or None
+                ),
+                predecessor_successor_delivery_id=(
+                    str(row.get("predecessor_successor_delivery_id") or "") or None
+                ),
+                predecessor_successor_turn_id=(
+                    str(row.get("predecessor_successor_turn_id") or "") or None
+                ),
+                predecessor_terminal_outcome=(
+                    str(row.get("predecessor_terminal_outcome") or "") or None
+                ),
+                predecessor_settled_by=(
+                    str(row.get("predecessor_settled_by") or "") or None
+                ),
+                predecessor_terminal_evidence_kind=(
+                    str(row.get("predecessor_terminal_evidence_kind") or "")
+                    or None
+                ),
+                predecessor_terminal_evidence_json=(
+                    str(row.get("predecessor_terminal_evidence_json") or "")
+                    or None
+                ),
+                predecessor_terminal_at=(
+                    str(row.get("predecessor_terminal_at") or "") or None
+                ),
+            )
+            for row in selected
+        ]
+        has_more = (
+            len(open_rows) > page_limit
+            or len(turn_rows) > page_limit
+            or len(fence_rows) > page_limit
+            or len(by_session) > page_limit
+        )
+        return observations, has_more
+
+    @staticmethod
+    def _terminal_predecessor_matches_observation(
+        predecessor: dict[str, Any],
+        observation: RuntimeDeliveryObservation,
+    ) -> bool:
+        return bool(
+            str(predecessor.get("id") or "")
+            == str(observation.predecessor_turn_id or "")
+            and str(predecessor.get("session_id") or "") == observation.session_id
+            and str(predecessor.get("state") or "")
+            == str(observation.predecessor_state or "")
+            and int(predecessor.get("version") or 0)
+            == observation.predecessor_version
+            and str(predecessor.get("control_state") or "")
+            == str(observation.predecessor_control_state or "")
+            and str(predecessor.get("control_mode") or "")
+            == str(observation.predecessor_control_mode or "")
+            and str(predecessor.get("control_attempt_id") or "")
+            == str(observation.predecessor_control_attempt_id or "")
+            and str(predecessor.get("control_expected_native_turn_id") or "")
+            == str(observation.predecessor_control_expected_native_turn_id or "")
+            and str(predecessor.get("control_receipt_outcome") or "")
+            == str(observation.predecessor_control_receipt_outcome or "")
+            and str(predecessor.get("control_successor_delivery_id") or "")
+            == str(observation.predecessor_successor_delivery_id or "")
+            and str(predecessor.get("control_successor_turn_id") or "")
+            == str(observation.predecessor_successor_turn_id or "")
+            and str(predecessor.get("terminal_outcome") or "")
+            == str(observation.predecessor_terminal_outcome or "")
+            and str(predecessor.get("settled_by") or "")
+            == str(observation.predecessor_settled_by or "")
+            and str(predecessor.get("terminal_evidence_kind") or "")
+            == str(observation.predecessor_terminal_evidence_kind or "")
+            and str(predecessor.get("terminal_evidence_json") or "")
+            == str(observation.predecessor_terminal_evidence_json or "")
+            and str(predecessor.get("terminal_at") or "")
+            == str(observation.predecessor_terminal_at or "")
+        )
+
+    def _runtime_observation_is_current(
+        self,
+        observation: RuntimeDeliveryObservation,
+    ) -> tuple[
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+    ]:
+        with self._sqlite_engine().connect() as conn:
+            delivery = (
+                delivery_store.get_delivery(conn, observation.delivery_id)
+                if observation.delivery_id
+                else None
+            )
+            turn = (
+                delivery_store.get_turn(conn, observation.turn_id)
+                if observation.turn_id
+                else None
+            )
+            predecessor = (
+                delivery_store.get_turn(conn, observation.predecessor_turn_id)
+                if observation.predecessor_turn_id
+                else None
+            )
+        if observation.delivery_id and (
+            delivery is None
+            or str(delivery.get("session_id") or "") != observation.session_id
+            or str(delivery.get("state") or "") != observation.delivery_state
+            or int(delivery.get("version") or 0) != observation.delivery_version
+            or str(delivery.get("current_attempt_id") or "")
+            != str(observation.delivery_attempt_id or "")
+            or str(delivery.get("current_target_turn_id") or "")
+            != str(observation.delivery_target_turn_id or "")
+            or str(delivery.get("current_expected_native_turn_id") or "")
+            != str(observation.delivery_expected_native_turn_id or "")
+        ):
+            return None, None, None
+        if observation.turn_id and (
+            turn is None
+            or str(turn.get("session_id") or "") != observation.session_id
+            or str(turn.get("state") or "") != observation.turn_state
+            or int(turn.get("version") or 0) != observation.turn_version
+            or str(turn.get("start_attempt_id") or "")
+            != str(observation.start_attempt_id or "")
+            or str(turn.get("native_turn_id") or "")
+            != str(observation.native_turn_id or "")
+        ):
+            return None, None, None
+        if observation.predecessor_turn_id and (
+            predecessor is None
+            or not self._terminal_predecessor_matches_observation(
+                predecessor,
+                observation,
+            )
+        ):
+            return None, None, None
+        return delivery, turn, predecessor
+
+    async def recover_runtime_delivery_observation(
+        self,
+        observation: RuntimeDeliveryObservation,
+    ) -> bool:
+        """Re-enter only the exact owner seen by a bounded lane scan."""
+
+        delivery, turn, predecessor = self._runtime_observation_is_current(observation)
+        if observation.delivery_id and delivery is None:
+            return False
+        if observation.turn_id and turn is None:
+            return False
+        if observation.predecessor_turn_id and predecessor is None:
+            return False
+        if observation.kind == "open_head":
+            return await self.drain_delivery_queue(
+                observation.session_id,
+                expected_head_id=observation.delivery_id,
+                expected_head_version=observation.delivery_version,
+            )
+        if turn is not None and turn["state"] == "starting":
+            return await self._start_persisted_turn(
+                str(turn["id"]),
+                expected_start_attempt_id=str(turn.get("start_attempt_id") or ""),
+            )
+        if turn is not None and turn["state"] == "waiting":
+            if predecessor is None:
+                return False
+            predecessor_id = str(predecessor["id"])
+            if predecessor["state"] == "terminal":
+                return bool(
+                    await self._resume_linked_control_successor(
+                        observation.session_id,
+                        predecessor_id,
+                        observation=observation,
+                    )
+                )
+            return await self._run_pending_interrupt(
+                observation.session_id,
+                predecessor_id,
+                expected_state=observation.predecessor_state,
+                expected_version=observation.predecessor_version,
+                expected_control_state=observation.predecessor_control_state,
+                expected_control_attempt_id=(
+                    observation.predecessor_control_attempt_id
+                ),
+                expected_native_turn_id=(
+                    observation.predecessor_control_expected_native_turn_id
+                ),
+                expected_successor_delivery_id=(
+                    observation.predecessor_successor_delivery_id
+                ),
+                expected_successor_turn_id=(
+                    observation.predecessor_successor_turn_id
+                ),
+            )
+        if turn is not None and turn.get("control_state") in {
+            "pending",
+            "interrupting",
+            "waiting_terminal",
+            "reconciling",
+        }:
+            await self._run_pending_interrupt(
+                observation.session_id,
+                str(turn["id"]),
+            )
+            return True
+        if delivery is None:
+            return False
+        if delivery["state"] == "reserved":
+            context = self._delivery_context(observation.session_id)
+            self._hydrate_delivery_context(context, delivery)
+            result = await self.deliver(
+                self._request_from_delivery(
+                    delivery,
+                    has_attachments=bool(context.files),
+                ),
+                context=context,
+            )
+            return result.state != "reserved"
+        target_turn_id = str(delivery.get("current_target_turn_id") or "")
+        if delivery["state"] == "pending_steer" and target_turn_id:
+            await self._run_pending_steers(
+                observation.session_id,
+                target_turn_id,
+                self._delivery_context(observation.session_id),
+            )
+            return True
+        if delivery["state"] in {"steering", "reconciling_steer"}:
+            attempt_id = str(delivery.get("current_attempt_id") or "")
+            expected_native = str(
+                delivery.get("current_expected_native_turn_id") or ""
+            )
+            if not target_turn_id or not attempt_id or not expected_native:
+                return False
+            with self._sqlite_engine().connect() as conn:
+                target_turn = delivery_store.get_turn(conn, target_turn_id)
+            if target_turn is None:
+                return False
+            receipt = await self._reconcile_steer_attempt(
+                str(target_turn["backend"]),
+                SteerReconcileRequest(
+                    target_session_id=observation.session_id,
+                    expected_logical_turn_id=target_turn_id,
+                    expected_native_turn_id=expected_native,
+                    attempt_id=attempt_id,
+                ),
+            )
+            outcome = getattr(receipt, "outcome", SteerOutcome.UNKNOWN)
+            if (
+                str(getattr(outcome, "value", outcome))
+                == SteerOutcome.UNKNOWN.value
+                and delivery["state"] == "reconciling_steer"
+            ):
+                return False
+            result = await self._finish_steer(
+                str(delivery["id"]),
+                receipt,
+                context=None,
+            )
+            return result.state != "reconciling_steer"
+        return False
 
     async def recover_durable_delivery_state(
         self,
@@ -4287,30 +5153,212 @@ class SessionTurnManager:
         elif owner["state"] == "starting":
             await self._start_persisted_turn(str(owner["id"]))
 
+    @staticmethod
+    def _activate_linked_waiting_successor(
+        conn: Connection,
+        *,
+        owner: _RuntimeStartOwner,
+        predecessor: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Claim the exact linked successor only behind a terminal winner."""
+
+        if (
+            predecessor is None
+            or predecessor.get("state") != "terminal"
+            or predecessor.get("control_mode") != "replace"
+            or predecessor.get("control_state")
+            not in {"pending", "interrupting", "waiting_terminal", "reconciling"}
+        ):
+            return None
+        successor_id = str(predecessor.get("control_successor_turn_id") or "")
+        delivery_id = str(predecessor.get("control_successor_delivery_id") or "")
+        if not successor_id or not delivery_id:
+            return None
+        successor = delivery_store.get_turn(conn, successor_id)
+        delivery = delivery_store.get_delivery(conn, delivery_id)
+        if (
+            successor is None
+            or delivery is None
+            or str(successor.get("session_id") or "")
+            != str(predecessor.get("session_id") or "")
+            or str(successor.get("initial_delivery_id") or "") != delivery_id
+            or str(delivery.get("session_id") or "")
+            != str(predecessor.get("session_id") or "")
+            or str(delivery.get("turn_id") or "") != successor_id
+            or str(delivery.get("turn_role") or "") != "initial"
+            or delivery.get("turn_position") != 0
+        ):
+            return None
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_backend,
+                agent_sessions.c.session_anchor,
+                agent_sessions.c.workdir,
+            ).where(agent_sessions.c.id == str(successor["session_id"]))
+        ).mappings().one_or_none()
+        if (
+            owner.session_id != str(successor["session_id"])
+            or (owner.backend and owner.backend != str(successor["backend"]))
+            or not owner.admitted
+            or binding is None
+            or str(binding["agent_backend"] or "").strip() != owner.backend
+            or str(binding["session_anchor"] or "").strip() != owner.session_anchor
+            or binding["workdir"] != owner.workdir
+        ):
+            return None
+        return delivery_store.activate_waiting_successor(
+            conn,
+            turn=successor,
+            delivery=delivery,
+        )
+
     async def _resume_linked_control_successor(
         self,
         session_id: str,
         terminal_turn_id: str,
+        *,
+        observation: RuntimeDeliveryObservation | None = None,
     ) -> str | None:
         """Start only the exact replacement linked from a settled control Turn."""
+        start_attempt_id = ""
         with self._sqlite_engine().connect() as conn:
+            observed_terminal = delivery_store.get_turn(conn, terminal_turn_id)
+            observed_successor = delivery_store.get_turn(
+                conn,
+                str((observed_terminal or {}).get("control_successor_turn_id") or ""),
+            )
+        owner_backend = str(
+            (observed_successor or observed_terminal or {}).get("backend") or ""
+        )
+        with self._runtime_start_owner(session_id, owner_backend) as start_owner, self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
             terminal = delivery_store.get_turn(conn, terminal_turn_id)
             successor_id = str(
                 (terminal or {}).get("control_successor_turn_id") or ""
             )
-            owner = delivery_store.active_turn(conn, session_id)
-        if (
-            terminal is None
-            or terminal["state"] != "terminal"
-            or str(terminal["session_id"]) != session_id
-            or terminal.get("control_mode") != "replace"
-            or not successor_id
-            or owner is None
-            or str(owner["id"]) != successor_id
-            or owner["state"] != "starting"
-        ):
-            return None
-        await self._start_persisted_turn(successor_id)
+            successor_delivery_id = str(
+                (terminal or {}).get("control_successor_delivery_id") or ""
+            )
+            predecessors = list(
+                conn.execute(
+                    select(session_turn_rows.c.id).where(
+                        session_turn_rows.c.control_successor_turn_id == successor_id,
+                        session_turn_rows.c.control_successor_delivery_id
+                        == successor_delivery_id,
+                    )
+                ).scalars()
+            )
+            session_status = conn.execute(
+                select(agent_sessions.c.status)
+                .where(agent_sessions.c.id == session_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if (
+                terminal is None
+                or terminal["state"] != "terminal"
+                or str(terminal["session_id"]) != session_id
+                or terminal.get("control_mode") != "replace"
+                or not successor_id
+                or not successor_delivery_id
+                or predecessors != [terminal_turn_id]
+                or session_status != "active"
+                or (
+                    observation is not None
+                    and not self._terminal_predecessor_matches_observation(
+                        terminal,
+                        observation,
+                    )
+                )
+            ):
+                return None
+            successor = delivery_store.get_turn(conn, successor_id)
+            successor_delivery = delivery_store.get_delivery(
+                conn, successor_delivery_id
+            )
+            if (
+                successor is None
+                or successor_delivery is None
+                or str(successor.get("session_id") or "") != session_id
+                or str(successor.get("initial_delivery_id") or "")
+                != successor_delivery_id
+                or str(successor_delivery.get("session_id") or "") != session_id
+                or str(successor_delivery.get("turn_id") or "") != successor_id
+                or str(successor_delivery.get("turn_role") or "") != "initial"
+                or successor_delivery.get("turn_position") != 0
+                or (
+                    observation is not None
+                    and (
+                        str(successor.get("id") or "")
+                        != str(observation.turn_id or "")
+                        or str(successor.get("state") or "")
+                        != str(observation.turn_state or "")
+                        or int(successor.get("version") or 0)
+                        != observation.turn_version
+                        or str(successor.get("start_attempt_id") or "")
+                        != str(observation.start_attempt_id or "")
+                        or str(successor.get("native_turn_id") or "")
+                        != str(observation.native_turn_id or "")
+                        or str(successor_delivery.get("id") or "")
+                        != str(observation.delivery_id or "")
+                        or str(successor_delivery.get("state") or "")
+                        != str(observation.delivery_state or "")
+                        or int(successor_delivery.get("version") or 0)
+                        != observation.delivery_version
+                        or str(successor_delivery.get("current_attempt_id") or "")
+                        != str(observation.delivery_attempt_id or "")
+                        or str(
+                            successor_delivery.get("current_target_turn_id") or ""
+                        )
+                        != str(observation.delivery_target_turn_id or "")
+                        or str(
+                            successor_delivery.get(
+                                "current_expected_native_turn_id"
+                            )
+                            or ""
+                        )
+                        != str(observation.delivery_expected_native_turn_id or "")
+                    )
+                )
+            ):
+                return None
+            if successor["state"] == "waiting":
+                started = self._activate_linked_waiting_successor(
+                    conn,
+                    owner=start_owner,
+                    predecessor=terminal,
+                )
+                if started is None:
+                    return None
+                successor = started
+            elif successor["state"] != "starting" or successor_delivery["state"] != "claimed":
+                return None
+            start_attempt_id = str(successor.get("start_attempt_id") or "")
+            if not start_attempt_id:
+                raise RuntimeError("linked successor activation has no start attempt")
+            if terminal.get("control_state") in {
+                "pending",
+                "interrupting",
+                "waiting_terminal",
+                "reconciling",
+            }:
+                settled = delivery_store.cas_turn(
+                    conn,
+                    terminal_turn_id,
+                    expected_version=int(terminal["version"]),
+                    expected_states=("terminal",),
+                    values={
+                        "control_state": "settled",
+                        "control_receipt_outcome": (
+                            terminal.get("control_receipt_outcome") or "accepted"
+                        ),
+                    },
+                )
+                if settled is None:
+                    raise RuntimeError("linked successor terminal resume lost")
+        await self._start_persisted_turn(
+            successor_id,
+            expected_start_attempt_id=start_attempt_id,
+        )
         return successor_id
 
     async def _resume_post_terminal(self, session_id: str) -> None:
@@ -5596,7 +6644,8 @@ class SessionTurnManager:
         durable_turn_registered = False
         materialized_delivery_id: str | None = None
         if session_exists:
-            with engine.begin() as conn:
+            backend = self._context_backend(context)
+            with self._runtime_start_owner(session_id, backend) as start_owner, engine.begin() as conn:
                 reserve_write_lock(conn)
                 durable = delivery_store.get_turn(conn, turn_token)
                 if durable is None:
@@ -5651,14 +6700,17 @@ class SessionTurnManager:
                             "outcome": "backend_initiated",
                         },
                     )
-                    self._claim_start_batch(
+                    claimed = self._claim_start_batch(
                         conn,
+                        owner=start_owner,
                         turn_id=turn_token,
                         session_id=session_id,
-                        backend=self._context_backend(context),
+                        backend=backend,
                         deliveries=[delivery],
                         dispatch_text="",
                     )
+                    if claimed is None:
+                        return False
                     durable = delivery_store.get_turn(conn, turn_token)
                 if durable is None:
                     return False

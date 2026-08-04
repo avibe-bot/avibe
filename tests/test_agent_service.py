@@ -43,6 +43,12 @@ class _RuntimeAgent:
     async def handle_stop(self, _request):
         return False
 
+    def record_runtime_turn_start(self, *, runtime_key, request):
+        session_last_activity = getattr(self, "session_last_activity", None)
+        if isinstance(session_last_activity, dict):
+            previous = float(session_last_activity.get(runtime_key, 0.0) or 0.0)
+            session_last_activity[runtime_key] = previous + 1.0
+
 
 class _RaisingRuntimeAgent(_RuntimeAgent):
     async def handle_message(self, _request):
@@ -304,6 +310,72 @@ def test_agent_service_serializes_same_runtime_until_terminal_release() -> None:
         await asyncio.wait_for(second, timeout=3)
 
         assert agent.started == ["first", "second"]
+
+    asyncio.run(_run())
+
+
+def test_hfr_142_gate_wait_does_not_refresh_backend_progress_clock() -> None:
+    """HFR-142: a request waiting on the runtime gate creates no progress."""
+
+    async def _run():
+        first_started = asyncio.Event()
+        second_waiting = asyncio.Event()
+
+        class _ObservedRuntimeAgent(_RuntimeAgent):
+            async def handle_message(self, request):
+                self.started.append(request.message)
+                if request.message == "first":
+                    first_started.set()
+                    if self.release_first is not None:
+                        await self.release_first.wait()
+
+        class _GateWaitIndicator:
+            async def show_queued_reaction(self, _request):
+                second_waiting.set()
+                return True
+
+            async def promote_reaction_to_running(
+                self,
+                _request,
+                *,
+                agent_name=None,
+            ):
+                return None
+
+            async def finish(self, _request_or_handle):
+                return None
+
+        controller = _Controller()
+        controller.processing_indicator = _GateWaitIndicator()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        agent = _ObservedRuntimeAgent(release_first)
+        agent.session_last_activity = {"session:/repo": 17.0}
+        service.register(agent)
+
+        first_request = _request("first")
+        first = asyncio.create_task(service.handle_message("claude", first_request))
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        second_request = _request("second")
+        second = asyncio.create_task(
+            service.handle_message("claude", second_request)
+        )
+        await asyncio.wait_for(second_waiting.wait(), timeout=1)
+
+        assert agent.started == ["first"]
+        assert agent.session_last_activity == {"session:/repo": 17.0}
+
+        service.mark_runtime_turn_started(first_request.context)
+        assert agent.session_last_activity == {"session:/repo": 18.0}
+
+        service.release_runtime_turn(first_request.context)
+        release_first.set()
+        await asyncio.wait_for(first, timeout=3)
+        await asyncio.wait_for(second, timeout=3)
+        assert agent.session_last_activity == {"session:/repo": 18.0}
+        service.mark_runtime_turn_started(second_request.context)
+        assert agent.session_last_activity == {"session:/repo": 19.0}
 
     asyncio.run(_run())
 
@@ -926,6 +998,8 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     gate = service._get_turn_gate(runtime_key)
     gate.token = "runtime-token"
     gate.backend = "claude"
+    gate.request = _request("first")
+    gate.agent = SimpleNamespace(record_runtime_turn_start=Mock())
     context = SimpleNamespace(
         platform_specific={
             "agent_runtime_turn_key": runtime_key,
@@ -934,8 +1008,13 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     )
 
     service.mark_runtime_turn_started(context)
+    service.mark_runtime_turn_started(context)
 
     assert gate.runtime_started is True
+    gate.agent.record_runtime_turn_start.assert_called_once_with(
+        runtime_key=runtime_key,
+        request=gate.request,
+    )
 
     stale_context = SimpleNamespace(
         platform_specific={
@@ -948,6 +1027,7 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     service.mark_runtime_turn_started(stale_context)
 
     assert gate.runtime_started is False
+    gate.agent.record_runtime_turn_start.assert_called_once()
 
 
 def test_agent_service_contains_terminal_owner_failure_after_releasing_gate() -> None:

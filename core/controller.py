@@ -36,6 +36,10 @@ from core.message_output import MessageOutput
 from core.processing_indicator import ProcessingIndicatorService
 from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT
 from core.runtime_commands import RuntimeCommandWatcher
+from core.runtime_activation import RuntimeActivationRegistry
+from core.runtime_ownership import RuntimeOwnershipProvider
+from core.runtime_recovery import SessionDeliveryRecoveryHandler
+from core.runtime_work import RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import ScheduledTaskService
 from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
@@ -46,6 +50,8 @@ from core.memory.admission import CaptureAdmission, InboundTurnFacts
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 
 
 class _SettingsUserBindings:
@@ -211,6 +217,13 @@ class Controller:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._im_thread: Optional[threading.Thread] = None
         self._im_run_exception: Optional[BaseException] = None
+        self._shutdown_requested = False
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._shutdown_tainted = False
+        self._service_lock_safe_to_release = False
+        self._runtime_work_shutdown_grace_seconds = (
+            _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
+        )
         self.enabled_platforms = list(getattr(config, "enabled_platforms", lambda: [config.platform])())
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
         self._reconcile_lock: Optional[asyncio.Lock] = None
@@ -248,10 +261,22 @@ class Controller:
         # dispatcher, and scheduler all share this one owner's in_flight + flush state.
         from core.session_turns import SessionTurnManager
 
+        self.runtime_activation = RuntimeActivationRegistry()
         self.session_turns = SessionTurnManager(self)
-        # Durable Delivery recovery must not classify a Turn before backend
-        # adapters have restored their restart-stable native identities.
-        self._delivery_recovery_barrier = asyncio.Event()
+        self.runtime_ownership = RuntimeOwnershipProvider(
+            self.session_turns._sqlite_engine()
+        )
+        self.runtime_work_supervisor = RuntimeWorkSupervisor()
+        self._runtime_work_tokens = [
+            self.runtime_work_supervisor.register(
+                RuntimeWorkLane.SESSION_DELIVERIES,
+                SessionDeliveryRecoveryHandler(self.session_turns),
+            )
+        ]
+        # The internal server publishes the Session gate before waiting on this
+        # event. Controller startup owns backend restoration, durable owner
+        # recovery, and supervisor activation, then releases HTTP serving and
+        # the scheduler/watch services together.
         self._delivery_recovery_complete = asyncio.Event()
 
         self._init_model_hub()
@@ -772,7 +797,11 @@ class Controller:
         activity_store = SQLiteSessionActivityStore(get_cached_sqlite_engine())
         self.agent_service = AgentService(
             self,
-            activities=SessionActivityRegistry(activity_store),
+            activities=SessionActivityRegistry(
+                activity_store,
+                activation_registry=self.runtime_activation,
+            ),
+            activation_registry=self.runtime_activation,
         )
         self.agent_service.register(ClaudeAgent(self))
         if self.config.codex:
@@ -789,19 +818,25 @@ class Controller:
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
 
+        def inbound(callback):
+            return self._dispatch_to_controller_loop(
+                callback,
+                wait_for_owner_recovery=True,
+            )
+
         # Command handlers dict
         # Admin protection for "set_cwd" and "settings" is now handled by
         # the centralized auth pipeline (core.auth.check_auth) in IM entry points.
         command_handlers = {
-            "start": self._dispatch_to_controller_loop(self.command_handler.handle_start),
-            "new": self._dispatch_to_controller_loop(self.command_handler.handle_new),
-            "cwd": self._dispatch_to_controller_loop(self.command_handler.handle_cwd),
-            "set_cwd": self._dispatch_to_controller_loop(self.command_handler.handle_set_cwd),
-            "resume": self._dispatch_to_controller_loop(self.command_handler.handle_resume),
-            "setup": self._dispatch_to_controller_loop(self.command_handler.handle_setup),
-            "settings": self._dispatch_to_controller_loop(self.settings_handler.handle_settings),
-            "stop": self._dispatch_to_controller_loop(self.command_handler.handle_stop),
-            "bind": self._dispatch_to_controller_loop(self.command_handler.handle_bind),
+            "start": inbound(self.command_handler.handle_start),
+            "new": inbound(self.command_handler.handle_new),
+            "cwd": inbound(self.command_handler.handle_cwd),
+            "set_cwd": inbound(self.command_handler.handle_set_cwd),
+            "resume": inbound(self.command_handler.handle_resume),
+            "setup": inbound(self.command_handler.handle_setup),
+            "settings": inbound(self.settings_handler.handle_settings),
+            "stop": inbound(self.command_handler.handle_stop),
+            "bind": inbound(self.command_handler.handle_bind),
         }
 
         # IM inbound messages funnel through ``core.services.dispatch``
@@ -816,25 +851,45 @@ class Controller:
 
         # Register callbacks with the IM client
         self.im_client.register_callbacks(
-            on_message=self._dispatch_im_message_to_controller_loop(_on_im_message),
+            on_message=self._dispatch_im_message_to_controller_loop(
+                _on_im_message,
+                wait_for_owner_recovery=True,
+            ),
             on_command=command_handlers,
-            on_callback_query=self._dispatch_to_controller_loop(self.message_handler.handle_callback_query),
-            on_settings_update=self._dispatch_to_controller_loop(self.settings_handler.handle_settings_update),
-            on_change_cwd=self._dispatch_to_controller_loop(self.command_handler.handle_change_cwd_submission),
-            on_routing_update=self._dispatch_to_controller_loop(self.settings_handler.handle_routing_update),
-            on_routing_modal_update=self._dispatch_to_controller_loop(
+            on_callback_query=inbound(self.message_handler.handle_callback_query),
+            on_settings_update=inbound(self.settings_handler.handle_settings_update),
+            on_change_cwd=inbound(self.command_handler.handle_change_cwd_submission),
+            on_routing_update=inbound(self.settings_handler.handle_routing_update),
+            on_routing_modal_update=inbound(
                 self.settings_handler.handle_routing_modal_update
             ),
-            on_resume_session=self._dispatch_to_controller_loop(self.session_handler.handle_resume_session_submission),
+            on_resume_session=inbound(
+                self.session_handler.handle_resume_session_submission
+            ),
             on_ready=self._dispatch_to_controller_loop(self._on_runtime_ready),
             on_transport_ready=self._dispatch_to_controller_loop(self._on_im_ready),
         )
 
-    def _dispatch_to_controller_loop(self, callback):
+    async def _await_runtime_owner_recovery(self) -> None:
+        recovery_complete = getattr(self, "_delivery_recovery_complete", None)
+        if recovery_complete is not None:
+            await recovery_complete.wait()
+
+    def _dispatch_to_controller_loop(
+        self,
+        callback,
+        *,
+        wait_for_owner_recovery: bool = False,
+    ):
         async def _wrapped(*args, **kwargs):
+            async def _invoke():
+                if wait_for_owner_recovery:
+                    await self._await_runtime_owner_recovery()
+                return await callback(*args, **kwargs)
+
             loop = self._loop
             if loop is None:
-                return await callback(*args, **kwargs)
+                return await _invoke()
 
             try:
                 current_loop = asyncio.get_running_loop()
@@ -842,21 +897,31 @@ class Controller:
                 current_loop = None
 
             if current_loop is loop:
-                return await callback(*args, **kwargs)
+                return await _invoke()
 
-            future = asyncio.run_coroutine_threadsafe(callback(*args, **kwargs), loop)
+            future = asyncio.run_coroutine_threadsafe(_invoke(), loop)
             return await asyncio.wrap_future(future)
 
         return _wrapped
 
-    def _dispatch_im_message_to_controller_loop(self, callback):
+    def _dispatch_im_message_to_controller_loop(
+        self,
+        callback,
+        *,
+        wait_for_owner_recovery: bool = False,
+    ):
         tracked_platforms = {"telegram", "wechat"}
 
         async def _wrapped(context, *args, **kwargs):
+            async def _invoke():
+                if wait_for_owner_recovery:
+                    await self._await_runtime_owner_recovery()
+                return await callback(context, *args, **kwargs)
+
             platform = self._platform_for_im_callback_context(context)
             if platform in tracked_platforms:
-                return await self._run_on_controller_loop(callback, context, *args, **kwargs)
-            self._schedule_controller_callback(callback, context, *args, **kwargs)
+                return await self._run_on_controller_loop(_invoke)
+            self._schedule_controller_callback(_invoke)
             return None
 
         return _wrapped
@@ -958,14 +1023,17 @@ class Controller:
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
-        self.scheduled_task_service.notify_transport_ready(platform)
-        notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
-        if callable(notify_update_checker):
-            notify_update_checker(platform)
         platforms = {platform}
         if platform == self.primary_platform:
             platforms.add("")
         await self._restore_active_polls(platforms)
+        # Poll registration is durable-owner evidence needed by startup recovery.
+        # All work admission and user-visible delivery remain behind the barrier.
+        await self._await_runtime_owner_recovery()
+        self.scheduled_task_service.notify_transport_ready(platform)
+        notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
+        if callable(notify_update_checker):
+            notify_update_checker(platform)
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform=platform)
         except Exception as e:
@@ -980,10 +1048,12 @@ class Controller:
         workbench_platforms = {"avibe"}
         if self.primary_platform == "avibe":
             workbench_platforms.add("")
+        await self._restore_active_polls(workbench_platforms)
         try:
-            await self._restore_active_polls(workbench_platforms)
-        finally:
-            self._delivery_recovery_barrier.set()
+            await self._recover_runtime_owners()
+        except Exception:
+            self.request_shutdown("runtime owner recovery failed")
+            raise
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
@@ -1011,6 +1081,52 @@ class Controller:
             self.cleanup_task is None or self.cleanup_task.done()
         ):
             self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
+
+    async def _recover_runtime_owners(self) -> None:
+        """Restore durable execution owners before any producer can admit work."""
+
+        recover_deliveries = getattr(
+            self.session_turns,
+            "recover_durable_delivery_state",
+            None,
+        )
+        if callable(recover_deliveries):
+            try:
+                recovered = await recover_deliveries(service_restart=True)
+                if recovered:
+                    logger.info(
+                        "Recovered durable Session delivery owners for %s",
+                        ",".join(recovered),
+                    )
+            except Exception:
+                logger.exception("Failed to recover durable Session delivery owners")
+                raise
+
+        recover_queue = getattr(
+            self.session_turns,
+            "recover_persisted_agent_run_queue",
+            None,
+        )
+        if callable(recover_queue):
+            try:
+                recovered = await recover_queue()
+                if recovered:
+                    logger.info(
+                        "Recovered persisted Workbench Agent Run queues for %s",
+                        ",".join(recovered),
+                    )
+            except Exception:
+                logger.exception("Failed to recover persisted Workbench Agent Run queues")
+                raise
+
+        try:
+            self.scheduled_task_service.recover_processing_requests()
+        except Exception:
+            logger.exception("Failed to recover fallback request owners")
+            raise
+
+        await self.runtime_work_supervisor.activate()
+        self._delivery_recovery_complete.set()
 
     # Utility methods used by handlers
 
@@ -1620,6 +1736,74 @@ class Controller:
         return dispatcher.session_token_field(context)
 
     # Main run method
+    @property
+    def service_lock_safe_to_release(self) -> bool:
+        return bool(getattr(self, "_service_lock_safe_to_release", False))
+
+    def request_shutdown(self, reason: str = "requested") -> None:
+        """Schedule shutdown on the controller loop without blocking its owner."""
+
+        if getattr(self, "_shutdown_requested", False):
+            return
+        self._shutdown_requested = True
+        self._service_lock_safe_to_release = False
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return
+        try:
+            loop.call_soon_threadsafe(self._ensure_shutdown_task, reason)
+        except RuntimeError:
+            logger.exception("Failed to schedule controller shutdown")
+            self._shutdown_tainted = True
+
+    def _ensure_shutdown_task(self, reason: str = "requested") -> None:
+        task = getattr(self, "_shutdown_task", None)
+        if task is not None and not task.done():
+            return
+        self._shutdown_task = asyncio.create_task(
+            self._shutdown_on_loop(reason),
+            name="controller-shutdown",
+        )
+
+    async def _shutdown_on_loop(self, reason: str) -> None:
+        """Join passive recovery owners before allowing the loop to stop."""
+
+        logger.info("Controller shutdown started: %s", reason)
+        supervisor = getattr(self, "runtime_work_supervisor", None)
+        stop_supervisor = getattr(supervisor, "stop", None)
+        try:
+            if callable(stop_supervisor):
+                stop_task = asyncio.create_task(
+                    stop_supervisor(),
+                    name="controller-runtime-work-stop",
+                )
+                grace = max(
+                    0.0,
+                    float(
+                        getattr(
+                            self,
+                            "_runtime_work_shutdown_grace_seconds",
+                            _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS,
+                        )
+                    ),
+                )
+                done, _ = await asyncio.wait({stop_task}, timeout=grace)
+                if not done:
+                    self._shutdown_tainted = True
+                    logger.critical(
+                        "Runtime work shutdown exceeded %.1fs; retaining the "
+                        "service lease until exact workers join",
+                        grace,
+                    )
+                await asyncio.shield(stop_task)
+        except Exception:
+            self._shutdown_tainted = True
+            logger.exception("Controller shutdown could not join runtime work")
+        finally:
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                loop.call_soon(loop.stop)
+
     def run(self):
         """Run the controller"""
         logger.info("Starting Claude Proxy Controller with platforms: %s", ", ".join(self.enabled_platforms))
@@ -1634,8 +1818,6 @@ class Controller:
                     name="memory-runtime-reconcile",
                 )
             self.show_git_checkpoint_service.start()
-            self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
-            self._im_thread.start()
             # Internal Unix-socket ASGI server for the Web UI / future
             # ``vibe agent run --sync`` cross-process callers. Lives on
             # the same loop as the IM dispatch path so they share one
@@ -1647,6 +1829,10 @@ class Controller:
             except Exception:
                 logger.exception("internal dispatch server failed to schedule; UI fallback will use the queue path")
                 self._internal_server_task = None
+            self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
+            self._im_thread.start()
+            if self._shutdown_requested:
+                self._ensure_shutdown_task("pre-loop request")
             self._loop.run_forever()
             if self._im_run_exception and not isinstance(self._im_run_exception, (KeyboardInterrupt, SystemExit)):
                 raise self._im_run_exception
@@ -1656,6 +1842,8 @@ class Controller:
             logger.error(f"Error in main run loop: {e}", exc_info=True)
         finally:
             self.cleanup_sync()
+            if not getattr(self, "_shutdown_tainted", False):
+                self._service_lock_safe_to_release = True
             # Best-effort: remove the dispatch socket so the next controller
             # boot starts from a clean filesystem state. uvicorn unlinks
             # the path on exit when it bound the socket itself, but it
@@ -1811,6 +1999,10 @@ class Controller:
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
+        supervisor = getattr(self, "runtime_work_supervisor", None)
+        stop_supervisor = getattr(supervisor, "stop", None)
+        if callable(stop_supervisor):
+            _stop_loop_coroutine(stop_supervisor(), "Runtime work supervisor")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
         # Reconciliation can start the sidecar, so settle it before closing the

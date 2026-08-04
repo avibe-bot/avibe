@@ -2365,6 +2365,181 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_tasks.py::test_service_stop_preserves_non_durable_user_stop_cause
+  - id: HFR-130
+    name: one explicit SQLite snapshot prevents mixed ownership generations
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_130_hfr_138_snapshot_prevents_torn_run_to_delivery_handoff
+  - id: HFR-131
+    name: an open head wakes exact Session recovery and survives runtime reclamation
+    status: covered
+    kind: recovery
+    layer: scenario
+    backend: codex
+    test: tests/test_runtime_ownership.py::test_hfr_131_open_head_wakes_survives_reclaim_and_claims_exact_head
+  - id: HFR-132
+    name: a held head survives reclamation and starts only after explicit release
+    status: covered
+    kind: recovery
+    layer: scenario
+    backend: codex
+    test: tests/test_runtime_ownership.py::test_hfr_132_held_head_survives_reclaim_then_explicit_release_starts
+  - id: HFR-133
+    name: unresolved Delivery fences and Turn ownership block reclamation
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_133_hfr_134_delivery_and_turn_contract_blocks_only_live_owners
+  - id: HFR-134
+    name: live Turn states block while terminal ownership history does not
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_133_hfr_134_delivery_and_turn_contract_blocks_only_live_owners
+  - id: HFR-135
+    name: only active Activity rows pin their exact backend runtime
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_135_hfr_147_only_active_exact_mapped_activity_pins
+  - id: HFR-136
+    name: watch runtime bookkeeping never pins but an execution Run does
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_136_watch_runtime_never_pins_but_execution_run_does
+  - id: HFR-137
+    name: exact-generation owner commits and reclamation serialize in both orderings
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_activation.py::test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid
+  - id: HFR-138
+    name: ownership handoffs stay visible in one SQLite generation
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_130_hfr_138_snapshot_prevents_torn_run_to_delivery_handoff
+  - id: HFR-139
+    name: unrelated Sessions do not pin an exact runtime resource target
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_139_unrelated_session_does_not_pin_target
+  - id: HFR-140
+    name: proven missing bindings fail open while lookup failures fail closed
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_140_missing_binding_fails_open_but_provider_failure_fails_closed
+  - id: HFR-141
+    name: recovery wakes do not refresh exact Session progress clocks
+    status: covered
+    kind: safety
+    layer: contract
+    backend: codex
+    test: tests/test_runtime_ownership.py::test_hfr_141_repeated_wakes_do_not_refresh_progress_clocks
+  - id: HFR-142
+    name: a request waiting on a runtime gate does not create progress
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_agent_service.py::test_hfr_142_gate_wait_does_not_refresh_backend_progress_clock
+  - id: HFR-143
+    name: exact observable Session progress wins the locked reclamation recheck
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: codex
+    test: tests/test_codex_agent.py::CodexAgentStopTests::test_hfr_143_observable_session_progress_wins_locked_recheck
+  - id: HFR-144
+    name: stuck ownership settles only the exact active owner without replay
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: codex
+    test: tests/test_codex_agent.py::CodexAgentStopTests::test_hfr_144_stuck_active_settles_only_exact_codex_owner
+  - id: HFR-145
+    name: every enabled backend invalidation path consumes exact ownership
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership
+  - id: HFR-146
+    name: shared Codex and composite Claude resources use exact durable bindings
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_146_shared_codex_target_and_claude_mapping_use_exact_bindings
+  - id: HFR-147
+    name: Session-less active Activity maps to its exact backend resource
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_135_hfr_147_only_active_exact_mapped_activity_pins
+  - id: HFR-148
+    name: fallback Run ownership follows queued pre-execution and PID-started boundaries
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_148_hfr_150_fallback_run_uses_pid_boundary_and_exact_route
+  - id: HFR-149
+    name: periodic recovery re-enters only exact unresolved ownership observations
+    status: covered
+    kind: recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_runtime_recovery.py::test_hfr_149_session_lane_recovers_only_current_exact_observation
+  - id: HFR-150
+    name: fallback Runs survive exact route mapping and archived Session reuse
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_ownership.py::test_hfr_148_hfr_150_fallback_run_uses_pid_boundary_and_exact_route
+  - id: HFR-151
+    name: supervisor wakes coalesce with bounded per-partition single flight
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_151_supervisor_coalesces_wakes_and_keeps_partition_single_flight
+  - id: HFR-152
+    name: supervisor startup is paused and periodic reconciliation re-reads work
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_152_supervisor_starts_paused_and_periodic_reconcile_wakes_lane
+  - id: HFR-153
+    name: event callbacks cross threads without off-loop lane mutation
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_153_bus_callback_crosses_threads_without_mutating_lane_off_loop
+  - id: HFR-154
+    name: live registrations require exact generation handoff before replacement
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_154_replacing_live_registration_requires_generation_handoff
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

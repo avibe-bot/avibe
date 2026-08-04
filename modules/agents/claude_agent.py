@@ -16,6 +16,7 @@ from core.message_output import (
 )
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.reply_enhancer import strip_silent_blocks
+from core.runtime_activation import RuntimeActivationIdentity
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -172,16 +173,25 @@ class ClaudeAgent(BaseAgent):
                 runtime_session_key not in self.receiver_tasks
                 or self.receiver_tasks[runtime_session_key].done()
             ):
+                receiver_kwargs: dict[str, object] = {
+                    "composite_key": runtime_session_key,
+                }
+                receiver_identity = self._client_activation_identity(client)
+                if receiver_identity is not None:
+                    receiver_kwargs["receiver_activation_identity"] = receiver_identity
                 self.receiver_tasks[runtime_session_key] = asyncio.create_task(
                     self._receive_messages(
                         client,
                         runtime_base_session_id,
                         request.working_path,
                         context,
-                        composite_key=runtime_session_key,
+                        **receiver_kwargs,
                     )
                 )
-            self.mark_runtime_turn_started(context)
+            self.mark_runtime_turn_started(
+                context,
+                activation_identity=self._client_activation_identity(client),
+            )
             turn_registered = True
             logger.info(f"Sent message to Claude for session {runtime_session_key}")
 
@@ -328,6 +338,84 @@ class ClaudeAgent(BaseAgent):
     def runtime_turn_keys(self) -> set[str]:
         return set(self.claude_sessions.keys()) | set(self.receiver_tasks.keys())
 
+    def runtime_ownership_snapshots(self):
+        return self.session_handler.runtime_ownership_snapshots()
+
+    @staticmethod
+    def _client_activation_identity(client) -> RuntimeActivationIdentity | None:
+        identity = getattr(client, "_vibe_runtime_activation_identity", None)
+        return identity if isinstance(identity, RuntimeActivationIdentity) else None
+
+    def runtime_activation_identity_for_request(
+        self,
+        request,
+    ) -> RuntimeActivationIdentity | None:
+        runtime_key = str(getattr(request, "composite_session_id", "") or "").strip()
+        if runtime_key:
+            return self._client_activation_identity(self.claude_sessions.get(runtime_key))
+        session_key = str(getattr(request, "session_key", "") or "").strip()
+        candidates = [
+            self._client_activation_identity(client)
+            for client in self.claude_sessions.values()
+            if session_key
+            and str(
+                getattr(client, "_vibe_runtime_fallback_session_key", "") or ""
+            ).strip()
+            == session_key
+        ]
+        identities = tuple(
+            dict.fromkeys(identity for identity in candidates if identity is not None)
+        )
+        if len(identities) > 1:
+            raise ValueError("ambiguous Claude Session route maps to live runtimes")
+        return identities[0] if identities else None
+
+    def runtime_activation_identity_for_session_binding(
+        self,
+        *,
+        session_anchor: str,
+        workdir: str | None,
+    ) -> RuntimeActivationIdentity | None:
+        normalized_anchor = str(session_anchor or "").strip()
+        normalized_workdir = str(workdir or "").strip()
+        if not normalized_anchor:
+            return None
+        anchor_clients = [
+            client
+            for client in self.claude_sessions.values()
+            if str(
+                getattr(client, "_vibe_runtime_base_session_id", "") or ""
+            ).strip()
+            == normalized_anchor
+        ]
+        if not anchor_clients:
+            return None
+        exact_clients = [
+            client
+            for client in anchor_clients
+            if str(getattr(client, "_vibe_runtime_workdir", "") or "").strip()
+            == normalized_workdir
+        ]
+        if len(exact_clients) != 1:
+            raise ValueError("Claude Session binding is ambiguous or changed workdir")
+        identity = self._client_activation_identity(exact_clients[0])
+        if identity is None:
+            raise ValueError("Claude runtime generation is not attached")
+        return identity
+
+    def record_runtime_turn_start(
+        self,
+        *,
+        runtime_key: str,
+        request: AgentRequest | None,
+    ) -> None:
+        del request
+        mark_started = getattr(self.session_handler, "mark_session_turn_started", None)
+        if callable(mark_started):
+            mark_started(runtime_key)
+        else:
+            self.session_handler.touch_session_activity(runtime_key)
+
     @staticmethod
     def _runtime_key_matches_session_base(runtime_key: str, session_bases: set[str]) -> bool:
         for session_base in session_bases:
@@ -441,6 +529,8 @@ class ClaudeAgent(BaseAgent):
         *,
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
+        runtime_lock_held: bool = False,
+        activation_retired: bool = False,
     ) -> None:
         """Drop Claude runtime state without canceling the current receiver task."""
 
@@ -450,6 +540,8 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=current_receiver_task,
                 preserve_pending_request_state=preserve_pending_request_state,
+                runtime_lock_held=runtime_lock_held,
+                activation_retired=activation_retired,
             )
         finally:
             self._retire_steering_state(composite_key)
@@ -460,6 +552,8 @@ class ClaudeAgent(BaseAgent):
         *,
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
+        runtime_lock_held: bool = False,
+        activation_retired: bool = False,
     ) -> None:
 
         self._last_assistant_text.pop(composite_key, None)
@@ -475,9 +569,14 @@ class ClaudeAgent(BaseAgent):
             pending_requests = self._pending_requests.pop(composite_key, None) or []
             for pending_request in pending_requests:
                 self._requeue_request_activity(pending_request)
-        cleanup = getattr(self.session_handler, "cleanup_session", None)
+        cleanup_name = "_cleanup_session_locked" if runtime_lock_held else "cleanup_session"
+        cleanup = getattr(self.session_handler, cleanup_name, None)
         if callable(cleanup):
-            await cleanup(composite_key, current_receiver_task=current_receiver_task)
+            await cleanup(
+                composite_key,
+                current_receiver_task=current_receiver_task,
+                activation_retired=activation_retired,
+            )
             return
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
@@ -495,7 +594,13 @@ class ClaudeAgent(BaseAgent):
             if not cleanup_from_receiver:
                 await self._stop_receiver_task(receiver_task)
 
-    async def force_cleanup_stuck_active_session(self, composite_key: str) -> None:
+    async def force_cleanup_stuck_active_session(
+        self,
+        composite_key: str,
+        *,
+        runtime_lock_held: bool = False,
+        activation_retired: bool = False,
+    ) -> None:
         """Settle and drop a Claude session whose active flag is stale.
 
         SessionHandler owns the idle timer, but ClaudeAgent owns the pending
@@ -522,6 +627,8 @@ class ClaudeAgent(BaseAgent):
                 await self._cleanup_runtime_session(
                     composite_key,
                     preserve_pending_request_state=True,
+                    runtime_lock_held=runtime_lock_held,
+                    activation_retired=activation_retired,
                 )
             except Exception:
                 if context is not None:
@@ -674,15 +781,6 @@ class ClaudeAgent(BaseAgent):
         buffered_terminal = self._consume_terminal_barrier(composite_key) is not None
         return generation_changed or buffered_terminal
 
-    def _touch_steering_activity(self, composite_key: str) -> None:
-        touch_session_activity = getattr(
-            self.session_handler,
-            "touch_session_activity",
-            None,
-        )
-        if callable(touch_session_activity):
-            touch_session_activity(composite_key)
-
     @staticmethod
     def _ambiguous_steering_input_closer(client):
         end_input = getattr(client, "end_input", None)
@@ -782,7 +880,6 @@ class ClaudeAgent(BaseAgent):
                         composite_key,
                         barrier="unknown",
                     )
-                    self._touch_steering_activity(composite_key)
                     await self._end_ambiguous_steering_input(
                         composite_key,
                         end_input,
@@ -813,7 +910,6 @@ class ClaudeAgent(BaseAgent):
                             composite_key,
                             barrier="unknown",
                         )
-                        self._touch_steering_activity(composite_key)
                         await self._end_ambiguous_steering_input(
                             composite_key,
                             end_input,
@@ -843,7 +939,6 @@ class ClaudeAgent(BaseAgent):
                         composite_key,
                         barrier="unknown",
                     )
-                    self._touch_steering_activity(composite_key)
                     await self._end_ambiguous_steering_input(
                         composite_key,
                         end_input,
@@ -858,7 +953,6 @@ class ClaudeAgent(BaseAgent):
                 writers.discard(composite_key)
 
             self._advance_steering_generation(composite_key)
-            self._touch_steering_activity(composite_key)
             if (
                 self.claude_sessions.get(composite_key) is not client
                 or self.receiver_tasks.get(composite_key) is not receiver_task
@@ -995,14 +1089,22 @@ class ClaudeAgent(BaseAgent):
         context: MessageContext,
         *,
         composite_key: str | None = None,
+        receiver_activation_identity: RuntimeActivationIdentity | None = None,
     ):
         """Receive messages from Claude SDK client."""
         receiver_steering_lock = None
         try:
             session_key = self.controller._get_session_key(context)
             composite_key = composite_key or f"{base_session_id}:{working_path}"
+            if receiver_activation_identity is None:
+                receiver_activation_identity = self._client_activation_identity(client)
             receiver_steering_lock = self._steering_lock(composite_key)
-            self._set_activity_connection(composite_key, context, "connected")
+            self._set_activity_connection(
+                composite_key,
+                context,
+                "connected",
+                activation_identity=receiver_activation_identity,
+            )
 
             # Build a request object for question handler
             request = AgentRequest(
@@ -1042,9 +1144,6 @@ class ClaudeAgent(BaseAgent):
                         preserve_pending_request_state=True,
                     )
                 try:
-                    touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
-                    if callable(touch_session_activity):
-                        touch_session_activity(composite_key)
                     claude_session_id = self._maybe_capture_session_id(
                         message,
                         base_session_id,
@@ -1064,7 +1163,12 @@ class ClaudeAgent(BaseAgent):
                             )
                         logger.info(f"Captured Claude session id {claude_session_id} for {base_session_id}")
 
-                    if self._handle_activity_message(message, composite_key, context):
+                    if self._handle_activity_message(
+                        message,
+                        composite_key,
+                        context,
+                        activation_identity=receiver_activation_identity,
+                    ):
                         registry = self._activity_registry()
                         if registry is not None and registry.has_completed_output(
                             self.name,
@@ -1107,9 +1211,11 @@ class ClaudeAgent(BaseAgent):
                             working_path,
                             session_key,
                             message_type=message_type,
+                            receiver_activation_identity=receiver_activation_identity,
                         )
 
                     if message_type == "assistant":
+                        self.session_handler.touch_session_activity(composite_key)
                         toolcalls = []
                         text_parts = []
                         # AskUserQuestion detection disabled - SDK cannot respond
@@ -1684,7 +1790,10 @@ class ClaudeAgent(BaseAgent):
             self._detached_assistant_text.pop(composite_key, None)
             self._detached_unsolicited_outputs.discard(composite_key)
             self._detached_unsolicited_text.pop(composite_key, None)
-            self._end_activity_runtime(composite_key)
+            self._end_activity_runtime(
+                composite_key,
+                activation_identity=receiver_activation_identity,
+            )
             if composite_key is not None:
                 self._retire_steering_state(
                     composite_key,
@@ -2229,6 +2338,8 @@ class ClaudeAgent(BaseAgent):
         composite_key: str,
         context: MessageContext,
         state: str,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
     ) -> None:
         registry = self._activity_registry()
         if registry is None:
@@ -2238,14 +2349,27 @@ class ClaudeAgent(BaseAgent):
             runtime_key=composite_key,
             session_id=self._activity_session_id(context),
             state=state,
+            activation_identity=activation_identity,
         )
 
-    def _end_activity_runtime(self, composite_key: str) -> None:
+    def _end_activity_runtime(
+        self,
+        composite_key: str,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> None:
         service = getattr(self.controller, "agent_service", None)
         end_runtime = getattr(service, "end_activity_runtime", None)
         completed = []
         if callable(end_runtime) and composite_key:
-            completed = end_runtime(self.name, composite_key) or []
+            completed = (
+                end_runtime(
+                    self.name,
+                    composite_key,
+                    activation_identity=activation_identity,
+                )
+                or []
+            )
         if completed:
             self._mark_session_idle_if_runtime_free(composite_key)
         self._signal_activity_output_settled(composite_key)
@@ -2368,6 +2492,8 @@ class ClaudeAgent(BaseAgent):
         message,
         composite_key: str,
         context: MessageContext,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
     ) -> bool:
         """Project Claude task events into the backend-neutral Activity registry."""
 
@@ -2452,7 +2578,7 @@ class ClaudeAgent(BaseAgent):
         if run_ids:
             metadata["run_ids"] = run_ids
         if event == "task_started":
-            registry.start(
+            started = registry.start(
                 backend=self.name,
                 runtime_key=composite_key,
                 session_id=session_id,
@@ -2464,26 +2590,34 @@ class ClaudeAgent(BaseAgent):
                 turn_id=turn_id,
                 run_id=run_ids[0] if run_ids else None,
                 metadata=metadata,
+                activation_identity=activation_identity,
             )
+            if started is None:
+                return True
             mark_active = getattr(self.session_handler, "mark_session_active", None)
             if callable(mark_active):
                 mark_active(composite_key)
+            self.session_handler.touch_session_activity(composite_key)
             return True
 
         status = str(self._task_field(message, "status", "") or "").strip().lower()
         terminal = status in {"completed", "failed", "stopped", "killed"}
         if event in {"task_progress", "task_updated"} and not terminal:
-            registry.progress(
+            progressed = registry.progress(
                 backend=self.name,
                 runtime_key=composite_key,
                 session_id=session_id,
                 activity_id=task_id,
                 description=description,
                 metadata=metadata,
+                activation_identity=activation_identity,
             )
+            if progressed is None:
+                return True
             mark_active = getattr(self.session_handler, "mark_session_active", None)
             if callable(mark_active):
                 mark_active(composite_key)
+            self.session_handler.touch_session_activity(composite_key)
             return True
         if not terminal:
             logger.warning("Ignoring Claude %s with non-terminal status %r", event, status)
@@ -2502,6 +2636,7 @@ class ClaudeAgent(BaseAgent):
                 turn_id=turn_id,
                 run_id=run_ids[0] if run_ids else None,
                 metadata=metadata,
+                activation_identity=activation_identity,
             )
         completed = registry.complete(
             backend=self.name,
@@ -2511,6 +2646,7 @@ class ClaudeAgent(BaseAgent):
             metadata=metadata,
             expects_output=status == "completed" and not foreground,
             retain_terminal_snapshot=status != "completed" and not foreground,
+            activation_identity=activation_identity,
         )
         service = getattr(self.controller, "agent_service", None)
         on_terminal = getattr(service, "on_activity_terminal", None)
@@ -2923,6 +3059,7 @@ class ClaudeAgent(BaseAgent):
         session_key: str,
         *,
         message_type: str | None = None,
+        receiver_activation_identity: RuntimeActivationIdentity | None = None,
     ) -> str | None:
         """Open a turn for UNSOLICITED backend output (no Avibe query behind it).
 
@@ -3005,7 +3142,12 @@ class ClaudeAgent(BaseAgent):
             return None
         payload = getattr(context, "platform_specific", None) or {}
         runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip() or composite_key
-        token = await begin(self.name, context, runtime_key)
+        token = await begin(
+            self.name,
+            context,
+            runtime_key,
+            activation_identity=receiver_activation_identity,
+        )
         if not token:
             # The gate is CONTENDED — a user turn holds it, or one is queued on it
             # and we must not block the receiver behind that waiter (deadlock; see
