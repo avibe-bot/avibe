@@ -207,6 +207,9 @@ def create_app(
 
         submission_platform = str(getattr(context, "platform", None) or "avibe").strip()
         native_message_id = str(getattr(context, "message_id", None) or "").strip()
+        submission_spec = dict(getattr(context, "platform_specific", None) or {})
+        author_id = str(submission_spec.get("task_definition_id") or "").strip() or None
+        author_name = str(submission_spec.get("task_trigger_kind") or "").strip() or None
         dedupe_key: str | None = None
         delivery_id: str | None = None
         delivery_request: DeliveryRequest | None = None
@@ -344,6 +347,8 @@ def create_app(
                         session_id=session_id,
                         platform=submission_platform,
                         author="harness",
+                        author_id=author_id,
+                        author_name=author_name,
                         source="harness",
                         message_type="harness",
                         text=text,
@@ -401,6 +406,8 @@ def create_app(
                 platform=submission_platform,
                 source="harness",
                 author="harness",
+                author_id=author_id,
+                author_name=author_name,
                 message_type="harness",
                 display_text=text,
                 metadata={
@@ -418,6 +425,8 @@ def create_app(
                 "scope_id": scope_id,
                 "display_text": delivery_request.display_text,
                 "message_metadata": dict(delivery_request.metadata or {}),
+                "author_id": delivery_request.author_id,
+                "author_name": delivery_request.author_name,
             }
         )
         try:

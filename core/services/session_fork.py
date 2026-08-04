@@ -517,6 +517,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
 
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
+    from storage.messages_service import transcript_order_value
     from storage.models import messages
 
     ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
@@ -525,7 +526,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
         with engine.connect() as conn:
             anchor = conn.execute(
                 select(
-                    messages.c.created_at,
+                    transcript_order_value().label("transcript_order_at"),
                     messages.c.id,
                     messages.c.author,
                     messages.c.type,
@@ -536,11 +537,11 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
             ).mappings().first()
             if anchor is None:
                 return ForkSourceState()
-            anchor_created_at = anchor["created_at"]
+            anchor_order_at = anchor["transcript_order_at"]
             anchor_id = anchor["id"]
             after_anchor = (
-                (messages.c.created_at > anchor_created_at)
-                | ((messages.c.created_at == anchor_created_at) & (messages.c.id > anchor_id))
+                (transcript_order_value() > anchor_order_at)
+                | ((transcript_order_value() == anchor_order_at) & (messages.c.id > anchor_id))
             )
             latest_after_anchor = conn.execute(
                 select(messages.c.author, messages.c.type, messages.c.metadata_json)
@@ -562,7 +563,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                     ),
                     after_anchor,
                 )
-                .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+                .order_by(transcript_order_value().desc(), messages.c.id.desc())
                 .limit(1)
             ).mappings().first()
             latest_after_anchor_author = (
@@ -682,6 +683,7 @@ def _forked_session_title(source_title: str, lang: str = "en") -> str:
 def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
     from sqlalchemy import select
 
+    from storage.messages_service import transcript_order_value
     from storage.models import agent_events, message_deliveries, messages, session_turns
 
     active_initial = conn.execute(
@@ -724,7 +726,7 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
             messages.c.session_id == source_session_id,
             messages.c.type.in_(_FORK_ANCHOR_TYPES),
         )
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
         .limit(1)
     ).mappings().first()
     if row is None:

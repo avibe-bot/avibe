@@ -1237,6 +1237,72 @@ def test_fork_source_state_tracks_nonterminal_messages_after_anchor(
         engine.dispose()
 
 
+def test_fork_source_state_uses_delivery_acceptance_for_anchor_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == source_id)
+            ).mappings().one()
+            conn.execute(
+                messages.insert(),
+                [
+                    {
+                        "id": "msg_prior_result",
+                        "scope_id": row["scope_id"],
+                        "session_id": source_id,
+                        "platform": "avibe",
+                        "author": "agent",
+                        "type": "result",
+                        "source": None,
+                        "content_text": "prior result",
+                        "content_json": "{}",
+                        "metadata_json": "{}",
+                        "created_at": "2026-08-04T00:00:02.000000Z",
+                        "updated_at": "2026-08-04T00:00:02.000000Z",
+                        "delivered_at": None,
+                    },
+                    {
+                        "id": "msg_queued_anchor",
+                        "scope_id": row["scope_id"],
+                        "session_id": source_id,
+                        "platform": "avibe",
+                        "author": "user",
+                        "type": "user",
+                        "source": "user",
+                        "content_text": "queued prompt",
+                        "content_json": "{}",
+                        "metadata_json": "{}",
+                        "created_at": "2026-08-04T00:00:01.000000Z",
+                        "updated_at": "2026-08-04T00:00:03.000000Z",
+                        "delivered_at": "2026-08-04T00:00:03.000000Z",
+                    },
+                ],
+            )
+
+        state = fork_source_state(
+            {
+                "source_session_id": source_id,
+                "source_message_id": "msg_queued_anchor",
+            }
+        )
+
+        assert state.has_messages_after_anchor is False
+        assert state.latest_after_anchor_author is None
+        assert state.has_terminal_agent_output_after_anchor is False
+    finally:
+        engine.dispose()
+
+
 def test_fork_source_state_ignores_notify_as_terminal_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

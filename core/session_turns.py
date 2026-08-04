@@ -4399,8 +4399,16 @@ class SessionTurnManager:
             display_text=str(spec.get("display_text") or text),
             content_json=spec.get("message_content") if isinstance(spec.get("message_content"), dict) else None,
             metadata=spec.get("message_metadata") if isinstance(spec.get("message_metadata"), dict) else {},
-            author_id=str(spec.get("author_id") or "").strip() or None,
-            author_name=str(spec.get("author_name") or "").strip() or None,
+            author_id=str(
+                spec.get("author_id")
+                or (spec.get("task_definition_id") if source == SOURCE_SCHEDULED else "")
+                or ""
+            ).strip() or None,
+            author_name=str(
+                spec.get("author_name")
+                or (spec.get("task_trigger_kind") if source == SOURCE_SCHEDULED else "")
+                or ""
+            ).strip() or None,
             native_message_id=native_message_id,
         )
         result = await self.deliver(request, context=context)

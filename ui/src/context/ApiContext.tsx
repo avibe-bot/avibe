@@ -411,6 +411,29 @@ export type TunnelQualitySnapshot = {
   };
 };
 
+export type CloudflareEdgeLocation = {
+  colo: string;
+  location?: string;
+  country?: string;
+};
+
+export type TunnelNetworkPath = {
+  schema_version: 1;
+  provider: 'Cloudflare';
+  asn: 13335;
+  sampled_at: string;
+  locations_pending: boolean;
+  client_access: 'local' | 'remote';
+  client_ingress: CloudflareEdgeLocation | null;
+  connector: {
+    locations: Array<CloudflareEdgeLocation & { id: string }>;
+    edge_ips: string[];
+  };
+  route: {
+    assessment: 'same_metro' | 'same_country' | 'cross_country' | 'unknown';
+  };
+};
+
 export type RemoteAccessStatus = {
   ok: boolean;
   enabled: boolean;
@@ -420,6 +443,7 @@ export type RemoteAccessStatus = {
   pid_state?: string;
   transport_protocol?: 'auto' | 'quic' | 'http2';
   tunnel_quality?: TunnelQualitySnapshot;
+  network_path?: TunnelNetworkPath;
   error?: string;
   optimization_started?: boolean;
 };

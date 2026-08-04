@@ -1376,6 +1376,66 @@ def test_trusted_proxy_forwarded_host_routes_remote_access(monkeypatch, tmp_path
     assert response.headers["Location"].startswith(config.remote_access.vibe_cloud.authorization_endpoint)
 
 
+def test_ra_tq_026_remote_status_uses_cf_ray_on_paired_public_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    observed = []
+
+    def status(
+        loaded_config=None,
+        *,
+        client_colo=None,
+        client_access="local",
+        include_network_path=False,
+    ):
+        observed.append((loaded_config, client_colo, client_access, include_network_path))
+        return {"ok": True, "client_colo": client_colo}
+
+    monkeypatch.setattr(remote_access, "status", status)
+    with app.test_request_context(
+        "/api/remote-access/status",
+        base_url="https://alex.avibe.bot",
+        headers={"CF-Ray": "9f1234567890abcd-SIN"},
+    ):
+        response = ui_server.remote_access_status()
+
+    assert response.status_code == 200
+    assert observed[0][0].remote_access.vibe_cloud.public_url == config.remote_access.vibe_cloud.public_url
+    assert observed[0][1] == "SIN"
+    assert observed[0][2] == "remote"
+    assert observed[0][3] is True
+
+
+def test_ra_tq_026_remote_status_ignores_spoofed_cf_ray(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    observed = []
+
+    def status(
+        loaded_config=None,
+        *,
+        client_colo=None,
+        client_access="local",
+        include_network_path=False,
+    ):
+        observed.append((loaded_config, client_colo, client_access, include_network_path))
+        return {"ok": True, "client_colo": client_colo}
+
+    monkeypatch.setattr(remote_access, "status", status)
+    with app.test_request_context(
+        "/api/remote-access/status",
+        base_url="http://127.0.0.1:5123",
+        headers={"CF-Ray": "9f1234567890abcd-NRT"},
+    ):
+        response = ui_server.remote_access_status()
+
+    assert response.status_code == 200
+    assert observed[0][1] is None
+    assert observed[0][2] == "local"
+    assert observed[0][3] is True
+    assert config.remote_access.vibe_cloud.public_url == "https://alex.avibe.bot"
+
+
 def test_trusted_proxy_missing_forwarded_host_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")

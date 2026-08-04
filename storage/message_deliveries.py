@@ -1069,7 +1069,15 @@ def _insert_message(
     snapshot: dict[str, Any],
     accepted_at: str,
 ) -> None:
+    from storage.messages_service import canonical_message_timestamp
+
     existing = conn.execute(select(messages).where(messages.c.id == message_id)).mappings().first()
+    normalized_accepted_at = canonical_message_timestamp(accepted_at)
+    normalized_created_at = canonical_message_timestamp(
+        snapshot.get("created_at") or accepted_at
+    )
+    assert normalized_accepted_at is not None
+    assert normalized_created_at is not None
     values = {
         "id": message_id,
         "scope_id": snapshot.get("scope_id"),
@@ -1085,9 +1093,9 @@ def _insert_message(
         "content_text": snapshot.get("content_text"),
         "content_json": snapshot["content_json"],
         "metadata_json": snapshot["metadata_json"],
-        "created_at": snapshot.get("created_at") or accepted_at,
-        "updated_at": accepted_at,
-        "delivered_at": accepted_at,
+        "created_at": normalized_created_at,
+        "updated_at": normalized_accepted_at,
+        "delivered_at": normalized_accepted_at,
         "read_at": snapshot.get("read_at"),
     }
     if existing is None:
