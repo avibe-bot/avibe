@@ -214,6 +214,18 @@ re-pointed, one Enter from archiving the wrong session. Fixed by storing the req
 id and deriving `open` from `archiveRequestIsLive(requestedId, targetId)` in
 `sessionArchived.ts`, plus forgetting a stale request so it cannot resurrect later.
 
+Round 3 on `cd302fa4` returned one P2, also valid: the chat header forked **before** the
+unsaved-changes prompt. The blocker is mounted on the *router* (`UnsavedChangesProvider`'s
+`useBlocker`, reached from `RouterRoot`), so any plain `navigate()` prompts only after the write
+has already happened — cancelling left an orphan forked session. The sidebar row avoided it by
+passing an `authorizeNavigation` option; the chat header simply never passed one, and
+`ProjectsPage`'s `MobileSessionRow` had the same hole (a third occurrence the review did not
+flag). Fixed at the layer that owns the write instead of per call site: `useSessionActions` now
+calls `useUnsavedChangesActionGuard()` itself, gates `fork` on `authorizeNavigation()` returning
+non-`null` before touching the API, and navigates through `authorization.runNavigation(...)` so
+the router does not prompt twice for one action. The option is gone, so a new surface inherits
+the pre-flight rather than having to remember it.
+
 Deliberately not changed: no `@radix-ui/react-dropdown-menu` dependency (not installed; a true
 menu role would be the honest fix for #7's *other* half, but the popover semantics are now
 truthful about what they are).
@@ -229,3 +241,5 @@ truthful about what they are).
 7. [x] i18n en/zh
 8. [x] tests + `npm run build`
 9. [x] Codex review round — 9 findings fixed + `useSessionActions.test.tsx`
+10. [x] round 2 — per-session archive request (`archiveRequestIsLive`)
+11. [x] round 3 — unsaved-changes pre-flight owned by `useSessionActions`

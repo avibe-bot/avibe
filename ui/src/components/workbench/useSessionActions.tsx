@@ -8,8 +8,8 @@ import type { WorkbenchSession } from '../../context/ApiContext';
 import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useToast } from '../../context/ToastContext';
+import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import { hideSessionToBackground } from '../../lib/sessionVisibilityActions';
-import type { UnsavedChangesActionAuthorization } from '../../lib/unsavedChangesRegistry';
 import { archiveRequestIsLive, isSessionReadOnly } from './sessionArchived';
 import { ArchiveSessionDialog } from './ArchiveSessionDialog';
 import type { SessionActionDescriptor } from './sessionActions';
@@ -33,14 +33,9 @@ export interface SessionActionsOptions {
   projectId?: string | null;
   /** Start the surface's own rename editor (inline input / chat header title). */
   onRenameStart: () => void;
-  /** Navigate to a session (the fork target). Runs inside ``authorizeNavigation``'s
-   *  runner when one is supplied. */
+  /** Navigate to a session (the fork target). Always called inside the
+   *  unsaved-changes authorization's runner (see below). */
   onOpenSession: (sessionId: string) => void;
-  /** Pre-flight for the actions that end in a route change (fork). The sidebar's
-   *  unsaved-changes guard prompts SYNCHRONOUSLY, so it has to run BEFORE the fork
-   *  request — asking afterwards and bailing out would leave an orphan session
-   *  behind (Codex). ``null`` = the user cancelled: nothing is written at all. */
-  authorizeNavigation?: () => UnsavedChangesActionAuthorization | null;
   /** After a successful archive — the chat leaves the dead session, rows just drop. */
   onArchived?: () => void;
   /** Mirror a write into a surface-local copy of the session (the chat page holds
@@ -68,7 +63,6 @@ export const useSessionActions = ({
   projectId,
   onRenameStart,
   onOpenSession,
-  authorizeNavigation,
   onArchived,
   onSessionPatched,
   archiveHint,
@@ -77,6 +71,12 @@ export const useSessionActions = ({
   const api = useApi();
   const { showToast } = useToast();
   const { forkSession, setSessionPinned, archiveSession } = useWorkbenchProjectsTree();
+  // Owned HERE, not passed in per surface: the unsaved-changes blocker is mounted on
+  // the ROUTER, so any surface that navigates after a write — sidebar, mobile row,
+  // chat header — is prompted only once the fork already exists, and cancelling
+  // orphans it. Asking inside the hook means a new surface inherits the pre-flight
+  // instead of having to remember an option (Codex found the chat header missing it).
+  const authorizeNavigation = useUnsavedChangesActionGuard();
   const insertTarget = useComposerInsertTarget();
   // The session an archive request was made FOR, not a bare "open" flag: this hook
   // instance outlives any one session (ChatPage is reused across ids), so a boolean
@@ -134,18 +134,18 @@ export const useSessionActions = ({
     if (!target || forkingRef.current) return;
     // Ask FIRST (the prompt is synchronous), write second: a cancelled
     // unsaved-changes prompt must not leave a forked session nobody navigated to.
-    const authorization = authorizeNavigation?.() ?? null;
-    if (authorizeNavigation && !authorization) return;
+    // ``null`` is the user cancelling; with nothing unsaved the gate authorizes
+    // straight through.
+    const authorization = authorizeNavigation();
+    if (!authorization) return;
     forkingRef.current = true;
     setForking(true);
     try {
       const forked = await forkSession(ownerProjectId, target.id);
       if (!forked) return;
-      const open = () => onOpenSession(forked.id);
       // runNavigation carries the already-granted authorization into the route
-      // change, so the guard doesn't prompt a second time for the same action.
-      if (authorization) authorization.runNavigation(open);
-      else open();
+      // change, so the router blocker doesn't prompt a second time for one action.
+      authorization.runNavigation(() => onOpenSession(forked.id));
     } finally {
       forkingRef.current = false;
       setForking(false);

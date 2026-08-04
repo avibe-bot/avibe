@@ -209,7 +209,6 @@ const SessionRow: React.FC<{
 }> = ({ projectId, session, unread }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const authorizeRouteAction = useUnsavedChangesActionGuard();
   const { renameSession } = useWorkbenchProjectsTree();
   const location = useLocation();
   const active = location.pathname === `/chat/${session.id}`;
@@ -230,10 +229,8 @@ const SessionRow: React.FC<{
       handledRef.current = false;
       setRenaming(true);
     },
-    // Forking navigates, so it goes through the unsaved-changes guard like every
-    // other route change this sidebar can trigger. The guard runs BEFORE the fork
-    // request (see authorizeNavigation) so a cancelled prompt writes nothing.
-    authorizeNavigation: authorizeRouteAction,
+    // Forking navigates, and useSessionActions runs the unsaved-changes guard
+    // itself — before the fork request, so a cancelled prompt writes nothing.
     onOpenSession: (sessionId) => navigate(`/chat/${encodeURIComponent(sessionId)}`),
     // Archiving the chat we are currently viewing leaves it directly — don't rely
     // solely on the replay-less SSE 'archived' event to navigate away.

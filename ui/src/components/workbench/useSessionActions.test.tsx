@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   archiveSession: vi.fn<(projectId: string | null, sessionId: string) => Promise<void>>(),
   setSessionVisibility: vi.fn(),
   showToast: vi.fn(),
+  authorizeRouteAction: vi.fn<() => UnsavedChangesActionAuthorization | null>(),
 }));
 
 vi.mock('../../context/ApiContext', () => ({
@@ -30,6 +31,9 @@ vi.mock('../../context/WorkbenchProjectsContext', () => ({
     setSessionPinned: mocks.setSessionPinned,
     archiveSession: mocks.archiveSession,
   }),
+}));
+vi.mock('../../context/useUnsavedChangesActionGuard', () => ({
+  useUnsavedChangesActionGuard: () => mocks.authorizeRouteAction,
 }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 
@@ -90,11 +94,18 @@ const options = (over: Partial<SessionActionsOptions> = {}): SessionActionsOptio
   ...over,
 });
 
+/** What the real gate returns when there is nothing unsaved to warn about: an
+ *  authorization that runs the navigation straight through. */
+const grantedAuthorization = (): UnsavedChangesActionAuthorization => ({
+  runNavigation: vi.fn((navigation: () => void) => navigation()),
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.forkSession.mockResolvedValue(session({ id: 'ses_forked' }));
   mocks.setSessionPinned.mockResolvedValue(undefined);
   mocks.archiveSession.mockResolvedValue(undefined);
+  mocks.authorizeRouteAction.mockImplementation(grantedAuthorization);
 });
 
 // ── Codex review (useSessionActions.tsx:81) ──────────────────────────────────
@@ -157,30 +168,36 @@ describe('a session with no project (project_id: null)', () => {
   });
 });
 
-// ── Codex review (useSessionActions.tsx:109) ─────────────────────────────────
+// ── Codex review (useSessionActions.tsx:139) ─────────────────────────────────
 // The sidebar's unsaved-changes prompt used to run inside `onOpenSession`, i.e.
 // AFTER the fork request had already been sent: cancelling the prompt left an orphan
-// forked session behind. The guard is a pre-flight now.
+// forked session behind. The guard is a pre-flight now — and the hook asks for it
+// ITSELF rather than taking it as an option, so a surface cannot forget to pass it
+// (the chat header and the mobile projects row both had).
 describe('fork under the unsaved-changes guard', () => {
-  const authorization = (): UnsavedChangesActionAuthorization => ({
-    runNavigation: vi.fn((navigation: () => void) => navigation()),
+  it('consults the router guard without being handed one', () => {
+    mount(options());
+    expect(mocks.authorizeRouteAction).not.toHaveBeenCalled(); // asked per action, not per render
   });
 
   it('writes nothing when the user cancels the prompt', async () => {
+    mocks.authorizeRouteAction.mockReturnValue(null);
     const onOpenSession = vi.fn();
-    const h = mount(options({ authorizeNavigation: () => null, onOpenSession }));
+    const h = mount(options({ onOpenSession }));
 
     select(h, 'fork');
     await flush();
 
+    expect(mocks.authorizeRouteAction).toHaveBeenCalledTimes(1);
     expect(mocks.forkSession).not.toHaveBeenCalled();
     expect(onOpenSession).not.toHaveBeenCalled();
   });
 
   it('carries the granted authorization into the navigation', async () => {
-    const granted = authorization();
+    const granted = grantedAuthorization();
+    mocks.authorizeRouteAction.mockReturnValue(granted);
     const onOpenSession = vi.fn();
-    const h = mount(options({ authorizeNavigation: () => granted, onOpenSession }));
+    const h = mount(options({ onOpenSession }));
 
     select(h, 'fork');
     await flush();
