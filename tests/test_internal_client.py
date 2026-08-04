@@ -406,6 +406,33 @@ def test_memory_restart_posts_and_passes_through_the_runtime_result(socket_path)
     }
 
 
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        httpx.ReadError("controller closed the response stream"),
+        httpx.RemoteProtocolError("controller disconnected without a response"),
+    ],
+)
+def test_memory_restart_maps_read_transport_errors_to_unavailable(
+    socket_path,
+    transport_error: httpx.TransportError,
+):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise transport_error
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            await internal_client.memory_restart(socket_path=socket_path)
+
+    with pytest.raises(internal_client.InternalServerUnavailable) as raised:
+        asyncio.run(_go())
+
+    assert raised.value.__cause__ is transport_error
+
+
 def test_memory_log_helpers_forward_structured_query_and_sign_owner(monkeypatch, socket_path):
     from core.memory import ui_access
 

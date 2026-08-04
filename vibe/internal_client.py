@@ -30,7 +30,7 @@ from config import paths
 
 logger = logging.getLogger(__name__)
 
-_SOCKET_ERRORS = (httpx.ConnectError, httpx.TimeoutException, OSError)
+_SOCKET_ERRORS = (httpx.TransportError, OSError)
 _SOCKET_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, OSError)
 _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
 

@@ -1312,25 +1312,29 @@ class MemoryRuntime:
         task = self._worker_task
         if task is None:
             return
-        current = asyncio.current_task()
-        initial_cancelling = current.cancelling() if current is not None else 0
         task.cancel()
-        caller_cancelled = False
-        while not task.done():
+        # ``gather(return_exceptions=True)`` absorbs the worker's expected
+        # cancellation, so any cancellation raised by shield belongs to this
+        # caller. This works on Python 3.10 without ``Task.cancelling()``.
+        settlement = asyncio.gather(task, return_exceptions=True)
+        caller_cancellation: asyncio.CancelledError | None = None
+        while not settlement.done():
             try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                if current is not None and current.cancelling() > initial_cancelling:
-                    caller_cancelled = True
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
         try:
-            task.result()
-        except asyncio.CancelledError:
-            pass
+            worker_result = settlement.result()[0]
         finally:
             if self._worker_task is task:
                 self._worker_task = None
-        if caller_cancelled:
-            raise asyncio.CancelledError
+        if isinstance(worker_result, BaseException) and not isinstance(
+            worker_result,
+            asyncio.CancelledError,
+        ):
+            raise worker_result
+        if caller_cancellation is not None:
+            raise caller_cancellation
 
     def _ensure_call_log_retention(self) -> None:
         task = self._call_log_retention_task

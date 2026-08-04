@@ -3158,6 +3158,118 @@ def test_runtime_restart_is_retained_when_one_caller_is_cancelled(tmp_path: Path
     asyncio.run(run())
 
 
+def test_stop_worker_supports_python_310_task_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    async def run() -> None:
+        started = asyncio.Event()
+
+        async def worker() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(worker())
+        runtime._worker_task = task
+        await started.wait()
+
+        class Python310Task:
+            """Python 3.10 tasks do not expose ``Task.cancelling()``."""
+
+        try:
+            with monkeypatch.context() as patcher:
+                patcher.setattr(memory_runtime.asyncio, "current_task", lambda: Python310Task())
+                await runtime._stop_worker()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert task.cancelled()
+        assert runtime._worker_task is None
+
+    asyncio.run(run())
+
+
+def test_stop_worker_settles_worker_before_propagating_caller_cancellation(
+    tmp_path: Path,
+) -> None:
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    async def run() -> None:
+        started = asyncio.Event()
+        cancellation_started = asyncio.Event()
+        release_cancellation = asyncio.Event()
+
+        async def worker() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_started.set()
+                await release_cancellation.wait()
+                raise
+
+        worker_task = asyncio.create_task(worker())
+        runtime._worker_task = worker_task
+        await started.wait()
+
+        stopping = asyncio.create_task(runtime._stop_worker())
+        await cancellation_started.wait()
+        stopping.cancel()
+        await asyncio.sleep(0)
+
+        assert stopping.done() is False
+        assert runtime._worker_task is worker_task
+
+        release_cancellation.set()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+
+        assert worker_task.cancelled()
+        assert runtime._worker_task is None
+
+    asyncio.run(run())
+
+
+def test_stop_worker_propagates_worker_cleanup_failure(tmp_path: Path) -> None:
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    async def run() -> None:
+        started = asyncio.Event()
+
+        async def worker() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise RuntimeError("worker cleanup failed")
+
+        worker_task = asyncio.create_task(worker())
+        runtime._worker_task = worker_task
+        await started.wait()
+
+        with pytest.raises(RuntimeError, match="worker cleanup failed"):
+            await runtime._stop_worker()
+
+        assert runtime._worker_task is None
+
+    asyncio.run(run())
+
+
 def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
