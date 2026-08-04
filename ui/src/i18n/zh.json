@@ -3585,6 +3585,7 @@
       "noPreview": "没有可用的文本预览。",
       "loggingOff": "提供方负载日志已关闭。正常处理时间线和已保留的诊断记录仍可查看。",
       "recorderDegraded": "新的提供方调用未被记录，已有记录仍可读取。",
+      "recorderRetentionDegraded": "提供方调用日志保留清理失败。现有记录的保留时间可能超过配置；Avibe 将自动重试。",
       "recorderCorrupt": "提供方调用日志已损坏。必须先通过「清除全部」移除该日志，之后才能恢复记录。",
       "restartAction": "重启记忆引擎",
       "clearAction": "打开「清除全部」",

@@ -527,6 +527,7 @@ export const MemoryLogPanel: React.FC<{
 
   const recorderFault = status?.recorder?.state === 'degraded';
   const corrupt = recorderFault && status?.recorder?.reason === 'call_log_corrupt';
+  const retentionFault = recorderFault && !loggingEnabled && !corrupt;
   const openDetail = (memcellId: string) => {
     setSelected(memcellId);
     void detailRead.reload(memcellId);
@@ -544,14 +545,18 @@ export const MemoryLogPanel: React.FC<{
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[12px]">
           <span className="flex min-w-0 items-center gap-2 text-foreground">
             <AlertTriangle className="size-4 shrink-0 text-gold" />
-            {corrupt ? t('memory.log.recorderCorrupt') : t('memory.log.recorderDegraded')}
+            {corrupt
+              ? t('memory.log.recorderCorrupt')
+              : retentionFault
+                ? t('memory.log.recorderRetentionDegraded')
+                : t('memory.log.recorderDegraded')}
           </span>
           {corrupt ? (
             <Button variant="destructive" size="xs" onClick={onClearAll}>
               <Trash2 />
               {t('memory.log.clearAction')}
             </Button>
-          ) : (
+          ) : retentionFault ? null : (
             <Button variant="secondary" size="xs" onClick={onRestartRuntime} disabled={restarting}>
               {restarting ? <Loader2 className="animate-spin" /> : <RotateCcw />}
               {t('memory.log.restartAction')}

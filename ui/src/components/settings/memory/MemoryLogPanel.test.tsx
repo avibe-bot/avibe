@@ -276,15 +276,23 @@ describe('MemoryLogPanel', () => {
     expect(screen.getByText('Fast')).toBeTruthy();
   });
 
-  it('reuses runtime restart for transient recorder degradation', async () => {
+  it('reuses runtime restart for active recorder degradation', async () => {
     api.getMemoryLog.mockResolvedValue(listResult([]));
     const restart = vi.fn();
     const user = userEvent.setup();
-    renderPanel({ loggingEnabled: false, status: status('writer_failures'), onRestartRuntime: restart });
+    renderPanel({ status: status('writer_failures'), onRestartRuntime: restart });
 
     await user.click(await screen.findByRole('button', { name: 'memory.log.restartAction' }));
     expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces host retention failure without offering an ineffective sidecar restart', async () => {
+    api.getMemoryLog.mockResolvedValue(listResult([]));
+    renderPanel({ loggingEnabled: false, status: status('writer_failures') });
+
+    expect(await screen.findByText('memory.log.recorderRetentionDegraded')).toBeTruthy();
     expect(screen.getByText('memory.log.loggingOff')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
   });
 
   it('keeps the normal timeline visible when provider payload logging is off', async () => {
