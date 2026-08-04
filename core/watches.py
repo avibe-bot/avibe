@@ -7,8 +7,10 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
@@ -28,6 +30,12 @@ from core.process_isolation import (
     terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
 )
+from core.runtime_work import (
+    RuntimeWorkHandler,
+    RuntimeWorkItem,
+    RuntimeWorkLane,
+    RuntimeWorkRegistrationToken,
+)
 from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
     DEFINITION_CYCLE_COLUMNS,
@@ -45,6 +53,15 @@ DEFAULT_RETRY_EXIT_CODE = 75
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
+
+
+def _publish_watch_definitions_updated() -> None:
+    try:
+        from core.inbox_events import publish_definitions_updated
+
+        publish_definitions_updated(definition_type="watch")
+    except Exception:
+        logger.debug("watch definition wake failed", exc_info=True)
 
 
 def _utc_now_iso() -> str:
@@ -372,6 +389,7 @@ class ManagedWatchStore:
                         "a file-backed watch store cannot commit a queued run with the watch row"
                     )
                 self._save()
+                _publish_watch_definitions_updated()
                 return True
             if queued_run is None:
                 landed = self._sqlite.upsert_watch(
@@ -388,6 +406,7 @@ class ManagedWatchStore:
             self._reload_after_lost_write(watch.id)
             raise
         if landed:
+            _publish_watch_definitions_updated()
             return True
         self.load()
         return False
@@ -447,12 +466,15 @@ class ManagedWatchStore:
                 )
                 if expected_reference_agent_id is not None:
                     self.load()
+                    _publish_watch_definitions_updated()
                     return self._watches[watch.id]
+                _publish_watch_definitions_updated()
                 return watch
             self._save()
         except Exception:
             self._reload_after_lost_write(watch.id)
             raise
+        _publish_watch_definitions_updated()
         return watch
 
     def add_watch(
@@ -521,11 +543,13 @@ class ManagedWatchStore:
         try:
             if self._sqlite is not None:
                 self._sqlite.remove_task(watch_id)
+                _publish_watch_definitions_updated()
                 return True
             self._save()
         except Exception:
             self._reload_after_lost_write(watch_id)
             raise
+        _publish_watch_definitions_updated()
         return True
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
@@ -766,6 +790,90 @@ class _CycleResult:
     timed_out: bool
 
 
+@dataclass(frozen=True)
+class _StaleWorkerRecovery:
+    recovered: bool
+    blocked: tuple[tuple[str, dict[str, Any]], ...] = ()
+
+
+class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
+    def __init__(self, service: "ManagedWatchService") -> None:
+        self.service = service
+
+    def scan(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None,
+    ) -> tuple[list[RuntimeWorkItem], bool]:
+        del limit, cursor
+        if "managed-watches" in occupied:
+            return [], False
+        with self.service._store_worker_lock:
+            recovery = _StaleWorkerRecovery(True)
+            if self.service._recovery_pending:
+                recovery = self.service._inspect_stale_workers()
+            blocked = {
+                watch_id: dict(entry)
+                for watch_id, entry in self.service._unreaped_runtime_entries.items()
+            }
+            blocked.update(
+                (watch_id, dict(entry))
+                for watch_id, entry in recovery.blocked
+            )
+            unblocked = (
+                self.service._inspect_recovery_blocked_watches(blocked)
+                if recovery.recovered and blocked
+                else ()
+            )
+            changed = False
+            if recovery.recovered and not self.service._store_error_fused:
+                changed = self.service.store.maybe_reload()
+            watches = tuple(
+                ManagedWatch.from_dict(watch.to_dict())
+                for watch in self.service.store.list_watches()
+            )
+        return [
+            RuntimeWorkItem(
+                "managed-watches",
+                {
+                    "recovery": recovery,
+                    "unblocked": unblocked,
+                    "changed": changed,
+                    "watches": watches,
+                },
+            )
+        ], False
+
+    async def process(self, item: RuntimeWorkItem) -> bool:
+        observation = item.observation
+        recovery = observation["recovery"]
+        self.service._apply_stale_worker_recovery(recovery)
+        self.service._apply_recovery_unblocked(observation["unblocked"])
+        if not recovery.recovered:
+            return False
+        self.service._recovery_pending = False
+        if observation["unblocked"]:
+            self.service._reconcile_dirty = True
+            self.service._runtime_state_dirty = True
+        if self.service._store_error_fused:
+            return False
+        try:
+            if observation["changed"] or self.service._reconcile_dirty:
+                if self.service.reconcile_watches(observation["watches"]):
+                    self.service._runtime_state_dirty = True
+            if self.service._runtime_state_dirty:
+                await self.service._persist_runtime_state()
+            self.service._store_reconcile_failures = 0
+            self.service._reconcile_dirty = False
+            return True
+        except Exception as exc:
+            self.service._reconcile_dirty = True
+            self.service._handle_reconcile_store_error(exc)
+            return False
+
+
 class ManagedWatchService:
     def __init__(
         self,
@@ -794,6 +902,12 @@ class ManagedWatchService:
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._reconcile_dirty = True
         self._runtime_state_dirty = True
+        self._runtime_state_revision = 0
+        self._store_worker_lock = threading.Lock()
+        self._runtime_work_token: RuntimeWorkRegistrationToken | None = None
+        self._runtime_work_unregistration_task: asyncio.Task[None] | None = None
+        self._legacy_probe_task: asyncio.Task[None] | None = None
+        self._legacy_watch_signature: tuple[int, int, int] | None = None
 
     def _t(self, key: str, **kwargs: Any) -> str:
         controller_translator = getattr(self.controller, "_t", None)
@@ -815,9 +929,71 @@ class ManagedWatchService:
         self._running = True
         self._startup_task = asyncio.create_task(self._start_after_recovery())
 
+    def _supports_runtime_work_lane(self) -> bool:
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        return callable(getattr(supervisor, "notify", None))
+
+    async def _run_runtime_sync(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
+        call = partial(operation, *args, **kwargs)
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        run_sync = getattr(supervisor, "run_sync", None)
+        if callable(run_sync):
+            return await run_sync(call)
+        return await asyncio.to_thread(call)
+
+    def _register_runtime_work_lane(self) -> None:
+        previous = self._runtime_work_unregistration_task
+        if previous is not None:
+            if not previous.done():
+                raise RuntimeError(
+                    "managed watch runtime work generation is still stopping"
+                )
+            previous.result()
+            self._runtime_work_unregistration_task = None
+        if self._runtime_work_token is not None:
+            raise RuntimeError("managed watch runtime work generation is already registered")
+        self._runtime_work_token = self.controller.runtime_work_supervisor.register(
+            RuntimeWorkLane.WATCH_DEFINITIONS,
+            _ManagedWatchRuntimeWorkHandler(self),
+        )
+
+    def _begin_runtime_work_unregistration(self) -> asyncio.Task[None] | None:
+        existing = self._runtime_work_unregistration_task
+        if existing is not None:
+            return existing
+        token = self._runtime_work_token
+        if token is None:
+            return None
+        self._runtime_work_token = None
+        task = self.controller.runtime_work_supervisor.begin_unregister(token)
+        self._runtime_work_unregistration_task = task
+        return task
+
+    def _wake_runtime_work(self) -> None:
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        notify = getattr(supervisor, "notify", None)
+        if callable(notify):
+            notify(RuntimeWorkLane.WATCH_DEFINITIONS)
+        else:
+            self._reconcile_dirty = True
+
+    async def _legacy_runtime_work_probe(self) -> None:
+        try:
+            while self._running:
+                await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
+                signature = await self._run_runtime_sync(_path_signature, self.store.path)
+                if signature == self._legacy_watch_signature:
+                    continue
+                self._legacy_watch_signature = signature
+                self._wake_runtime_work()
+        except asyncio.CancelledError:
+            raise
+
     async def _start_after_recovery(self) -> None:
         try:
-            recovered = await asyncio.to_thread(self._reap_stale_workers)
+            recovery = await self._run_runtime_sync(self._inspect_stale_workers)
+            self._apply_stale_worker_recovery(recovery)
+            recovered = recovery.recovered
         except Exception:
             recovered = False
             logger.exception("Unexpected error during stale watch worker recovery")
@@ -825,7 +1001,7 @@ class ManagedWatchService:
             if not self._running or not self._owns_service_instance():
                 return
             self._recovery_pending = not recovered
-            if recovered:
+            if recovered and not self._supports_runtime_work_lane():
                 try:
                     if self.reconcile_watches():
                         self._runtime_state_dirty = True
@@ -834,13 +1010,33 @@ class ManagedWatchService:
                 except Exception as exc:
                     self._reconcile_dirty = True
                     self._handle_reconcile_store_error(exc)
-            if self._running and self._owns_service_instance():
+            if self._running and self._owns_service_instance() and self._supports_runtime_work_lane():
+                self._register_runtime_work_lane()
+                self._wake_runtime_work()
+                if self.store.sqlite_backend is None:
+                    self._legacy_watch_signature = _path_signature(self.store.path)
+                    self._legacy_probe_task = asyncio.create_task(
+                        self._legacy_runtime_work_probe(),
+                        name="watch-runtime-work-legacy-probe",
+                    )
+            elif self._running and self._owns_service_instance():
                 self._reconcile_task = asyncio.create_task(self._watch_store())
         finally:
             if self._startup_task is asyncio.current_task():
                 self._startup_task = None
 
-    def _reap_stale_workers(self) -> bool:
+    def _inspect_stale_workers(self) -> _StaleWorkerRecovery:
+        blocked: dict[str, dict[str, Any]] = {}
+
+        def block(watch_id: str, entry: dict[str, Any]) -> None:
+            blocked[watch_id] = dict(entry)
+
+        def result(recovered: bool) -> _StaleWorkerRecovery:
+            return _StaleWorkerRecovery(
+                recovered,
+                tuple((watch_id, entry) for watch_id, entry in blocked.items()),
+            )
+
         try:
             runtime_state = self.runtime_store.load_for_recovery()
         except Exception:
@@ -848,11 +1044,11 @@ class ManagedWatchService:
                 "Unable to read prior watch runtime state; deferring watch reconciliation",
                 exc_info=True,
             )
-            return False
+            return result(False)
 
         if not isinstance(runtime_state, dict):
             logger.warning("Prior watch runtime state is malformed; deferring watch reconciliation")
-            return False
+            return result(False)
         runtime_watches = runtime_state.get("watches")
         if not isinstance(runtime_watches, dict) or any(
             not isinstance(watch_id, str)
@@ -861,9 +1057,9 @@ class ManagedWatchService:
             for watch_id, entry in runtime_watches.items()
         ):
             logger.warning("Prior watch runtime state is malformed; deferring watch reconciliation")
-            return False
+            return result(False)
         if not runtime_watches:
-            return True
+            return result(True)
 
         try:
             watches = self.store.list_watches_for_recovery()
@@ -874,7 +1070,7 @@ class ManagedWatchService:
                 "Unable to read managed watch definitions; deferring watch reconciliation",
                 exc_info=True,
             )
-            return False
+            return result(False)
         watch_ids = {watch.id for watch in watches}
 
         for watch_id, entry in runtime_watches.items():
@@ -897,7 +1093,7 @@ class ManagedWatchService:
                             pid,
                             watch_id,
                         )
-                        self._block_watch_after_failed_recovery(watch_id, entry)
+                        block(watch_id, entry)
                         continue
                     logger.warning(
                         "Reaping stale watch process group pgid=%s watch_id=%s after its leader exited",
@@ -910,7 +1106,7 @@ class ManagedWatchService:
                         f"stale watch {watch_id}",
                         expected_identity=expected_identity,
                     ):
-                        self._block_watch_after_failed_recovery(watch_id, entry)
+                        block(watch_id, entry)
                     continue
             except Exception:
                 logger.warning(
@@ -919,7 +1115,7 @@ class ManagedWatchService:
                     watch_id,
                     exc_info=True,
                 )
-                self._block_watch_after_failed_recovery(watch_id, entry)
+                block(watch_id, entry)
                 continue
             if expected_identity is None:
                 live_identity = inspect_process_identity(pid)
@@ -940,7 +1136,7 @@ class ManagedWatchService:
                     pid,
                     watch_id,
                 )
-                self._block_watch_after_failed_recovery(watch_id, entry)
+                block(watch_id, entry)
                 continue
             try:
                 live_identity = inspect_process_identity(pid)
@@ -958,7 +1154,7 @@ class ManagedWatchService:
                     pid,
                     watch_id,
                 )
-                self._block_watch_after_failed_recovery(watch_id, entry)
+                block(watch_id, entry)
                 continue
             if live_identity.create_time != expected_identity.create_time:
                 logger.info(
@@ -974,7 +1170,7 @@ class ManagedWatchService:
                     pid,
                     watch_id,
                 )
-                self._block_watch_after_failed_recovery(watch_id, entry)
+                block(watch_id, entry)
                 continue
 
             watch_label = f"stale watch {watch_id}"
@@ -993,18 +1189,34 @@ class ManagedWatchService:
                 logger.exception("Unexpected error reaping stale watch worker pid=%s watch_id=%s", pid, watch_id)
             if not terminated:
                 logger.error("Failed to reap stale watch worker pid=%s watch_id=%s", pid, watch_id)
-                self._block_watch_after_failed_recovery(watch_id, entry)
-        return True
+                block(watch_id, entry)
+        return result(True)
+
+    def _apply_stale_worker_recovery(
+        self,
+        recovery: _StaleWorkerRecovery,
+    ) -> None:
+        if not recovery.blocked:
+            return
+        for watch_id, entry in recovery.blocked:
+            self._block_watch_after_failed_recovery(watch_id, entry)
+
+    def _reap_stale_workers(self) -> bool:
+        recovery = self._inspect_stale_workers()
+        self._apply_stale_worker_recovery(recovery)
+        return recovery.recovered
 
     def _block_watch_after_failed_recovery(self, watch_id: str, entry: dict[str, Any]) -> None:
         self._recovery_blocked_watch_ids.add(watch_id)
         self._unreaped_runtime_entries[watch_id] = dict(entry)
         self._runtime_state_dirty = True
 
-    def _recheck_recovery_blocked_watches(self) -> bool:
-        unblocked = False
-        for watch_id in list(self._recovery_blocked_watch_ids):
-            entry = self._unreaped_runtime_entries.get(watch_id)
+    def _inspect_recovery_blocked_watches(
+        self,
+        entries: dict[str, dict[str, Any]],
+    ) -> tuple[str, ...]:
+        unblocked: list[str] = []
+        for watch_id, entry in entries.items():
             if not isinstance(entry, dict):
                 continue
             pid = entry.get("pid")
@@ -1057,13 +1269,34 @@ class ManagedWatchService:
                 "Unblocking recovered watch_id=%s after its prior worker exited",
                 watch_id,
             )
+            unblocked.append(watch_id)
+        return tuple(unblocked)
+
+    def _apply_recovery_unblocked(self, watch_ids: tuple[str, ...]) -> bool:
+        if not watch_ids:
+            return False
+        for watch_id in watch_ids:
             self._recovery_blocked_watch_ids.discard(watch_id)
             self._unreaped_runtime_entries.pop(watch_id, None)
-            unblocked = True
-        return unblocked
+        return True
+
+    def _recheck_recovery_blocked_watches(self) -> bool:
+        entries = {
+            watch_id: dict(entry)
+            for watch_id, entry in self._unreaped_runtime_entries.items()
+            if watch_id in self._recovery_blocked_watch_ids
+        }
+        return self._apply_recovery_unblocked(
+            self._inspect_recovery_blocked_watches(entries)
+        )
 
     async def stop(self) -> None:
         self._begin_stop()
+        runtime_work_stop = self._begin_runtime_work_unregistration()
+        legacy_probe = self._legacy_probe_task
+        self._legacy_probe_task = None
+        if legacy_probe is not None and legacy_probe is not asyncio.current_task():
+            await asyncio.gather(legacy_probe, return_exceptions=True)
         startup_task = self._startup_task
         if startup_task and startup_task is not asyncio.current_task():
             await startup_task
@@ -1082,7 +1315,11 @@ class ManagedWatchService:
         self._active_process_identities.clear()
         self._watch_started_at.clear()
         self._runtime_state_dirty = True
-        self._write_runtime_state()
+        await self._persist_runtime_state()
+        if runtime_work_stop is not None:
+            await runtime_work_stop
+            if self._runtime_work_unregistration_task is runtime_work_stop:
+                self._runtime_work_unregistration_task = None
 
     async def _watch_store(self) -> None:
         while self._running:
@@ -1090,7 +1327,9 @@ class ManagedWatchService:
                 return
             if self._recovery_pending:
                 try:
-                    recovered = await asyncio.to_thread(self._reap_stale_workers)
+                    recovery = await self._run_runtime_sync(self._inspect_stale_workers)
+                    self._apply_stale_worker_recovery(recovery)
+                    recovered = recovery.recovered
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -1106,9 +1345,19 @@ class ManagedWatchService:
                 await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
                 continue
             try:
-                if self._recovery_blocked_watch_ids and await asyncio.to_thread(
-                    self._recheck_recovery_blocked_watches
-                ):
+                if self._recovery_blocked_watch_ids:
+                    blocked = {
+                        watch_id: dict(entry)
+                        for watch_id, entry in self._unreaped_runtime_entries.items()
+                        if watch_id in self._recovery_blocked_watch_ids
+                    }
+                    unblocked = await self._run_runtime_sync(
+                        self._inspect_recovery_blocked_watches,
+                        blocked,
+                    )
+                else:
+                    unblocked = ()
+                if self._apply_recovery_unblocked(unblocked):
                     self._reconcile_dirty = True
                     self._runtime_state_dirty = True
                 should_reconcile = self.store.maybe_reload() or self._reconcile_dirty
@@ -1126,12 +1375,15 @@ class ManagedWatchService:
                 self._handle_reconcile_store_error(exc)
             await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
 
-    def reconcile_watches(self) -> bool:
+    def reconcile_watches(
+        self,
+        watches: tuple[ManagedWatch, ...] | list[ManagedWatch] | None = None,
+    ) -> bool:
         if not self._owns_service_instance():
             return False
         if self._store_error_fused:
             return False
-        watches = self.store.list_watches()
+        watches = self.store.list_watches() if watches is None else watches
         desired_ids = {watch.id for watch in watches if watch.enabled}
         changed = False
         for watch in watches:
@@ -1160,14 +1412,13 @@ class ManagedWatchService:
         self._active_pids.pop(watch_id, None)
         self._active_process_identities.pop(watch_id, None)
         self._watch_started_at.pop(watch_id, None)
-        self._runtime_state_dirty = True
         self._write_runtime_state()
         self._reconcile_dirty = True
 
-    def _write_runtime_state(self) -> None:
-        if self._recovery_pending:
-            return
-        payload = {
+    def _runtime_state_payload(self) -> dict[str, Any]:
+        """Assemble the loop-owned runtime projection without storage I/O."""
+
+        payload: dict[str, Any] = {
             "watches": {
                 watch_id: dict(entry)
                 for watch_id, entry in self._unreaped_runtime_entries.items()
@@ -1185,8 +1436,43 @@ class ManagedWatchService:
             if identity is not None:
                 entry["process_identity"] = serialize_process_identity(identity)
             payload["watches"][watch_id] = entry
+        return payload
+
+    def _mark_runtime_state_dirty(self) -> None:
+        self._runtime_state_revision += 1
+        self._runtime_state_dirty = True
+        if self._supports_runtime_work_lane() and self._running:
+            self._wake_runtime_work()
+
+    async def _persist_runtime_state(self) -> None:
+        if self._recovery_pending:
+            return
+        revision = self._runtime_state_revision
+        payload = self._runtime_state_payload()
         try:
+            await self._run_runtime_sync(self._write_runtime_state_payload, payload)
+            if revision == self._runtime_state_revision:
+                self._runtime_state_dirty = False
+            else:
+                self._wake_runtime_work()
+        except Exception:
+            self._runtime_state_dirty = True
+            logger.exception("Failed to persist watch runtime state")
+
+    def _write_runtime_state_payload(self, payload: dict[str, Any]) -> None:
+        with self._store_worker_lock:
             self.runtime_store.write(payload)
+
+    def _write_runtime_state(self) -> None:
+        """Legacy synchronous persistence; production is owned by the lane."""
+
+        self._mark_runtime_state_dirty()
+        if self._supports_runtime_work_lane():
+            return
+        if self._recovery_pending:
+            return
+        try:
+            self._write_runtime_state_payload(self._runtime_state_payload())
             self._runtime_state_dirty = False
         except Exception:
             self._runtime_state_dirty = True
@@ -1237,11 +1523,8 @@ class ManagedWatchService:
         case and must not stop the watch. Only the guarded writers opt in.
         """
 
-        try:
+        with self._store_worker_lock:
             result = callback()
-        except Exception as exc:
-            self._fuse_store_after_error(operation, exc, watch_id=watch_id)
-            return False
         if guarded and result is False:
             # NOT a store error: the row is fine, this write simply lost to a
             # concurrent lifecycle change. Fusing would disable reconciliation for a
@@ -1255,6 +1538,26 @@ class ManagedWatchService:
             return False
         return True
 
+    async def _watch_store_call_async(
+        self,
+        watch_id: str,
+        operation: str,
+        callback,
+        *,
+        guarded: bool = False,
+    ) -> bool:
+        try:
+            return await self._run_runtime_sync(
+                self._watch_store_call,
+                watch_id,
+                operation,
+                callback,
+                guarded=guarded,
+            )
+        except Exception as exc:
+            self._fuse_store_after_error(operation, exc, watch_id=watch_id)
+            return False
+
     def _current_asyncio_task(self) -> Optional["asyncio.Task[Any]"]:
         try:
             return asyncio.current_task()
@@ -1263,9 +1566,12 @@ class ManagedWatchService:
 
     def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
         self._running = False
+        self._begin_runtime_work_unregistration()
         current_task = self._current_asyncio_task()
         if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
             self._reconcile_task.cancel()
+        if self._legacy_probe_task and self._legacy_probe_task is not current_task:
+            self._legacy_probe_task.cancel()
         for task in list(self._active_tasks.values()):
             if task is not current_task:
                 task.cancel()
@@ -1292,7 +1598,11 @@ class ManagedWatchService:
                 return
             if watch_id in self._fused_watch_ids:
                 return
-            if not self._watch_store_call(watch_id, "reload", self.store.maybe_reload):
+            if not await self._watch_store_call_async(
+                watch_id,
+                "reload",
+                self.store.maybe_reload,
+            ):
                 return
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
@@ -1304,7 +1614,7 @@ class ManagedWatchService:
                 if remaining_lifetime <= 0:
                     # ONE DECISION (HFR-269), not a stamp followed by a hook. See
                     # ``_commit_cycle_result``.
-                    self._commit_cycle_result(
+                    await self._commit_cycle_result_async(
                         watch,
                         # Running out of lifetime is a timeout, and the row has
                         # to be able to say so: ``definition_lifecycle_detail``
@@ -1334,7 +1644,7 @@ class ManagedWatchService:
             # refusal means a teardown (``/new`` reclaim, archive) committed after this
             # loop read the watch, so the definition it is about to run no longer
             # exists in the state this iteration decided from.
-            if not self._watch_store_call(
+            if not await self._watch_store_call_async(
                 watch.id,
                 "mark_cycle_start",
                 lambda: self.store.mark_cycle_start(watch.id),
@@ -1343,7 +1653,10 @@ class ManagedWatchService:
                 return
             cwd_error = _missing_watch_cwd_error(watch)
             if cwd_error:
-                self._stop_watch_for_missing_cwd(watch, error_text=cwd_error)
+                await self._stop_watch_for_missing_cwd_async(
+                    watch,
+                    error_text=cwd_error,
+                )
                 return
             try:
                 result = await self._run_cycle(watch, timeout_seconds=cycle_timeout)
@@ -1352,7 +1665,10 @@ class ManagedWatchService:
             except Exception as exc:
                 cwd_error = _missing_watch_cwd_error(watch)
                 if cwd_error:
-                    self._stop_watch_for_missing_cwd(watch, error_text=cwd_error)
+                    await self._stop_watch_for_missing_cwd_async(
+                        watch,
+                        error_text=cwd_error,
+                    )
                     return
                 result = _CycleResult(
                     exit_code=1,
@@ -1367,7 +1683,7 @@ class ManagedWatchService:
             if result.exit_code == 0:
                 # Building the prompt is pure; the stamp and the hook it authorises are
                 # committed together (HFR-269).
-                if not self._commit_cycle_result(
+                if not await self._commit_cycle_result_async(
                     watch,
                     exit_code=0,
                     error=None,
@@ -1385,13 +1701,16 @@ class ManagedWatchService:
                 if watch.mode == "forever" and 124 in set(watch.retry_exit_codes):
                     # A retry authorises no hook: the watch keeps running, and there is
                     # nothing to tell the user yet.
-                    if not self._commit_cycle_result(
-                        watch, exit_code=124, error=error_text, disable=False
+                    if not await self._commit_cycle_result_async(
+                        watch,
+                        exit_code=124,
+                        error=error_text,
+                        disable=False,
                     ):
                         return
                     await asyncio.sleep(watch.retry_delay_seconds)
                     continue
-                self._commit_cycle_result(
+                await self._commit_cycle_result_async(
                     watch,
                     exit_code=124,
                     error=error_text,
@@ -1407,14 +1726,17 @@ class ManagedWatchService:
 
             error_text = _squash_error(result.stderr) or f"watch command exited with status {result.exit_code}"
             if watch.mode == "forever" and result.exit_code in set(watch.retry_exit_codes):
-                if not self._commit_cycle_result(
-                    watch, exit_code=result.exit_code, error=error_text, disable=False
+                if not await self._commit_cycle_result_async(
+                    watch,
+                    exit_code=result.exit_code,
+                    error=error_text,
+                    disable=False,
                 ):
                     return
                 await asyncio.sleep(watch.retry_delay_seconds)
                 continue
 
-            self._commit_cycle_result(
+            await self._commit_cycle_result_async(
                 watch,
                 exit_code=result.exit_code,
                 error=error_text,
@@ -1577,6 +1899,25 @@ class ManagedWatchService:
             self.request_store.enqueue(request)
         return True
 
+    async def _commit_cycle_result_async(
+        self,
+        watch: ManagedWatch,
+        **kwargs: Any,
+    ) -> bool:
+        try:
+            return await self._run_runtime_sync(
+                self._commit_cycle_result,
+                watch,
+                **kwargs,
+            )
+        except Exception as exc:
+            self._fuse_store_after_error(
+                "mark_cycle_result",
+                exc,
+                watch_id=watch.id,
+            )
+            return False
+
     def _stop_watch_for_missing_cwd(self, watch: ManagedWatch, *, error_text: str) -> None:
         watch_label = watch.name or watch.id
         self._commit_cycle_result(
@@ -1590,6 +1931,26 @@ class ManagedWatchService:
                 "Update or recreate the watch with a valid cwd before monitoring continues."
             ),
         )
+
+    async def _stop_watch_for_missing_cwd_async(
+        self,
+        watch: ManagedWatch,
+        *,
+        error_text: str,
+    ) -> bool:
+        try:
+            return await self._run_runtime_sync(
+                self._stop_watch_for_missing_cwd,
+                watch,
+                error_text=error_text,
+            )
+        except Exception as exc:
+            self._fuse_store_after_error(
+                "mark_cycle_result",
+                exc,
+                watch_id=watch.id,
+            )
+            return False
 
 
 def _failure_hook_body(watch: ManagedWatch, *, exit_code: int, error_text: str) -> str:

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,14 +15,22 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
-from core import watch_worker
+from core import watch_worker, watches as watches_module
 from core.process_isolation import (
     PersistedProcessIdentity,
     ProcessIdentity,
     fingerprint_process_marker,
 )
+from core.runtime_work import RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import TaskExecutionStore
-from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore, _CycleResult
+from core.watches import (
+    ManagedWatchService,
+    ManagedWatchStore,
+    WatchRuntimeStateStore,
+    _CycleResult,
+    _ManagedWatchRuntimeWorkHandler,
+    _StaleWorkerRecovery,
+)
 from storage.background import SQLiteBackgroundTaskStore
 
 TEST_MARKER = "test-watch-worker"
@@ -176,6 +185,40 @@ def test_managed_watch_store_round_trip(tmp_path: Path) -> None:
     assert saved.mode == "forever"
     assert saved.retry_exit_codes == [75]
     assert saved.post_to == "channel"
+
+
+def test_hfr_174_watch_definition_commit_emits_watch_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import inbox_events
+
+    monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", True)
+    events: list[tuple[str, dict]] = []
+    subscription = inbox_events.bus.subscribe_callback(
+        lambda event_type, payload: events.append((event_type, payload))
+    )
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    store.add_watch(
+        name="Definition wake",
+        session_key="avibe::agent::default",
+        command=["true"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=30,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    inbox_events.bus.unsubscribe(subscription)
+
+    assert events == [
+        (inbox_events.DEFINITIONS_UPDATED_EVENT, {"definition_type": "watch"})
+    ]
 
 
 def test_managed_watch_store_preserves_zero_values_on_reload(tmp_path: Path) -> None:
@@ -1686,7 +1729,11 @@ def test_managed_watch_service_start_keeps_recovery_off_event_loop(
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
-    monkeypatch.setattr(service, "_reap_stale_workers", lambda: time.sleep(0.15))
+    def inspect_stale_workers() -> _StaleWorkerRecovery:
+        time.sleep(0.15)
+        return _StaleWorkerRecovery(True)
+
+    monkeypatch.setattr(service, "_inspect_stale_workers", inspect_stale_workers)
     monkeypatch.setattr(service, "reconcile_watches", lambda: False)
 
     async def _run() -> None:
@@ -1699,6 +1746,144 @@ def test_managed_watch_service_start_keeps_recovery_off_event_loop(
         assert not startup_task.done()
         await startup_task
         await service.stop()
+
+    asyncio.run(_run())
+
+
+def test_hfr_164_watch_restart_replaces_only_its_registration_generation(
+    tmp_path: Path,
+) -> None:
+    class EmptyHandler:
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item) -> None:  # noqa: ANN001
+            raise AssertionError(item)
+
+    async def _run() -> None:
+        supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+        delivery_token = supervisor.register(
+            RuntimeWorkLane.SESSION_DELIVERIES,
+            EmptyHandler(),
+        )
+        await supervisor.activate()
+        service = ManagedWatchService(
+            controller=SimpleNamespace(runtime_work_supervisor=supervisor),
+            store=ManagedWatchStore(tmp_path / "watches.json"),
+            request_store=TaskExecutionStore(tmp_path / "task_requests"),
+            runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+        )
+
+        await _start_watch_service(service)
+        first = service._runtime_work_token
+        assert first is not None
+        assert RuntimeWorkLane.SESSION_DELIVERIES in supervisor._registrations
+        await service.stop()
+        assert RuntimeWorkLane.WATCH_DEFINITIONS not in supervisor._registrations
+        assert supervisor._registrations[RuntimeWorkLane.SESSION_DELIVERIES].token == delivery_token
+
+        await _start_watch_service(service)
+        second = service._runtime_work_token
+        assert second is not None
+        assert second.generation > first.generation
+        await service.stop()
+        await supervisor.stop()
+
+    asyncio.run(_run())
+
+
+def test_hfr_176_legacy_watch_probe_only_wakes_watch_definitions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notified: list[RuntimeWorkLane] = []
+    service = ManagedWatchService(
+        controller=SimpleNamespace(
+            runtime_work_supervisor=SimpleNamespace(
+                notify=lambda *lanes: notified.extend(lanes),
+            )
+        ),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._running = True
+    service._legacy_watch_signature = (1, 1, 1)
+    monkeypatch.setattr(watches_module, "_path_signature", lambda _path: (2, 2, 2))
+
+    async def stop_after_tick(_delay: float) -> None:
+        service._running = False
+
+    monkeypatch.setattr(watches_module.asyncio, "sleep", stop_after_tick)
+    asyncio.run(service._legacy_runtime_work_probe())
+
+    assert notified == [RuntimeWorkLane.WATCH_DEFINITIONS]
+
+
+def test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._runtime_state_dirty = False
+    scan_entered = threading.Event()
+    release_scan = threading.Event()
+    guarded_entered = threading.Event()
+    scan_threads: list[int] = []
+    reconcile_threads: list[int] = []
+
+    def blocking_reload() -> bool:
+        scan_threads.append(threading.get_ident())
+        scan_entered.set()
+        assert release_scan.wait(timeout=1)
+        return True
+
+    monkeypatch.setattr(service.store, "maybe_reload", blocking_reload)
+
+    async def _run() -> None:
+        loop_thread = threading.get_ident()
+        handler = _ManagedWatchRuntimeWorkHandler(service)
+        scan = asyncio.create_task(
+            asyncio.to_thread(
+                handler.scan,
+                limit=1,
+                occupied=frozenset(),
+                cursor=None,
+            )
+        )
+        assert await asyncio.to_thread(scan_entered.wait, 1)
+
+        guarded = asyncio.create_task(
+            service._watch_store_call_async(
+                "watch-a",
+                "guarded-test",
+                lambda: guarded_entered.set() or True,
+                guarded=True,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not guarded_entered.is_set()
+        release_scan.set()
+        items, has_more = await scan
+        assert not has_more
+        assert await guarded is True
+
+        def reconcile(watches) -> bool:  # noqa: ANN001
+            del watches
+            reconcile_threads.append(threading.get_ident())
+            return False
+
+        monkeypatch.setattr(service, "reconcile_watches", reconcile)
+        assert await handler.process(items[0]) is True
+        assert scan_threads and scan_threads[0] != loop_thread
+        assert reconcile_threads == [loop_thread]
 
     asyncio.run(_run())
 

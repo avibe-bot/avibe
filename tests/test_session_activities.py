@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -64,6 +65,51 @@ def test_activity_lifecycle_keeps_state_axes_orthogonal():
     assert registry.has_completed_output("claude", "runtime-1") is False
 
 
+def test_hfr_166_recovered_unbound_grace_uses_first_durable_completion(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    engine = create_sqlite_engine(db_path)
+    store = SQLiteSessionActivityStore(engine)
+    first = datetime(2026, 8, 4, 0, 0, tzinfo=timezone.utc)
+    for activity_id, completed_at in (
+        ("task-a", first),
+        ("task-b", first + timedelta(seconds=5)),
+    ):
+        activity = SessionActivity(
+            id=activity_id,
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            kind="background_task",
+            status="completed",
+            turn_id="turn-1",
+            completed_at=completed_at.isoformat(),
+            updated_at=completed_at.isoformat(),
+        )
+        store.upsert_activity(activity.to_dict(), phase="awaiting_output")
+
+    recovered = SessionActivityRegistry(store)
+    assert recovered.recovered_output_delay_seconds(
+        "claude",
+        "runtime-1",
+        grace_seconds=10,
+        now=first + timedelta(seconds=6),
+    ) == 4
+
+    claimed = recovered.claim_completed_output_batch("claude", "runtime-1")
+    assert [activity.id for activity in claimed] == ["task-a", "task-b"]
+    assert recovered.requeue_completed_outputs(claimed) == 2
+    assert recovered.recovered_output_delay_seconds(
+        "claude",
+        "runtime-1",
+        grace_seconds=10,
+        now=first + timedelta(seconds=6),
+    ) == 0
+    engine.dispose()
+
+
 def test_activity_batch_claim_leaves_interleaved_output_in_place():
     registry = SessionActivityRegistry()
     for activity_id, turn_id in (
@@ -98,11 +144,15 @@ def test_activity_batch_claim_leaves_interleaved_output_in_place():
         "task-current-a",
         "task-current-b",
     ]
+    for activity in claimed:
+        registry.ack_completed_output(activity)
     older = registry.claim_completed_output_batch("claude", "runtime-1")
+    for activity in older:
+        registry.ack_completed_output(activity)
     other = registry.claim_completed_output_batch("claude", "runtime-1")
     assert [activity.id for activity in older] == ["task-old"]
     assert [activity.id for activity in other] == ["task-other"]
-    for activity in [*claimed, *older, *other]:
+    for activity in other:
         registry.ack_completed_output(activity)
 
 
@@ -142,14 +192,13 @@ def test_activity_batch_requeue_restores_global_fifo_position():
     restored = []
     while activity := registry.claim_completed_output("claude", "runtime-1"):
         restored.append(activity)
+        registry.ack_completed_output(activity)
     assert [activity.id for activity in restored] == [
         "task-old",
         "task-current-b",
         "task-other",
         "task-new",
     ]
-    for activity in restored:
-        registry.ack_completed_output(activity)
 
 
 def test_activity_output_native_id_is_stable_across_recovery_contexts():

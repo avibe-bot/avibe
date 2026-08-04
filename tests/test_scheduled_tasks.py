@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -85,6 +86,7 @@ from storage.db import create_sqlite_engine
 from storage.background import (
     COMMAND_SNAPSHOT_METADATA_KEY,
     COMMAND_TIMED_OUT_METADATA_KEY,
+    DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
     definition_lifecycle_detail,
 )
@@ -124,6 +126,25 @@ class _StubScheduler:
 
     def get_jobs(self):
         return list(self.jobs.values())
+
+
+async def _fire_and_finish_scheduled_task(
+    service: ScheduledTaskService,
+    task_id: str,
+) -> None:
+    """Fire through the scheduler producer, then let the request owner consume it."""
+
+    await service._run_task(task_id)
+    pending = [
+        request
+        for request in service.request_store.list_pending()
+        if request.task_id == task_id and request.source_kind == "scheduler"
+    ]
+    for request in pending:
+        await service._process_pending_request(request)
+    executions = tuple(service._inflight_executions.values())
+    if executions:
+        await asyncio.gather(*executions)
 
 
 def test_parse_session_key_accepts_channel_and_thread() -> None:
@@ -429,6 +450,93 @@ def test_scheduled_task_store_uses_sqlite_when_path_is_default(tmp_path: Path, m
     assert saved is not None
     assert saved.session_id == "sesk8m4q2p7x"
     assert sqlite.get_scheduled_task(task.id)["prompt"] == "hello"
+
+
+def test_hfr_172_task_definition_wake_follows_commit_and_not_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import inbox_events
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    events: list[tuple[str, dict[str, Any]]] = []
+    subscription = inbox_events.bus.subscribe_callback(
+        lambda event_type, payload: events.append((event_type, payload))
+    )
+    monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", True)
+    original_save = store._save
+    entered = threading.Event()
+    release = threading.Event()
+    failure: list[BaseException] = []
+
+    def blocking_save() -> None:
+        entered.set()
+        assert release.wait(timeout=1)
+        original_save()
+
+    def add_task() -> None:
+        try:
+            store.add_task(
+                name="Wake contract",
+                session_key="avibe::agent::default",
+                prompt="hello",
+                schedule_type="at",
+                run_at="2026-08-04T01:00:00+00:00",
+                timezone_name="UTC",
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failure.append(exc)
+
+    monkeypatch.setattr(store, "_save", blocking_save)
+    writer = threading.Thread(target=add_task)
+    writer.start()
+    assert entered.wait(timeout=1)
+    assert events == []
+    release.set()
+    writer.join(timeout=1)
+    assert not writer.is_alive()
+    assert failure == []
+    assert events == [
+        (inbox_events.DEFINITIONS_UPDATED_EVENT, {"definition_type": "scheduled"})
+    ]
+
+    events.clear()
+    task = store.list_tasks()[0]
+    monkeypatch.setattr(store, "_save", lambda: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        store.set_enabled(task.id, False)
+    assert events == []
+    inbox_events.bus.unsubscribe(subscription)
+
+
+def test_hfr_172_losing_task_definition_cas_emits_no_wake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import inbox_events
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", True)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        name="CAS wake contract",
+        session_key="avibe::agent::default",
+        prompt="hello",
+        schedule_type="at",
+        run_at="2026-08-04T01:00:00+00:00",
+        timezone_name="UTC",
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+    subscription = inbox_events.bus.subscribe_callback(
+        lambda event_type, payload: events.append((event_type, payload))
+    )
+    assert store.sqlite_backend is not None
+    monkeypatch.setattr(store.sqlite_backend, "upsert_scheduled_task", lambda *args, **kwargs: False)
+
+    with pytest.raises(DefinitionWriteConflict):
+        store.set_enabled(task.id, False)
+    assert events == []
+    inbox_events.bus.unsubscribe(subscription)
 
 
 def test_sqlite_update_task_persists_changes(tmp_path: Path, monkeypatch) -> None:
@@ -1244,7 +1352,7 @@ def test_run_task_records_scheduled_handler_error(tmp_path: Path) -> None:
     )
     service = ScheduledTaskService(controller=controller, store=store)
 
-    asyncio.run(service._run_task(task.id))
+    asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
     reloaded = ScheduledTaskStore(path)
     updated = reloaded.get_task(task.id)
 
@@ -1280,6 +1388,127 @@ def test_run_task_stays_queued_until_target_transport_is_ready(tmp_path: Path) -
     assert updated is not None
     assert updated.last_run_at is None
     assert updated.enabled is True
+
+
+def test_hfr_161_scheduler_only_enqueues_one_successor_behind_active_work(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    request_store = TaskExecutionStore()
+    notifications: list[tuple[RuntimeWorkLane, ...]] = []
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": object()},
+        runtime_work_supervisor=SimpleNamespace(
+            notify=lambda *lanes: notifications.append(lanes)
+        ),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=store,
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._run_task(task.id)
+        first = request_store.list_pending()
+        assert len(first) == 1
+        claimed = request_store.claim(first[0].id)
+        assert claimed is not None
+        assert request_store.mark_execution_started(claimed.id)
+
+        await asyncio.gather(
+            service._run_task(task.id),
+            service._run_task(task.id),
+            service._run_task(task.id),
+        )
+
+    asyncio.run(_exercise())
+
+    queued = request_store.list_pending()
+    assert len(queued) == 1
+    assert queued[0].task_id == task.id
+    assert len(notifications) == 2
+    assert all(lanes == (RuntimeWorkLane.REQUESTS,) for lanes in notifications)
+
+
+def test_hfr_158_request_scan_fills_page_across_recovery_and_queued_work(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    recovering = request_store.enqueue_hook_send(
+        session_key="slack::channel::recovering",
+        prompt="recover",
+    )
+    assert request_store.claim(recovering.id) is not None
+    queued = request_store.enqueue_hook_send(
+        session_key="slack::channel::queued",
+        prompt="queued",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        request_store=request_store,
+    )
+    handler = scheduled_tasks._ScheduledRuntimeWorkHandler(
+        service,
+        RuntimeWorkLane.REQUESTS,
+    )
+
+    items, _has_more = handler.scan(
+        limit=2,
+        occupied=frozenset(),
+        cursor=None,
+    )
+
+    assert [item.observation[0] for item in items] == ["fallback", "queued"]
+    assert items[0].partition_key == recovering.id
+    assert items[1].observation[1].id == queued.id
+
+
+def test_hfr_166_activity_scan_never_sleeps_ahead_of_due_runtime() -> None:
+    scheduled: list[tuple[RuntimeWorkLane, float]] = []
+
+    class _Registry:
+        @staticmethod
+        def recovered_output_runtimes():
+            return [("claude", "a-not-due"), ("claude", "b-due")]
+
+        @staticmethod
+        def recovered_output_delay_seconds(backend, runtime_key, *, grace_seconds):  # noqa: ANN001, ANN202
+            del backend, grace_seconds
+            return 30.0 if runtime_key == "a-not-due" else 0.0
+
+    service = SimpleNamespace(
+        _activity_registry=lambda: _Registry(),
+        _activity_output_grace_seconds=lambda _backend: 10.0,
+        _schedule_runtime_work_wake=(
+            lambda lane, delay: scheduled.append((lane, delay))
+        ),
+    )
+    handler = scheduled_tasks._ScheduledRuntimeWorkHandler(
+        service,
+        RuntimeWorkLane.ACTIVITY_OUTPUTS,
+    )
+
+    items, has_more = handler.scan(
+        limit=1,
+        occupied=frozenset(),
+        cursor=None,
+    )
+
+    assert [item.partition_key for item in items] == ["claude\x1fb-due"]
+    assert has_more is False
+    assert scheduled == [(RuntimeWorkLane.ACTIVITY_OUTPUTS, 30.0)]
 
 
 def test_reconcile_jobs_skips_invalid_tasks_and_keeps_valid_jobs(tmp_path: Path) -> None:
@@ -3433,7 +3662,10 @@ def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypa
     service._execute_claimed_request = fake_execute  # type: ignore[assignment]
 
     async def _exercise() -> None:
-        run_task = asyncio.create_task(service._run_task(task.id))
+        await service._run_task(task.id)
+        pending = service.request_store.list_pending()
+        assert len(pending) == 1
+        assert await service._process_pending_request(pending[0]) is True
         await started.wait()
         assert len(service._inflight_executions) == 1
         execution = next(iter(service._inflight_executions.values()))
@@ -3441,8 +3673,6 @@ def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypa
         assert service._owns_service_instance() is False
         with pytest.raises(asyncio.CancelledError):
             await execution
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
 
     asyncio.run(_exercise())
 
@@ -7483,6 +7713,57 @@ def test_recovered_silent_directive_activity_settles_without_emit() -> None:
     service.controller.emit_agent_message.assert_not_awaited()
 
 
+def test_hfr_169_recovered_activity_without_run_reaches_its_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    sqlite_store = request_store.sqlite_backend
+    assert sqlite_store is not None
+    activity_store = SQLiteSessionActivityStore(sqlite_store.engine)
+    original = SessionActivityRegistry(activity_store)
+    original.start(
+        backend="claude",
+        runtime_key="runtime-without-run",
+        session_id=session_id,
+        activity_id="task-without-run",
+        kind="background_task",
+    )
+    original.complete(
+        backend="claude",
+        runtime_key="runtime-without-run",
+        activity_id="task-without-run",
+        status="completed",
+        metadata={"summary": "Recovered without a Run row"},
+        expects_output=True,
+    )
+
+    recovered = SessionActivityRegistry(activity_store)
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=lambda *_args, **_kwargs: None,
+    )
+    controller.agent_service = SimpleNamespace(activities=recovered)
+    delivered: list[tuple[str, str]] = []
+
+    async def emit(context, _kind, text, **_kwargs):  # noqa: ANN001, ANN202
+        delivered.append((context.platform_specific["agent_session_id"], text))
+        return "message-without-run"
+
+    controller.emit_agent_message = emit
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_recovered_activity_outputs())
+
+    assert delivered == [(session_id, "Recovered without a Run row")]
+    assert activity_store.list_activities() == []
+
+
 def test_restart_background_activity_persists_without_outward_delivery(
     tmp_path: Path,
     monkeypatch,
@@ -8730,6 +9011,138 @@ def test_watch_store_does_not_respawn_after_stop(tmp_path: Path) -> None:
     asyncio.run(_exercise())
 
 
+def test_hfr_164_hfr_165_service_restart_joins_only_its_harness_lane_generations(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    class _Supervisor:
+        def __init__(self) -> None:
+            self.generations: dict[RuntimeWorkLane, int] = {}
+            self.current: dict[RuntimeWorkLane, RuntimeWorkRegistrationToken] = {}
+            self.unregistered: list[RuntimeWorkLane] = []
+
+        def register(self, lane, _handler):  # noqa: ANN001, ANN202
+            assert lane not in self.current
+            generation = self.generations.get(lane, 0) + 1
+            self.generations[lane] = generation
+            token = RuntimeWorkRegistrationToken(lane=lane, generation=generation)
+            self.current[lane] = token
+            return token
+
+        def begin_unregister(self, token):  # noqa: ANN001, ANN202
+            assert self.current.get(token.lane) == token
+            self.current.pop(token.lane)
+            self.unregistered.append(token.lane)
+
+            async def _joined() -> None:
+                return None
+
+            return asyncio.create_task(_joined())
+
+        def notify(self, *_lanes) -> None:  # noqa: ANN002
+            return None
+
+    async def _exercise() -> None:
+        supervisor = _Supervisor()
+        supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, object())
+        controller = SimpleNamespace(
+            platform_settings_managers={},
+            runtime_work_supervisor=supervisor,
+        )
+        service = ScheduledTaskService(controller=controller)
+        service.scheduler = _StubScheduler()
+        service.start()
+        expected_harness = {
+            RuntimeWorkLane.TASK_DEFINITIONS,
+            RuntimeWorkLane.REQUESTS,
+            RuntimeWorkLane.RUN_CALLBACKS,
+            RuntimeWorkLane.VAULT_CALLBACKS,
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            RuntimeWorkLane.FAILURE_NOTICES,
+            RuntimeWorkLane.STALE_RUNS,
+        }
+        assert set(supervisor.current) == {
+            RuntimeWorkLane.SESSION_DELIVERIES,
+            *expected_harness,
+        }
+        assert service._reconcile_task is None
+
+        await service.stop()
+        assert set(supervisor.current) == {RuntimeWorkLane.SESSION_DELIVERIES}
+        assert set(supervisor.unregistered) == expected_harness
+
+        for expected_generation in (2, 3):
+            service.scheduler = _StubScheduler()
+            service.start()
+            assert set(supervisor.current) == {
+                RuntimeWorkLane.SESSION_DELIVERIES,
+                *expected_harness,
+            }
+            assert all(
+                supervisor.generations[lane] == expected_generation
+                for lane in expected_harness
+            )
+            await service.stop()
+            assert set(supervisor.current) == {RuntimeWorkLane.SESSION_DELIVERIES}
+
+    asyncio.run(_exercise())
+
+
+def test_hfr_176_legacy_file_probes_wake_only_their_mapped_lanes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    notifications: list[tuple[RuntimeWorkLane, ...]] = []
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(
+            platform_settings_managers={},
+            runtime_work_supervisor=SimpleNamespace(
+                notify=lambda *lanes: notifications.append(lanes)
+            ),
+        ),
+        store=ScheduledTaskStore(tmp_path / "tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "requests"),
+    )
+    service._running = True
+    service.request_store._ensure_dirs()
+    service._legacy_request_signature = service.request_store._state_signature()
+
+    async def _one_probe(delay: float) -> None:
+        assert delay == 2
+        (service.request_store.pending_dir / "edge.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        service._running = False
+
+    monkeypatch.setattr(scheduled_tasks.asyncio, "sleep", _one_probe)
+    asyncio.run(service._legacy_request_directory_probe())
+
+    assert notifications == [
+        (
+            RuntimeWorkLane.REQUESTS,
+            RuntimeWorkLane.RUN_CALLBACKS,
+        )
+    ]
+
+    notifications.clear()
+    service._running = True
+    service._legacy_task_signature = scheduled_tasks._path_signature(
+        service.store.path
+    )
+
+    async def _task_probe(delay: float) -> None:
+        assert delay == 2
+        service.store.path.write_text('{"tasks": []}', encoding="utf-8")
+        service._running = False
+
+    monkeypatch.setattr(scheduled_tasks.asyncio, "sleep", _task_probe)
+    asyncio.run(service._legacy_task_definition_probe())
+    assert notifications == [(RuntimeWorkLane.TASK_DEFINITIONS,)]
+
+
 @pytest.mark.parametrize("stop_entrypoint", ["stop", "lease_loss"])
 def test_request_recovery_registration_is_owned_by_exact_service_generation(
     tmp_path: Path,
@@ -9067,15 +9480,21 @@ def test_drain_does_not_block_on_hung_execution(tmp_path: Path) -> None:
     asyncio.run(_exercise())
 
 
-def test_drain_defers_im_runs_until_transport_ready_without_blocking_workbench(tmp_path: Path) -> None:
+def test_hfr_177_transport_ready_wakes_requests_and_resumes_skipped_run(
+    tmp_path: Path,
+) -> None:
     async def _exercise() -> None:
         store = TaskExecutionStore(tmp_path / "reqs")
         workbench = store.enqueue_hook_send(session_key="avibe::project::proj_test", prompt="local")
         discord = store.enqueue_hook_send(session_key="discord::channel::C123", prompt="remote")
         ready_platforms = {"avibe"}
+        notifications: list[tuple[RuntimeWorkLane, ...]] = []
         controller = SimpleNamespace(
             platform_settings_managers={},
             is_im_transport_ready=lambda platform: platform in ready_platforms,
+            runtime_work_supervisor=SimpleNamespace(
+                notify=lambda *lanes: notifications.append(lanes)
+            ),
         )
         service = ScheduledTaskService(
             controller=controller,
@@ -9098,7 +9517,7 @@ def test_drain_defers_im_runs_until_transport_ready_without_blocking_workbench(t
 
         ready_platforms.add("discord")
         service.notify_transport_ready("discord")
-        assert service._drain_dirty is True
+        assert notifications == [(RuntimeWorkLane.REQUESTS,)]
         await service._drain_requests()
         await asyncio.sleep(0)
 
@@ -9960,7 +10379,7 @@ def test_execute_task_notifies_then_pauses_after_three_unresolvable_failures(
     notices = _spy_binding_notices(service)
 
     for attempt in range(1, 4):
-        asyncio.run(service._run_task(task.id))
+        asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
         current = store.get_task(task.id)
         assert current is not None
         assert current.enabled is (attempt < 3)
@@ -10005,14 +10424,14 @@ def test_unresolvable_target_errors_follow_the_configured_language(
     )
     service = _binding_service(tmp_path, store, [], language=language)
 
-    asyncio.run(service._run_task(task.id))
+    asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
     retry_error = store.get_task(task.id).last_error
     assert retry_copy in retry_error
     assert "sesdoesnotexist" in retry_error
     assert f"vibe task update {task.id} --session-id <id>" in retry_error
 
-    asyncio.run(service._run_task(task.id))
-    asyncio.run(service._run_task(task.id))
+    asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
+    asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
     paused_error = store.get_task(task.id).last_error
     assert paused_copy in paused_error
     assert "sesdoesnotexist" in paused_error
@@ -10041,7 +10460,7 @@ def test_existing_policy_never_rebinds(tmp_path: Path, monkeypatch) -> None:
     service = _binding_service(tmp_path, store, [])
 
     for _ in range(3):
-        asyncio.run(service._run_task(task.id))
+        asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
 
     updated = store.get_task(task.id)
     assert updated is not None
@@ -10073,7 +10492,7 @@ def test_create_once_rebinds_when_session_deleted(tmp_path: Path, monkeypatch) -
     service = _binding_service(tmp_path, store, calls)
     notices = _spy_binding_notices(service)
 
-    asyncio.run(service._run_task(task.id))
+    asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
 
     updated = store.get_task(task.id)
     assert updated is not None
@@ -10107,7 +10526,7 @@ def test_repeated_binding_failures_notify_only_on_state_transitions(tmp_path: Pa
     notices = _spy_binding_notices(service)
 
     for _ in range(3):
-        asyncio.run(service._run_task(task.id))
+        asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
 
     assert [notice.action for notice in notices] == ["failing", "paused"]
 
@@ -10140,7 +10559,7 @@ def test_transient_resolver_errors_do_not_auto_pause_a_definition(tmp_path: Path
 
     service._execute_request = _transient_failure  # type: ignore[method-assign]
     for _ in range(3):
-        asyncio.run(service._run_task(task.id))
+        asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
 
     saved = store.get_task(task.id)
     assert saved is not None and saved.enabled is True
@@ -10169,7 +10588,7 @@ def test_a_success_resets_the_unresolvable_target_auto_pause_streak(
     service = _binding_service(tmp_path, store, [])
 
     for _ in range(2):
-        asyncio.run(service._run_task(task.id))
+        asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
 
     current = store.get_task(task.id)
     assert current is not None
@@ -10182,7 +10601,7 @@ def test_a_success_resets_the_unresolvable_target_auto_pause_streak(
     assert claimed is not None
     service.request_store.complete(claimed, ok=True, task_id=task.id)
 
-    asyncio.run(service._run_task(task.id))
+    asyncio.run(_fire_and_finish_scheduled_task(service, task.id))
 
     saved = store.get_task(task.id)
     assert saved is not None and saved.enabled is True
@@ -16004,7 +16423,7 @@ def test_a_definition_does_not_fire_while_its_own_worker_may_be_alive(
         )
 
         # Scoped to the definition: another definition's fire is not held up by it.
-        asyncio.run(service._run_task(other.id))
+        asyncio.run(_fire_and_finish_scheduled_task(service, other.id))
         assert other_ran.exists(), (
             "one definition's live worker blocked every other definition's fire"
         )

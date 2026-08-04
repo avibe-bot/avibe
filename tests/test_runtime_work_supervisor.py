@@ -6,7 +6,13 @@ from dataclasses import dataclass
 
 import pytest
 
-from core.inbox_events import QUEUE_UPDATED_EVENT, bus
+from core.inbox_events import (
+    DEFINITIONS_UPDATED_EVENT,
+    QUEUE_UPDATED_EVENT,
+    RUNS_UPDATED_EVENT,
+    VAULTS_UPDATED_EVENT,
+    bus,
+)
 from core.runtime_work import (
     RuntimeWorkHandler,
     RuntimeWorkItem,
@@ -97,7 +103,7 @@ async def test_hfr_151_supervisor_coalesces_wakes_and_keeps_partition_single_fli
 
 
 @pytest.mark.anyio
-async def test_hfr_151_guarded_noop_uses_partition_backoff() -> None:
+async def test_hfr_170_guarded_noop_uses_partition_backoff() -> None:
     """HFR-151: a stale guarded no-op cannot become a tight retry loop."""
 
     attempted = asyncio.Event()
@@ -355,3 +361,571 @@ async def test_concurrent_stop_callers_join_the_same_blocked_scan() -> None:
 
     handler.release_scan.set()
     await asyncio.gather(first, second)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("event_type", "expected"),
+    [
+        (QUEUE_UPDATED_EVENT, {RuntimeWorkLane.SESSION_DELIVERIES}),
+        (
+            RUNS_UPDATED_EVENT,
+            {
+                RuntimeWorkLane.REQUESTS,
+                RuntimeWorkLane.RUN_CALLBACKS,
+                RuntimeWorkLane.FAILURE_NOTICES,
+            },
+        ),
+        (VAULTS_UPDATED_EVENT, {RuntimeWorkLane.VAULT_CALLBACKS}),
+        (
+            DEFINITIONS_UPDATED_EVENT,
+            {
+                RuntimeWorkLane.TASK_DEFINITIONS,
+                RuntimeWorkLane.WATCH_DEFINITIONS,
+            },
+        ),
+    ],
+)
+async def test_hfr_155_events_wake_only_their_durable_lanes(
+    event_type: str,
+    expected: set[RuntimeWorkLane],
+) -> None:
+    started: set[RuntimeWorkLane] = set()
+    events = {lane: asyncio.Event() for lane in RuntimeWorkLane}
+
+    class _OneShot(RuntimeWorkHandler):
+        def __init__(self, lane: RuntimeWorkLane) -> None:
+            self.lane = lane
+            self.ready = False
+            self.initial_scan = threading.Event()
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            self.initial_scan.set()
+            if not self.ready:
+                return [], False
+            self.ready = False
+            return [RuntimeWorkItem(self.lane.value, {})], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            del item
+            started.add(self.lane)
+            events[self.lane].set()
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    handlers = {lane: _OneShot(lane) for lane in RuntimeWorkLane}
+    for lane, handler in handlers.items():
+        supervisor.register(lane, handler)
+    await supervisor.activate()
+    await asyncio.gather(
+        *(asyncio.to_thread(handler.initial_scan.wait, 1) for handler in handlers.values())
+    )
+    for handler in handlers.values():
+        handler.ready = True
+    bus.publish(event_type, {})
+    await asyncio.gather(
+        *(asyncio.wait_for(events[lane].wait(), 1) for lane in expected)
+    )
+    await asyncio.sleep(0)
+    await supervisor.stop()
+    assert started == expected
+
+
+@pytest.mark.anyio
+async def test_hfr_162_failed_scan_rearms_after_bounded_backoff() -> None:
+    attempted = asyncio.Event()
+    release_backoff = asyncio.Event()
+    processed = asyncio.Event()
+
+    class _FailsOnce(RuntimeWorkHandler):
+        scans = 0
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            self.scans += 1
+            attempted.set()
+            if self.scans == 1:
+                raise RuntimeError("transient")
+            return [RuntimeWorkItem("partition-a", {})], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            del item
+            processed.set()
+
+    async def backoff(delay: float) -> None:
+        assert delay == 0.25
+        await release_backoff.wait()
+
+    handler = _FailsOnce()
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        retry_backoff=0.25,
+        retry_wait=backoff,
+    )
+    supervisor.register(RuntimeWorkLane.REQUESTS, handler)
+    await supervisor.activate()
+    await asyncio.wait_for(attempted.wait(), 1)
+    assert handler.scans == 1
+    release_backoff.set()
+    await asyncio.wait_for(processed.wait(), 1)
+    await supervisor.stop()
+    assert handler.scans >= 2
+
+
+@pytest.mark.anyio
+async def test_hfr_162_wake_during_final_empty_scan_is_not_lost() -> None:
+    processed = asyncio.Event()
+    holder: dict[str, RuntimeWorkSupervisor] = {}
+
+    class _WakeDuringEmpty(RuntimeWorkHandler):
+        scans = 0
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            self.scans += 1
+            if self.scans == 1:
+                holder["supervisor"].notify(RuntimeWorkLane.REQUESTS)
+                return [], False
+            return [RuntimeWorkItem("run-a", {})], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            assert item.partition_key == "run-a"
+            processed.set()
+
+    handler = _WakeDuringEmpty()
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    holder["supervisor"] = supervisor
+    supervisor.register(RuntimeWorkLane.REQUESTS, handler)
+    await supervisor.activate()
+    await asyncio.wait_for(processed.wait(), 1)
+    await supervisor.stop()
+    assert handler.scans >= 2
+
+
+@pytest.mark.anyio
+async def test_hfr_159_blocked_store_scan_does_not_block_another_lane() -> None:
+    scan_entered = threading.Event()
+    release_scan = threading.Event()
+    other_processed = asyncio.Event()
+
+    class _BlockedScan(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            scan_entered.set()
+            assert release_scan.wait(timeout=1)
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            raise AssertionError(item)
+
+    class _Ready(RuntimeWorkHandler):
+        ready = True
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            if not self.ready:
+                return [], False
+            self.ready = False
+            return [RuntimeWorkItem("other", {})], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            assert item.partition_key == "other"
+            other_processed.set()
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    supervisor.register(RuntimeWorkLane.TASK_DEFINITIONS, _BlockedScan())
+    supervisor.register(RuntimeWorkLane.STALE_RUNS, _Ready())
+    await supervisor.activate()
+    assert await asyncio.to_thread(scan_entered.wait, 1)
+    await asyncio.wait_for(other_processed.wait(), 1)
+    stopping = asyncio.create_task(supervisor.stop())
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    release_scan.set()
+    await stopping
+
+
+@pytest.mark.anyio
+async def test_hfr_163_lane_capacity_bounds_distinct_partition_workers() -> None:
+    release = asyncio.Event()
+    two_started = asyncio.Event()
+    active = 0
+    peak = 0
+    completed = 0
+    done: set[str] = set()
+
+    class _Backlog(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            rows = [
+                RuntimeWorkItem(f"partition-{index}", {}, cursor_key=str(index))
+                for index in range(5)
+                if f"partition-{index}" not in occupied
+                and f"partition-{index}" not in done
+                and (cursor is None or str(index) > cursor)
+            ]
+            return rows[:limit], len(rows) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            nonlocal active, peak, completed
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                two_started.set()
+            await release.wait()
+            active -= 1
+            done.add(item.partition_key)
+            completed += 1
+
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=2,
+        scan_page_size=5,
+    )
+    supervisor.register(RuntimeWorkLane.RUN_CALLBACKS, _Backlog())
+    await supervisor.activate()
+    await asyncio.wait_for(two_started.wait(), 1)
+    assert peak == 2
+    release.set()
+    for _ in range(100):
+        if completed == 5:
+            break
+        await asyncio.sleep(0)
+    await supervisor.stop()
+    assert completed == 5
+    assert peak == 2
+
+
+@pytest.mark.anyio
+async def test_hfr_171_overdue_report_names_lane_partition_and_generation(
+    caplog,
+) -> None:
+    release = asyncio.Event()
+    started = asyncio.Event()
+    tick = asyncio.Event()
+    clock = iter((0.0, 10.0, 45.0))
+
+    async def reconcile_wait(delay: float) -> None:
+        assert delay == 1
+        await tick.wait()
+
+    handler = _Handler(
+        [RuntimeWorkItem("session-a", {})],
+        [],
+        release,
+        started,
+    )
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=1,
+        overdue_seconds=30,
+        reconcile_wait=reconcile_wait,
+        monotonic=lambda: next(clock),
+    )
+    token = supervisor.register(RuntimeWorkLane.REQUESTS, handler)
+    await supervisor.activate()
+    await asyncio.wait_for(started.wait(), 1)
+    tick.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if "Runtime work item overdue" in caplog.text:
+            break
+    unregister = supervisor.begin_unregister(token)
+    release.set()
+    await unregister
+    await supervisor.stop()
+    assert "lane=requests partition=session-a generation=1" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_hfr_158_occupied_page_cannot_hide_a_later_partition() -> None:
+    """HFR-158: keyset paging advances through followers of an occupied owner."""
+
+    live_entered = asyncio.Event()
+    release_live = asyncio.Event()
+    later_started = asyncio.Event()
+    scans = 0
+
+    class _OccupiedPage(RuntimeWorkHandler):
+        ready = False
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            nonlocal scans
+            del occupied
+            scans += 1
+            if not self.ready:
+                return [], False
+            rows = [
+                RuntimeWorkItem(
+                    "session-a",
+                    index,
+                    cursor_key=f"{index:02d}",
+                )
+                for index in range(8)
+            ] + [RuntimeWorkItem("session-b", 8, cursor_key="08")]
+            rows = [row for row in rows if cursor is None or row.cursor_key > cursor]
+            return rows[:limit], len(rows) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            if item.partition_key == "session-b":
+                later_started.set()
+
+    async def live_owner() -> None:
+        live_entered.set()
+        await release_live.wait()
+
+    handler = _OccupiedPage()
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=2,
+        scan_page_size=2,
+    )
+    supervisor.register(RuntimeWorkLane.REQUESTS, handler)
+    await supervisor.activate()
+    live = asyncio.create_task(
+        supervisor.run_in_partition(
+            RuntimeWorkLane.REQUESTS,
+            "session-a",
+            live_owner,
+        )
+    )
+    await asyncio.wait_for(live_entered.wait(), 1)
+    handler.ready = True
+    supervisor.notify(RuntimeWorkLane.REQUESTS)
+    await asyncio.wait_for(later_started.wait(), 1)
+    assert scans >= 9
+    release_live.set()
+    await live
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_160_live_partition_owner_blocks_recovery_and_unregisters_by_join() -> None:
+    """HFR-160/HFR-166: one exact owner survives wake and registration teardown."""
+
+    live_entered = asyncio.Event()
+    release_live = asyncio.Event()
+    scan_observed = threading.Event()
+    recovered_started = asyncio.Event()
+
+    class _Recovery(RuntimeWorkHandler):
+        ready = False
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied
+            if not self.ready:
+                return [], False
+            if cursor is not None:
+                return [], False
+            scan_observed.set()
+            return [RuntimeWorkItem("claude\x1fruntime-a", {})], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            del item
+            recovered_started.set()
+
+    async def live_owner() -> str:
+        live_entered.set()
+        await release_live.wait()
+        return "settled"
+
+    handler = _Recovery()
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    token = supervisor.register(RuntimeWorkLane.ACTIVITY_OUTPUTS, handler)
+    await supervisor.activate()
+    live = asyncio.create_task(
+        supervisor.run_in_partition(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            "claude\x1fruntime-a",
+            live_owner,
+        )
+    )
+    await asyncio.wait_for(live_entered.wait(), 1)
+    handler.ready = True
+    supervisor.notify(RuntimeWorkLane.ACTIVITY_OUTPUTS)
+    assert await asyncio.to_thread(scan_observed.wait, 1)
+    assert not recovered_started.is_set()
+
+    unregister = supervisor.begin_unregister(token)
+    await asyncio.sleep(0)
+    assert not unregister.done()
+    release_live.set()
+    assert await live == "settled"
+    await unregister
+    assert not recovered_started.is_set()
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_160_canceled_sync_worker_remains_owner_until_thread_exits() -> None:
+    """HFR-160: cancellation cannot abandon a still-running store thread."""
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class _Idle(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            del item
+
+    def blocking_store_call() -> str:
+        started.set()
+        release.wait()
+        return "done"
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    token = supervisor.register(RuntimeWorkLane.REQUESTS, _Idle())
+    await supervisor.activate()
+
+    async def operation() -> str:
+        return await supervisor.run_sync(blocking_store_call)
+
+    owner = asyncio.create_task(
+        supervisor.run_in_partition(RuntimeWorkLane.REQUESTS, "run-a", operation)
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    unregister = supervisor.begin_unregister(token)
+    await asyncio.sleep(0)
+    assert not unregister.done()
+
+    release.set()
+    await unregister
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_164_unregister_joins_partition_not_outer_caller_task() -> None:
+    """HFR-164: lane teardown joins only the exact protected operation."""
+
+    operation_started = asyncio.Event()
+    release_operation = asyncio.Event()
+    caller_continued = asyncio.Event()
+    release_caller = asyncio.Event()
+
+    class _Idle(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            del item
+
+    async def operation() -> None:
+        operation_started.set()
+        await release_operation.wait()
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    token = supervisor.register(RuntimeWorkLane.ACTIVITY_OUTPUTS, _Idle())
+    await supervisor.activate()
+
+    async def caller() -> None:
+        await supervisor.run_in_partition(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            "runtime-a",
+            operation,
+        )
+        caller_continued.set()
+        await release_caller.wait()
+
+    caller_task = asyncio.create_task(caller())
+    await asyncio.wait_for(operation_started.wait(), 1)
+    unregister = supervisor.begin_unregister(token)
+    release_operation.set()
+    await asyncio.wait_for(caller_continued.wait(), 1)
+    await asyncio.wait_for(unregister, 1)
+    assert not caller_task.done()
+
+    release_caller.set()
+    await caller_task
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_165_old_generation_delayed_wake_cannot_rearm_replacement() -> None:
+    """HFR-165: delayed eligibility belongs to one registration generation."""
+
+    class _Idle(RuntimeWorkHandler):
+        def __init__(self) -> None:
+            self.scanned = threading.Event()
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            self.scanned.set()
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            del item
+
+    first = _Idle()
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    first_token = supervisor.register(RuntimeWorkLane.ACTIVITY_OUTPUTS, first)
+    await supervisor.activate()
+    assert await asyncio.to_thread(first.scanned.wait, 1)
+    supervisor.notify_after(first_token, 60)
+    assert first_token in supervisor._delayed_wakes
+    await supervisor.unregister(first_token)
+    assert first_token not in supervisor._delayed_wakes
+
+    second = _Idle()
+    second_token = supervisor.register(RuntimeWorkLane.ACTIVITY_OUTPUTS, second)
+    assert await asyncio.to_thread(second.scanned.wait, 1)
+    registration = supervisor._registrations[RuntimeWorkLane.ACTIVITY_OUTPUTS]
+    registration.event.clear()
+    supervisor._fire_delayed_wake(first_token)
+    assert registration.token == second_token
+    assert not registration.event.is_set()
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_175_global_lease_loss_joins_every_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owns_lease = True
+    scanned = threading.Event()
+    processed: list[str] = []
+
+    class _LeaseHandler(RuntimeWorkHandler):
+        ready = False
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            scanned.set()
+            if not self.ready:
+                return [], False
+            return [RuntimeWorkItem("work", {})], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            processed.append(item.partition_key)
+
+    monkeypatch.setattr(
+        "core.runtime_work.runtime.current_process_owns_service_instance",
+        lambda: owns_lease,
+    )
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    supervisor._requires_service_lease = True
+    handlers = {
+        RuntimeWorkLane.SESSION_DELIVERIES: _LeaseHandler(),
+        RuntimeWorkLane.REQUESTS: _LeaseHandler(),
+    }
+    for lane, handler in handlers.items():
+        supervisor.register(lane, handler)
+    await supervisor.activate()
+    assert await asyncio.to_thread(scanned.wait, 1)
+
+    owns_lease = False
+    for handler in handlers.values():
+        handler.ready = True
+    supervisor.notify(*handlers)
+    for _ in range(100):
+        if supervisor._stop_task is not None:
+            break
+        await asyncio.sleep(0)
+    assert supervisor._stop_task is not None
+    await supervisor._stop_task
+    assert supervisor._registrations == {}
+    assert processed == []

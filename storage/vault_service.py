@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
@@ -1442,13 +1442,23 @@ def expire_overdue_requests(conn: Connection) -> None:
     _expire_pending_requests(conn)
 
 
-def list_pending_request_callbacks(conn: Connection, *, limit: int | None = None) -> list[dict[str, Any]]:
+def list_pending_request_callbacks(
+    conn: Connection,
+    *,
+    limit: int | None = None,
+    after: tuple[str, str] | None = None,
+) -> list[dict[str, Any]]:
     """Terminal requests owed an auto-resume callback (``callback_status='pending'``)."""
     query = (
         select(vault_requests)
         .where(vault_requests.c.callback_status == "pending")
-        .order_by(vault_requests.c.decided_at, vault_requests.c.id)
     )
+    if after is not None:
+        query = query.where(
+            tuple_(vault_requests.c.decided_at, vault_requests.c.id)
+            > tuple_(str(after[0]), str(after[1]))
+        )
+    query = query.order_by(vault_requests.c.decided_at, vault_requests.c.id)
     if limit is not None:
         query = query.limit(limit)
     rows = conn.execute(query).mappings()

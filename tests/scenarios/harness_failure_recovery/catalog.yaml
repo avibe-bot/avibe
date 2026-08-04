@@ -2540,6 +2540,181 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_runtime_work_supervisor.py::test_hfr_154_replacing_live_registration_requires_generation_handoff
+  - id: HFR-155
+    name: runtime work hints wake only their mapped durable lanes
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_155_events_wake_only_their_durable_lanes
+  - id: HFR-156
+    name: socket hint failure cannot roll back committed durable work
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_inbox_events.py::test_hfr_156_bridge_failure_does_not_rollback_committed_run
+  - id: HFR-157
+    name: startup and slow reconciliation recover lost runtime work hints
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_152_supervisor_starts_paused_and_periodic_reconcile_wakes_lane
+  - id: HFR-158
+    name: occupied partitions cannot hide later actionable work
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hfr_158_request_scan_fills_page_across_recovery_and_queued_work
+  - id: HFR-159
+    name: blocking store scans do not block the controller loop or other lanes
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_159_blocked_store_scan_does_not_block_another_lane
+  - id: HFR-160
+    name: live and recovered work share one exact partition owner
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_160_canceled_sync_worker_remains_owner_until_thread_exits
+  - id: HFR-161
+    name: scheduled work admits one queued successor through one request owner
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hfr_161_scheduler_only_enqueues_one_successor_behind_active_work
+  - id: HFR-162
+    name: a final-scan wake is retained and rearmed after failure
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_162_wake_during_final_empty_scan_is_not_lost
+  - id: HFR-163
+    name: runtime work lanes enforce global and per-partition single flight
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_163_lane_capacity_bounds_distinct_partition_workers
+  - id: HFR-164
+    name: service restart joins only its own runtime work registrations
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hfr_164_hfr_165_service_restart_joins_only_its_harness_lane_generations
+  - id: HFR-165
+    name: repeated service cycles leave one current registration generation
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hfr_164_hfr_165_service_restart_joins_only_its_harness_lane_generations
+  - id: HFR-166
+    name: recovered Activity batches retain durable live batching grace
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_session_activities.py::test_hfr_166_recovered_unbound_grace_uses_first_durable_completion
+  - id: HFR-167
+    name: accepted Activity output retries local settlement without transport replay
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::MessageDispatcherScheduledTests::test_recovered_durable_message_retries_only_local_settlement_after_restart
+  - id: HFR-168
+    name: incomplete recovered Activity batches fail closed before transport
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_session_activities.py::test_recovery_marks_an_incomplete_persisted_output_batch_for_fail_closed_emit
+  - id: HFR-169
+    name: Activity recovery remains visible without a Run projection
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hfr_169_recovered_activity_without_run_reaches_its_session
+  - id: HFR-170
+    name: skipped runtime work rearms with bounded backoff
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_170_guarded_noop_uses_partition_backoff
+  - id: HFR-171
+    name: overdue runtime work identifies lane partition and generation
+    status: covered
+    kind: observability
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_171_overdue_report_names_lane_partition_and_generation
+  - id: HFR-172
+    name: definition hints follow commit and exclude rollback or losing CAS
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hfr_172_task_definition_wake_follows_commit_and_not_rollback
+  - id: HFR-173
+    name: local event fanout and bounded bridge echo dedupe deliver once
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_inbox_bridge.py::test_hfr_173_local_event_echo_is_suppressed_once
+  - id: HFR-174
+    name: task and watch definition commits wake separate reconcile owners
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_watches.py::test_hfr_174_watch_definition_commit_emits_watch_hint
+  - id: HFR-175
+    name: global lease loss stops and joins every runtime work registration
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_runtime_work_supervisor.py::test_hfr_175_global_lease_loss_joins_every_registration
+  - id: HFR-176
+    name: legacy file signatures wake only their mapped runtime work lanes
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hfr_176_legacy_file_probes_wake_only_their_mapped_lanes
+  - id: HFR-177
+    name: transport readiness directly resumes skipped request admission
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hfr_177_transport_ready_wakes_requests_and_resumes_skipped_run
+  - id: HFR-178
+    name: loop-owned shutdown retains supervisor join past outer grace
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_controller_dispatch_loop.py::test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace
+  - id: HFR-179
+    name: managed-watch store work stays single-flight and applies on loop
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_watches.py::test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

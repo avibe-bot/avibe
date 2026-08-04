@@ -766,6 +766,9 @@ class SessionActivityRegistry:
     ) -> SessionActivity | None:
         """Claim one receipt and return its canonical (last) batch member."""
 
+        if self.has_claimed_output(backend, runtime_key):
+            return None
+
         claimed = self._claim_completed_outputs(
             backend,
             runtime_key,
@@ -820,6 +823,15 @@ class SessionActivityRegistry:
 
         key = (str(backend), str(runtime_key))
         with self._lock:
+            if any(
+                (
+                    claimed.entry.activity.backend,
+                    claimed.entry.activity.runtime_key,
+                )
+                == key
+                for claimed in self._claimed_completed_outputs.values()
+            ):
+                return []
             queue = self._completed_outputs.get(key)
             if not queue:
                 return []
@@ -1594,6 +1606,20 @@ class SessionActivityRegistry:
                 for claimed in self._claimed_completed_outputs.values()
             )
 
+    def has_claimed_output(self, backend: str, runtime_key: str) -> bool:
+        """Whether one batch already owns transport/local settlement."""
+
+        key = (str(backend), str(runtime_key))
+        with self._lock:
+            return any(
+                (
+                    claimed.entry.activity.backend,
+                    claimed.entry.activity.runtime_key,
+                )
+                == key
+                for claimed in self._claimed_completed_outputs.values()
+            )
+
     def has_pending_run_output(self, run_id: str) -> bool:
         identity = str(run_id or "").strip()
         if not identity:
@@ -1622,6 +1648,46 @@ class SessionActivityRegistry:
                 if self._activity_key(entry.activity) in self._recovered_output_ids
             }
         return sorted(runtimes)
+
+    def recovered_output_delay_seconds(
+        self,
+        backend: str,
+        runtime_key: str,
+        *,
+        grace_seconds: float,
+        now: datetime | None = None,
+    ) -> float | None:
+        """Return the durable remaining live-batching grace for one runtime."""
+
+        key = (str(backend), str(runtime_key))
+        instant = now or datetime.now(timezone.utc)
+        with self._lock:
+            recovered = [
+                entry.activity
+                for entry in self._completed_outputs.get(key, ())
+                if self._activity_key(entry.activity) in self._recovered_output_ids
+            ]
+        if not recovered:
+            return None
+        if any(
+            str(activity.metadata.get("output_batch_id") or "").strip()
+            or activity.metadata.get("_output_local_settlement_only")
+            for activity in recovered
+        ):
+            return 0.0
+        completed: list[datetime] = []
+        for activity in recovered:
+            raw = str(activity.completed_at or "").strip()
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return 0.0
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            completed.append(parsed.astimezone(timezone.utc))
+        first = min(completed)
+        elapsed = max(0.0, (instant - first).total_seconds())
+        return max(0.0, float(grace_seconds) - elapsed)
 
     def drain_recovered_terminals(self) -> list[SessionActivity]:
         with self._lock:

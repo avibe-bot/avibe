@@ -71,11 +71,13 @@ class FallbackRequestRecoveryHandler:
         ], has_more
 
     async def process(self, item: RuntimeWorkItem) -> bool:
+        return await asyncio.to_thread(self.process_sync, item)
+
+    def process_sync(self, item: RuntimeWorkItem) -> bool:
         row = item.observation
         if str(row["id"]) in self._live_claims():
             return True
-        return await asyncio.to_thread(
-            self.store.recover_claimed_pre_execution_run,
+        return self.store.recover_claimed_pre_execution_run(
             run_id=str(row["id"]),
             expected_status=str(row["status"]),
             expected_updated_at=str(row["updated_at"]),

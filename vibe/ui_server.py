@@ -7009,6 +7009,14 @@ async def sessions_archive(session_id: str):
         return _coded_error_response(code, str(err), 403)
 
     revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
+    reclaimed = session.get("reclaimed") or {}
+    if reclaimed.get("tasks") or reclaimed.get("watches"):
+        from core.inbox_events import publish_definitions_updated
+
+        if reclaimed.get("tasks"):
+            publish_definitions_updated(definition_type="scheduled")
+        if reclaimed.get("watches"):
+            publish_definitions_updated(definition_type="watch")
 
     # Broadcast + return immediately — the archive is already committed. Other
     # mounted clients (sidebars, tabs) drop the row live and leave the chat if
@@ -8811,6 +8819,9 @@ def harness_task_patch(task_id: str):
             return jsonify({"ok": False, "code": "task_not_found"}), 404
         store.set_definition_enabled(task_id, enabled, definition_type="scheduled")
         task = store.get_scheduled_task(task_id)
+    from core.inbox_events import publish_definitions_updated
+
+    publish_definitions_updated(definition_type="scheduled")
     return jsonify({"ok": True, "task": task})
 
 
@@ -8820,6 +8831,9 @@ def harness_task_delete(task_id: str):
         if not store.get_scheduled_task(task_id):
             return jsonify({"ok": False, "code": "task_not_found"}), 404
         store.remove_task(task_id)
+    from core.inbox_events import publish_definitions_updated
+
+    publish_definitions_updated(definition_type="scheduled")
     return jsonify({"ok": True, "id": task_id})
 
 
@@ -8869,6 +8883,9 @@ def harness_watch_patch(watch_id: str):
             return jsonify({"ok": False, "code": "watch_not_found"}), 404
         store.set_definition_enabled(watch_id, enabled, definition_type="watch")
         watch = store.get_watch(watch_id)
+    from core.inbox_events import publish_definitions_updated
+
+    publish_definitions_updated(definition_type="watch")
     return jsonify({"ok": True, "watch": watch})
 
 
@@ -8878,6 +8895,9 @@ def harness_watch_delete(watch_id: str):
         if not store.get_watch(watch_id):
             return jsonify({"ok": False, "code": "watch_not_found"}), 404
         store.remove_task(watch_id)
+    from core.inbox_events import publish_definitions_updated
+
+    publish_definitions_updated(definition_type="watch")
     return jsonify({"ok": True, "id": watch_id})
 
 
