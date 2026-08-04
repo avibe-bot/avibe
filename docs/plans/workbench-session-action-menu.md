@@ -207,6 +207,13 @@ path":
 | 8 | `End` focused the wrong item | `Home`/`End` → `focusItem(0)` / `focusItem(actions.length - 1)`. |
 | 9 | disabled fork used `disabled`, so it couldn't be focused and its explanation was unreachable by keyboard | `aria-disabled` + `tabIndex` kept, with the reason rendered on screen under the label. |
 
+Round 2 on `0f230780` returned one P2, also valid: the archive confirm dialog kept a bare
+`open` boolean, but the hook owning it outlives any one session (`ChatPage` is reused across
+session ids), so a request made for A was **inherited** by B — dialog re-appears open and
+re-pointed, one Enter from archiving the wrong session. Fixed by storing the requested session
+id and deriving `open` from `archiveRequestIsLive(requestedId, targetId)` in
+`sessionArchived.ts`, plus forgetting a stale request so it cannot resurrect later.
+
 Deliberately not changed: no `@radix-ui/react-dropdown-menu` dependency (not installed; a true
 menu role would be the honest fix for #7's *other* half, but the popover semantics are now
 truthful about what they are).
