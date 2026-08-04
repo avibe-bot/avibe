@@ -1,9 +1,10 @@
-# Add a forced Memory sidecar restart action (rev20)
+# Add a forced Memory sidecar restart action (rev21)
 
-> Rev20 resets the plan to one public recovery action and one linear Runtime
-> lifecycle. It keeps the existing Runtime, Module, Worker, and Process
-> interfaces deep: callers see `MemoryRuntime.restart()`, while worker lease
-> handoff and process ownership remain private implementation details.
+> Rev21 keeps one public recovery action and one linear Runtime lifecycle while
+> closing the replay-marker, delayed-readiness, and UI timeout races. The Runtime,
+> Module, Worker, and Process interfaces stay deep: callers see
+> `MemoryRuntime.restart()`, while worker lease handoff and process ownership
+> remain private implementation details.
 
 ## Decision
 
@@ -11,6 +12,8 @@ When Memory is enabled, the settings page will expose one "Restart engine"
 action. The action replaces an alive-but-unreachable sidecar with a new child
 using the Runtime's replay configuration: the startup configuration until the
 first successful reconcile, then the latest configuration applied successfully.
+An independently successful `embedding_change_pending` settlement is reflected
+in that snapshot without adopting the rest of a subsequently failed candidate.
 
 This plan deliberately does not repair configuration persistence. In
 particular, restart does not:
@@ -24,9 +27,11 @@ particular, restart does not:
 If the replay snapshot still has `embedding_change_pending=true`, restart fails
 closed with `memory_clear_failed` before pausing the worker or touching the
 sidecar. The existing Settings/Clear lifecycle remains responsible for checking
-the provider root and settling that persisted marker. Keeping configuration
-repair out of restart is what removes the global config transaction and
-Controller rebasing work from this feature.
+the provider root and settling that persisted marker. Once settlement succeeds,
+the Runtime mirrors only the cleared marker into its replay snapshot. Keeping
+the settlement itself and all other configuration repair out of restart is what
+removes the global config transaction and Controller rebasing work from this
+feature.
 
 ## Goals
 
@@ -44,7 +49,8 @@ Controller rebasing work from this feature.
 
 - automatic health-based restart;
 - persisted/live/Controller config repair after a failed settings rollback;
-- a general Memory lifecycle coordinator or explicit state machine;
+- a general Memory lifecycle coordinator or explicit state machine beyond the
+  narrow ready-callback generation described below;
 - new provider, store, or process interfaces;
 - retrying historical `unknown` flushes;
 - disabled/no-store cleanup recovery UX;
@@ -89,8 +95,8 @@ The contract is:
 - success means the replacement `EverOSProcess.start()` returned `True`, which
   already includes the sidecar health/readiness check;
 - restart does not run the processing preflight probe;
-- restart does not modify persisted settings, except that it also does not undo
-  any marker settlement completed earlier by the existing reconcile path;
+- restart does not modify persisted settings; an earlier reconcile that settled
+  the durable embedding marker also clears only that marker in the replay copy;
 - disabled replay returns `memory_disabled` without constructing a process;
 - unavailable store/module returns `memory_store_unavailable`;
 - a pending embedding change or failed clear recovery returns
@@ -116,7 +122,10 @@ Add one private `_restart_config` to `MemoryRuntime`:
 - initialize it as a deep copy of the startup `MemoryConfig`;
 - update it with a deep copy only after enabled or disabled reconciliation has
   returned success while `_reconcile_lock` is held;
-- never replace it with a failed candidate; and
+- immediately after `_settle_embedding_change_pending()` succeeds, clear only
+  `_restart_config.embedding_change_pending` while `_reconcile_lock` is held,
+  even if a later reconciliation step fails;
+- never copy any other field from a failed candidate; and
 - copy it again at the start of the locked restart sequence.
 
 The deep copies are required because `MemoryConfig`, its nested settings, and
@@ -128,6 +137,13 @@ record. After its first successful reconcile, `_restart_config` becomes the
 latest successfully applied configuration for the remainder of that Runtime
 instance. This plan does not add persistence for replay history across an Avibe
 restart.
+
+Marker settlement is a separate successful fact from candidate activation. The
+existing guard has already proved the provider root safe and persisted
+`embedding_change_pending=false`, so leaving `true` in the startup or last-good
+replay copy would permanently disable restart after a later readiness or root
+failure. Mutating only that boolean preserves the last-good settings while
+making the replay snapshot agree with the durable marker.
 
 Immediately before replacement, restore `self._config` from the replay copy so
 the worker's `enabled` callback and the new child settings use the same value.
@@ -161,10 +177,12 @@ MemoryRuntime._reconcile_lock
      -> provider-root lifecycle lock, only inside Clear recovery
 ```
 
-No pending counters, waiter inspection, retained-owner gate, generation token,
-or new coordinator is added. A concurrent reconcile, Clear, artifact activation,
-or restart finishes in this lock order; it is acceptable for restart to wait for
-the current lifecycle operation rather than implement fail-fast admission.
+No pending counters, waiter inspection, retained-owner gate, or new coordinator
+is added. A concurrent reconcile, Clear, artifact activation, or restart finishes
+in this lock order; it is acceptable for restart to wait for the current
+lifecycle operation rather than implement fail-fast admission. The narrow
+generation below only invalidates readiness notifications; it does not grant
+ownership or replace these locks.
 
 Make two focused fixes to keep that order real:
 
@@ -184,21 +202,40 @@ Capture and status do not need a new lifecycle gate. Capture only enqueues store
 work, and status metadata writes do not carry a worker lease. Search/profile and
 Clear already serialize through the Module lifecycle lock.
 
-### 4. Ready-callback handoff guard
+### 4. Ready-callback serialization
 
-Add one private `_restart_handoff_active` boolean owned by `_restart_once()`.
-Set it only after both lifecycle locks are held and before Clear recovery or
-worker fencing begins; clear it in `finally`.
+Add one private monotonic `_lifecycle_generation`, one retained
+`_ready_activation_task`, and one latest-event slot to `MemoryRuntime`. Each
+outer Runtime lifecycle owner advances the generation in `finally`: reconcile,
+Clear, restart, and the full artifact-install span. Locked helpers reuse their
+owner's generation rather than marking a nested lifecycle. The artifact-install
+span continues to use its existing active flag while its blocking thread runs
+outside `_reconcile_lock`.
 
-`_on_sidecar_ready()` returns without resuming claims or creating a worker while
-the flag is true. This covers both an old supervisor whose automatic start
-finishes during handoff and the initial ready callback from the explicit
-replacement. The explicit success path resumes claims and starts the worker
-itself. A later automatic retry runs after the flag is clear and continues to
-use the existing ready callback.
+Bind each supervisor's `on_ready` callback to that exact supervisor. The callback
+must synchronously schedule or coalesce a Runtime-owned activation task and
+return; it must not await Runtime locks while `EverOSProcess` is still holding
+its own lifecycle lock. Scheduling overwrites the latest-event slot with the
+notifying supervisor and captured generation, then ensures one activation task
+is running. That task drains the slot and acquires `_reconcile_lock` followed by
+`module._lifecycle_lock` for each event. Its done callback clears only the exact
+task that became terminal, so a newer task cannot be lost. Before resuming claims
+it revalidates all of the following:
 
-This single handoff flag replaces lifecycle generations, activation futures,
-callback rebinding, and abort compensation.
+- the captured generation is unchanged;
+- the notifying supervisor is still `self._process` and reports `running`;
+- replay/live configuration is enabled with no pending embedding marker; and
+- artifact installation is not active.
+
+A callback emitted by a lifecycle-owned `start()` is therefore stale after that
+lifecycle advances the generation in `finally`; the explicit success path resumes
+claims and starts the worker itself. A delayed automatic retry in a quiescent
+generation is serialized behind any later lifecycle and activates the worker
+only if its process identity and captured generation still match. A callback
+during the unlocked artifact-install span fails the active-install revalidation.
+`close()` advances the generation, clears the latest-event slot, and joins the
+retained ready-activation task before process shutdown. This prevents both lock
+inversion with the Process supervisor and unowned callback work.
 
 ### 5. Worker stop and lease handoff
 
@@ -245,11 +282,11 @@ This is a local ownership fix. Do not add an installer registry or a general
 
 Inside `_restart_once()`:
 
-1. Acquire `_reconcile_lock`; copy the replay configuration and validate
+1. Acquire `_reconcile_lock`, copy the replay configuration, and validate
    store/module availability, artifact installation state, enabled replay, and
    `embedding_change_pending=false`. Resolve the installed Python runtime here,
    before handoff, but do not run a processing preflight.
-2. Acquire `module._lifecycle_lock` and set `_restart_handoff_active`.
+2. Acquire `module._lifecycle_lock`.
 3. Run locked interrupted-Clear recovery. If it fails, return without creating
    a process. On success, call `pause_claims()` again with no intervening await;
    the existing recovery helper may resume claims before returning, but no worker
@@ -263,7 +300,8 @@ Inside `_restart_once()`:
    process.
 6. Restore `self._config` from the replay copy, replace the provider, apply the
    existing artifact/root metadata checks, and construct the replacement.
-   Assign it to `_process` before awaiting `start()` so ownership is never lost.
+   Bind its ready callback to that exact supervisor and assign it to `_process`
+   before awaiting `start()` so ownership is never lost.
 7. After old ownership is gone, rotate the Worker lease and then call the
    replacement's `start()`. Rotating before `start()` ensures that both immediate
    success and a later automatic ready callback use the new lease. If `start()`
@@ -271,7 +309,8 @@ Inside `_restart_once()`:
    retry, keep claims paused, and return `memory_sidecar_unavailable`.
 8. On success, resume claims, start the drain task, clear the visible runtime
    error, and return `{ok: true, state: "ready"}`.
-9. Clear `_restart_handoff_active` in `finally`.
+9. Advance `_lifecycle_generation` in `finally`, making any callback emitted
+   during the lifecycle stale before releasing `_reconcile_lock`.
 
 Failures before the old process is touched may restore the previous worker and
 claims when its supervisor is still running. Failures after old ownership is
@@ -291,15 +330,20 @@ implementation remains responsible for the successful `stop()` postcondition.
 1. `core/internal_server.py`: add `POST /internal/memory/restart`, which calls
    `MemoryRuntime.restart()`. Missing Runtime returns `memory_runtime_missing`;
    unhandled exceptions map to `memory_restart_failed`.
-2. `vibe/internal_client.py`: add `memory_restart()` with a reporting timeout
-   longer than the expected five-second grace plus existing process stop/start
-   bounds. A timeout is a transport failure, not proof that the retained Runtime
-   task was cancelled.
+2. `vibe/internal_client.py`: add `memory_restart()` without a client-side
+   reporting timeout. The Runtime may be waiting for an already-running SQLite
+   thread that Python cannot preempt, so only the internal response is proof that
+   its retained restart task reached a terminal result.
 3. `vibe/ui_memory_routes.py`: keep `/api/memory/runtime/restart`, preserve its
    same-origin/user checks, and call `memory_restart()` instead of reconcile.
-   Serialize the request with the existing `_memory_settings_write_lock()` so a
-   normal Memory PATCH cannot save/reconcile concurrently. Do not add a pending
-   counter or a cross-process config lock.
+   Create or join one loop-scoped, retained UI-process restart request task using
+   the same loop-rebinding discipline as `_memory_settings_write_lock()`. That
+   task acquires the settings lock and holds it until the no-timeout internal
+   request returns; route callers await it through `asyncio.shield()`. A browser
+   disconnect or cancelled route waiter therefore does not release the settings
+   lock while the controller restart continues, and a normal Memory PATCH cannot
+   save/reconcile concurrently. Clear the retained task only after it is terminal.
+   Do not add a pending counter or a cross-process config lock.
 4. `core/memory/types.py` and frontend translations: add transport-only
    `memory_restart_failed`. Reuse existing error codes for disabled, unavailable,
    clear-marker, and sidecar-readiness failures. Do not add a SQLite schema value.
@@ -338,8 +382,14 @@ private counters, task registries, generations, or callback phases.
   - before any successful reconcile, restart uses the startup retry candidate;
     after successful C0, a failed C1 is not committed and restart uses C0 while
     the persisted config remains byte-for-byte unchanged;
+  - successful marker settlement followed by a later reconcile failure clears
+    only the marker in the replay snapshot, so restart remains available without
+    adopting the failed candidate's settings;
   - pending embedding marker and failed Clear recovery launch no child;
   - restart and Clear/reconcile serialize without a marker/start race;
+  - a delayed ready callback racing Clear, reconcile, or artifact activation
+    cannot start a worker inside that lifecycle; stale process/generation
+    callbacks are ignored and a surviving quiescent retry activates normally;
   - drain completion inside the grace window preserves its result;
   - cancellation during a Worker store call does not start replacement until
     the synchronous write has ended, after which the new lease recovers old
@@ -360,9 +410,12 @@ private counters, task registries, generations, or callback phases.
 - `tests/test_internal_server.py`: success, missing Runtime, and exception
   mapping for the new endpoint.
 - `tests/test_internal_client.py` and timeout tests: method/path, response
-  passthrough, and reporting timeout.
+  passthrough, and the explicit absence of a restart reporting timeout.
 - `tests/test_ui_memory_routes.py`: new client call, settings-lock serialization,
-  internal unavailability, and existing cross-origin rejection.
+  retained-task sharing, caller-cancellation behavior, internal unavailability,
+  and existing cross-origin rejection. Prove a PATCH remains blocked after its
+  restart route waiter is cancelled and proceeds only after the internal restart
+  reaches a terminal response.
 
 ### TypeScript
 
@@ -398,7 +451,8 @@ exists:
 - a cross-process transaction for every V2 config writer;
 - failed settings rollback repair across disk, Runtime, Controller, and UI;
 - generic async-thread ownership and cancellation infrastructure;
-- a general Memory lifecycle coordinator or process generation model;
+- a general Memory lifecycle coordinator or process generation model beyond the
+  narrow ready-callback generation;
 - disabled/no-store durable orphan recovery UX; and
 - global process-budget or shutdown-lifecycle redesign.
 
