@@ -288,6 +288,15 @@ def test_everos_errors_are_scrubbed_before_persistence_across_key_rotation(
     assert all(old_key not in error for error in persisted)
 
 
+def test_persisted_errors_scrub_canonical_provider_url_echoes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(patches, "_persisted_error_base_urls", ("HTTPS://LLM.Internal.Example/v1",))
+    monkeypatch.setattr(patches, "_persisted_error_exact_values", ())
+
+    assert patches._persisted_error("failed at https://llm.internal.example/v1/chat") == (
+        "failed at [PROVIDER_BASE_URL]/chat"
+    )
+
+
 def test_pinned_everos_patch_contract(monkeypatch, tmp_path: Path) -> None:
     """Exercise the patched, public EverOS 1.2.1 call surfaces offline.
 

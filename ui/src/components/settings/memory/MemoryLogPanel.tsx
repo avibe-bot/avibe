@@ -61,6 +61,8 @@ const ENUM_LABEL_KEYS = {
     ok: 'ok',
     success: 'success',
     failed: 'failed',
+    dead_letter: 'deadLetter',
+    crashed: 'crashed',
     error: 'error',
     present: 'present',
     missing: 'missing',
@@ -310,7 +312,7 @@ const StepRow: React.FC<{ step: MemoryLogStep }> = ({ step }) => {
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="break-words text-[12.5px] font-semibold text-foreground">{title}</span>
-          <Badge variant={step.status === 'failed' ? 'destructive' : 'secondary'}>
+          <Badge variant={['failed', 'dead_letter', 'crashed'].includes(step.status) ? 'destructive' : 'secondary'}>
             {memoryLogEnumLabel(t, 'status', step.status)}
           </Badge>
           {step.relation === 'profile_trigger' ? (

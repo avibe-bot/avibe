@@ -3621,6 +3621,8 @@
         "ok": "成功",
         "success": "成功",
         "failed": "失败",
+        "deadLetter": "重试后停止",
+        "crashed": "已崩溃",
         "error": "错误",
         "present": "已存在",
         "missing": "缺失",

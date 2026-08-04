@@ -69,7 +69,7 @@ const listResult = (entries: MemoryLogEntry[], nextCursor: string | null = null)
   sections,
 });
 
-const detailResult = (providerCallStatus = 'ok'): MemoryLogDetailResult => ({
+const detailResult = (providerCallStatus = 'ok', strategyStatus = 'success'): MemoryLogDetailResult => ({
   status: 'ok',
   entry: entry('mc-alpha', 'Alpha detail'),
   capture: { status: 'available', delivery_states: ['delivered'], matched_message_count: 1 },
@@ -78,7 +78,7 @@ const detailResult = (providerCallStatus = 'ok'): MemoryLogDetailResult => ({
     { type: 'memcell', status: 'created', timestamp_ms: 1_722_816_000_000, memcell_id: 'mc-alpha' },
     {
       type: 'strategy',
-      status: 'success',
+      status: strategyStatus,
       started_at_ms: 1_722_816_001_000,
       strategy: 'extract_user_profile',
       relation: 'profile_trigger',
@@ -158,6 +158,21 @@ const renderPanel = (props?: Partial<React.ComponentProps<typeof MemoryLogPanel>
   );
 
 describe('MemoryLogPanel', () => {
+  it.each([
+    ['dead_letter', 'deadLetter'],
+    ['crashed', 'crashed'],
+  ])('renders terminal EverOS run status %s as a localized failure', async (status, label) => {
+    api.getMemoryLog.mockResolvedValue(listResult([entry('mc-alpha', 'Alpha')]));
+    api.getMemoryLogEntry.mockResolvedValue(detailResult('ok', status));
+    const user = userEvent.setup();
+
+    renderPanel();
+    await user.click(await screen.findByText('Alpha'));
+
+    const badge = await screen.findByText(`memory.log.status.${label}`);
+    expect(badge.classList.contains('text-destructive')).toBe(true);
+  });
+
   it('accumulates cursor pages and refresh replaces the old result', async () => {
     let firstPageReads = 0;
     api.getMemoryLog.mockImplementation((cursor: string | null) => {

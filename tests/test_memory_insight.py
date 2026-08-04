@@ -758,6 +758,60 @@ def test_configured_provider_urls_are_scrubbed_from_runs_and_calls(
     assert "[PROVIDER_BASE_URL]" in encoded
 
 
+def test_provider_url_redaction_normalizes_scheme_and_host(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    configured_url = "HTTPS://LLM.Internal.Example/v1"
+    echoed_url = "https://llm.internal.example/v1/chat"
+    _insert_memcell(insight_paths, "mc_url_case", ALICE, timestamp_ms=10_500)
+    _insert_call(
+        insight_paths,
+        "call-url-case",
+        memcell_id="mc_url_case",
+        error=f"provider failed at {echoed_url}",
+    )
+
+    detail = MemoryInsightReader(
+        insight_paths,
+        provider_base_urls=(configured_url,),
+    ).entry_detail((ALICE, PROJECT), "mc_url_case")
+
+    assert "llm.internal.example" not in json.dumps(detail).casefold()
+    assert detail["calls"][0]["error"] == "provider failed at [PROVIDER_BASE_URL]/chat"
+
+
+def test_detail_preserves_internal_ids_and_enums_when_exact_key_is_short(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc-u-1", ALICE, timestamp_ms=10_500)
+    event = {"memcell_id": "mc-u-1", "app_id": "avibe", "project_id": PROJECT, "owner_id": ALICE}
+    _insert_run(insight_paths, "run-u-1", "extract_user_profile", event, status="dead_letter")
+    _insert_call(
+        insight_paths,
+        "call-u-1",
+        memcell_id="mc-u-1",
+        kind="multimodal_llm",
+        stage="episode_extract",
+        status="crashed",
+        error="provider echoed u",
+    )
+
+    detail = MemoryInsightReader(insight_paths, exact_redaction_values=("u",)).entry_detail(
+        (ALICE, PROJECT), "mc-u-1"
+    )
+
+    assert detail["entry"]["memcell_id"] == "mc-u-1"
+    strategy = next(step for step in detail["steps"] if step["type"] == "strategy")
+    assert strategy["run_id"] == "run-u-1"
+    assert strategy["strategy"] == "extract_user_profile"
+    assert strategy["status"] == "dead_letter"
+    assert detail["calls"][0]["id"] == "call-u-1"
+    assert detail["calls"][0]["kind"] == "multimodal_llm"
+    assert detail["calls"][0]["stage"] == "episode_extract"
+    assert detail["calls"][0]["status"] == "crashed"
+    assert detail["calls"][0]["error"] == "provider echoed [REDACTED]"
+
+
 def test_configured_provider_keys_are_scrubbed_from_run_and_current_state_errors(
     insight_paths: MemoryInsightPaths,
 ) -> None:
@@ -873,6 +927,7 @@ def test_list_keeps_direct_call_count_when_capture_table_is_malformed(
 
 def test_detail_has_fixed_bounds_omission_counts_and_response_ceiling(
     insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _insert_memcell(insight_paths, "mc_large", ALICE, timestamp_ms=12_000)
     huge = "\\\"" * 20_000
@@ -904,6 +959,16 @@ def test_detail_has_fixed_bounds_omission_counts_and_response_ceiling(
             error=huge,
         )
 
+    statements: list[str] = []
+    original_connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+
     detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_large")
     assert len([step for step in detail["steps"] if "run_id" in step]) == 50
     assert detail["omitted_step_count"] == 5
@@ -916,3 +981,39 @@ def test_detail_has_fixed_bounds_omission_counts_and_response_ceiling(
         assert set(call["request"]) == {"excerpt", "omitted_bytes"}
         assert set(call["response"]) == {"excerpt", "omitted_bytes"}
     assert len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode()) <= 1_000_000
+
+    detail_run_query = next(
+        statement
+        for statement in statements
+        if "COUNT(*) OVER () AS total_count" in statement and "FROM run_record" in statement
+    )
+    detail_call_query = next(
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("WITH")
+        and "COUNT(*) OVER () AS total_count" in statement
+    )
+    capture_query = next(
+        statement
+        for statement in statements
+        if "WITH matched AS MATERIALIZED" in statement
+    )
+    assert "LIMIT 50" in detail_run_query
+    assert "LIMIT 20" in detail_call_query
+    assert "authorized_calls AS" in detail_call_query
+    assert "principal_id =" in capture_query
+
+    with original_connect(insight_paths.call_log_db_path) as conn:
+        conn.execute("ATTACH DATABASE ? AS capture", (str(insight_paths.capture_db_path),))
+        conn.execute("ATTACH DATABASE ? AS ome", (str(insight_paths.ome_db_path),))
+        query_plan = "\n".join(
+            str(row[3]) for row in conn.execute(f"EXPLAIN QUERY PLAN {detail_call_query}")
+        )
+    for index_name in (
+        "provider_call_memcell_id_idx",
+        "provider_call_request_id_idx",
+        "provider_call_run_id_idx",
+        "provider_call_parent_idx",
+    ):
+        assert f"SEARCH pc USING INDEX {index_name}" in query_plan
+    assert "SCAN pc" not in query_plan

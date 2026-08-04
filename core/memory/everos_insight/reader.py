@@ -190,11 +190,14 @@ class MemoryInsightReader:
         if not isinstance(memcell_id, str) or not _ID_RE.fullmatch(memcell_id):
             raise ValueError("invalid memcell id")
 
-        memcells, everos_section = self._read_memcells(
+        row, everos_section = self._read_detail_memcell(
+            principal_id=principal_id,
             project_id=project_id,
             memcell_id=memcell_id,
         )
-        if memcells is None:
+        if row is None:
+            if everos_section["status"] == "available":
+                return {"status": "not_found"}
             return {
                 "status": "not_found",
                 "sections": {
@@ -203,45 +206,25 @@ class MemoryInsightReader:
                     "calls": _source_status(self._paths.call_log_db_path),
                 },
             }
-        row = next(
-            (
-                candidate
-                for candidate in memcells
-                if _memcell_owned_by(candidate, principal_id=principal_id, project_id=project_id)
-            ),
-            None,
+        queues, capture_section = self._read_detail_capture_rows(
+            row,
+            principal_id=principal_id,
+            project_id=project_id,
         )
-        if row is None:
-            return {"status": "not_found"}
-
-        queues, capture_section = self._read_capture_rows()
-        calls, call_section = self._read_call_rows()
-        runs, runs_section = self._read_run_rows()
-        owned_runs = _authorized_runs(
-            runs or [],
+        runs, owned_run_count, runs_section = self._read_detail_runs(
             memcell_id=memcell_id,
             principal_id=principal_id,
             project_id=project_id,
         )
-        owned_calls = _authorized_calls(
-            calls or [],
-            memcell=row,
-            queues=queues or [],
-            runs=owned_runs,
+        calls, owned_call_count, call_section = self._read_detail_calls(
+            row,
             principal_id=principal_id,
             project_id=project_id,
+            capture_available=capture_section["status"] == "available",
+            runs_available=runs_section["status"] == "available",
         )
-        owned_calls.sort(
-            key=lambda item: (
-                _optional_non_negative_int(item["started_at_ms"]) or 0,
-                str(item["id"]),
-            ),
-            reverse=True,
-        )
-        owned_runs.sort(key=lambda item: (_timestamp_ms(item["started_at"]), str(item["run_id"])), reverse=True)
-
-        selected_calls = owned_calls[:_MAX_DETAIL_CALLS]
-        selected_runs = owned_runs[:_MAX_DETAIL_RUNS]
+        selected_calls = calls or []
+        selected_runs = runs or []
         capture = _capture_projection(
             row,
             queues,
@@ -276,8 +259,8 @@ class MemoryInsightReader:
                 )
                 for call in selected_calls
             ],
-            "omitted_call_count": len(owned_calls) - len(selected_calls),
-            "omitted_step_count": len(owned_runs) - len(selected_runs),
+            "omitted_call_count": max(0, owned_call_count - len(selected_calls)),
+            "omitted_step_count": max(0, owned_run_count - len(selected_runs)),
             "current_state": current_state,
             "sections": {
                 "everos": _combine_everos_section(everos_section, runs_section),
@@ -646,70 +629,237 @@ class MemoryInsightReader:
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}
 
-    def _read_memcells(
+    def _read_detail_calls(
         self,
+        memcell: sqlite3.Row,
         *,
+        principal_id: str,
         project_id: str,
-        memcell_id: str | None = None,
-    ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
-        try:
-            with _read_only(self._paths.system_db_path) as conn:
-                sql = (
-                    "SELECT memcell_id, app_id, project_id, message_ids_json, "
-                    "sender_ids_json, payload_json, timestamp FROM memcell"
-                )
-                sql += " WHERE app_id = ? AND project_id = ?"
-                args: tuple[str, ...] = (_APP_ID, project_id)
-                if memcell_id is not None:
-                    sql += " AND memcell_id = ?"
-                    args = (*args, memcell_id)
-                return list(conn.execute(sql, args)), {"status": "available"}
-        except _Unavailable as unavailable:
-            return None, {"status": "unavailable", "reason": unavailable.reason}
-
-    def _read_capture_rows(self) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
-        try:
-            with _read_only(self._paths.capture_db_path) as conn:
-                rows = list(
-                    conn.execute(
-                        "SELECT session_id, principal_id, project_ref, "
-                        "provider_timestamp_ms, state, occurred_at_ms, add_request_id, flush_request_id "
-                        "FROM memory_capture_queue"
-                    )
-                )
-            return rows, {"status": "available"}
-        except _Unavailable as unavailable:
-            return None, {"status": "unavailable", "reason": unavailable.reason}
-
-    def _read_run_rows(self) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
-        try:
-            with _read_only(self._paths.ome_db_path) as conn:
-                rows = list(
-                    conn.execute(
-                        "SELECT run_id, strategy_name, status, attempt, started_at, finished_at, "
-                        "error, event_topic, event_payload FROM run_record"
-                    )
-                )
-            return rows, {"status": "available"}
-        except _Unavailable as unavailable:
-            return None, {"status": "unavailable", "reason": unavailable.reason}
-
-    def _read_call_rows(self) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
+        capture_available: bool,
+        runs_available: bool,
+    ) -> tuple[list[sqlite3.Row] | None, int, dict[str, str]]:
         try:
             with _read_only(self._paths.call_log_db_path) as conn:
-                rows = list(
-                    conn.execute(
-                        "SELECT id, started_at_ms, duration_ms, kind, stage, model, status, "
-                        "error, finish_reason, prompt_tokens, completion_tokens, request_json, "
-                        "response_json, request_bytes, response_bytes, request_id, run_id, "
-                        "memcell_id, app_id, project_id, owner_id, parent_type, parent_id, "
-                        "dropped_before FROM provider_call"
+                if capture_available:
+                    _attach_read_only(conn, self._paths.capture_db_path, "capture")
+                if runs_available:
+                    _attach_read_only(conn, self._paths.ome_db_path, "ome")
+                ctes = [
+                    """
+                    page AS MATERIALIZED (
+                        SELECT :memcell_id AS memcell_id, :message_ids_json AS message_ids_json
                     )
-                )
-            return rows, {"status": "available"}
+                    """
+                ]
+                branches = [
+                    """
+                    SELECT pc.id AS call_id FROM page
+                    CROSS JOIN provider_call AS pc INDEXED BY provider_call_memcell_id_idx
+                    WHERE pc.memcell_id = page.memcell_id
+                    """,
+                    """
+                    SELECT pc.id AS call_id FROM page
+                    CROSS JOIN provider_call AS pc INDEXED BY provider_call_parent_idx
+                    WHERE pc.parent_type = 'memcell' AND pc.parent_id = page.memcell_id
+                      AND pc.stage = 'cascade' AND pc.app_id = :app_id
+                      AND pc.project_id = :project_id AND pc.owner_id = :owner_id
+                    """,
+                ]
+                if capture_available:
+                    capture_links = " UNION ".join(
+                        f"""
+                        SELECT owned_queue.{column} AS request_id
+                        FROM page JOIN capture.memory_capture_queue AS owned_queue
+                          ON owned_queue.principal_id = :owner_id
+                         AND owned_queue.project_ref = :project_id
+                        WHERE typeof(owned_queue.{column}) = 'text' AND owned_queue.{column} != ''
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(page.message_ids_json) AS message_id
+                              WHERE message_id.type = 'text' AND message_id.value =
+                                  'm_' || owned_queue.session_id || '_'
+                                  || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM capture.memory_capture_queue AS any_queue
+                              WHERE (any_queue.add_request_id = owned_queue.{column}
+                                     OR any_queue.flush_request_id = owned_queue.{column})
+                                AND (any_queue.principal_id IS NOT :owner_id
+                                     OR any_queue.project_ref IS NOT :project_id)
+                          )
+                        """
+                        for column in ("add_request_id", "flush_request_id")
+                    )
+                    ctes.append(f"capture_links AS MATERIALIZED ({capture_links})")
+                    branches.append(
+                        """
+                        SELECT pc.id AS call_id FROM capture_links
+                        CROSS JOIN provider_call AS pc INDEXED BY provider_call_request_id_idx
+                        WHERE pc.request_id = capture_links.request_id
+                          AND typeof(pc.request_id) = 'text' AND pc.request_id != ''
+                        """
+                    )
+                if runs_available:
+                    run_scope = """
+                        CASE WHEN json_valid(rr.event_payload) THEN
+                            json_type(rr.event_payload) = 'object'
+                            AND json_type(rr.event_payload, '$.memcell_id') = 'text'
+                            AND json_extract(rr.event_payload, '$.memcell_id') = page.memcell_id
+                            AND json_extract(rr.event_payload, '$.app_id') = :app_id
+                            AND json_extract(rr.event_payload, '$.project_id') = :project_id
+                            AND (json_type(rr.event_payload, '$.owner_id') IS NULL OR
+                                 (json_type(rr.event_payload, '$.owner_id') = 'text' AND
+                                  json_extract(rr.event_payload, '$.owner_id') = :owner_id))
+                        ELSE 0 END
+                    """
+                    ctes.append(
+                        f"""
+                        authorized_runs AS MATERIALIZED (
+                            SELECT rr.run_id,
+                                   CASE WHEN substr(rr.event_topic, -length(':EpisodeExtracted'))
+                                             = ':EpisodeExtracted' COLLATE BINARY
+                                          AND json_type(rr.event_payload, '$.episode_entry_id') = 'text'
+                                        THEN json_extract(rr.event_payload, '$.episode_entry_id') END AS episode_entry_id
+                            FROM ome.run_record AS rr CROSS JOIN page WHERE {run_scope}
+                        )
+                        """
+                    )
+                    branches.extend((
+                        """
+                        SELECT pc.id AS call_id FROM authorized_runs
+                        CROSS JOIN provider_call AS pc INDEXED BY provider_call_run_id_idx
+                        WHERE pc.run_id = authorized_runs.run_id AND typeof(pc.run_id) = 'text'
+                        """,
+                        """
+                        SELECT pc.id AS call_id FROM authorized_runs
+                        CROSS JOIN provider_call AS pc INDEXED BY provider_call_parent_idx
+                        WHERE authorized_runs.episode_entry_id IS NOT NULL
+                          AND pc.parent_type = 'episode' AND pc.parent_id = authorized_runs.episode_entry_id
+                          AND pc.stage = 'cascade' AND pc.app_id = :app_id
+                          AND pc.project_id = :project_id AND pc.owner_id = :owner_id
+                        """,
+                    ))
+                ctes.append(f"authorized_calls AS ({' UNION '.join(branches)})")
+                rows = list(conn.execute(
+                    f"""
+                    WITH {', '.join(ctes)}
+                    SELECT pc.id, pc.started_at_ms, pc.duration_ms, pc.kind, pc.stage, pc.model,
+                           pc.status, pc.error, pc.finish_reason, pc.prompt_tokens,
+                           pc.completion_tokens, pc.request_json, pc.response_json, pc.request_bytes,
+                           pc.response_bytes, pc.request_id, pc.run_id, pc.memcell_id, pc.app_id,
+                           pc.project_id, pc.owner_id, pc.parent_type, pc.parent_id, pc.dropped_before,
+                           COUNT(*) OVER () AS total_count
+                    FROM provider_call AS pc
+                    WHERE pc.id IN (SELECT call_id FROM authorized_calls)
+                    ORDER BY pc.started_at_ms DESC, pc.id DESC LIMIT :limit
+                    """,
+                    {"memcell_id": str(memcell["memcell_id"]),
+                     "message_ids_json": str(memcell["message_ids_json"]), "app_id": _APP_ID,
+                     "project_id": project_id, "owner_id": principal_id, "limit": _MAX_DETAIL_CALLS},
+                ))
+                return rows, int(rows[0]["total_count"]) if rows else 0, {"status": "available"}
+        except _Unavailable as unavailable:
+            return None, 0, {"status": "unavailable", "reason": unavailable.reason}
+
+    def _read_detail_memcell(
+        self, *, principal_id: str, project_id: str, memcell_id: str
+    ) -> tuple[sqlite3.Row | None, dict[str, str]]:
+        try:
+            with _read_only(self._paths.system_db_path) as conn:
+                row = conn.execute(
+                    """
+                    SELECT memcell_id, app_id, project_id, message_ids_json,
+                           sender_ids_json, payload_json, timestamp
+                    FROM memcell
+                    WHERE memcell_id = ? AND app_id = ? AND project_id = ?
+                      AND CASE WHEN json_valid(sender_ids_json) THEN
+                            json_type(sender_ids_json) = 'array'
+                            AND json_array_length(sender_ids_json) = 1
+                            AND json_type(sender_ids_json, '$[0]') = 'text'
+                            AND json_extract(sender_ids_json, '$[0]') = ?
+                          ELSE 0 END
+                    """,
+                    (memcell_id, _APP_ID, project_id, principal_id),
+                ).fetchone()
+                return row, {"status": "available"}
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}
 
+    def _read_detail_capture_rows(
+        self, memcell: sqlite3.Row, *, principal_id: str, project_id: str
+    ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
+        try:
+            with _read_only(self._paths.capture_db_path) as conn:
+                rows = list(conn.execute(
+                    """
+                    WITH matched AS MATERIALIZED (
+                        SELECT session_id, principal_id, project_ref, provider_timestamp_ms,
+                               state, occurred_at_ms, add_request_id, flush_request_id
+                        FROM memory_capture_queue
+                        WHERE principal_id = :owner_id AND project_ref = :project_id
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(:message_ids_json) AS message_id
+                              WHERE message_id.type = 'text' AND message_id.value =
+                                  'm_' || session_id || '_' || CAST(provider_timestamp_ms AS TEXT) || '_000'
+                          )
+                    ), candidate_requests AS MATERIALIZED (
+                        SELECT add_request_id AS request_id FROM matched
+                        WHERE typeof(add_request_id) = 'text' AND add_request_id != ''
+                        UNION
+                        SELECT flush_request_id FROM matched
+                        WHERE typeof(flush_request_id) = 'text' AND flush_request_id != ''
+                    )
+                    SELECT session_id, principal_id, project_ref, provider_timestamp_ms,
+                           state, occurred_at_ms, add_request_id, flush_request_id
+                    FROM memory_capture_queue
+                    WHERE EXISTS (
+                        SELECT 1 FROM candidate_requests
+                        WHERE add_request_id = candidate_requests.request_id
+                           OR flush_request_id = candidate_requests.request_id
+                    )
+                    UNION
+                    SELECT session_id, principal_id, project_ref, provider_timestamp_ms,
+                           state, occurred_at_ms, add_request_id, flush_request_id
+                    FROM matched
+                    """,
+                    {
+                        "owner_id": principal_id,
+                        "project_id": project_id,
+                        "message_ids_json": str(memcell["message_ids_json"]),
+                    },
+                ))
+                return rows, {"status": "available"}
+        except _Unavailable as unavailable:
+            return None, {"status": "unavailable", "reason": unavailable.reason}
+
+    def _read_detail_runs(
+        self, *, memcell_id: str, principal_id: str, project_id: str
+    ) -> tuple[list[sqlite3.Row] | None, int, dict[str, str]]:
+        try:
+            with _read_only(self._paths.ome_db_path) as conn:
+                rows = list(conn.execute(
+                    f"""
+                    SELECT run_id, strategy_name, status, attempt, started_at, finished_at,
+                           error, event_topic, event_payload, COUNT(*) OVER () AS total_count
+                    FROM run_record
+                    WHERE CASE WHEN json_valid(event_payload) THEN
+                        json_type(event_payload) = 'object'
+                        AND json_type(event_payload, '$.memcell_id') = 'text'
+                        AND json_extract(event_payload, '$.memcell_id') = :memcell_id
+                        AND json_extract(event_payload, '$.app_id') = :app_id
+                        AND json_extract(event_payload, '$.project_id') = :project_id
+                        AND (json_type(event_payload, '$.owner_id') IS NULL OR
+                             (json_type(event_payload, '$.owner_id') = 'text' AND
+                              json_extract(event_payload, '$.owner_id') = :owner_id))
+                    ELSE 0 END
+                    ORDER BY {_MEMCELL_TIMESTAMP_SQL.replace('timestamp', 'started_at')} DESC, run_id DESC
+                    LIMIT :limit
+                    """,
+                    {"memcell_id": memcell_id, "app_id": _APP_ID, "project_id": project_id,
+                     "owner_id": principal_id, "limit": _MAX_DETAIL_RUNS},
+                ))
+                return rows, int(rows[0]["total_count"]) if rows else 0, {"status": "available"}
+        except _Unavailable as unavailable:
+            return None, 0, {"status": "unavailable", "reason": unavailable.reason}
 
 @contextmanager
 def _read_only(path: Path) -> Iterator[sqlite3.Connection]:
@@ -884,121 +1034,6 @@ def _related_queue_rows(
     ]
 
 
-def _request_ids_for_scope(
-    memcell: sqlite3.Row,
-    queues: list[sqlite3.Row],
-    *,
-    principal_id: str,
-    project_id: str,
-) -> set[str]:
-    related = _related_queue_rows(
-        memcell,
-        queues,
-        principal_id=principal_id,
-        project_id=project_id,
-    )
-    candidate_ids = {
-        request_id
-        for row in related
-        for request_id in (row["add_request_id"], row["flush_request_id"])
-        if isinstance(request_id, str) and request_id
-    }
-    accepted: set[str] = set()
-    for request_id in candidate_ids:
-        group = [
-            row
-            for row in queues
-            if row["add_request_id"] == request_id or row["flush_request_id"] == request_id
-        ]
-        if group and all(
-            row["principal_id"] == principal_id and row["project_ref"] == project_id for row in group
-        ):
-            accepted.add(request_id)
-    return accepted
-
-
-def _event_payload(row: sqlite3.Row) -> dict[str, Any] | None:
-    value = _decode_json(row["event_payload"])
-    return value if isinstance(value, dict) else None
-
-
-def _authorized_runs(
-    runs: list[sqlite3.Row],
-    *,
-    memcell_id: str,
-    principal_id: str,
-    project_id: str,
-) -> list[sqlite3.Row]:
-    accepted: list[sqlite3.Row] = []
-    for row in runs:
-        event = _event_payload(row)
-        if (
-            event is None
-            or event.get("memcell_id") != memcell_id
-            or event.get("app_id") != _APP_ID
-            or event.get("project_id") != project_id
-        ):
-            continue
-        if "owner_id" in event and event["owner_id"] != principal_id:
-            continue
-        accepted.append(row)
-    return accepted
-
-
-def _episode_entry_ids(runs: list[sqlite3.Row], memcell_id: str) -> set[str]:
-    result: set[str] = set()
-    for row in runs:
-        event = _event_payload(row)
-        topic = row["event_topic"]
-        if (
-            event is not None
-            and event.get("memcell_id") == memcell_id
-            and isinstance(topic, str)
-            and topic.endswith(":EpisodeExtracted")
-            and isinstance(event.get("episode_entry_id"), str)
-        ):
-            result.add(event["episode_entry_id"])
-    return result
-
-
-def _authorized_calls(
-    calls: list[sqlite3.Row],
-    *,
-    memcell: sqlite3.Row,
-    queues: list[sqlite3.Row],
-    runs: list[sqlite3.Row],
-    principal_id: str,
-    project_id: str,
-) -> list[sqlite3.Row]:
-    memcell_id = str(memcell["memcell_id"])
-    request_ids = _request_ids_for_scope(
-        memcell,
-        queues,
-        principal_id=principal_id,
-        project_id=project_id,
-    )
-    run_ids = {str(row["run_id"]) for row in runs}
-    episode_ids = _episode_entry_ids(runs, memcell_id)
-    accepted: list[sqlite3.Row] = []
-    for row in calls:
-        direct = row["memcell_id"] == memcell_id
-        boundary = isinstance(row["request_id"], str) and row["request_id"] in request_ids
-        strategy = isinstance(row["run_id"], str) and row["run_id"] in run_ids
-        exact_cascade_scope = (
-            row["stage"] == "cascade"
-            and row["app_id"] == _APP_ID
-            and row["project_id"] == project_id
-            and row["owner_id"] == principal_id
-        )
-        cascade = exact_cascade_scope and (
-            (row["parent_type"] == "memcell" and row["parent_id"] == memcell_id)
-            or (row["parent_type"] == "episode" and row["parent_id"] in episode_ids)
-        )
-        if direct or boundary or strategy or cascade:
-            accepted.append(row)
-    return accepted
-
-
 def _entry_projection(
     row: sqlite3.Row,
     *,
@@ -1007,7 +1042,7 @@ def _entry_projection(
 ) -> dict[str, Any]:
     return {
         "memcell_id": _bounded_string(
-            _scrub(str(row["memcell_id"]), base_urls, exact_values),
+            _scrub(str(row["memcell_id"]), base_urls, ()),
             _MAX_MEMCELL_ID_BYTES,
         ),
         "timestamp_ms": _memcell_timestamp_ms(row),
@@ -1137,7 +1172,7 @@ def _steps_projection(
             "status": "created",
             "timestamp_ms": _memcell_timestamp_ms(memcell),
             "memcell_id": _bounded_string(
-                _scrub(str(memcell["memcell_id"]), base_urls, exact_values),
+                _scrub(str(memcell["memcell_id"]), base_urls, ()),
                 _MAX_MEMCELL_ID_BYTES,
             ),
         }
@@ -1161,19 +1196,19 @@ def _run_projection(
     exact_values: tuple[str, ...],
 ) -> dict[str, Any]:
     strategy = _bounded_string(
-        _scrub(str(row["strategy_name"]), base_urls, exact_values),
+        _scrub(str(row["strategy_name"]), base_urls, ()),
         128,
     )
     return {
         "type": "strategy",
         "run_id": _bounded_string(
-            _scrub(str(row["run_id"]), base_urls, exact_values),
+            _scrub(str(row["run_id"]), base_urls, ()),
             256,
         ),
         "strategy": strategy,
         "relation": "profile_trigger" if strategy == "extract_user_profile" else "run",
         "status": _bounded_string(
-            _scrub(str(row["status"]), base_urls, exact_values),
+            _scrub(str(row["status"]), base_urls, ()),
             128,
         ),
         "attempt": _optional_non_negative_int(row["attempt"]) or 0,
@@ -1208,17 +1243,17 @@ def _call_projection(
     )
     return {
         "id": _bounded_string(
-            _scrub(str(row["id"]), base_urls, exact_values),
+            _scrub(str(row["id"]), base_urls, ()),
             256,
         ),
         "started_at_ms": _optional_non_negative_int(row["started_at_ms"]) or 0,
         "duration_ms": _optional_non_negative_int(row["duration_ms"]) or 0,
         "kind": _bounded_string(
-            _scrub(str(row["kind"]), base_urls, exact_values),
+            _scrub(str(row["kind"]), base_urls, ()),
             128,
         ),
         "stage": _bounded_string(
-            _scrub(str(row["stage"]), base_urls, exact_values),
+            _scrub(str(row["stage"]), base_urls, ()),
             128,
         ),
         "model": _bounded_optional_string(
@@ -1226,7 +1261,7 @@ def _call_projection(
             1_024,
         ),
         "status": _bounded_string(
-            _scrub(str(row["status"]), base_urls, exact_values),
+            _scrub(str(row["status"]), base_urls, ()),
             128,
         ),
         "error": _bounded_optional_string(

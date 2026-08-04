@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
+from urllib.parse import urlsplit, urlunsplit
 
 JsonPrimitive: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
@@ -97,7 +98,7 @@ _LABELED_SECRET_RE = re.compile(
 )
 _PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:sk|rk|pk|api)-[A-Za-z0-9_-]{8,}")
 _FILE_URL_RE = re.compile(r"(?i)\bfile:///(?:[^\s\"'<>]|\\ )+")
-_POSIX_PATH_RE = re.compile(r"(?<![:/\w])/(?:[^\s\"'<>]|\\ )+")
+_POSIX_PATH_RE = re.compile(r"(?<![:/\w\]])/(?:[^\s\"'<>]|\\ )+")
 _WINDOWS_PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>]+")
 
 
@@ -903,7 +904,17 @@ def _scrub_text(
     for exact_value in exact_values:
         scrubbed = scrubbed.replace(exact_value, _REDACTED)
     for base_url in sorted(base_urls, key=len, reverse=True):
-        scrubbed = scrubbed.replace(base_url, _PROVIDER_BASE_URL)
+        normalized = _normalize_provider_base_url(base_url)
+        if normalized:
+            parts = urlsplit(normalized)
+            if parts.scheme and parts.netloc:
+                pattern = re.compile(
+                    "(?i:" + re.escape(f"{parts.scheme}://{parts.netloc}") + ")"
+                    + re.escape(parts.path),
+                )
+                scrubbed = pattern.sub(_PROVIDER_BASE_URL, scrubbed)
+            else:
+                scrubbed = scrubbed.replace(normalized, _PROVIDER_BASE_URL)
     scrubbed = _AUTHORIZATION_VALUE_RE.sub(lambda match: match.group(1) + _REDACTED, scrubbed)
     scrubbed = _BEARER_RE.sub("Bearer " + _REDACTED, scrubbed)
     scrubbed = _LABELED_SECRET_RE.sub(lambda match: match.group(1) + _REDACTED, scrubbed)
@@ -911,6 +922,17 @@ def _scrub_text(
     scrubbed = _FILE_URL_RE.sub(_LOCAL_PATH, scrubbed)
     scrubbed = _WINDOWS_PATH_RE.sub(_LOCAL_PATH, scrubbed)
     return _POSIX_PATH_RE.sub(_LOCAL_PATH, scrubbed)
+
+
+def _normalize_provider_base_url(value: str) -> str:
+    """Normalize only the case-insensitive provider URL components."""
+    try:
+        parts = urlsplit(value.rstrip("/"))
+    except ValueError:
+        return value.rstrip("/")
+    if not parts.scheme or not parts.netloc:
+        return value.rstrip("/")
+    return urlunsplit((parts.scheme.casefold(), parts.netloc.casefold(), parts.path, "", ""))
 
 
 def _normalized_key(value: str) -> str:

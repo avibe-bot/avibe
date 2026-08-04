@@ -3621,6 +3621,8 @@
         "ok": "Succeeded",
         "success": "Succeeded",
         "failed": "Failed",
+        "deadLetter": "Stopped after retries",
+        "crashed": "Crashed",
         "error": "Error",
         "present": "Present",
         "missing": "Missing",
