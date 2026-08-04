@@ -132,6 +132,13 @@ describe('a session with no project (project_id: null)', () => {
     const onArchived = vi.fn();
     const h = mount(options({ onArchived }));
 
+    // The dialog is closed and bound to nothing until it is asked for — the hook
+    // instance is reused across sessions, so an inherited `open` is the bug class
+    // `archiveRequestIsLive` exists to prevent.
+    const dialog = (h.archiveDialog as ReactElement<ArchiveSessionDialogProps>).props;
+    expect(dialog.open).toBe(false);
+    expect(dialog.sessionId).toBeNull();
+
     await confirmArchive(h);
 
     expect(mocks.archiveSession).toHaveBeenCalledWith(null, 'ses_standalone');

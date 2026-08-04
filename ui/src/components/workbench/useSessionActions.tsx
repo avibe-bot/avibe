@@ -1,5 +1,5 @@
 import type * as React from 'react';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Archive, EyeOff, GitFork, Hash, Pencil, Pin, PinOff } from 'lucide-react';
 
@@ -10,7 +10,7 @@ import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext
 import { useToast } from '../../context/ToastContext';
 import { hideSessionToBackground } from '../../lib/sessionVisibilityActions';
 import type { UnsavedChangesActionAuthorization } from '../../lib/unsavedChangesRegistry';
-import { isSessionReadOnly } from './sessionArchived';
+import { archiveRequestIsLive, isSessionReadOnly } from './sessionArchived';
 import { ArchiveSessionDialog } from './ArchiveSessionDialog';
 import type { SessionActionDescriptor } from './sessionActions';
 
@@ -78,7 +78,10 @@ export const useSessionActions = ({
   const { showToast } = useToast();
   const { forkSession, setSessionPinned, archiveSession } = useWorkbenchProjectsTree();
   const insertTarget = useComposerInsertTarget();
-  const [archiveOpen, setArchiveOpen] = useState(false);
+  // The session an archive request was made FOR, not a bare "open" flag: this hook
+  // instance outlives any one session (ChatPage is reused across ids), so a boolean
+  // would be inherited by the next session — see archiveRequestIsLive.
+  const [archiveRequestId, setArchiveRequestId] = useState<string | null>(null);
   const [pinning, setPinning] = useState(false);
   const [forking, setForking] = useState(false);
   // Refs, not the state above: a second click can land before React re-renders
@@ -91,12 +94,22 @@ export const useSessionActions = ({
   // menu is withdrawn rather than offered as a list of guaranteed failures. Same
   // reasoning showPageControlActions already applies to the Show Page cluster.
   const target = session && !isSessionReadOnly(session) ? session : null;
+  const targetId = target?.id ?? null;
   const ownerProjectId = projectId ?? target?.project_id ?? null;
 
+  // Derived, so a target that moved or went read-only closes the dialog in the SAME
+  // render rather than a frame later.
+  const archiveOpen = archiveRequestIsLive(archiveRequestId, targetId);
+  // ...and forget the request once it is stale, so coming back to that session later
+  // does not resurrect a dialog the user has long since walked away from.
+  useEffect(() => {
+    setArchiveRequestId(null);
+  }, [targetId]);
+
   const requestArchive = useCallback(() => {
-    if (!target) return;
-    setArchiveOpen(true);
-  }, [target]);
+    if (!targetId) return;
+    setArchiveRequestId(targetId);
+  }, [targetId]);
 
   const togglePinned = useCallback(async () => {
     if (!target || pinningRef.current) return;
@@ -232,10 +245,10 @@ export const useSessionActions = ({
 
   const archiveDialog = target ? (
     <ArchiveSessionDialog
-      sessionId={archiveOpen ? target.id : null}
+      sessionId={archiveOpen ? archiveRequestId : null}
       sessionTitle={target.title}
       open={archiveOpen}
-      onOpenChange={setArchiveOpen}
+      onOpenChange={(open) => setArchiveRequestId(open ? targetId : null)}
       onConfirm={async () => {
         await archiveSession(ownerProjectId, target.id);
         onArchived?.();
