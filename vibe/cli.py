@@ -4001,7 +4001,16 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
         else:
-            cwd = task.cwd
+            # Nothing in this edit asks about directories, so each half carries forward
+            # from where that half is stored. For a message task ``task.cwd`` IS the
+            # Session's answer; for a command task it is the command's alone, and
+            # reading it here promoted it into ``metadata["session_workdir"]`` -- so a
+            # plain ``--name`` on a per-run definition that deliberately left its
+            # Sessions unplaced (SCT-047) pinned every future one to the directory
+            # ``task add`` happened to be typed in, and a ``create_once`` definition
+            # that had not reserved yet reserved there. The command half is untouched:
+            # ``_command_definition_spawn_cwd`` falls back to ``stored_cwd`` below.
+            cwd = _stored_session_workdir(task, metadata) if task.has_command else task.cwd
         if not command_only_cwd:
             session_workdir = cwd
             cwd = _command_definition_spawn_cwd(

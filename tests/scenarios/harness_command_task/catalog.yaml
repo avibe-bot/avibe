@@ -527,7 +527,10 @@ scenarios:
     # before. Omitting it keeps SCT-008 intact, which matters because the inherited
     # directory is read live -- ``vibe session update --cwd`` on an unrelated conversation
     # silently relocates every unpinned command, and nothing errors, because every
-    # fallback in the chain is ``isdir``-validated.
+    # fallback in the chain is ``isdir``-validated. The runtime half -- that a stored
+    # ``cwd`` actually beats the live Session read at fire time, or accepting the flag
+    # means nothing -- is
+    # tests/test_scheduled_tasks.py::test_a_stored_cwd_beats_the_bound_sessions_workdir.
   - id: SCT-051
     name: an unrelated edit does not un-pin a command task's working directory
     status: covered
@@ -632,3 +635,18 @@ scenarios:
     # reason. The same branch stops an unrelated edit on a reserved definition from
     # falling through and stamping the command's directory into
     # ``metadata["session_workdir"]`` -- SCT-053's rule in the lane SCT-051 does not cover.
+  - id: SCT-058
+    name: an edit that asks nothing about directories places no Session
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_unrelated_edit_leaves_a_per_run_definitions_sessions_unplaced
+    # SCT-053 fixed the retarget; this is the same conflation in the lane where the edit
+    # asks nothing at all. With no ``--cwd`` and no creation flag the update carries the
+    # stored directory forward from ``task.cwd`` -- the COMMAND's half -- and then writes
+    # it as the Session's, so ``vibe task update --name`` pinned every future per-run
+    # Session to the directory ``task add`` was typed in and undid SCT-047's deliberate
+    # blank. A ``create_once`` definition that had not reserved yet reserved there for the
+    # same reason. Each half now carries forward from where that half is stored, which is
+    # the rule SCT-053, SCT-056 and SCT-057 each enforce in one other lane.

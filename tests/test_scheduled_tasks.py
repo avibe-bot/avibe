@@ -14788,7 +14788,7 @@ def test_the_escalation_prompt_prepends_the_stored_message_and_names_the_run(
 
 
 def test_a_stored_cwd_beats_the_bound_sessions_workdir(tmp_path: Path, monkeypatch) -> None:
-    """An explicit ``--cwd`` has to actually win, or accepting the flag means nothing.
+    """SCT-050 -- an explicit ``--cwd`` has to actually win, or accepting the flag means nothing.
 
     The bound Session's workdir is read LIVE at fire time, by design, so a command with
     no directory of its own follows a Session that moves. That is the behaviour the

@@ -313,4 +313,28 @@ line short.
 - **Scenario IDs were missing from the tests and the PR body.** AGENTS.md:250
   asks for them in both. Added for SCT-050 – SCT-057.
 
-Scenario catalogue: SCT-050 – SCT-057.
+### Third review pass
+
+Three findings, all taken. The first is the same conflation again, in the last
+lane that still read `task.cwd` for the Session's answer.
+
+- **An edit that asks nothing about directories still placed a Session.**
+  `command_only_cwd` covers the lanes where the *flag* arrives; the plain
+  `else: cwd = task.cwd` fall-through was left, and for a command task that value
+  is the command's half. So `vibe task update --name` on a `create_per_run`
+  definition wrote it into `metadata["session_workdir"]` and pinned every future
+  per-run Session to the directory `task add` was typed in — undoing SCT-047's
+  deliberate blank — and a `create_once` definition that had not reserved yet
+  reserved there. Each half now carries forward from where that half is stored.
+  **SCT-058.**
+- **The runtime half of SCT-050 carried no scenario ID.**
+  `test_a_stored_cwd_beats_the_bound_sessions_workdir` is the assertion that the
+  stored `cwd` actually wins at fire time; ID added, and the catalogue entry now
+  names it alongside the CLI test.
+- **`--cwd` was undocumented in the user references.** `docs/CLI.md` and
+  `docs/CLI_ZH.md` list the command-task flags and explain what `vibe task update`
+  may change; both now include `--cwd`, with a paragraph on what it means on a
+  command task versus a message task. (`docs/COMMANDS*.md` covers IM slash
+  commands, not the `vibe` CLI, so nothing there applies.)
+
+Scenario catalogue: SCT-050 – SCT-058.

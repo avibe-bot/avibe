@@ -1752,6 +1752,57 @@ def test_task_update_keeps_a_command_tasks_cwd_through_an_unrelated_edit(
     )
 
 
+def test_task_update_unrelated_edit_leaves_a_per_run_definitions_sessions_unplaced(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-058 -- an edit that asks nothing about directories must place no Session.
+
+    SCT-053 covers the retarget; this is the same conflation in the lane where nothing
+    is asked at all. With no ``--cwd`` and no creation flag the update carries the
+    stored directory forward from ``task.cwd``, which for a command task is the
+    COMMAND's -- so a plain ``--name`` wrote it into ``metadata["session_workdir"]``
+    and every future per-run Session was pinned to the directory ``task add`` happened
+    to be typed in, undoing SCT-047's deliberate blank. Each half now carries forward
+    from where that half is stored.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    described_in = tmp_path / "described-in"
+    described_in.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="",
+        session_policy="create_per_run",
+        agent_name="codex",
+        # What SCT-047 stores for a per-run command created without ``--cwd``: the
+        # command has a directory, the Sessions deliberately do not.
+        cwd=str(described_in),
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--name", "renamed"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["name"] == "renamed"
+    assert definition["cwd"] == str(described_in), (
+        "the rename moved the command: " f"{definition['cwd']!r}"
+    )
+    assert "session_workdir" not in (definition["metadata"] or {}), (
+        "a rename pinned every future per-run Session to the command's directory, so "
+        "the escalation turn stopped inheriting from its Scope"
+    )
+
+
 def test_task_update_retarget_does_not_promote_a_command_cwd_onto_a_new_session(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
