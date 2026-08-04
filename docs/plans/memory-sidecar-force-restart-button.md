@@ -1,6 +1,6 @@
-# Add a forced sidecar restart action to Memory settings (rev16)
+# Add a forced sidecar restart action to Memory settings (rev17)
 
-> Rev16 keeps one public recovery action and a focused set of internal fixes:
+> Rev17 keeps one public recovery action and a focused set of internal fixes:
 > replayable configuration, config-wide write serialization, restart-specific
 > and lifecycle-intent admission, generation-fenced ready activation, complete
 > supervisor quiescing, bounded orphan recovery, disk/live replay convergence,
@@ -8,8 +8,9 @@
 > locked clear-marker recovery, bounded readiness, supervisor callback rebinding,
 > authoritative controller/UI settings refresh, queued-operation exclusion, and
 > disabled/fail-closed replay handling, explicit worker activation, post-lock
-> retained-owner admission, root/installer task retention, and disabled recovery
-> projection alongside processing-probe/module-store ownership.
+> retained-owner admission, complete root/installer/probe ownership, lifecycle
+> abort reactivation, store-unavailable retry, shutdown joining, and disabled
+> recovery projection alongside processing-probe/module-store ownership.
 > Timed-out work remains owned until it is either joined or proven unable to
 > mutate state. It does not add a lifecycle coordinator, explicit state machine,
 > provider/store port, or frontend DOM test framework.
@@ -301,6 +302,13 @@ an abandoned restart, and a user retry can enqueue a second one.
   held, return
   `{ok: false, error: 'memory_restart_busy'}` without changing the process,
   claims, or worker.
+- Order that admission so Runtime-only counters and locks are checked before any
+  module member is read. If the store is unavailable and no conflicting Runtime
+  intent owns admission, synchronously retry `_open_store()` before accessing
+  `module.lifecycle_busy` or `module._lifecycle_lock`; a second failed open returns
+  `memory_store_unavailable` without process/config mutation. This preserves the
+  existing transient-store recovery behavior and never treats
+  `_UnavailableMemoryModule` as a full lifecycle module.
 - Add a narrow `_retained_ownership_active` gate to `MemoryRuntime`. Any worker,
   worker/module store task, processing probe, supervisor start, watcher/monitor,
   or process cleanup owner that outlives its bound sets this gate synchronously
@@ -370,18 +378,28 @@ an abandoned restart, and a user retry can enqueue a second one.
   exact task still outlives that bound, retain it and set the cross-lifecycle gate
   before releasing locks. Include module-store settlement as its own restart
   deadline component.
-- Give the bare root verification and recreation `to_thread()` calls in
-  `_clear_provider_data_or_fail()` explicit shielded task records keyed by the
-  provider root. Keep them distinct from `_ROOT_CLEANUP_TASKS`, which owns the
-  provider cleanup callback. Clear and interrupted-clear recovery consume or
-  retain the exact verification/recreation tasks; restart settles all three root
-  owner classes under the root cleanup allowance. If any task outlives the bound,
-  set the cross-lifecycle gate before releasing locks and prevent a retry from
-  resolving or launching EverOS until that exact filesystem task terminates.
+- Give every root verification or mutation reached through `to_thread()` an
+  explicit shielded task record keyed by provider root. This includes Clear and
+  interrupted-clear verification/recreation plus artifact activation's format
+  rewrite, rollback sentinel restore, and post-restore verification. Keep these
+  records distinct from `_ROOT_CLEANUP_TASKS`, which owns the provider cleanup
+  callback. Clear, recovery, activation, and rollback consume or retain their
+  exact tasks; restart settles every root owner under the root cleanup allowance.
+  If any task outlives the bound or cancellation recurs during rollback, set the
+  cross-lifecycle gate before releasing locks and prevent reconcile, rollback,
+  or restart from touching root metadata or launching EverOS until that exact
+  filesystem task terminates.
 - Bound settlement of processing-probe trees separately. Cancelling the drain
   task can make it terminal while probe termination is still incomplete; every
   retained probe owner must prove its process tree reaped before lease rotation
   or sidecar replacement.
+- Register each throwaway supervisor created by `_probe_processing()` in a
+  Runtime-owned preflight-probe registry before invoking `processing_healthy()`.
+  Remove it only after its supervisor probe registry proves the credential-bearing
+  tree fully reaped. Reconcile cancellation/failure transfers the exact temporary
+  supervisor to retained ownership and sets the cross-lifecycle gate if bounded
+  settlement cannot finish; restart and close settle both the supervised child
+  and every Runtime-level preflight supervisor before releasing lifecycle state.
 - Bound settlement of any automatic supervisor restart already in progress by
   the same all-inclusive process-start budget. The client deadline includes this
   predecessor explicitly. A generation fence, described below, prevents its
@@ -504,20 +522,22 @@ The locked sequence is fixed:
    bound, retain the task reference, keep claims fenced, and enter the
    fail-closed state below; do not rotate the lease or touch the process.
 6. After the exact drain task is terminal, call `settle_store_calls()` on both
-   `MemoryWorker` and `MemoryModule` under their distinct bounds. If any shielded
-   store thread remains live, retain its registry entry, the old lease, and every
-   existing process reference; set the retained-ownership gate, keep claims
-   fenced, and return fail-closed. A retry rejoins the same store task before it
-   can proceed.
-7. Ask the old supervisor to settle every retained processing-probe tree under
-   the probe-settlement bound. `processing_healthy()` registers the exact probe,
+   `MemoryWorker` and `MemoryModule` under their distinct bounds, then settle the
+   module's root verification/mutation registry under the root cleanup allowance.
+   If any shielded store or root thread remains live, retain its registry entry,
+   the old lease, and every existing process reference; set the retained-ownership
+   gate, keep claims fenced, and return fail-closed. A retry rejoins the same task
+   before it can proceed.
+7. Ask the old supervisor and every Runtime-retained throwaway preflight
+   supervisor to settle their processing-probe trees under the probe-settlement
+   bound. `processing_healthy()` registers the exact probe,
    process group, and owned-process snapshot immediately after spawn returns and
    before awaiting probe completion; any cleanup task is recorded before its
    first cleanup await. It removes that record only after complete reap.
    Cancellation or failed cleanup keeps the record on the supervisor. If
-   settlement cannot prove every tree reaped, retain those records and the old
-   supervisor, keep claims fenced, and return fail-closed. A retry settles the
-   same owners first.
+   settlement cannot prove every tree reaped, retain those records and their
+   supervisor objects, keep claims fenced, and return fail-closed. A retry
+   settles the same owners first.
 8. Rotate the lease owner only after the supervisor, process owners, drain task,
    store-task registry, and probe registry are all confirmed quiescent, and
    before any new activation.
@@ -574,6 +594,18 @@ without resuming claims or creating a worker. Current-generation activation
 failures set the visible runtime error and leave claims fenced; task completion
 is consumed and the task is retained/cancelled during later lifecycle cleanup
 rather than becoming an unobserved exception.
+
+Generation invalidation also has an abort compensation. If a lifecycle operation
+returns before committing to a replacement/disable/Clear state and leaves the
+same enabled supervisor current and ready, it must not merely discard the queued
+old-generation callback. While still owning both lifecycle locks, verify that no
+retained owner or newer operation superseded that supervisor, rebind it to the
+current generation, and directly run the same locked activation handshake before
+releasing claims. This path is required for failed persisted reconcile preflight
+and equivalent early aborts. If the supervisor is no longer ready/current, or
+reactivation fails, keep claims fenced and expose the specific runtime error; do
+not resume from `running` alone. Operations that committed disable, Clear, root
+mutation, or replacement ownership never restore the prior activation.
 
 `restart()` does not call `_probe_processing`. The conditional embedding/root
 guard protects persistent vector-space compatibility; it is not a processing
@@ -666,6 +698,19 @@ retain the supervisor reference and keep claims fenced. The same shielded cleanu
 retains incomplete processing-probe owners rather than dropping their local
 references when cancellation is re-raised.
 
+Shutdown is an ownership handoff, not the generic five-second best-effort close.
+Runtime records the exact task executing explicit restart. `close()` first fences
+new lifecycle admission, cancels and joins that task through its shielded cleanup,
+then acquires the lifecycle locks and settles worker/module stores, every root
+task, Runtime preflight supervisors, automatic activation, process owners, and
+the final child stop. Expose a Memory-specific complete shutdown allowance equal
+to the advertised restart-cancellation and owner-cleanup components plus a small
+scheduling margin. `Controller.cleanup_sync()` passes that allowance to a
+timeout-parameterized loop helper instead of the fixed five seconds. Expiry is
+not success: the controller keeps the Memory close future and event loop alive
+until its terminal ownership result is observed, rather than abandoning it and
+continuing loop teardown beside a non-cancellable thread or live sidecar.
+
 `start()` returning `False` keeps the specific
 `memory_sidecar_unavailable`. Stop, factory, and other restart orchestration
 exceptions use the transport-only `memory_restart_failed`.
@@ -696,8 +741,9 @@ exceptions use the transport-only `memory_restart_failed`.
 2. `core/memory/runtime.py`: add `_restart_config`,
    `_persisted_memory_snapshot`, `_explicit_restart_active`,
    `_clear_pending_count`, `_reconcile_pending_count`,
-   `_retained_ownership_active`, a retained artifact-install task, lifecycle
-   generation and a retained ready activation task, and fail-fast `restart()`;
+   `_retained_ownership_active`, a retained artifact-install task, a Runtime
+   preflight-supervisor registry, lifecycle generation, the active explicit
+   restart task, and a retained ready activation task, and fail-fast `restart()`;
    recheck retained ownership under acquired lifecycle locks; refresh the
    persisted snapshot after every successful runtime-owned V2 mutation and
    rebase a successfully reconciled
@@ -708,7 +754,10 @@ exceptions use the transport-only `memory_restart_failed`.
    restart admission fail fast. Make `restart()` return its transport
    result plus the exact applied replay config whenever convergence committed,
    including later lifecycle failure, and no config before convergence or on
-   busy. Project `restart_recovery_required` in restart/status results while a
+   busy. Retry unavailable-store creation before module admission; compensate
+   failed lifecycle generation invalidation by activating an unchanged current
+   ready supervisor under both locks. Project `restart_recovery_required` in
+   restart/status results while a
    disabled replay still owns failed cleanup. Add `reconcile_persisted()` to
    return the exact
    successful candidate alongside the transport result while ordinary
@@ -720,8 +769,9 @@ exceptions use the transport-only `memory_restart_failed`.
    wrapper and existing queued lifecycle-lock behavior for read/Clear paths. Add
    the synchronous lifecycle-intent scope and `lifecycle_busy` property covering
    active and queued search, profile, Clear, and recovery operations. Shield and
-   retain explicit module store tasks plus root verification/recreation tasks and
-   expose their bounded settlement. A narrow Runtime-supplied admission predicate
+   retain explicit module store tasks plus every Clear/recovery/artifact root
+   verification or mutation task and expose their bounded settlement. A narrow
+   Runtime-supplied admission predicate
    prevents search/profile recovery and Clear from entering while retained
    ownership is fenced and is rechecked after a queued caller acquires the module
    lifecycle lock.
@@ -743,7 +793,9 @@ exceptions use the transport-only `memory_restart_failed`.
    into `Controller.config.memory`, then expose only the transport response with
    its `config_committed` flag. Missing runtime returns
    `memory_runtime_missing`; unhandled exceptions map to `memory_restart_failed`,
-   not `memory_reconcile_failed`.
+   not `memory_reconcile_failed`. Make synchronous cleanup accept a per-resource
+   allowance; Memory cancels/joins active restart ownership and receives its full
+   Runtime-exported shutdown allowance rather than the generic five seconds.
 7. `vibe/internal_client.py`: add `memory_restart()` with a deadline above the
    complete restart lifecycle budget; retain and join the shielded request task
    after a reporting timeout.
@@ -824,6 +876,10 @@ exceptions use the transport-only `memory_restart_failed`.
     task record, `_artifact_installing`, and reconcile intent remain owned;
     restart stays busy until the exact thread ends, after which cancellation is
     re-raised and all three ownership signals clear.
+    With a startup store-open failure, restart retries `_open_store()` before
+    reading module lifecycle state: a recovered store proceeds normally, while a
+    second failure returns `memory_store_unavailable` without touching the
+    unavailable module adapter, process, or config.
     Hold one search/profile request in the module lock and queue a second; across
     the owner's release/waiter-wakeup gap, `lifecycle_busy` remains true and
     restart returns busy without joining the read queue. After both reads finish,
@@ -860,17 +916,23 @@ exceptions use the transport-only `memory_restart_failed`.
     registered. Restart retains the old lease and process without running
     recovery; after the thread is released, retry joins it and only then rotates
     and recovers.
-  - Block the actual root verification and recreation `to_thread()` calls during
-    Clear and interrupted-clear recovery. Cancellation or reporting timeout must
-    leave the exact root task registered and the retained-owner gate set; restart
-    retry cannot resolve an artifact or launch a child until that thread exits
-    and the root-task registry is consumed. Cover the cleanup callback registry
-    in the same settlement assertion without conflating the three owners.
+  - Block the actual root verification/recreation `to_thread()` calls during
+    Clear and interrupted-clear recovery, then separately block artifact format
+    rewrite and rollback sentinel restore/verification. Cancellation or reporting
+    timeout must leave each exact root task registered and the retained-owner gate
+    set; restart/reconcile cannot touch root metadata, resolve an artifact, or
+    launch a child until that thread exits and the root-task registry is consumed.
+    Cover the cleanup callback registry in the same settlement assertion without
+    conflating the owner classes.
   - Cancel a drain task inside a real supervised processing probe and make its
     first termination round fail. The terminal worker task is insufficient for
     restart admission: the exact probe-tree record remains on the supervisor,
     claims and lease stay fenced, and no process replacement occurs. A retry
     reaps that same record before continuing.
+    Also cancel persisted reconcile inside `_probe_processing()` and fail the
+    throwaway supervisor's first termination round. Runtime must retain that exact
+    supervisor in its preflight registry, set cross-lifecycle admission, and make
+    restart/close settle it before any root, lease, or child action.
   - Timeout interrupted-clear recovery while `MemoryModule._store_call()` owns a
     blocked `get_meta`, `begin_clear`, `finish_clear`, or failure-recording
     thread. Cancellation leaves the exact task shielded and registered, keeps
@@ -893,6 +955,11 @@ exceptions use the transport-only `memory_restart_failed`.
     lifecycle generation and exits without resuming claims or replacing the
     worker. The equivalent no-intervening-lifecycle case activates only after
     taking both locks.
+    If persisted reconcile then aborts before committing replacement ownership,
+    such as on processing preflight failure, and the same supervisor is current
+    and ready, its abort compensation rebinds current generation and completes
+    locked worker activation before releasing claims. A stale callback alone
+    cannot strand draining; a changed/unready supervisor remains fenced.
   - The old watcher or safety monitor enters child-tree cleanup immediately
     before restart. Handoff joins that exact owner under the process-owner bound
     before calling `stop()`; timeout stays fail-closed, and the successful case
@@ -939,11 +1006,18 @@ exceptions use the transport-only `memory_restart_failed`.
 - `tests/test_internal_client.py` / `tests/test_internal_client_timeouts.py`:
   POST and busy response passthrough; deadline computed from both clear phases,
   automatic-supervisor start settlement, watcher/monitor owner settlement,
-  worker, store-task, and processing-probe bounds, a distinct old stop retry, the
+  worker, store/root-task, and supervised plus preflight processing-probe bounds,
+  a distinct old stop retry, the
   outer all-round orphan-reap cap, readiness, failed-start cleanup, explicit
   worker activation, and a separate complete replacement-activation cleanup
   allowance. On reporting timeout or caller cancellation, the retained request
   is joined before its caller can release transaction ownership.
+- Controller cleanup tests: start explicit restart inside retained store/root or
+  preflight cleanup, call `cleanup_sync()`, and prove it cancels and joins the
+  exact restart plus Runtime ownership before loop teardown. The Memory close
+  uses the exported complete shutdown allowance rather than five seconds; an
+  allowance expiry keeps the future/loop owned until terminal instead of silently
+  continuing shutdown.
 - `tests/test_ui_memory_routes.py`: new client path, internal unavailable,
   cross-origin rejection, restart/settings serialization, timed-out settlement
   ownership, unrelated-field retention, and failed-Memory-C1 convergence to C0.
@@ -974,7 +1048,8 @@ exceptions use the transport-only `memory_restart_failed`.
 - `tests/test_memory_module.py`: clear/recovery store calls use explicit shielded
   tasks; timeout and caller cancellation retain each SQLite-writing task through
   terminal result, and settlement reports quiescence only when the registry is
-  empty.
+  empty. Root task coverage includes Clear/recovery verification/recreation and
+  artifact activation/rollback metadata writes.
 - `tests/test_memory_process.py`: stale recorded leader plus late helper and
   multiple unusable-record anchors share one outer reap deadline. Timeout keeps
   the record and prevents child launch. Idle watcher/monitor tasks cancel and
@@ -1042,12 +1117,14 @@ settlement propagates the same exact block into controller shared config;
 explicit restart cannot queue behind or leapfrog any active or queued module
 lifecycle operation, while reads and destructive Clear retain their existing
 serialization and recheck retained ownership after acquiring their locks;
-artifact installation and root verification/recreation threads remain explicitly
-owned through cancellation; artifact installation excludes launch; orphan
+artifact installation and every root metadata thread remain explicitly owned
+through cancellation; unavailable-store retry precedes module admission;
+artifact installation excludes launch; orphan
 recovery has one complete cap; every active process lifecycle
 owner is settled and budgeted before stop; readiness, including the final health
 request, has one hard cap; delayed automatic activation and re-armed supervision
-are bound to the current lifecycle generation and both runtime locks; pending
+are bound to the current lifecycle generation and both runtime locks, with locked
+abort compensation for an unchanged ready supervisor; pending
 embeddings cannot bypass the root guard or remain in a successful replay
 snapshot; claimed rows require a new lease only after the old worker and every
 shielded worker/module store thread exit; activation success is observable and
@@ -1055,7 +1132,9 @@ its shared future is shielded from reporting timeout; post-convergence failure
 still propagates the committed block to Controller and UI; retained ownership
 excludes every other mutating lifecycle; replacement cleanup fences supervision
 before awaiting; disabled retained cleanup keeps its explicit recovery action;
-and clear markers serialize with root/child lifecycle. The
+Runtime retains throwaway preflight supervisors; shutdown joins active restart
+ownership beyond the generic five-second close; and clear markers serialize with
+root/child lifecycle. The
 implementation adds two private snapshots, focused intent counters, one narrow
 retained-owner gate, focused helpers, and two precise transport-only error codes
 while reusing existing locks, guards, recovery SQL, supervision, and UI
@@ -1078,18 +1157,22 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] Retained worker cancellation fail-closed state and retry
 - [ ] Shielded store-thread registry, bounded settlement, and retry
 - [ ] Module clear/recovery store-task retention and cross-lifecycle owner gate
-- [ ] Root verification/recreation task retention and retry settlement
+- [ ] Clear/recovery/activation root-task retention and retry settlement
 - [ ] Locked clear recovery and race regression
 - [ ] Restart/Clear intent admission, queued-Clear handoff, artifact admission
 - [ ] Queued read intent admission and waiter-handoff regression
 - [ ] Under-lock retained-owner recheck for every queued lifecycle operation
 - [ ] Cancelled artifact installer ownership and restart exclusion
+- [ ] Unavailable-store restart bootstrap before module admission
+- [ ] Runtime-owned preflight-probe supervisors and cancellation settlement
 - [ ] Supervisor handoff/rebind, lifecycle-owner settlement, readiness/deadline contract
 - [ ] Lifecycle-generation ready activation and Clear/reconcile race regression
+- [ ] Lifecycle-abort compensation for unchanged ready supervisor activation
 - [ ] Complete orphan/start budgets, explicit activation, failed-start cleanup
 - [ ] Shielded activation handshake and fenced replacement-activation cleanup
 - [ ] Internal server/client, closed/busy errors, bounded timeout tests
 - [ ] UI route and response normalizer
 - [ ] Page action, deduplicated banner, success/failure settings reload, toast/i18n
 - [ ] Disabled retained-cleanup recovery projection and persistent retry action
+- [ ] Memory-specific shutdown allowance and active-restart ownership join
 - [ ] Focused Python/TypeScript validation and Incus `SIGSTOP` scenario
