@@ -42,6 +42,14 @@ from vibe.i18n import t as i18n_t
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETRY_EXIT_CODE = 75
+# A waiter that ran to completion and decided the cycle is not worth waking the
+# Agent for. It is neither an event (exit 0, which authorises a hook) nor a
+# failure (any other non-zero, which authorises a failure hook): the cycle is
+# recorded, no hook is built, and the watch ends or re-arms quietly. Without it
+# every terminal outcome costs an Agent turn, so waiters that can only report
+# "nothing happened" -- green CI, filtered-out review chatter -- had to either
+# fire a useless turn or spin in forever mode.
+NO_EVENT_EXIT_CODE = 64
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
@@ -1378,6 +1386,24 @@ class ManagedWatchService:
                     return
                 if watch.mode != "forever":
                     return
+                continue
+
+            if result.exit_code == NO_EVENT_EXIT_CODE:
+                # No prompt, prefix or body: ``_hook_request`` returns None, so this
+                # commits the cycle WITHOUT authorising a hook. The stamp still lands,
+                # so ``vibe watch show`` can say the cycle ran and found nothing.
+                if not self._commit_cycle_result(
+                    watch,
+                    exit_code=NO_EVENT_EXIT_CODE,
+                    error=None,
+                    disable=watch.mode == "once",
+                ):
+                    return
+                if watch.mode != "forever":
+                    return
+                # The waiter decides its own polling cadence; the retry delay only
+                # keeps a waiter that returns immediately from spinning the cycle loop.
+                await asyncio.sleep(watch.retry_delay_seconds)
                 continue
 
             if result.timed_out or result.exit_code == 124:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -33,6 +34,16 @@ from _github_wait_common import (  # noqa: E402
 
 CODEX_REVIEW_PASS_REACTION_USER = "chatgpt-codex-connector[bot]"
 CODEX_REVIEW_PASS_REACTION_CONTENT = "+1"
+
+# Comments that only drive the review loop rather than report its result. On a
+# busy PR these outnumber the real findings, and each one costs a full Agent turn.
+DEFAULT_NOISE_COMMENT_PATTERNS = (
+    r"^@[\w\[\]-]+\s+(review|fix|rebase|merge)\b",
+    r"^/[\w-]+\s*$",
+)
+# Lifecycle transitions worth interrupting for. Draft toggles are usually the
+# Agent's own doing, so they are noise in --actionable-only mode.
+ACTIONABLE_PR_STATUSES = frozenset({"merged", "closed"})
 
 
 def _format_review(review: dict[str, Any]) -> str:
@@ -66,6 +77,55 @@ def _is_self_authored_comment(comment: dict[str, Any], viewer_login: str | None)
         return False
     author = ((comment.get("user") or {}).get("login")) or ""
     return str(author).casefold() == viewer_login.casefold()
+
+
+def _compile_ignore_patterns(values: list[str] | None, *, actionable_only: bool) -> list[re.Pattern[str]]:
+    patterns = list(DEFAULT_NOISE_COMMENT_PATTERNS) if actionable_only else []
+    patterns.extend(values or [])
+    return [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
+
+
+def _normalize_authors(values: list[str] | None) -> set[str]:
+    return {value.strip().casefold() for value in (values or []) if value.strip()}
+
+
+def _is_ignored_author(item: dict[str, Any], ignored_authors: set[str]) -> bool:
+    if not ignored_authors:
+        return False
+    author = ((item.get("user") or {}).get("login")) or ""
+    return str(author).casefold() in ignored_authors
+
+
+def _matches_ignored_pattern(item: dict[str, Any], patterns: list[re.Pattern[str]]) -> bool:
+    if not patterns:
+        return False
+    text = squash(item.get("body"), limit=1000)
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in patterns)
+
+
+def _is_actionable_review(review: dict[str, Any]) -> bool:
+    """A review carries a verdict, or a body worth reading.
+
+    A bodyless ``COMMENTED`` review is the envelope GitHub wraps around inline
+    comments; those comments are reported on their own, so the envelope adds a
+    turn and no information.
+    """
+
+    state = str(review.get("state") or "").lower()
+    if state in {"changes_requested", "approved", "dismissed"}:
+        return True
+    return bool(squash(review.get("body")))
+
+
+def _keep_item(
+    item: dict[str, Any],
+    *,
+    ignored_authors: set[str],
+    ignore_patterns: list[re.Pattern[str]],
+) -> bool:
+    return not _is_ignored_author(item, ignored_authors) and not _matches_ignored_pattern(item, ignore_patterns)
 
 
 def _is_codex_pass_reaction(reaction: dict[str, Any]) -> bool:
@@ -197,26 +257,34 @@ def _render_activity(
     event_limit: int,
     viewer_login: str | None = None,
     ignore_self_comments: bool = True,
+    actionable_only: bool = False,
+    ignored_authors: set[str] | None = None,
+    ignore_patterns: list[re.Pattern[str]] | None = None,
 ) -> tuple[str | None, int, int, int, int, str]:
+    ignored_authors = ignored_authors or set()
+    ignore_patterns = ignore_patterns or []
     current_pr_status = _current_pr_status(state.get("pull_request"))
     new_reviews = filter_new(state["reviews"], review_cursor)
     new_review_comments = filter_new(state["review_comments"], review_comment_cursor)
     new_issue_comments = filter_new(state["issue_comments"], issue_comment_cursor)
-    visible_reviews = (
-        [review for review in new_reviews if not _is_self_authored_comment(review, viewer_login)]
-        if ignore_self_comments
-        else new_reviews
-    )
-    visible_review_comments = (
-        [comment for comment in new_review_comments if not _is_self_authored_comment(comment, viewer_login)]
-        if ignore_self_comments
-        else new_review_comments
-    )
-    visible_issue_comments = (
-        [comment for comment in new_issue_comments if not _is_self_authored_comment(comment, viewer_login)]
-        if ignore_self_comments
-        else new_issue_comments
-    )
+
+    def _visible(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Cursors advance over everything new; only the rendering is filtered, so a
+        # dropped item is dropped once and never re-examined on the next poll.
+        kept = items if not ignore_self_comments else [
+            item for item in items if not _is_self_authored_comment(item, viewer_login)
+        ]
+        return [
+            item
+            for item in kept
+            if _keep_item(item, ignored_authors=ignored_authors, ignore_patterns=ignore_patterns)
+        ]
+
+    visible_reviews = _visible(new_reviews)
+    if actionable_only:
+        visible_reviews = [review for review in visible_reviews if _is_actionable_review(review)]
+    visible_review_comments = _visible(new_review_comments)
+    visible_issue_comments = _visible(new_issue_comments)
     new_reactions = [
         reaction
         for reaction in filter_new(state["reactions"], reaction_cursor)
@@ -233,8 +301,12 @@ def _render_activity(
     next_reaction_cursor = max(reaction_cursor, max_id(state["reactions"]))
     next_pr_status = current_pr_status
 
+    render_pr_status_event = has_pr_status_event and (
+        not actionable_only or current_pr_status in ACTIONABLE_PR_STATUSES
+    )
+
     rendered_events: list[str] = []
-    if has_pr_status_event and isinstance(state.get("pull_request"), dict):
+    if render_pr_status_event and isinstance(state.get("pull_request"), dict):
         rendered_events.append(_format_pr_status_event(state["pull_request"], pr_status, current_pr_status))
     rendered_events.extend(_format_review(review) for review in visible_reviews)
     rendered_events.extend(_format_review_comment(comment) for comment in visible_review_comments)
@@ -355,6 +427,26 @@ def main() -> int:
         help="Include reviews and comments authored by the current authenticated GitHub user",
     )
     parser.add_argument(
+        "--actionable-only",
+        action="store_true",
+        help=(
+            "Only wake the Agent for review activity that needs a response: reviews carrying a "
+            "verdict or a body, inline review comments, the Codex pass reaction, and merged/closed "
+            "transitions. Drops bodyless COMMENTED review envelopes, bot trigger comments such as "
+            "'@codex review', and draft toggles."
+        ),
+    )
+    parser.add_argument(
+        "--ignore-author",
+        action="append",
+        help="GitHub login whose reviews and comments never trigger a follow-up; repeatable",
+    )
+    parser.add_argument(
+        "--ignore-comment-pattern",
+        action="append",
+        help="Case-insensitive regex; matching review/comment bodies never trigger a follow-up. Repeatable",
+    )
+    parser.add_argument(
         "--catch-up",
         action="store_true",
         help="Treat current existing activity as pending when no explicit cursor is provided",
@@ -368,6 +460,15 @@ def main() -> int:
 
     token = get_token()
     viewer_login = None if args.include_self_comments else get_authenticated_login(token)
+    ignored_authors = _normalize_authors(args.ignore_author)
+    try:
+        ignore_patterns = _compile_ignore_patterns(
+            args.ignore_comment_pattern,
+            actionable_only=args.actionable_only,
+        )
+    except re.error as err:
+        print(f"Invalid --ignore-comment-pattern: {err}", file=sys.stderr)
+        return 2
     if token is None and not args.allow_unauthenticated:
         print(
             (
@@ -483,6 +584,9 @@ def main() -> int:
             event_limit=args.event_limit,
             viewer_login=viewer_login,
             ignore_self_comments=not args.include_self_comments,
+            actionable_only=args.actionable_only,
+            ignored_authors=ignored_authors,
+            ignore_patterns=ignore_patterns,
         )
         if initial_output is not None:
             _write_cursor_output(
@@ -585,6 +689,9 @@ def main() -> int:
                 event_limit=args.event_limit,
                 viewer_login=viewer_login,
                 ignore_self_comments=not args.include_self_comments,
+                actionable_only=args.actionable_only,
+                ignored_authors=ignored_authors,
+                ignore_patterns=ignore_patterns,
             )
             if output is None:
                 continue

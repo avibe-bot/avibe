@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.8.0
+version: 0.9.0
 ---
 
 # Background Watch Hook
@@ -83,8 +83,13 @@ Management commands:
 Write waiters to follow this contract:
 
 - `exit 0`: event detected; final summary printed to `stdout`
+- `exit 64`: cycle completed with nothing worth reporting; **no follow-up Agent Run**, the watch ends (`once`) or re-arms (`--forever`)
 - `exit 124`: timeout; still send a timeout follow-up
-- other non-zero: failure; no follow-up
+- other non-zero: failure; the watch stops and sends a failure follow-up
+
+Exit 64 is the token-saving path. Every other terminal exit costs one Agent turn,
+so a waiter whose normal outcome is uninteresting — green CI, review chatter that
+was filtered out — should end on 64 rather than reporting "nothing to do".
 
 Keep the output split clean:
 
@@ -162,7 +167,7 @@ This skill ships bundled GitHub waiters:
 
 Use bundled waiters as examples or as ready-to-run building blocks. The main skill is still `vibe watch`; the waiter is only the thing that blocks until the condition is met.
 When running a bundled script through `uv`, prefer `uv run --no-project ...` so the script does not accidentally attach itself to an unrelated parent project.
-Bundled GitHub waiters use exit code `75` for retryable startup errors such as temporary network failures or GitHub `408/429/5xx` responses.
+Bundled GitHub waiters use exit code `75` for retryable startup errors such as temporary network failures or GitHub `408/429/5xx` responses, and exit code `64` when a cycle finished with nothing worth an Agent turn.
 
 ## GitHub Example Waiter
 
@@ -178,8 +183,20 @@ vibe watch add \
   uv run --no-project scripts/wait_pr.py \
     --repo avibe-bot/avibe \
     --pr 151 \
+    --actionable-only \
     --interval 60
 ```
+
+Prefer `--actionable-only` for review loops. Without it the waiter wakes the Agent
+for every comment on the PR, including the `@codex review` triggers the loop itself
+posts and the bodyless `COMMENTED` review envelope GitHub wraps around inline
+comments. With it the waiter still reports inline review comments, reviews carrying
+a verdict or a body, the Codex pass reaction, and merged/closed transitions — which
+is everything the review loop needs to make progress or close out.
+
+Narrow it further with `--ignore-author <login>` and `--ignore-comment-pattern <regex>`
+(both repeatable). Filtered items still advance the cursors, so they are examined
+once and never re-reported.
 
 Catch up on existing activity first:
 
@@ -244,7 +261,7 @@ GitHub Actions for a pushed commit:
 ```bash
 vibe watch add \
   --name "Watch CI" \
-  --message "GitHub Actions finished. Inspect the result below and continue with the deployment or fix failures." \
+  --message "GitHub Actions failed. Inspect the result below and fix the failures." \
   -- \
   uv run --no-project scripts/wait_action.py \
     --repo cyhhao/sub2api \
@@ -252,8 +269,15 @@ vibe watch add \
     --sha "$HEAD_SHA" \
     --workflow CI \
     --workflow "Security Scan" \
+    --only-on-failure \
     --interval 60
 ```
+
+`--only-on-failure` exits `64` when every watched workflow succeeded, so a green
+build ends the watch silently instead of spending an Agent turn to say so. The
+full summary still goes to `stderr` and stays readable via `vibe watch show`.
+Drop the flag when the follow-up should also run on success, for example when a
+green build is supposed to trigger a deploy.
 
 ## Practical Advice
 

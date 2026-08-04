@@ -17,6 +17,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _github_wait_common import (  # noqa: E402
+    NO_EVENT_EXIT_CODE,
     RETRY_EXIT_CODE,
     get_token,
     github_get,
@@ -189,6 +190,14 @@ def main() -> int:
             "Defaults to success,skipped,neutral."
         ),
     )
+    parser.add_argument(
+        "--only-on-failure",
+        action="store_true",
+        help=(
+            "Do not wake the Agent when every watched workflow succeeded; exit with the "
+            f"no-event code {NO_EVENT_EXIT_CODE} instead. Failures still exit 0 with the full report."
+        ),
+    )
     parser.add_argument("--cursor-output", help=argparse.SUPPRESS)
     parser.add_argument(
         "--allow-unauthenticated",
@@ -296,7 +305,7 @@ def main() -> int:
                 branch=args.branch,
                 head_sha=args.sha,
             )
-            output, _has_failed_workflow = _render_actions_result(
+            output, has_failed_workflow = _render_actions_result(
                 repo=args.repo,
                 branch=args.branch,
                 head_sha=args.sha,
@@ -305,6 +314,17 @@ def main() -> int:
             )
             if output is not None:
                 _write_cursor_output(args.cursor_output, selected=selected)
+                if args.only_on_failure and not has_failed_workflow:
+                    # The interesting outcome is a broken build. Reporting a green one
+                    # costs a full Agent turn to say "nothing to do", so keep the
+                    # summary on stderr where it stays inspectable via the watch log.
+                    print(output, file=sys.stderr)
+                    print(
+                        "All watched workflows succeeded; exiting without an Agent follow-up "
+                        "because --only-on-failure is set.",
+                        file=sys.stderr,
+                    )
+                    return NO_EVENT_EXIT_CODE
                 print(output)
                 return 0
 

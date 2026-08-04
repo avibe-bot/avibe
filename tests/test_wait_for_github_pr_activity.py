@@ -762,3 +762,341 @@ def test_main_returns_retry_exit_code_for_initial_pr_network_error() -> None:
 
     assert rc == 75
     assert "GitHub network error: temporary network failure" in stderr.getvalue()
+
+
+def test_render_activity_actionable_only_drops_bot_trigger_comment_but_advances_cursor() -> None:
+    module = _load_module()
+    state = {
+        "pull_request": {"number": 153, "state": "open", "draft": False},
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [
+            {
+                "id": 301,
+                "body": "@codex review",
+                "html_url": "https://github.com/example/repo/pull/1#issuecomment-301",
+                "user": {"login": "teammate"},
+            }
+        ],
+        "reactions": [],
+    }
+
+    output, _review_cursor, _review_comment_cursor, issue_comment_cursor, _reaction_cursor, _pr_status = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        actionable_only=True,
+        ignore_patterns=module._compile_ignore_patterns(None, actionable_only=True),
+    )
+
+    assert output is None
+    # Dropped once, never re-examined.
+    assert issue_comment_cursor == 301
+
+
+def test_render_activity_actionable_only_keeps_bot_trigger_comment_when_disabled() -> None:
+    module = _load_module()
+    state = {
+        "pull_request": {"number": 153, "state": "open", "draft": False},
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [
+            {
+                "id": 301,
+                "body": "@codex review",
+                "html_url": "https://github.com/example/repo/pull/1#issuecomment-301",
+                "user": {"login": "teammate"},
+            }
+        ],
+        "reactions": [],
+    }
+
+    output, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+    )
+
+    assert output is not None
+    assert "issue_comment #301" in output
+
+
+def test_render_activity_actionable_only_drops_bodyless_commented_review() -> None:
+    module = _load_module()
+    state = {
+        "pull_request": {"number": 153, "state": "open", "draft": False},
+        "reviews": [
+            {
+                "id": 401,
+                "state": "COMMENTED",
+                "body": "",
+                "html_url": "https://github.com/example/repo/pull/1#pullrequestreview-401",
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+            }
+        ],
+        "review_comments": [],
+        "issue_comments": [],
+        "reactions": [],
+    }
+
+    output, review_cursor, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        actionable_only=True,
+        ignore_patterns=module._compile_ignore_patterns(None, actionable_only=True),
+    )
+
+    assert output is None
+    assert review_cursor == 401
+
+
+def test_render_activity_actionable_only_keeps_inline_comments_and_verdicts() -> None:
+    module = _load_module()
+    state = {
+        "pull_request": {"number": 153, "state": "open", "draft": False},
+        "reviews": [
+            {
+                "id": 402,
+                "state": "CHANGES_REQUESTED",
+                "body": "",
+                "html_url": "https://github.com/example/repo/pull/1#pullrequestreview-402",
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+            }
+        ],
+        "review_comments": [
+            {
+                "id": 501,
+                "path": "core/watches.py",
+                "body": "This drops the cursor advance.",
+                "html_url": "https://github.com/example/repo/pull/1#discussion_r501",
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+            }
+        ],
+        "issue_comments": [],
+        "reactions": [],
+    }
+
+    output, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        actionable_only=True,
+        ignore_patterns=module._compile_ignore_patterns(None, actionable_only=True),
+    )
+
+    assert output is not None
+    assert "review #402" in output
+    assert "review_comment #501" in output
+
+
+def test_render_activity_actionable_only_keeps_codex_pass_reaction() -> None:
+    module = _load_module()
+    state = {
+        "pull_request": {"number": 153, "state": "open", "draft": False},
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [],
+        "reactions": [
+            {
+                "id": 601,
+                "content": "+1",
+                "created_at": "2026-04-02T13:05:42Z",
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+            }
+        ],
+    }
+
+    output, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        actionable_only=True,
+        ignore_patterns=module._compile_ignore_patterns(None, actionable_only=True),
+    )
+
+    assert output is not None
+    assert "pr_reaction #601" in output
+
+
+def test_render_activity_actionable_only_drops_draft_toggle_but_keeps_merge() -> None:
+    module = _load_module()
+    ignore_patterns = module._compile_ignore_patterns(None, actionable_only=True)
+    draft_state = {
+        "pull_request": {"number": 153, "state": "open", "draft": True},
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [],
+        "reactions": [],
+    }
+
+    output, _rc, _rcc, _icc, _reaction_cursor, pr_status = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=draft_state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        actionable_only=True,
+        ignore_patterns=ignore_patterns,
+    )
+
+    assert output is None
+    # The status still moves forward, so the transition is not re-detected.
+    assert pr_status == "draft"
+
+    merged_state = {
+        "pull_request": {
+            "number": 153,
+            "state": "closed",
+            "merged_at": "2026-04-02T14:00:00Z",
+            "html_url": "https://github.com/example/repo/pull/153",
+        },
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [],
+        "reactions": [],
+    }
+
+    output, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=merged_state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        actionable_only=True,
+        ignore_patterns=ignore_patterns,
+    )
+
+    assert output is not None
+    assert "pr_status #153 open -> merged" in output
+
+
+def test_render_activity_ignores_configured_author_but_advances_cursor() -> None:
+    module = _load_module()
+    state = {
+        "pull_request": {"number": 153, "state": "open", "draft": False},
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [
+            {
+                "id": 701,
+                "body": "Looks good to me, shipping soon.",
+                "html_url": "https://github.com/example/repo/pull/1#issuecomment-701",
+                "user": {"login": "NoisyBot"},
+            }
+        ],
+        "reactions": [],
+    }
+
+    output, _rc, _rcc, issue_comment_cursor, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        ignored_authors=module._normalize_authors(["noisybot"]),
+    )
+
+    assert output is None
+    assert issue_comment_cursor == 701
+
+
+def test_render_activity_ignores_custom_comment_pattern() -> None:
+    module = _load_module()
+    state = {
+        "pull_request": {"number": 153, "state": "open", "draft": False},
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [
+            {
+                "id": 801,
+                "body": "Deployed to staging: build 42",
+                "html_url": "https://github.com/example/repo/pull/1#issuecomment-801",
+                "user": {"login": "teammate"},
+            }
+        ],
+        "reactions": [],
+    }
+
+    output, _rc, _rcc, issue_comment_cursor, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        ignore_patterns=module._compile_ignore_patterns(
+            [r"^deployed to staging"], actionable_only=False
+        ),
+    )
+
+    assert output is None
+    assert issue_comment_cursor == 801
+
+
+def test_main_rejects_invalid_ignore_comment_pattern() -> None:
+    module = _load_module()
+
+    with (
+        patch.object(module, "get_token", return_value="token"),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--ignore-comment-pattern",
+                "([unclosed",
+            ],
+        ),
+    ):
+        rc = module.main()
+
+    assert rc == 2

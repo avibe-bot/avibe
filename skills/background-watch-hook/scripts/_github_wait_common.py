@@ -14,6 +14,9 @@ from typing import Any
 
 
 RETRY_EXIT_CODE = 75
+# Cycle completed, nothing worth waking the Agent for. `vibe watch` records the
+# cycle and ends or re-arms without creating a follow-up run.
+NO_EVENT_EXIT_CODE = 64
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
