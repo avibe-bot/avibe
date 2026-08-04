@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -393,7 +394,7 @@ def _run(
     backend: str = "codex",
     session_id: str | None = None,
     legacy_session_key: str | None = None,
-    run_type: str = "scheduled",
+    run_type: str | None = "scheduled",
     delivery_id: str | None = None,
     pid: int | None = None,
 ) -> None:
@@ -1244,6 +1245,44 @@ def test_hfr_148_unknown_execution_type_fails_closed(tmp_path: Path) -> None:
             status="running",
             legacy_session_key="route:base",
             run_type="unknown_execution",
+        )
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is SessionRuntimeDisposition.UNKNOWN
+    engine.dispose()
+
+
+def test_hfr_148_null_execution_type_fails_closed(tmp_path: Path) -> None:
+    """HFR-148: a legacy NULL Run type cannot disappear from ownership."""
+
+    database_path = tmp_path / "ownership.sqlite"
+    engine = _engine(tmp_path)
+    engine.dispose()
+    with sqlite3.connect(database_path) as connection:
+        schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'"
+        ).fetchone()[0]
+        legacy_schema = schema.replace(
+            "run_type VARCHAR NOT NULL",
+            "run_type VARCHAR",
+        )
+        assert legacy_schema != schema
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            "UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'agent_runs'",
+            (legacy_schema,),
+        )
+        schema_version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute(f"PRAGMA schema_version = {schema_version + 1}")
+        connection.execute("PRAGMA writable_schema = OFF")
+
+    engine = create_sqlite_engine(database_path)
+    with engine.begin() as conn:
+        _run(
+            conn,
+            "run-null-type",
+            status="running",
+            legacy_session_key="route:base",
+            run_type=None,
         )
     snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
     assert snapshot.disposition is SessionRuntimeDisposition.UNKNOWN

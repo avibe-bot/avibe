@@ -357,8 +357,12 @@ class ClaudeAgent(BaseAgent):
             ).strip()
             == session_key
         ]
-        identities = [identity for identity in candidates if identity is not None]
-        return identities[0] if len(identities) == 1 else None
+        identities = tuple(
+            dict.fromkeys(identity for identity in candidates if identity is not None)
+        )
+        if len(identities) > 1:
+            raise ValueError("ambiguous Claude Session route maps to live runtimes")
+        return identities[0] if identities else None
 
     def runtime_activation_identity_for_session_binding(
         self,

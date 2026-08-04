@@ -177,9 +177,10 @@ class BaseAgent(ABC):
     ) -> RuntimeActivationIdentity | None:
         """Return the live disposable resource generation serving ``request``.
 
-        A missing identity means this request has no runtime resource yet. The
-        adapter that creates the resource must pass its attached identity at
-        native acceptance.
+        A missing identity means this request has no runtime resource yet. An
+        ambiguous or incomplete lookup must raise so admission fails closed.
+        The adapter that creates the resource must pass its attached identity
+        at native acceptance.
         """
 
         return None

@@ -409,7 +409,12 @@ class RuntimeOwnershipProvider:
                         )
                     )
                     .where(agent_runs.c.status.notin_(_TERMINAL_RAW_RUN_STATUSES))
-                    .where(agent_runs.c.run_type != "watch_runtime")
+                    .where(
+                        or_(
+                            agent_runs.c.run_type.is_(None),
+                            agent_runs.c.run_type != "watch_runtime",
+                        )
+                    )
                     .where(
                         or_(
                             agent_runs.c.agent_backend == backend,

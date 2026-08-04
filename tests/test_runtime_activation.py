@@ -260,6 +260,68 @@ def test_request_lookup_failure_is_not_resource_absence() -> None:
     assert resolution == RuntimeActivationResolution(authoritative=False)
 
 
+def test_claude_request_route_resolution_distinguishes_absence_and_ambiguity() -> None:
+    registry = RuntimeActivationRegistry()
+    first_identity = registry.attach("claude", "runtime-main")
+    second_identity = registry.attach("claude", "runtime-routing")
+    claude = object.__new__(ClaudeAgent)
+    claude.claude_sessions = {}
+
+    request = SimpleNamespace(session_key="route:base")
+    assert claude.runtime_activation_identity_for_request(request) is None
+
+    claude.claude_sessions = {
+        "runtime-main": SimpleNamespace(
+            _vibe_runtime_activation_identity=first_identity,
+            _vibe_runtime_fallback_session_key="route:base",
+        )
+    }
+    assert claude.runtime_activation_identity_for_request(request) == first_identity
+
+    claude.claude_sessions["runtime-routing"] = SimpleNamespace(
+        _vibe_runtime_activation_identity=second_identity,
+        _vibe_runtime_fallback_session_key="route:base",
+    )
+    with pytest.raises(ValueError, match="ambiguous"):
+        claude.runtime_activation_identity_for_request(request)
+
+
+def test_hfr_137_claude_ambiguous_route_blocks_fallback_claim() -> None:
+    registry = RuntimeActivationRegistry()
+    claude = object.__new__(ClaudeAgent)
+    claude.claude_sessions = {
+        "runtime-main": SimpleNamespace(
+            _vibe_runtime_activation_identity=registry.attach(
+                "claude", "runtime-main"
+            ),
+            _vibe_runtime_fallback_session_key="route:base",
+        ),
+        "runtime-routing": SimpleNamespace(
+            _vibe_runtime_activation_identity=registry.attach(
+                "claude", "runtime-routing"
+            ),
+            _vibe_runtime_fallback_session_key="route:base",
+        ),
+    }
+    controller = SimpleNamespace(runtime_activation=registry)
+    agent_service = AgentService(controller, activation_registry=registry)
+    agent_service.agents = {"claude": claude}
+    controller.agent_service = agent_service
+    request_store = SimpleNamespace(claim=Mock())
+    scheduled = object.__new__(ScheduledTaskService)
+    scheduled.controller = controller
+    scheduled.request_store = request_store
+    pending = TaskExecutionRequest(
+        id="run-route",
+        request_type="agent_run",
+        agent_backend="claude",
+        session_key="route:base",
+    )
+
+    assert scheduled._claim_pending_request(pending) is None
+    request_store.claim.assert_not_called()
+
+
 def test_backend_without_activation_contract_has_no_runtime_resource() -> None:
     service = object.__new__(AgentService)
     service.agents = {"legacy": SimpleNamespace()}
