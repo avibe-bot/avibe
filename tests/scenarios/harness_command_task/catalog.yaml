@@ -602,3 +602,33 @@ scenarios:
     # deleted" the Session field prints two rows up, in the case the UI can already see.
     # The field names the CHAIN the fire walks instead, and drops the Session term where
     # the binding is visibly gone or absent.
+  - id: SCT-056
+    name: a replacement reusable Session is reserved where the Session belongs, not where the command runs
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_reserves_a_replacement_session_without_the_commands_directory
+    # SCT-053 split the two halves of ``cwd`` on the read side, then handed the reservation
+    # ``cwd`` -- the variable ``_command_definition_spawn_cwd`` had just overwritten with
+    # the COMMAND's answer. So ``--create-session`` on a command task pinned to a build
+    # directory reserved its replacement escalation Session in that build directory instead
+    # of letting it inherit from its Scope: the defect SCT-053 closed, reintroduced one
+    # line later and through the same field. The reservation reads the Session half it was
+    # always meant to. The add path carried the identical line and is fixed with it.
+  - id: SCT-057
+    name: repointing a reserved command task's directory does not replace the Session it escalates to
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_repoints_a_reserved_command_task_without_replacing_its_session
+    # ``_reject_inert_create_once_cwd_update`` refuses ``--cwd`` once a reusable Session
+    # exists, and for a message task that is right -- the Session owns its workdir and the
+    # flag would change nothing. It runs before the command-aware resolution, so it reached
+    # a command task first and left ``--create-session`` as the only way to move a nightly
+    # build: discarding an escalation Session that had nothing to do with the request.
+    # Softened exactly as SCT-050 softened the ``existing`` refusal, and for the same
+    # reason. The same branch stops an unrelated edit on a reserved definition from
+    # falling through and stamping the command's directory into
+    # ``metadata["session_workdir"]`` -- SCT-053's rule in the lane SCT-051 does not cover.

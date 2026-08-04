@@ -283,4 +283,34 @@ whose second meaning was not carried all the way through.
   Resolving it exactly would need the backend to publish the source; the pane
   stops making a claim it cannot support instead. **SCT-055.**
 
-Scenario catalogue: SCT-050 – SCT-055.
+### Second review pass
+
+Four findings, all taken. Two of them are the first pass's own fix landing one
+line short.
+
+- **The Session reservation still read the command's answer.**
+  `_stored_session_workdir` split the two halves on the read side, and then
+  `_reserve_definition_session(..., workdir=cwd, ...)` was handed `cwd` — the
+  variable `_command_definition_spawn_cwd` had just overwritten with the
+  command's. So `--create-session` on a pinned command task reserved its
+  replacement escalation Session in the build directory, which is exactly the
+  defect SCT-053 closed, reintroduced through the same field one line later. Both
+  call sites (add and update) now pass `session_workdir`. **SCT-056.**
+- **`--cwd` was refused on the very tasks Issue 1 was for.**
+  `_reject_inert_create_once_cwd_update` is a Session rule — a reserved reusable
+  Session owns its workdir, so the flag is inert — but it ran before the
+  command-aware resolution, so it reached a command task first. Repointing a
+  nightly build meant `--create-session`, discarding an escalation Session that
+  had nothing to do with the request. Softened for commands exactly as Issue 1
+  softened the `existing` refusal. The same branch (`command_only_cwd`) also stops
+  the `else: cwd = task.cwd` fall-through writing a command directory into
+  `metadata["session_workdir"]` on an unrelated edit. **SCT-057.**
+- **The `--help` epilog described a chain the code does not walk.** It promised
+  "else the runtime default", but `cmd_task_add`'s pure-command branch stores
+  `os.getcwd()` and `_command_definition_spawn_cwd` returns it for an unpinned
+  `create_per_run` — SCT-047's rule, which the epilog was written before. Reworded
+  to say what is stored.
+- **Scenario IDs were missing from the tests and the PR body.** AGENTS.md:250
+  asks for them in both. Added for SCT-050 – SCT-057.
+
+Scenario catalogue: SCT-050 – SCT-057.

@@ -501,7 +501,8 @@ def _task_add_examples_text() -> str:
           Failure handling is silent-success by default: a successful run stays quiet, and a failed run records a failure notice.
           Add --on-failure agent with --message to spend an Agent turn triaging a failed run instead.
           --timeout bounds one run; use 0 for no timeout.
-          The command runs in --cwd; without it, in the bound Session's working directory, else the runtime default.
+          --cwd is where the command runs; without it, a Session-bound command follows that Session's directory
+          and every other command records the directory you ran this from.
 
         Examples:
           vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
@@ -3327,7 +3328,11 @@ def cmd_task_add(args):
                     agent_name=agent_name,
                     agent_id=agent.id if agent else None,
                     deliver_key=scope_key or "",
-                    workdir=cwd,
+                    # The SESSION half, captured before the command's overwrote it. The
+                    # two agree here today, but reading the command's answer is what
+                    # made the update path place a Session in a subprocess directory,
+                    # and the same line is the one that would do it here.
+                    workdir=session_workdir,
                     help_command="vibe task add --help",
                     require_enabled_agent=expected_enabled_agent_id is not None,
                     expected_reference_agent_id=expected_reference_agent_id,
@@ -3943,9 +3948,35 @@ def cmd_task_update(args):
             current_policy=task.session_policy,
             current_session_id=task.session_id,
             create_session=bool(getattr(args, "create_session", False)),
+            has_command=task.has_command,
             help_command="vibe task update --help",
         )
-        if session_policy == "existing":
+        # This edit is not placing a Session: the definition is bound to one that owns
+        # its own directory, or has already reserved its reusable one and passed no
+        # --create-session to replace it. For a message task that leaves ``--cwd``
+        # nothing to do, and the two refusals above say so. For a command task it
+        # leaves exactly one question -- where the subprocess runs -- so the flag is
+        # resolved as the command's alone and the Session's half is read back from
+        # storage untouched. Without the branch, every path below writes SOME answer
+        # into ``session_workdir``, and for a command task that answer is the command's
+        # directory: an unrelated ``--name`` edit on a reserved definition wrote the
+        # subprocess directory into ``metadata["session_workdir"]``.
+        command_only_cwd = task.has_command and (
+            session_policy == "existing"
+            or (
+                session_policy == "create_once"
+                and bool(task.session_id)
+                and not getattr(args, "create_session", False)
+            )
+        )
+        if command_only_cwd:
+            session_workdir = _stored_session_workdir(task, metadata)
+            cwd = _resolve_command_only_cwd(
+                explicit_cwd,
+                stored_cwd=task.cwd,
+                help_command="vibe task update --help",
+            )
+        elif session_policy == "existing":
             cwd = _resolve_definition_session_cwd(
                 explicit_cwd=explicit_cwd,
                 existing_cwd=None,
@@ -3971,15 +4002,16 @@ def cmd_task_update(args):
             )
         else:
             cwd = task.cwd
-        session_workdir = cwd
-        cwd = _command_definition_spawn_cwd(
-            cwd,
-            has_command=task.has_command,
-            session_policy=session_policy,
-            explicit_cwd=explicit_cwd,
-            stored_cwd=task.cwd,
-            help_command="vibe task update --help",
-        )
+        if not command_only_cwd:
+            session_workdir = cwd
+            cwd = _command_definition_spawn_cwd(
+                cwd,
+                has_command=task.has_command,
+                session_policy=session_policy,
+                explicit_cwd=explicit_cwd,
+                stored_cwd=task.cwd,
+                help_command="vibe task update --help",
+            )
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
         if session_policy == "create_once" and not scope_key:
             raise TaskCliError(
@@ -4025,7 +4057,13 @@ def cmd_task_update(args):
                 agent_name=agent_name,
                 agent_id=agent.id if agent else None,
                 deliver_key=scope_key,
-                workdir=cwd,
+                # The SESSION half, captured before ``_command_definition_spawn_cwd``
+                # overwrote ``cwd`` with the command's. Reading ``cwd`` here handed the
+                # replacement Session the directory the user picked for a subprocess,
+                # so it stopped inheriting from its Scope -- the same defect
+                # ``_stored_session_workdir`` closes one branch earlier, through the
+                # one line that could reintroduce it.
+                workdir=session_workdir,
                 help_command="vibe task update --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
                 expected_reference_agent_id=expected_reference_agent_id,
@@ -4980,9 +5018,21 @@ def _reject_inert_create_once_cwd_update(
     current_policy: Optional[str],
     current_session_id: Optional[str],
     create_session: bool,
+    has_command: bool = False,
     help_command: str,
 ) -> None:
-    if explicit_cwd is None or create_session:
+    """Refuse a ``--cwd`` that would change nothing, for the tasks where it changes nothing.
+
+    A reusable Session that has already been reserved owns its workdir, so for a
+    message task the flag is inert and saying so beats accepting it silently. A command
+    task in the same position still has the other question to answer -- where its
+    subprocess runs -- and this refusal reached it first, so the only way to repoint a
+    nightly command was to replace an escalation Session that had nothing to do with
+    the request. Same rule as ``_resolve_definition_session_cwd``'s, softened the same
+    way and for the same reason.
+    """
+
+    if explicit_cwd is None or create_session or has_command:
         return
     if current_policy == "create_once" and current_session_id:
         raise TaskCliError(
@@ -5197,6 +5247,26 @@ def _command_definition_spawn_cwd(
     if session_policy == "create_per_run":
         return os.getcwd()
     return None
+
+
+def _resolve_command_only_cwd(
+    explicit_cwd: Optional[str],
+    *,
+    stored_cwd: Optional[str],
+    help_command: str,
+) -> Optional[str]:
+    """``--cwd`` for an edit that answers the command question and nothing else.
+
+    Under the same ``cwd_not_found`` check every other policy gives the flag. Omitting
+    it keeps the stored directory rather than re-deriving one, because a definition
+    whose Session is already settled has no other source to fall back to and the
+    invocation directory of an unrelated edit is not an answer anybody asked for.
+    """
+
+    raw = (explicit_cwd or "").strip()
+    if raw:
+        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+    return stored_cwd
 
 
 def _stored_session_workdir(task, metadata: Optional[dict]) -> Optional[str]:

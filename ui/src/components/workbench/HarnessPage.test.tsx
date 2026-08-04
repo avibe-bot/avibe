@@ -550,7 +550,7 @@ describe('TaskDetail command task', () => {
   });
 
   it('shows where the command runs, and names the source when it follows a session', () => {
-    // ``WatchDetail`` has shown the working directory since it shipped; the task pane
+    // SCT-052. ``WatchDetail`` has shown the working directory since it shipped; the task pane
     // never did, so a scheduled command's directory was unanswerable from the UI even
     // once ``--cwd`` could store one.
     const pinned = detail(task({ shell_command: 'make test', cwd: '/srv/app' }));
@@ -569,7 +569,7 @@ describe('TaskDetail command task', () => {
   });
 
   it('does not name a session the command cannot inherit a directory from', () => {
-    // A binding whose Session row is gone resolves to None at fire time and falls
+    // SCT-055. A binding whose Session row is gone resolves to None at fire time and falls
     // through to the runtime default — so naming the Session here would contradict the
     // "Session deleted" the Session field prints two rows up, and misstate where the
     // command runs.
@@ -582,7 +582,7 @@ describe('TaskDetail command task', () => {
   });
 
   it('states the failure policy before the routing it governs, not after it', () => {
-    // The five routing fields describe a path that runs on no healthy day. Rendered
+    // SCT-052. The five routing fields describe a path that runs on no healthy day. Rendered
     // above the ``On failure`` that qualifies them, the pane read top-down as "this
     // job spends an Agent turn every morning" — the exact cost an agent-free command
     // task is chosen to avoid.
@@ -597,7 +597,7 @@ describe('TaskDetail command task', () => {
   });
 
   it('calls an escalating command task\'s message a triage prompt, not the job', () => {
-    // Same label as a message task's payload, entirely different meaning: this text is
+    // SCT-052. Same label as a message task's payload, entirely different meaning: this text is
     // sent only when the command fails.
     const html = detail(
       task({ shell_command: 'make test', message: 'Diagnose it.', metadata: { on_failure: 'agent' } }),
@@ -609,7 +609,7 @@ describe('TaskDetail command task', () => {
   });
 
   it('calls nothing an escalation on a command task that escalates to no one', () => {
-    // The routing gate is SCT-043's: bindings, not kind. A command task with
+    // SCT-054. The routing gate is SCT-043's: bindings, not kind. A command task with
     // ``--on-failure none`` delivered to a real conversation keeps these fields
     // legitimately — and heading them "On failure → escalation" would have the pane
     // say "Notice only (no Agent)" and "escalation" about the same task, one field
@@ -632,7 +632,7 @@ describe('TaskDetail command task', () => {
   });
 
   it('leaves a message task reading as the job it is', () => {
-    // A message task routes EVERY run through those fields, so grouping them under a
+    // SCT-054. A message task routes EVERY run through those fields, so grouping them under a
     // failure heading would be a lie in the other direction.
     const html = detail(task({ prompt: 'Summarize #ops', message: 'Summarize #ops' }));
 
