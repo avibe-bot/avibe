@@ -134,6 +134,7 @@ def main():
     """Main entry point"""
     lock_acquired = False
     macos_session_diagnostics = None
+    controller = None
     try:
         acquire_service_instance_lock()
         lock_acquired = True
@@ -190,13 +191,7 @@ def main():
             except Exception:
                 pass
             _stop_macos_session_diagnostics(macos_session_diagnostics)
-            try:
-                controller.cleanup_sync()
-            except Exception as cleanup_err:
-                logger.error(f"Cleanup failed: {cleanup_err}")
-            finally:
-                release_service_instance_lock()
-            raise SystemExit(0)
+            controller.request_shutdown(f"signal {signum}")
 
         signal.signal(signal.SIGTERM, _handle_shutdown)
         signal.signal(signal.SIGINT, _handle_shutdown)
@@ -205,17 +200,20 @@ def main():
             controller.run()
         finally:
             _stop_macos_session_diagnostics(macos_session_diagnostics)
-            release_service_instance_lock()
         
     except ServiceAlreadyRunningError as e:
         logging.error("Failed to start: %s", e)
         sys.exit(2)
     except Exception as e:
-        if lock_acquired:
-            release_service_instance_lock()
         logging.error(f"Failed to start: {e}")
         sys.exit(1)
     finally:
+        lock_safe = bool(
+            controller is None
+            or getattr(controller, "service_lock_safe_to_release", True)
+        )
+        if lock_acquired and lock_safe:
+            release_service_instance_lock()
         _stop_macos_session_diagnostics(macos_session_diagnostics)
 
 

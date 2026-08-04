@@ -70,7 +70,12 @@ class _StubController:
         self.claude_client = SimpleNamespace(_is_skip_message=lambda message: False)
         self.agent_auth_service = SimpleNamespace(maybe_emit_auth_recovery_message=AsyncMock(return_value=False))
 
-        async def _cleanup_session(composite_key, *, current_receiver_task=None):
+        async def _cleanup_session(
+            composite_key,
+            *,
+            current_receiver_task=None,
+            activation_retired=False,
+        ):
             receiver_task = self.receiver_tasks.pop(composite_key, None)
             client = self.claude_sessions.pop(composite_key, None)
             cleanup_from_receiver = receiver_task is not None and receiver_task is current_receiver_task
@@ -103,6 +108,7 @@ class _StubController:
         self.session_handler = SimpleNamespace(
             cleanup_session=AsyncMock(side_effect=_cleanup_session),
             capture_session_id=lambda *args, **kwargs: None,
+            touch_session_activity=lambda _key: None,
         )
 
 
@@ -154,6 +160,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             mark_session_idle=lambda _key: None,
             handle_session_error=AsyncMock(),
             capture_session_id=lambda *_args, **_kwargs: None,
+            touch_session_activity=lambda _key: None,
         )
 
         agent = ClaudeAgent(controller)
@@ -243,6 +250,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             mark_session_idle=lambda _key: None,
             handle_session_error=AsyncMock(),
             capture_session_id=lambda *_args, **_kwargs: None,
+            touch_session_activity=lambda _key: None,
         )
 
         agent = ClaudeAgent(controller)
@@ -324,6 +332,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             handle_session_error=AsyncMock(),
             capture_session_id=lambda *_args, **_kwargs: None,
             clear_session_tracking=lambda key: mark_idle_calls.append(f"clear:{key}"),
+            touch_session_activity=lambda _key: None,
         )
 
         agent = ClaudeAgent(controller)
@@ -439,6 +448,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             runtime_key,
             current_receiver_task=None,
+            activation_retired=False,
         )
         self.assertFalse(service._turn_gates[runtime_key].lock.locked())
         self.assertEqual(request.context.platform_specific["turn_token"], "T1")
@@ -622,6 +632,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             runtime_key,
             current_receiver_task=None,
+            activation_retired=False,
         )
         controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
 
@@ -1294,6 +1305,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             session_key,
             current_receiver_task=receiver_task,
+            activation_retired=False,
         )
         self.assertNotIn(session_key, agent._last_assistant_text)
         self.assertNotIn(session_key, agent._pending_assistant_message)
@@ -1518,6 +1530,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             composite_key,
             current_receiver_task=asyncio.current_task(),
+            activation_retired=False,
         )
         self.assertNotIn(composite_key, controller.receiver_tasks)
         self.assertNotIn(composite_key, controller.claude_sessions)
@@ -1590,6 +1603,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.session_handler = SimpleNamespace(
             capture_session_id=lambda *_args, **_kwargs: None,
             mark_session_idle=lambda _key: None,
+            touch_session_activity=lambda _key: None,
             _t=lambda key, **kwargs: (
                 (
                     "Claude's safety checks triggered for this request. "
@@ -2001,6 +2015,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             composite_key,
             current_receiver_task=None,
+            activation_retired=False,
         )
         agent._remove_ack_reaction.assert_awaited_once_with(pending_request)
         controller.emit_agent_message.assert_awaited_once_with(
@@ -2135,6 +2150,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             composite_key,
             current_receiver_task=asyncio.current_task(),
+            activation_retired=False,
         )
         self.assertEqual(agent._remove_ack_reaction.await_count, 2)
         self.assertEqual(agent._remove_ack_reaction.await_args_list[0].args, (pending_request_1,))

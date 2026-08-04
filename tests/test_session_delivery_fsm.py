@@ -19,6 +19,10 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
+from core.runtime_activation import (
+    RuntimeActivationRegistry,
+    RuntimeActivationResolution,
+)
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
@@ -191,6 +195,248 @@ def _row(engine, delivery_id: str) -> dict:
         row = delivery_store.get_delivery(conn, delivery_id)
     assert row is not None
     return row
+
+
+def _configure_activation_owner(
+    manager: SessionTurnManager,
+    registry: RuntimeActivationRegistry,
+    identity,
+) -> None:
+    manager.controller.runtime_activation = registry
+    manager.controller.agent_service.activation_registry = registry
+    manager.controller.agent_service.runtime_activation_identity_for_session_binding = (
+        lambda _backend, **_binding: RuntimeActivationResolution(
+            authoritative=True,
+            identity=identity,
+        )
+    )
+
+
+def test_hfr_137_opencode_turn_claim_commit_precedes_cleanup(
+    managers,
+    monkeypatch,
+) -> None:
+    """HFR-137: the Turn owner commits before shared-server cleanup observes it."""
+
+    manager, _other, engine, engine_b, starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(agent_backend="opencode", agent_variant="opencode")
+        )
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("opencode", "http://127.0.0.1:4096")
+    _configure_activation_owner(manager, registry, identity)
+    claim_entered = threading.Event()
+    allow_claim = threading.Event()
+    retire_started = threading.Event()
+    order: list[str] = []
+    retired: list[bool] = []
+    delivered: list = []
+    original_claim = delivery_store.claim_start_batch
+
+    def claim_with_barrier(*args, **kwargs):
+        result = original_claim(*args, **kwargs)
+        order.append("claim-written")
+        claim_entered.set()
+        assert allow_claim.wait(timeout=2)
+        order.append("claim-returned")
+        return result
+
+    monkeypatch.setattr(delivery_store, "claim_start_batch", claim_with_barrier)
+
+    def admit() -> None:
+        delivered.append(
+            asyncio.run(
+                manager.deliver(
+                    DeliveryRequest(
+                        session_id="ses_fsm",
+                        priority="p3",
+                        content="OpenCode prompt",
+                    ),
+                    context=_context(),
+                )
+            )
+        )
+
+    def retire() -> None:
+        retire_started.set()
+
+        def final_predicate() -> bool:
+            order.append("cleanup-snapshot")
+            with engine_b.connect() as conn:
+                return delivery_store.active_turn(conn, "ses_fsm") is None
+
+        retired.append(registry.retire_if_current(identity, final_predicate))
+
+    admission_thread = threading.Thread(target=admit)
+    retirement_thread = threading.Thread(target=retire)
+    admission_thread.start()
+    assert claim_entered.wait(timeout=2)
+    retirement_thread.start()
+    assert retire_started.wait(timeout=2)
+    allow_claim.set()
+    admission_thread.join(timeout=2)
+    retirement_thread.join(timeout=2)
+
+    assert not admission_thread.is_alive()
+    assert not retirement_thread.is_alive()
+    assert retired == [False]
+    assert order == ["claim-written", "claim-returned", "cleanup-snapshot"]
+    assert delivered[0].state == "claimed"
+    assert starts == [(delivered[0].turn_id, "OpenCode prompt")]
+
+
+def test_hfr_137_opencode_cleanup_first_preserves_queued_turn_owner(
+    managers,
+) -> None:
+    """HFR-137: a retired shared server cannot consume a queued Turn owner."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(agent_backend="opencode", agent_variant="opencode")
+        )
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("opencode", "http://127.0.0.1:4096")
+    _configure_activation_owner(manager, registry, identity)
+    predicate_entered = threading.Event()
+    allow_cleanup = threading.Event()
+    delivery_started = threading.Event()
+    retired: list[bool] = []
+    delivered: list = []
+
+    def retire() -> None:
+        def final_predicate() -> bool:
+            predicate_entered.set()
+            assert allow_cleanup.wait(timeout=2)
+            return True
+
+        retired.append(registry.retire_if_current(identity, final_predicate))
+
+    def admit() -> None:
+        delivery_started.set()
+        delivered.append(
+            asyncio.run(
+                manager.deliver(
+                    DeliveryRequest(
+                        session_id="ses_fsm",
+                        priority="p3",
+                        content="queued after cleanup",
+                    ),
+                    context=_context(),
+                )
+            )
+        )
+
+    retirement_thread = threading.Thread(target=retire)
+    admission_thread = threading.Thread(target=admit)
+    retirement_thread.start()
+    assert predicate_entered.wait(timeout=2)
+    admission_thread.start()
+    assert delivery_started.wait(timeout=2)
+    allow_cleanup.set()
+    retirement_thread.join(timeout=2)
+    admission_thread.join(timeout=2)
+
+    assert not retirement_thread.is_alive()
+    assert not admission_thread.is_alive()
+    assert retired == [True]
+    assert delivered[0].state == "queued"
+    assert delivered[0].turn_id is None
+    assert starts == []
+    rows = _rows(engine)
+    assert len(rows) == 1
+    assert rows[0]["state"] == "queued"
+    assert rows[0]["turn_id"] is None
+
+
+def test_hfr_137_turn_claim_rechecks_exact_durable_binding(managers) -> None:
+    """HFR-137: rebind between observation and commit keeps input queued."""
+
+    manager, _other, engine, engine_b, starts = managers
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("codex", "/tmp")
+    manager.controller.runtime_activation = registry
+    manager.controller.agent_service.activation_registry = registry
+
+    def rebind_before_boundary(_backend, **_binding):
+        with engine_b.begin() as conn:
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == "ses_fsm")
+                .values(session_anchor="ses_rebound")
+            )
+        return RuntimeActivationResolution(authoritative=True, identity=identity)
+
+    manager.controller.agent_service.runtime_activation_identity_for_session_binding = (
+        rebind_before_boundary
+    )
+
+    delivered = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="must follow the rebound Session",
+            ),
+            context=_context(),
+        )
+    )
+
+    assert delivered.state == "queued"
+    assert delivered.turn_id is None
+    assert starts == []
+    assert _rows(engine)[0]["state"] == "queued"
+
+
+def test_hfr_137_cleanup_first_preserves_waiting_replacement_owner(managers) -> None:
+    """HFR-137: waiting -> starting also rejects a retired exact generation."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("codex", "/tmp")
+    _configure_activation_owner(manager, registry, identity)
+    active_turn_id, _context_value = asyncio.run(_activate(manager))
+    replacement = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p0",
+                content="replacement",
+            ),
+            context=_context(),
+        )
+    )
+    assert replacement.delivery_id
+    with engine.begin() as conn:
+        active = delivery_store.get_turn(conn, active_turn_id)
+        successor_id = str(active["control_successor_turn_id"])
+        settled = manager._write_terminal_snapshot(
+            conn,
+            active_turn_id,
+            outcome="completed",
+            settled_by="native_terminal",
+            evidence_kind="native_terminal",
+        )
+        assert settled["changed"]
+    assert registry.retire_if_current(identity, lambda: True)
+
+    resumed = asyncio.run(
+        manager._resume_linked_control_successor("ses_fsm", active_turn_id)
+    )
+
+    assert resumed is None
+    with engine.connect() as conn:
+        successor = delivery_store.get_turn(conn, successor_id)
+        delivery = delivery_store.get_delivery(conn, str(replacement.delivery_id))
+        predecessor = delivery_store.get_turn(conn, active_turn_id)
+    assert successor is not None and successor["state"] == "waiting"
+    assert delivery is not None and delivery["state"] == "interrupt_waiting"
+    assert predecessor is not None and predecessor["control_state"] != "settled"
 
 
 def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(managers) -> None:
@@ -3224,7 +3470,7 @@ def test_final_dispatch_gate_retires_batch_when_attachment_expires_after_claim(
     attachment = tmp_path / "expires-after-claim.txt"
     attachment.write_text("expires after claim", encoding="utf-8")
     delivery_id = delivery_store.new_delivery_id()
-    with engine.begin() as conn:
+    with manager._runtime_start_owner("ses_fsm", "codex") as start_owner, engine.begin() as conn:
         token = media_service.register(
             conn,
             scope_id=None,
@@ -3254,6 +3500,7 @@ def test_final_dispatch_gate_retires_batch_when_attachment_expires_after_claim(
         )
         turn_id = manager._claim_fifo_batch_in_transaction(
             conn,
+            owner=start_owner,
             session_id="ses_fsm",
             backend="codex",
         )

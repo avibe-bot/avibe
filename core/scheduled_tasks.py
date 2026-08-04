@@ -8,7 +8,7 @@ import logging
 import os
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -38,6 +38,15 @@ from core.message_context import (
 )
 from core.origin_links import origin_link
 from core.reply_enhancer import strip_silent_blocks
+from core.runtime_activation import (
+    RuntimeActivationIdentity,
+    RuntimeActivationResolution,
+)
+from core.runtime_recovery import FallbackRequestRecoveryHandler
+from core.runtime_work import (
+    RuntimeWorkLane,
+    RuntimeWorkRegistrationToken,
+)
 from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     RUN_INTERRUPTION_REASONS,
@@ -87,6 +96,7 @@ from storage.background import (
     COMMAND_WORKER_REAP_ATTEMPTS_KEY,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
+    EXECUTION_RUN_TYPES,
     NOTICE_FAILED,
     NOTICE_PENDING,
     NOTICE_SENT,
@@ -127,6 +137,11 @@ AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
 
 class _ScopeAgentTarget(NamedTuple):
     agent_name: Optional[str]
+
+
+class _ClaimedRequestBackendResolution(NamedTuple):
+    authoritative: bool
+    backend: str = ""
 
 
 def _utc_now_iso() -> str:
@@ -1098,9 +1113,16 @@ class TaskExecutionRequest:
     callback_status: Optional[str] = None
     delivery_id: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    observed_activation_identity: RuntimeActivationIdentity | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(replace(self, observed_activation_identity=None))
+        payload.pop("observed_activation_identity", None)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "TaskExecutionRequest":
@@ -2444,16 +2466,7 @@ class TaskExecutionStore:
                 # does: it is a queued Agent turn the drain loop must claim. Left out,
                 # the escalation row would be durable and never executed -- a failure
                 # report the atomic stamp promised and nothing ever delivered.
-                if item.get("request_type")
-                in {
-                    "task_run",
-                    "hook_send",
-                    "agent_run",
-                    "scheduled",
-                    "watch",
-                    "webhook",
-                    "task_escalation",
-                }
+                if item.get("request_type") in EXECUTION_RUN_TYPES
             ]
         self._ensure_dirs()
         requests: list[TaskExecutionRequest] = []
@@ -3229,6 +3242,8 @@ class ScheduledTaskService:
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._reconcile_task: Optional[asyncio.Task] = None
         self._service_teardown_task: Optional["asyncio.Task[None]"] = None
+        self._request_recovery_token: RuntimeWorkRegistrationToken | None = None
+        self._request_recovery_unregistration_task: asyncio.Task[None] | None = None
         # The owed-notice drain pass currently in flight, if any. It runs OUTSIDE the
         # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
         # be torn down by name: cancelling the watch no longer stops it.
@@ -3239,6 +3254,9 @@ class ScheduledTaskService:
         # Claimed requests currently executing, keyed by request id, so a
         # single slow/hung turn can't stall delivery of every other request.
         self._inflight_executions: Dict[str, "asyncio.Task[Any]"] = {}
+        # Immutable loop-published view consumed by the off-thread recovery scan.
+        # The handler rechecks it on the loop before the recovery CAS.
+        self._live_claimed_run_ids: frozenset[str] = frozenset()
         # The exact claims behind those tasks. The done callback uses this as a
         # terminalization backstop when asyncio cancels a task before its coroutine
         # executes even one line.
@@ -3266,6 +3284,10 @@ class ScheduledTaskService:
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._drain_dirty = True
         self._recover_activity_lifecycle()
+
+    def recover_processing_requests(self) -> None:
+        """Reconcile fallback Run owners after backend and Turn recovery."""
+
         # BEFORE ``recover_processing``, which nulls ``pid`` and settles these rows:
         # the run is the only place the orphan's identity is recorded, so once it is
         # terminal the child can never be found again. This pass decides each record by
@@ -3907,7 +3929,18 @@ class ScheduledTaskService:
     def start(self) -> None:
         if self._running:
             return
-        self.scheduler.start()
+        teardown = self._service_teardown_task
+        if teardown is not None:
+            if not teardown.done():
+                raise RuntimeError("scheduled task service generation is still stopping")
+            teardown.result()
+            self._service_teardown_task = None
+        self._register_request_recovery()
+        try:
+            self.scheduler.start()
+        except BaseException:
+            self._begin_stop()
+            raise
         self._running = True
         self._spawn_watch_store()
         try:
@@ -3948,6 +3981,55 @@ class ScheduledTaskService:
             return asyncio.current_task()
         except RuntimeError:
             return None
+
+    def _register_request_recovery(self) -> None:
+        previous = self._request_recovery_unregistration_task
+        if previous is not None:
+            if not previous.done():
+                raise RuntimeError(
+                    "scheduled task service request recovery generation is still stopping"
+                )
+            previous.result()
+            self._request_recovery_unregistration_task = None
+        if self._request_recovery_token is not None:
+            raise RuntimeError(
+                "scheduled task service request recovery generation is already registered"
+            )
+
+        sqlite_store = self.request_store.sqlite_backend
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        register = getattr(supervisor, "register", None)
+        begin_unregister = getattr(supervisor, "begin_unregister", None)
+        if sqlite_store is None or not callable(register) or not callable(begin_unregister):
+            return
+        self._request_recovery_token = register(
+            RuntimeWorkLane.REQUESTS,
+            FallbackRequestRecoveryHandler(
+                sqlite_store,
+                live_claims=lambda: self._live_claimed_run_ids,
+            ),
+        )
+
+    def _begin_request_recovery_unregistration(
+        self,
+    ) -> asyncio.Task[None] | None:
+        existing = self._request_recovery_unregistration_task
+        if existing is not None:
+            return existing
+        token = self._request_recovery_token
+        if token is None:
+            return None
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        begin_unregister = getattr(supervisor, "begin_unregister", None)
+        if not callable(begin_unregister):
+            return None
+
+        # The supervisor invalidates synchronously before returning the join task.
+        # A restart must wait for that exact generation to finish joining workers.
+        task = begin_unregister(token)
+        self._request_recovery_token = None
+        self._request_recovery_unregistration_task = task
+        return task
 
     async def _settle_service_teardown_owners(self) -> None:
         manager = getattr(self.controller, "session_turns", None)
@@ -4057,8 +4139,13 @@ class ScheduledTaskService:
             self._inflight_cancellation_causes[request_id] = SETTLED_BY_STOPPED
             execution.cancel()
 
-    def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
+    def _begin_stop(
+        self,
+        *,
+        cancel_reconcile: bool = True,
+    ) -> asyncio.Task[None] | None:
         self._running = False
+        request_recovery_stop = self._begin_request_recovery_unregistration()
         current_task = self._current_asyncio_task()
         if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
             self._reconcile_task.cancel()
@@ -4079,6 +4166,7 @@ class ScheduledTaskService:
         except Exception:
             logger.debug("Failed to shut down scheduler", exc_info=True)
         self._ensure_service_teardown_task()
+        return request_recovery_stop
 
     def _owns_service_instance(self) -> bool:
         if not self._requires_service_lease:
@@ -4090,7 +4178,7 @@ class ScheduledTaskService:
         return False
 
     async def stop(self) -> None:
-        self._begin_stop()
+        request_recovery_stop = self._begin_stop()
         if self._reconcile_task:
             self._reconcile_task.cancel()
             try:
@@ -4121,7 +4209,14 @@ class ScheduledTaskService:
         teardown = self._ensure_service_teardown_task()
         if teardown is not None:
             await teardown
+        if request_recovery_stop is None:
+            request_recovery_stop = self._begin_request_recovery_unregistration()
+        if request_recovery_stop is not None:
+            await request_recovery_stop
+            if self._request_recovery_unregistration_task is request_recovery_stop:
+                self._request_recovery_unregistration_task = None
         self._inflight_executions.clear()
+        self._live_claimed_run_ids = frozenset()
         self._inflight_requests.clear()
         self._inflight_cancellation_causes.clear()
         self._inflight_sessions.clear()
@@ -4444,7 +4539,7 @@ class ScheduledTaskService:
         if not self._transport_ready_for_request(queued):
             self._drain_dirty = True
             return
-        request = self.request_store.claim(queued.id)
+        request = self._claim_pending_request(queued)
         if request is None:
             return
         lock_key = self._execution_lock_key(request)
@@ -4511,7 +4606,7 @@ class ScheduledTaskService:
                 # keeps waiting and must not look sweepable while it does.
                 self.request_store.record_skip_reason(pending.id, reason=SKIP_REASON_SESSION_BUSY)
                 continue
-            request = self.request_store.claim(pending.id)
+            request = self._claim_pending_request(pending)
             if request is None:
                 continue
             self._spawn_execution(request, lock_key)
@@ -6221,6 +6316,7 @@ class ScheduledTaskService:
             self._session_lock_owners[lock_key] = request.id
         task = asyncio.create_task(self._execute_claimed_request(request))
         self._inflight_executions[request.id] = task
+        self._live_claimed_run_ids = frozenset(self._inflight_executions)
         self._inflight_requests[request.id] = request
         task.add_done_callback(
             lambda finished, rid=request.id, key=lock_key: self._on_execution_done(rid, key, finished)
@@ -6230,6 +6326,7 @@ class ScheduledTaskService:
         self, request_id: str, lock_key: Optional[str], task: "asyncio.Task[Any]"
     ) -> None:
         self._inflight_executions.pop(request_id, None)
+        self._live_claimed_run_ids = frozenset(self._inflight_executions)
         request = self._inflight_requests.pop(request_id, None)
         interruption = self._inflight_cancellation_causes.pop(
             request_id,
@@ -6283,13 +6380,214 @@ class ScheduledTaskService:
         if exc is not None:
             logger.error("Claimed request %s crashed: %r", request_id, exc, exc_info=exc)
 
+    def _claimed_request_backend_resolution(
+        self,
+        request: TaskExecutionRequest,
+    ) -> _ClaimedRequestBackendResolution:
+        observed = request.observed_activation_identity
+        if observed is not None:
+            return _ClaimedRequestBackendResolution(True, observed.backend)
+        backend = str(request.agent_backend or "").strip()
+        if backend:
+            return _ClaimedRequestBackendResolution(True, backend)
+        session_id = str(request.session_id or "").strip()
+        if session_id:
+            try:
+                backend = str(resolve_session_id_target(session_id).agent_backend or "").strip()
+            except ValueError:
+                backend = ""
+            if backend:
+                return _ClaimedRequestBackendResolution(True, backend)
+
+        agent_id = str(request.agent_id or "").strip()
+        agent_name = str(request.agent_name or "").strip()
+        if agent_id or agent_name:
+            catalog = getattr(self.controller, "vibe_agent_store", None)
+            get_by_id = getattr(catalog, "get_by_id", None)
+            get_by_name = getattr(catalog, "get", None)
+            service = getattr(self.controller, "agent_service", None)
+            adapters = getattr(service, "agents", None)
+            try:
+                if agent_id:
+                    if not callable(get_by_id):
+                        if callable(
+                            getattr(
+                                service,
+                                "runtime_activation_identity_for_request",
+                                None,
+                            )
+                        ):
+                            return _ClaimedRequestBackendResolution(False)
+                        return _ClaimedRequestBackendResolution(True)
+                    agent = get_by_id(agent_id)
+                else:
+                    if not callable(get_by_name):
+                        if isinstance(adapters, dict) and agent_name in adapters:
+                            return _ClaimedRequestBackendResolution(True, agent_name)
+                        if callable(
+                            getattr(
+                                service,
+                                "runtime_activation_identity_for_request",
+                                None,
+                            )
+                        ):
+                            return _ClaimedRequestBackendResolution(False)
+                        return _ClaimedRequestBackendResolution(True)
+                    agent = get_by_name(agent_name)
+            except Exception:
+                logger.exception(
+                    "Failed to resolve durable Agent backend for Run %s",
+                    request.id,
+                )
+                return _ClaimedRequestBackendResolution(False)
+            if agent is None:
+                # The execution owner still needs to claim and terminalize a Run
+                # whose Agent was deleted. Authoritative absence means "no runtime
+                # generation to probe", not "scan every adapter".
+                return _ClaimedRequestBackendResolution(True)
+            backend = str(getattr(agent, "backend", "") or "").strip()
+            return _ClaimedRequestBackendResolution(bool(backend), backend)
+
+        return _ClaimedRequestBackendResolution(True)
+
+    def _activation_resolution_for_request(
+        self,
+        request: TaskExecutionRequest,
+        *,
+        backend: str = "",
+    ) -> RuntimeActivationResolution | None:
+        service = getattr(self.controller, "agent_service", None)
+        identity_for_request = getattr(
+            service,
+            "runtime_activation_identity_for_request",
+            None,
+        )
+        if not callable(identity_for_request):
+            return None
+        if not backend:
+            return RuntimeActivationResolution(
+                authoritative=True,
+                identity=None,
+            )
+
+        request_view: Any = request
+        session_id = str(request.session_id or "").strip()
+        if session_id:
+            try:
+                target = resolve_session_id_target(session_id)
+            except ValueError:
+                target = None
+            if target is not None and target.workdir:
+                request_payload = vars(request).copy()
+                request_payload["working_path"] = target.workdir
+                request_view = SimpleNamespace(**request_payload)
+
+        result = identity_for_request(backend, request_view)
+        if isinstance(result, RuntimeActivationResolution):
+            return result
+        if isinstance(result, RuntimeActivationIdentity):
+            return RuntimeActivationResolution(authoritative=True, identity=result)
+        if result is None:
+            return RuntimeActivationResolution(authoritative=True, identity=None)
+        return RuntimeActivationResolution(authoritative=False)
+
+    def _runtime_activation_registry(self) -> Any:
+        service = getattr(self.controller, "agent_service", None)
+        registry = getattr(service, "activation_registry", None)
+        if registry is None:
+            registry = getattr(self.controller, "runtime_activation", None)
+        return registry
+
+    def _claim_pending_request(
+        self,
+        pending: TaskExecutionRequest,
+    ) -> TaskExecutionRequest | None:
+        backend_resolution = self._claimed_request_backend_resolution(pending)
+        if not backend_resolution.authoritative:
+            return None
+        backend = backend_resolution.backend
+        service = getattr(self.controller, "agent_service", None)
+        is_backend_ready = getattr(service, "is_backend_ready", None)
+        if backend and callable(is_backend_ready) and not is_backend_ready(backend):
+            return None
+        resolution = self._activation_resolution_for_request(
+            pending,
+            backend=backend,
+        )
+        if resolution is not None and not resolution.authoritative:
+            return None
+        identity = resolution.identity if resolution is not None else None
+        registry = self._runtime_activation_registry()
+        if registry is None or identity is None:
+            return self.request_store.claim(pending.id)
+
+        committed = registry.commit_if_current(
+            identity,
+            lambda: self.request_store.claim(pending.id),
+        )
+        request = committed.value if committed.admitted else None
+        if request is not None:
+            request.observed_activation_identity = identity
+        return request
+
+    async def _mark_execution_started_for_claimed_request(
+        self,
+        request: TaskExecutionRequest,
+    ) -> tuple[TaskExecutionRequest, bool]:
+        observed_identity = request.observed_activation_identity
+        request = self.request_store.refresh_claimed_request(request)
+        if request.observed_activation_identity is None:
+            request.observed_activation_identity = observed_identity
+        backend_resolution = self._claimed_request_backend_resolution(request)
+        if not backend_resolution.authoritative:
+            self.request_store.requeue(request.id)
+            return request, False
+        backend = backend_resolution.backend
+        service = getattr(self.controller, "agent_service", None)
+        activation_identity = request.observed_activation_identity
+        if activation_identity is None:
+            resolution = self._activation_resolution_for_request(
+                request,
+                backend=backend,
+            )
+            if resolution is not None and not resolution.authoritative:
+                self.request_store.requeue(request.id)
+                return request, False
+            activation_identity = (
+                resolution.identity if resolution is not None else None
+            )
+        if not backend and activation_identity is not None:
+            backend = activation_identity.backend
+        if backend and service is not None:
+            is_backend_ready = getattr(service, "is_backend_ready", None)
+            if callable(is_backend_ready) and not is_backend_ready(backend):
+                self.request_store.requeue(request.id)
+                return request, False
+
+        def commit_start() -> bool:
+            return self.request_store.mark_execution_started(request.id)
+
+        activation_registry = self._runtime_activation_registry()
+        if activation_registry is not None and activation_identity is not None:
+            committed = activation_registry.commit_if_current(
+                activation_identity,
+                commit_start,
+            )
+            if not committed.admitted:
+                self.request_store.requeue(request.id)
+                return request, False
+            return request, bool(committed.value)
+        return request, bool(commit_start())
+
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
-        if not self.request_store.mark_execution_started(request.id):
+        request, execution_started = (
+            await self._mark_execution_started_for_claimed_request(request)
+        )
+        if not execution_started:
             # A terminal result or explicit cancellation won after claim but before
             # this coroutine entered. Do not dispatch work whose Run no longer owns
             # the execution boundary.
             return
-        request = self.request_store.refresh_claimed_request(request)
         error: Optional[str] = None
         #: The structured CLASS of this run's failure, when the failure has one. Kept
         #: beside ``error`` rather than parsed back out of it: the text is a sentence

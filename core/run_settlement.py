@@ -323,7 +323,7 @@ _END_RUNTIME = (
 )
 _EVICT_CODEX = (
     "tests/test_codex_agent.py::CodexAgentStopTests::"
-    "test_evict_idle_transports_force_evicts_stuck_active_transport"
+    "test_hfr_144_stuck_active_settles_only_exact_codex_owner"
 )
 _EVICT_CLAUDE = (
     "tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::"

@@ -50,6 +50,11 @@ from core.run_settlement import (
     TEARDOWN_SETTLEMENT_MATRIX,
     TEARDOWN_SETTLEMENT_SURFACES,
 )
+from core.runtime_activation import RuntimeActivationRegistry
+from core.runtime_work import (
+    RuntimeWorkLane,
+    RuntimeWorkRegistrationToken,
+)
 from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
@@ -2984,6 +2989,8 @@ def test_restart_recovers_running_row_and_preserves_same_session_fifo(monkeypatc
         store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
         request_store=restarted_store,
     )
+    assert restarted_store.get_run(first.id)["status"] == "running"
+    service.recover_processing_requests()
     assert [request.id for request in restarted_store.list_pending()] == [first.id, second.id]
 
     async def _exercise() -> None:
@@ -3314,6 +3321,88 @@ def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypat
     assert settled is not None
     assert settled["status"] == "failed"
     assert settled["metadata"]["interrupt_reason"] == "restarted"
+
+
+def test_execute_claimed_request_checks_backend_before_marking_started(
+    tmp_path: Path,
+) -> None:
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    wait_observations: list[object] = []
+
+    def is_backend_ready(_backend: str) -> bool:
+        wait_observations.append(request_store.get_run(claimed.id).get("pid"))
+        return True
+
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            is_backend_ready=Mock(side_effect=is_backend_ready),
+            runtime_activation_identity_for_request=Mock(return_value=None),
+            activation_registry=None,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    claimed = request_store.enqueue_agent_run(
+        message="run",
+        agent_backend="codex",
+        session_id="ses-runtime",
+    )
+    claimed = request_store.claim(claimed.id)
+    assert claimed is not None
+
+    async def fake_execute_agent_run(**_kwargs):
+        assert request_store.get_run(claimed.id).get("pid") is not None
+        return scheduled_tasks.AgentRunExecutionResult(
+            error=None,
+            complete_on_return=False,
+        )
+
+    service._execute_agent_run = AsyncMock(side_effect=fake_execute_agent_run)  # type: ignore[assignment]
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert wait_observations == [None]
+    service._execute_agent_run.assert_awaited_once()
+    assert request_store.get_run(claimed.id)["pid"] is not None
+
+
+def test_execute_claimed_request_skips_retired_runtime_generation(
+    tmp_path: Path,
+) -> None:
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("codex", "/repo")
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            is_backend_ready=Mock(return_value=True),
+            runtime_activation_identity_for_request=Mock(return_value=identity),
+            activation_registry=registry,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    claimed = request_store.enqueue_agent_run(
+        message="run",
+        agent_backend="codex",
+        session_id="ses-runtime",
+    )
+    claimed = request_store.claim(claimed.id)
+    assert claimed is not None
+    assert registry.retire_if_current(identity, lambda: True) is True
+    service._execute_agent_run = AsyncMock()  # type: ignore[assignment]
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    service._execute_agent_run.assert_not_awaited()
+    row = request_store.get_run(claimed.id)
+    assert row["status"] == "queued"
+    assert row.get("pid") is None
 
 
 def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypatch) -> None:
@@ -4056,9 +4145,9 @@ def test_late_terminal_result_cannot_reopen_a_stopped_run(tmp_path: Path, monkey
 # only thing that can close them, which also makes it the only thing that can
 # WRONGLY close a healthy run — so the negative cases matter as much as the positive.
 #
-# Note on staging: ``ScheduledTaskService.__init__`` runs ``recover_processing()``.
-# It requeues bare claims and terminalizes executions whose coroutine had started,
-# so these tests build the service first and stage the live-process orphan after it.
+# Note on staging: startup owner recovery requeues bare claims and terminalizes
+# executions whose coroutine had started. These tests build the service first and
+# stage the live-process orphan after it.
 # ---------------------------------------------------------------------------
 
 
@@ -8641,6 +8730,104 @@ def test_watch_store_does_not_respawn_after_stop(tmp_path: Path) -> None:
     asyncio.run(_exercise())
 
 
+@pytest.mark.parametrize("stop_entrypoint", ["stop", "lease_loss"])
+def test_request_recovery_registration_is_owned_by_exact_service_generation(
+    tmp_path: Path,
+    monkeypatch,
+    stop_entrypoint: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    class BarrierSupervisor:
+        def __init__(self) -> None:
+            self.generation = 0
+            self.current: RuntimeWorkRegistrationToken | None = None
+            self.handlers: list[Any] = []
+            self.unregister_calls: list[RuntimeWorkRegistrationToken] = []
+            self.unregister_entered = asyncio.Event()
+            self.allow_unregister = asyncio.Event()
+
+        def register(self, lane, handler):  # noqa: ANN001, ANN202
+            assert lane is RuntimeWorkLane.REQUESTS
+            assert self.current is None, "a replacement overlapped the prior generation"
+            self.generation += 1
+            token = RuntimeWorkRegistrationToken(lane=lane, generation=self.generation)
+            self.current = token
+            self.handlers.append(handler)
+            return token
+
+        def begin_unregister(
+            self,
+            token: RuntimeWorkRegistrationToken,
+        ) -> asyncio.Task[None]:
+            self.unregister_calls.append(token)
+            assert self.current == token
+            self.unregister_entered.set()
+
+            async def _join() -> None:
+                await self.allow_unregister.wait()
+                if self.current == token:
+                    self.current = None
+
+            return asyncio.create_task(_join())
+
+    async def _exercise() -> None:
+        supervisor = BarrierSupervisor()
+        controller = SimpleNamespace(
+            platform_settings_managers={},
+            runtime_work_supervisor=supervisor,
+        )
+        request_store = TaskExecutionStore()
+        service = ScheduledTaskService(
+            controller=controller,
+            store=ScheduledTaskStore(),
+            request_store=request_store,
+        )
+        service.scheduler = _StubScheduler()
+
+        async def _watch_store() -> None:
+            await asyncio.Event().wait()
+
+        service._watch_store = _watch_store  # type: ignore[method-assign]
+        service.start()
+        first_token = service._request_recovery_token
+        assert first_token is not None
+        assert supervisor.handlers[-1].store is request_store.sqlite_backend
+
+        if stop_entrypoint == "stop":
+            stop_task = asyncio.create_task(service.stop())
+        else:
+            service._requires_service_lease = True
+            monkeypatch.setattr(
+                "core.scheduled_tasks.runtime.current_process_owns_service_instance",
+                lambda: False,
+            )
+            assert service._owns_service_instance() is False
+            stop_task = asyncio.create_task(service.stop())
+
+        await asyncio.wait_for(supervisor.unregister_entered.wait(), timeout=1)
+        assert service._request_recovery_token is None
+        assert supervisor.unregister_calls == [first_token]
+        with pytest.raises(RuntimeError, match="generation is still stopping"):
+            service.start()
+
+        supervisor.allow_unregister.set()
+        await asyncio.wait_for(stop_task, timeout=1)
+        assert supervisor.current is None
+
+        service._requires_service_lease = False
+        service.scheduler = _StubScheduler()
+        service.start()
+        second_token = service._request_recovery_token
+        assert second_token is not None
+        assert second_token.generation == first_token.generation + 1
+        assert supervisor.current == second_token
+        await service.stop()
+        assert supervisor.unregister_calls == [first_token, second_token]
+
+    asyncio.run(_exercise())
+
+
 def test_scheduled_task_service_idle_tick_does_not_drain_empty_queues(tmp_path: Path, monkeypatch) -> None:
     original_sleep = asyncio.sleep
 
@@ -8978,7 +9165,8 @@ def test_drain_serializes_session_id_against_matching_session_key(tmp_path: Path
     def fake_resolve(session_id, *, db_path=None):
         # Both runs resolve to the same canonical session key.
         return SimpleNamespace(
-            session_key=ParsedSessionKey(platform="slack", scope_type="channel", scope_id="C123")
+            session_key=ParsedSessionKey(platform="slack", scope_type="channel", scope_id="C123"),
+            agent_backend="",
         )
 
     monkeypatch.setattr("core.scheduled_tasks.resolve_session_id_target", fake_resolve)
@@ -15207,9 +15395,11 @@ def test_a_crashed_service_reaps_the_command_worker_it_left_running(
         assert workers, "the fire recorded no worker, so a restart cannot find it"
         assert workers[0]["run_id"] == request.id
 
-        # The restart. Its ``__init__`` reaps before ``recover_processing`` settles
-        # the row the identity is stored on.
-        _scheduled_service_with_ledger(tmp_path, store, [])
+        # The controller invokes recovery only after backend/Turn recovery has
+        # reconstructed exact owners. Command reaping remains the first step of
+        # that recovery pass, before the row carrying its identity can settle.
+        restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted.recover_processing_requests()
 
         await asyncio.wait_for(
             asyncio.gather(
@@ -15290,7 +15480,8 @@ def test_a_worker_that_survives_the_reap_is_kept_for_the_next_start(
         # Every start before the cap: the kill is attempted, comes back unconfirmed,
         # and the record is kept with its attempt count so the NEXT one can try.
         for attempt in range(1, cap):
-            _scheduled_service_with_ledger(tmp_path, store, [])
+            restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+            restarted.recover_processing_requests()
             assert len(attempts) == attempt, (
                 f"start {attempt} did not attempt the kill: {attempts!r}"
             )
@@ -15309,7 +15500,8 @@ def test_a_worker_that_survives_the_reap_is_kept_for_the_next_start(
 
         # The cap. The process is still there and still unkillable, but the run stops
         # being held open on its behalf.
-        _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted.recover_processing_requests()
         assert _worker_record() is None, "the reap never gave up; this run stays running forever"
         assert _run_row(request.id)["status"] != "running", (
             "the spent run was left ``running`` with nothing tracking it"
@@ -15404,9 +15596,9 @@ def test_a_restart_reaps_the_group_a_dead_supervisor_left_behind(
             "the fixture did not leave the run in the state the startup reap scans"
         )
 
-        # The restart. Its ``__init__`` reaps before ``recover_processing`` settles
-        # the row the identity is stored on.
-        _scheduled_service_with_ledger(tmp_path, store, [])
+        # Recovery reaps before settling the row that stores the identity.
+        restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted.recover_processing_requests()
 
         deadline = 15.0
         while deadline > 0 and process_isolation.probe_process_liveness(child_pid) != "gone":
@@ -15498,7 +15690,8 @@ def test_a_probe_that_cannot_read_the_process_keeps_its_identity(
 
     cap = ScheduledTaskService._MAX_COMMAND_WORKER_REAP_ATTEMPTS
     for attempt in range(1, cap):
-        _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+        restarted.recover_processing_requests()
         identity = _worker_record()
         assert identity is not None, (
             f"start {attempt} read the process as gone because it could not read it at "
@@ -15519,7 +15712,8 @@ def test_a_probe_that_cannot_read_the_process_keeps_its_identity(
     )
 
     # The cap. Still unreadable, but the run stops being held open on its behalf.
-    _scheduled_service_with_ledger(tmp_path, store, [])
+    restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+    restarted.recover_processing_requests()
     assert _worker_record() is None, "the reap never gave up; this run stays running forever"
     row = service.request_store.get_run(request.id)
     assert row is not None and row["status"] != "running", (
@@ -15684,8 +15878,9 @@ def test_an_enumeration_that_fails_leaves_the_records_it_could_not_read(
         type(service.request_store), "list_running_command_workers", _cannot_read
     )
 
-    # The restart, with the enumeration failing exactly as a momentary lock would.
-    _scheduled_service_with_ledger(tmp_path, store, [])
+    # The recovery pass, with enumeration failing exactly as a momentary lock would.
+    restarted = _scheduled_service_with_ledger(tmp_path, store, [])
+    restarted.recover_processing_requests()
 
     monkeypatch.setattr(
         type(service.request_store), "list_running_command_workers", real_list

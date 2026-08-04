@@ -109,6 +109,7 @@ def _require_agent_reference_identity(
         select(
             agents.c.id,
             agents.c.name,
+            agents.c.backend,
             agents.c.enabled,
             agents.c.archived_at,
             agents.c.metadata_json,
@@ -126,7 +127,11 @@ def _require_agent_reference_identity(
         metadata=_json_loads(row["metadata_json"], {}),
     ):
         raise ValueError(f"agent reference '{row['name']}' is disabled")
-    return {"id": str(row["id"]), "name": str(row["name"])}
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "backend": str(row["backend"]),
+    }
 
 
 def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict[str, str]]:
@@ -142,13 +147,17 @@ def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict
     except ValueError:
         return None
     row = conn.execute(
-        select(agents.c.id, agents.c.name)
+        select(agents.c.id, agents.c.name, agents.c.backend)
         .where(agents.c.normalized_name == normalized_name)
         .limit(1)
     ).mappings().first()
     if row is None:
         return None
-    return {"id": str(row["id"]), "name": str(row["name"])}
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "backend": str(row["backend"]),
+    }
 
 
 def _pin_run_to_definition_agent(
@@ -268,6 +277,7 @@ RUN_STATUS_ALIASES: dict[str, str] = {
     "succeeded": "succeeded",
     "failed": "failed",
     "canceled": "canceled",
+    "cancelled": "canceled",
 }
 _LIKE_ESCAPE = "\\"
 # Every run status Session teardown condemns, which is deliberately WIDER than the
@@ -329,6 +339,17 @@ _WATCH_RUNTIME_RUN_TYPE = "watch_runtime"
 # Harness shows the turn beside the task -- and it settles ``succeeded`` whenever the
 # Agent answers, because answering is all it was asked to do.
 _TASK_ESCALATION_RUN_TYPE = "task_escalation"
+EXECUTION_RUN_TYPES = frozenset(
+    {
+        "task_run",
+        "hook_send",
+        "agent_run",
+        "scheduled",
+        "watch",
+        "webhook",
+        _TASK_ESCALATION_RUN_TYPE,
+    }
+)
 # Rows that carry a definition's id but are NOT a verdict on that definition. Both
 # members present as the newest row for the definition and both settle ``succeeded``
 # on their own schedule, so counted as verdicts they make a broken definition read
@@ -2434,6 +2455,43 @@ def upsert_definition_in_connection(
     return False
 
 
+def _capture_run_backend(conn: Any, values: dict[str, Any]) -> Optional[str]:
+    """Resolve the immutable backend identity for a newly persisted Run."""
+
+    explicit = str(values.get("agent_backend") or "").strip()
+    if explicit:
+        return explicit
+
+    session_id = str(values.get("session_id") or "").strip()
+    if session_id:
+        session_backend = conn.execute(
+            select(agent_sessions.c.agent_backend)
+            .where(agent_sessions.c.id == session_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        cleaned_session_backend = str(session_backend or "").strip()
+        if cleaned_session_backend:
+            return cleaned_session_backend
+
+    agent_id = str(values.get("agent_id") or "").strip()
+    agent_name = str(values.get("agent_name") or "").strip()
+    agent_backend = None
+    if agent_id:
+        agent_backend = conn.execute(
+            select(agents.c.backend).where(agents.c.id == agent_id).limit(1)
+        ).scalar_one_or_none()
+    elif agent_name:
+        identity = _resolve_agent_identity_by_name(conn, agent_name)
+        agent_backend = (identity or {}).get("backend")
+    cleaned_agent_backend = str(agent_backend or "").strip()
+    if cleaned_agent_backend:
+        return cleaned_agent_backend
+
+    from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
+
+    return agent_name if agent_name in SUPPORTED_AGENT_BACKENDS else None
+
+
 def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
     """Write one ``agent_runs`` outbox row in a CALLER'S transaction.
 
@@ -2442,8 +2500,12 @@ def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
     """
 
     existing = conn.execute(
-        select(agent_runs.c.id).where(agent_runs.c.id == values["id"]).limit(1)
-    ).scalar_one_or_none()
+        select(agent_runs.c.id, agent_runs.c.agent_backend)
+        .where(agent_runs.c.id == values["id"])
+        .limit(1)
+    ).mappings().first()
+    existing_backend = str((existing or {}).get("agent_backend") or "").strip()
+    values["agent_backend"] = existing_backend or _capture_run_backend(conn, values)
     if existing:
         conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
     else:
@@ -2893,6 +2955,7 @@ class SQLiteBackgroundTaskStore:
                 )
                 values["agent_id"] = identity["id"]
                 values["agent_name"] = identity["name"]
+                values["agent_backend"] = identity["backend"]
             enqueue_run_in_connection(conn, values)
 
     def enqueue_definition_run(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2952,6 +3015,7 @@ class SQLiteBackgroundTaskStore:
                 values.update(
                     agent_name=identity["name"] if identity else current_name,
                     agent_id=identity["id"] if identity else None,
+                    agent_backend=identity["backend"] if identity else None,
                     session_policy=definition["session_policy"],
                     session_id=definition["session_id"],
                     legacy_session_key=definition["legacy_session_key"],
@@ -2966,6 +3030,7 @@ class SQLiteBackgroundTaskStore:
         return {
             "agent_name": values["agent_name"],
             "agent_id": values["agent_id"],
+            "agent_backend": values["agent_backend"],
             "session_policy": values["session_policy"],
             "session_id": values["session_id"],
             "session_key": values["legacy_session_key"],
@@ -4014,6 +4079,77 @@ class SQLiteBackgroundTaskStore:
             if result.rowcount:
                 row_to_publish = dict(
                     conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
+        return row_to_publish is not None
+
+    def scan_claimed_pre_execution_runs(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Read a keyset page of fallback claims before the PID boundary."""
+
+        page_limit = max(1, int(limit))
+        query = (
+            select(
+                agent_runs.c.id,
+                agent_runs.c.status,
+                agent_runs.c.updated_at,
+                agent_runs.c.delivery_id,
+                agent_runs.c.pid,
+            )
+            .where(agent_runs.c.status.in_(_status_query_values("running")))
+            .where(agent_runs.c.pid.is_(None))
+            .where(agent_runs.c.delivery_id.is_(None))
+            .where(agent_runs.c.run_type.in_(EXECUTION_RUN_TYPES))
+            .order_by(agent_runs.c.id)
+            .limit(page_limit + 1)
+        )
+        if cursor:
+            query = query.where(agent_runs.c.id > cursor)
+        if occupied:
+            query = query.where(~agent_runs.c.id.in_(occupied))
+        with self.engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(query).mappings()]
+        return rows[:page_limit], len(rows) > page_limit
+
+    def recover_claimed_pre_execution_run(
+        self,
+        *,
+        run_id: str,
+        expected_status: str,
+        expected_updated_at: str,
+    ) -> bool:
+        """Requeue one exact fallback claim if execution still has not started."""
+
+        now = _utc_now_iso()
+        row_to_publish = None
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status == expected_status)
+                .where(agent_runs.c.updated_at == expected_updated_at)
+                .where(agent_runs.c.pid.is_(None))
+                .where(agent_runs.c.delivery_id.is_(None))
+                .where(agent_runs.c.run_type.in_(EXECUTION_RUN_TYPES))
+                .values(
+                    status="queued",
+                    started_at=None,
+                    pid=None,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount:
+                row_to_publish = dict(
+                    conn.execute(
+                        select(agent_runs)
+                        .where(agent_runs.c.id == run_id)
+                        .limit(1)
+                    ).mappings().one()
                 )
         _publish_run_rows_updated([row_to_publish])
         return row_to_publish is not None
