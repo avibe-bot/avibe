@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import socket
 import stat
 import tempfile
@@ -69,6 +70,36 @@ _UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
     if value is not None
 )
 _ACCEPTED_RESERVATION_TYPES = set(types_with("acceptedReservation"))
+_MEMORY_LOG_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_MEMORY_LOG_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+
+
+def _memory_log_list_query(request: Request) -> tuple[str | None, int]:
+    items = list(request.query_params.multi_items())
+    keys = [key for key, _value in items]
+    if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
+        raise ValueError("invalid memory log query")
+    values = dict(items)
+    cursor = values.get("cursor")
+    if cursor is not None and _MEMORY_LOG_CURSOR_RE.fullmatch(cursor) is None:
+        raise ValueError("invalid memory log cursor")
+    raw_limit = values.get("limit", "20")
+    if not raw_limit.isascii() or not raw_limit.isdecimal():
+        raise ValueError("invalid memory log limit")
+    limit = int(raw_limit)
+    if not 1 <= limit <= 50:
+        raise ValueError("invalid memory log limit")
+    return cursor, limit
+
+
+def _memory_log_entry_query(request: Request) -> str:
+    items = list(request.query_params.multi_items())
+    if len(items) != 1 or items[0][0] != "memcell_id":
+        raise ValueError("invalid memory log entry query")
+    memcell_id = items[0][1]
+    if _MEMORY_LOG_ENTRY_ID_RE.fullmatch(memcell_id) is None:
+        raise ValueError("invalid memory log entry id")
+    return memcell_id
 
 
 def _create_controller_loop_server(config: Any) -> Any:
@@ -844,6 +875,103 @@ def create_app(
         except Exception:
             logger.warning("internal memory profile failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.get("/internal/memory/log")
+    async def _memory_log(request: Request) -> Any:
+        try:
+            cursor, limit = _memory_log_list_query(request)
+            scope = _memory_read_scope(request)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if scope is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_runtime_missing"},
+            )
+        principal_id, project_id = scope
+        try:
+            return await runtime.log_entries_payload(
+                principal_id,
+                project_id,
+                cursor,
+                limit,
+            )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except Exception:
+            logger.warning("internal memory log failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
+
+    @app.get("/internal/memory/log/entry")
+    async def _memory_log_entry(request: Request) -> Any:
+        try:
+            memcell_id = _memory_log_entry_query(request)
+            scope = _memory_read_scope(request)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if scope is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_runtime_missing"},
+            )
+        principal_id, project_id = scope
+        try:
+            payload = await runtime.log_entry_payload(
+                principal_id,
+                project_id,
+                memcell_id,
+            )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except Exception:
+            logger.warning("internal memory log entry failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
+        if payload.get("status") == "not_found":
+            return JSONResponse(
+                status_code=404,
+                content={"status": "failed", "error": "memory_log_entry_not_found"},
+            )
+        return payload
 
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:

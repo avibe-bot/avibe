@@ -261,6 +261,52 @@ def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypat
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[tuple[object, ...]] = []
+
+    async def memory_log(*, cursor: str | None, limit: int, user_key: str):
+        calls.append(("list", cursor, limit, user_key))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "entries": [], "next_cursor": None},
+        }
+
+    async def memory_log_entry(memcell_id: str, *, user_key: str):
+        calls.append(("detail", memcell_id, user_key))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "entry": {"memcell_id": memcell_id}},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_log", memory_log)
+    monkeypatch.setattr(internal_client, "memory_log_entry", memory_log_entry)
+    client = app.test_client()
+    request_options = {
+        "headers": _local_headers(),
+        "base_url": "http://127.0.0.1:15131",
+        "environ_base": {"REMOTE_ADDR": "127.0.0.1"},
+    }
+
+    listed = client.get("/api/memory/log?cursor=opaque_cursor&limit=17", **request_options)
+    detail = client.get("/api/memory/log/entry?memcell_id=mc_1", **request_options)
+    duplicate = client.get("/api/memory/log?limit=1&limit=2", **request_options)
+    invalid_id = client.get("/api/memory/log/entry?memcell_id=../secret", **request_options)
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    assert listed.headers["cache-control"] == "no-store"
+    assert detail.headers["cache-control"] == "no-store"
+    assert calls == [
+        ("list", "opaque_cursor", 17, "avibe:local"),
+        ("detail", "mc_1", "avibe:local"),
+    ]
+    for response in (duplicate, invalid_id):
+        assert response.status_code == 400
+        assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
+
+
 def test_memory_settings_enable_reconciles_through_controller(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

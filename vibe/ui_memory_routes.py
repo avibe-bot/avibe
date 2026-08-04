@@ -16,12 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, Callable
 
 from fastapi import Request as FastAPIRequest
 
 from config.v2_config import V2Config
 from vibe.ui_compat import Response, jsonify
+
+
+_MEMORY_LOG_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_MEMORY_LOG_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
 
 def _memory_ui_user_key() -> str | None:
@@ -53,6 +58,34 @@ def _memory_response_body(response: Response) -> dict:
     except (TypeError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _memory_log_list_query(request: FastAPIRequest) -> tuple[str | None, int]:
+    items = list(request.query_params.multi_items())
+    keys = [key for key, _value in items]
+    if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
+        raise ValueError("invalid memory log query")
+    values = dict(items)
+    cursor = values.get("cursor")
+    if cursor is not None and _MEMORY_LOG_CURSOR_RE.fullmatch(cursor) is None:
+        raise ValueError("invalid memory log cursor")
+    raw_limit = values.get("limit", "20")
+    if not raw_limit.isascii() or not raw_limit.isdecimal():
+        raise ValueError("invalid memory log limit")
+    limit = int(raw_limit)
+    if not 1 <= limit <= 50:
+        raise ValueError("invalid memory log limit")
+    return cursor, limit
+
+
+def _memory_log_entry_query(request: FastAPIRequest) -> str:
+    items = list(request.query_params.multi_items())
+    if len(items) != 1 or items[0][0] != "memcell_id":
+        raise ValueError("invalid memory log entry query")
+    memcell_id = items[0][1]
+    if _MEMORY_LOG_ENTRY_ID_RE.fullmatch(memcell_id) is None:
+        raise ValueError("invalid memory log entry id")
+    return memcell_id
 
 
 async def _memory_internal_response(call: Callable[[], Any]) -> Response:
@@ -293,6 +326,55 @@ def register_memory_routes(app) -> None:
 
             return await _memory_internal_response(
                 lambda: internal_client.memory_profile(user_key=user_key)
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    @app.get("/api/memory/log", include_in_schema=False)
+    async def memory_log_get(starlette_request: FastAPIRequest):
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            try:
+                cursor, limit = _memory_log_list_query(starlette_request)
+            except ValueError:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"},
+                    status_code=400,
+                )
+            from vibe import internal_client
+
+            return await _memory_internal_response(
+                lambda: internal_client.memory_log(
+                    cursor=cursor,
+                    limit=limit,
+                    user_key=user_key,
+                )
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    @app.get("/api/memory/log/entry", include_in_schema=False)
+    async def memory_log_entry_get(starlette_request: FastAPIRequest):
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            try:
+                memcell_id = _memory_log_entry_query(starlette_request)
+            except ValueError:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"},
+                    status_code=400,
+                )
+            from vibe import internal_client
+
+            return await _memory_internal_response(
+                lambda: internal_client.memory_log_entry(
+                    memcell_id,
+                    user_key=user_key,
+                )
             )
 
         return await app.dispatch_native_request(starlette_request, handler)
