@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.11.0
+version: 0.11.1
 ---
 
 # Background Watch Hook
@@ -259,20 +259,26 @@ resolved for, and an explicit `--since-review-comment-id` /
 for is not narrowed away. It is written on every cursor advance and on timeout,
 replaced atomically, and ignored when unreadable. Two failures are terminal rather
 than a warning — a path that cannot be written to (checked before the first poll)
-and a path already owned by another PR — and both stop the watch with exit `1`
+and a path already owned by another watch — and both stop the watch with exit `1`
 rather than polling on without the cursors it was asked to keep, or clobbering
 another watch's.
 
 Ownership is claimed, not assumed. A missing state file is created before the first
-poll holding nothing but the repo and PR it belongs to, so two watches started
-together cannot both see an unowned path; the one that loses that exclusive create
-reads the winner's claim and stops. Ownership is re-checked before every replacement
-as well, because the loser of a microsecond-wide race has already passed the
-startup check. Give each PR its own state file.
+poll holding nothing but the identity it belongs to, so two watches started together
+cannot both see an unowned path; the one that loses that exclusive create reads the
+winner's claim and stops. Ownership is re-checked before every replacement as well,
+because the loser of a microsecond-wide race has already passed the startup check.
+Identity is the repo, the PR, and the options that decide what the watch reports
+(`--actionable-only`, `--ignore-author`, `--ignore-comment-pattern`,
+`--include-self-comments`, `--new-prs`) — two watches on the same PR that report
+different things cannot share cursors either, because the filtered one advances past
+events the other never reported. Pacing options such as `--interval` and `--settle`
+are not part of it. Give each watch its own state file.
 
 GitHub-specific notes:
 
-- `--catch-up` reports activity that already exists at startup
+- `--catch-up` reports activity that already exists at startup, and overrides saved
+  cursors when a state file is present; an explicit `--since-*-id` still wins
 - without `--catch-up` or a `--state-file`, the waiter snapshots current PR activity as the baseline
 - polling is cheap by design: comment fetches are filtered server-side with `since`,
   reactions with `content=+1`, and unchanged pages revalidate to `304`, which GitHub

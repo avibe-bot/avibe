@@ -80,7 +80,7 @@ class StatePersistenceError(StateFileError):
 
 
 class StateFileOwnershipError(StateFileError):
-    """The state file at this path belongs to a different PR.
+    """The state file at this path belongs to a different PR, or a different watch.
 
     Two watches pointed at one file is a configuration error, not a state to
     recover from: each would read the other's cursors as absent, re-baseline, and
@@ -468,7 +468,66 @@ def _write_new_pr_cursor_output(path: str | None, *, pr_cursor: int) -> None:
         json.dump({"pr_cursor": pr_cursor}, handle)
 
 
-def _load_state_file(path: str | None, *, repo: str, pr_number: int | None) -> dict[str, Any]:
+def _watch_identity(args: argparse.Namespace) -> str:
+    """A stable digest of the options that decide what this watch reports.
+
+    Ownership by repo and PR alone cannot tell two watches on the same PR apart --
+    one ``--actionable-only``, one meant to report everything -- and a shared state
+    file then lets whichever polls first advance the cursors past an event the other
+    would have reported. That event is gone for good rather than merely late, so the
+    filters belong in the identity.
+
+    Only the report-shaping options are in here. ``--interval``, ``--timeout`` and
+    ``--settle`` change pacing, not which activity counts, and two watches differing
+    only in those can share cursors without losing anything.
+    """
+
+    material = json.dumps(
+        {
+            "mode": "new-prs" if args.new_prs else "pr",
+            "actionable_only": bool(args.actionable_only),
+            "include_self_comments": bool(args.include_self_comments),
+            "ignore_authors": sorted(_normalize_authors(args.ignore_author)),
+            "ignore_comment_patterns": sorted(set(args.ignore_comment_pattern or [])),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(f"wait_pr/{STATE_FILE_VERSION}/{material}".encode()).hexdigest()[:16]
+
+
+def _owner_conflict(
+    owner: tuple[Any, Any, Any] | None,
+    *,
+    repo: str,
+    pr_number: int | None,
+    watch_identity: str | None,
+) -> str | None:
+    """Why ``owner`` is somebody else's claim on the path, or ``None`` when it is ours.
+
+    A state file written before identities existed carries none, and an absent
+    identity cannot prove a conflict, so such a file is adopted rather than rejected.
+    """
+
+    if owner is None:
+        return None
+    saved_repo, saved_pr, saved_watch = owner
+    if saved_repo != repo or saved_pr != pr_number:
+        return f"belongs to {saved_repo}#{saved_pr}, not {repo}#{pr_number}"
+    if saved_watch is not None and watch_identity is not None and saved_watch != watch_identity:
+        return (
+            f"belongs to another watch on {saved_repo}#{saved_pr} with different "
+            "reporting filters"
+        )
+    return None
+
+
+def _load_state_file(
+    path: str | None,
+    *,
+    repo: str,
+    pr_number: int | None,
+    watch_identity: str | None = None,
+) -> dict[str, Any]:
     """Read cursors left behind by an earlier run of this same waiter.
 
     A `--forever` watch runs the waiter once per cycle, so without this the next
@@ -492,15 +551,18 @@ def _load_state_file(path: str | None, *, repo: str, pr_number: int | None) -> d
     if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
         print(f"Ignoring state file {path}: unrecognised format", file=sys.stderr)
         return {}
-    # Resuming from another PR's cursors would skip that PR's real history, and
-    # carrying on would overwrite them with ours on the first cursor advance --
-    # so this is terminal rather than a fresh baseline. A file left behind by an
-    # earlier watch on another PR has to be removed or renamed deliberately.
-    if payload.get("repo") != repo or payload.get("pr") != pr_number:
-        raise StateFileOwnershipError(
-            f"State file {path} belongs to {payload.get('repo')}#{payload.get('pr')}, "
-            f"not {repo}#{pr_number}"
-        )
+    # Resuming from somebody else's cursors would skip the history they cover, and
+    # carrying on would overwrite them on the first cursor advance -- so this is
+    # terminal rather than a fresh baseline. A file left behind by another watch has
+    # to be removed, or that watch given its own path, deliberately.
+    conflict = _owner_conflict(
+        (payload.get("repo"), payload.get("pr"), payload.get("watch")),
+        repo=repo,
+        pr_number=pr_number,
+        watch_identity=watch_identity,
+    )
+    if conflict is not None:
+        raise StateFileOwnershipError(f"State file {path} {conflict}")
     return payload
 
 
@@ -516,8 +578,8 @@ def _state_file_scratch(target: Path) -> tuple[int, str]:
     return tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
 
 
-def _state_file_owner(target: Path) -> tuple[Any, Any] | None:
-    """Which PR the file at ``target`` currently claims, or ``None`` if it says nothing.
+def _state_file_owner(target: Path) -> tuple[Any, Any, Any] | None:
+    """Which watch the file at ``target`` currently claims, or ``None`` if it says nothing.
 
     Missing and unusable files both answer ``None``, matching ``_load_state_file``:
     there is no owner to respect, so the caller may take the path.
@@ -530,10 +592,16 @@ def _state_file_owner(target: Path) -> tuple[Any, Any] | None:
         return None
     if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
         return None
-    return payload.get("repo"), payload.get("pr")
+    return payload.get("repo"), payload.get("pr"), payload.get("watch")
 
 
-def _claim_state_file(target: Path, *, repo: str, pr_number: int | None) -> bool:
+def _claim_state_file(
+    target: Path,
+    *,
+    repo: str,
+    pr_number: int | None,
+    watch_identity: str | None = None,
+) -> bool:
     """Take a currently missing state file for this PR, atomically.
 
     ``O_EXCL`` is the whole point: two waiters starting together both see no file,
@@ -554,13 +622,27 @@ def _claim_state_file(target: Path, *, repo: str, pr_number: int | None) -> bool
 
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump({"version": STATE_FILE_VERSION, "repo": repo, "pr": pr_number}, stream)
+            json.dump(
+                {
+                    "version": STATE_FILE_VERSION,
+                    "repo": repo,
+                    "pr": pr_number,
+                    "watch": watch_identity,
+                },
+                stream,
+            )
     except OSError as err:
         raise StatePersistenceError(f"Cannot write state file {target}: {err}") from err
     return True
 
 
-def _verify_state_file_writable(path: str | None, *, repo: str, pr_number: int | None) -> None:
+def _verify_state_file_writable(
+    path: str | None,
+    *,
+    repo: str,
+    pr_number: int | None,
+    watch_identity: str | None = None,
+) -> None:
     """Claim the requested state file, and fail before the first poll if it is unusable.
 
     A forever watch only discovers a read-only parent directory when the cycle it
@@ -590,7 +672,9 @@ def _verify_state_file_writable(path: str | None, *, repo: str, pr_number: int |
     except OSError as err:
         raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
 
-    if not exists and _claim_state_file(target, repo=repo, pr_number=pr_number):
+    if not exists and _claim_state_file(
+        target, repo=repo, pr_number=pr_number, watch_identity=watch_identity
+    ):
         # Creating the real file in the real directory is the write probe, and the
         # rename in later cycles lands on a file this process owns.
         return
@@ -617,22 +701,38 @@ def _verify_state_file_writable(path: str | None, *, repo: str, pr_number: int |
                 pass
 
 
-def _write_state_file(path: str | None, *, repo: str, pr_number: int | None, **fields: Any) -> None:
+def _write_state_file(
+    path: str | None,
+    *,
+    repo: str,
+    pr_number: int | None,
+    watch_identity: str | None = None,
+    **fields: Any,
+) -> None:
     if not path:
         return
 
-    payload = {"version": STATE_FILE_VERSION, "repo": repo, "pr": pr_number, **fields}
+    payload = {
+        "version": STATE_FILE_VERSION,
+        "repo": repo,
+        "pr": pr_number,
+        "watch": watch_identity,
+        **fields,
+    }
     target = Path(path)
     scratch = None
     # Re-checked on every replace, not just at startup: the claim can lose a race with
     # a waiter that created the file in the same instant, or a person can point another
     # watch at the same path mid-run. Clobbering that watch's cursors would make it
     # re-baseline and skip real activity, so hand the path back and stop instead.
-    owner = _state_file_owner(target)
-    if owner is not None and owner != (repo, pr_number):
-        raise StateFileOwnershipError(
-            f"State file {path} now belongs to {owner[0]}#{owner[1]}, not {repo}#{pr_number}"
-        )
+    conflict = _owner_conflict(
+        _state_file_owner(target),
+        repo=repo,
+        pr_number=pr_number,
+        watch_identity=watch_identity,
+    )
+    if conflict is not None:
+        raise StateFileOwnershipError(f"State file {path} now {conflict}")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         # Written aside and moved into place: a cycle killed mid-write must not
@@ -682,7 +782,9 @@ def _saved_str(saved: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """The waiter's CLI surface, separate from main() so it can be inspected directly."""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="GitHub repo in owner/name form")
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -757,12 +859,21 @@ def main() -> int:
         action="store_true",
         help="Allow polling without GitHub auth; the interval will be clamped to a safer minimum",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
 
     token = get_token()
     cache = ResponseCache()
-    _verify_state_file_writable(args.state_file, repo=args.repo, pr_number=args.pr)
-    saved = _load_state_file(args.state_file, repo=args.repo, pr_number=args.pr)
+    watch_identity = _watch_identity(args)
+    _verify_state_file_writable(
+        args.state_file, repo=args.repo, pr_number=args.pr, watch_identity=watch_identity
+    )
+    saved = _load_state_file(
+        args.state_file, repo=args.repo, pr_number=args.pr, watch_identity=watch_identity
+    )
     token_fingerprint = _token_fingerprint(token)
     viewer_login = None
     if not args.include_self_comments:
@@ -818,7 +929,12 @@ def main() -> int:
         if resumed and args.since_issue_comment_id is None
         else None
     )
-    saved_pr_cursor = _saved_int(saved, "pr_cursor")
+    # --catch-up asks for existing activity to count as pending, and it already
+    # overrides the saved cursors above. The new-PR cursor follows the same rule:
+    # inheriting it would filter the fully fetched history right back down to what
+    # the last cycle had already seen, which is the opposite of what was asked for.
+    # An explicit --since-pr-id names a replay point and still wins.
+    saved_pr_cursor = None if args.catch_up else _saved_int(saved, "pr_cursor")
     since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
 
     try:
@@ -945,6 +1061,7 @@ def main() -> int:
                 args.state_file,
                 repo=args.repo,
                 pr_number=args.pr,
+                watch_identity=watch_identity,
                 review_cursor=review_cursor,
                 review_comment_cursor=review_comment_cursor,
                 issue_comment_cursor=issue_comment_cursor,
@@ -1039,7 +1156,13 @@ def main() -> int:
             pr_cursor=pr_cursor,
             event_limit=args.event_limit,
         )
-        _write_state_file(args.state_file, repo=args.repo, pr_number=None, pr_cursor=pr_cursor)
+        _write_state_file(
+            args.state_file,
+            repo=args.repo,
+            pr_number=None,
+            watch_identity=watch_identity,
+            pr_cursor=pr_cursor,
+        )
         if initial_output is not None:
             _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
             print(initial_output)
@@ -1155,7 +1278,13 @@ def main() -> int:
                 pr_cursor=pr_cursor,
                 event_limit=args.event_limit,
             )
-            _write_state_file(args.state_file, repo=args.repo, pr_number=None, pr_cursor=pr_cursor)
+            _write_state_file(
+                args.state_file,
+                repo=args.repo,
+                pr_number=None,
+                watch_identity=watch_identity,
+                pr_cursor=pr_cursor,
+            )
             if output is None:
                 continue
             _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
@@ -1177,7 +1306,11 @@ def run_cli() -> int:
     try:
         return main()
     except StateFileError as err:
-        print(f"{err}. Fix the path or drop --state-file, then recreate the watch.", file=sys.stderr)
+        print(
+            f"{err}. Give this watch its own --state-file path (or fix this one), "
+            "then recreate the watch.",
+            file=sys.stderr,
+        )
         return 1
 
 

@@ -1878,19 +1878,24 @@ def test_state_file_preflight_claims_a_missing_path_before_polling(tmp_path) -> 
     module = _load_module()
     state_file = tmp_path / "cursors" / "pr-153.json"
 
-    module._verify_state_file_writable(str(state_file), repo="avibe-bot/avibe", pr_number=153)
+    module._verify_state_file_writable(
+        str(state_file), repo="avibe-bot/avibe", pr_number=153, watch_identity="abc123"
+    )
 
-    assert json.loads(state_file.read_text(encoding="utf-8")) == {
+    claim = {
         "version": module.STATE_FILE_VERSION,
         "repo": "avibe-bot/avibe",
         "pr": 153,
+        "watch": "abc123",
     }
+    assert json.loads(state_file.read_text(encoding="utf-8")) == claim
     # No cursors, so a resume is not attempted and the cycle baselines as before.
-    assert module._load_state_file(str(state_file), repo="avibe-bot/avibe", pr_number=153) == {
-        "version": module.STATE_FILE_VERSION,
-        "repo": "avibe-bot/avibe",
-        "pr": 153,
-    }
+    assert (
+        module._load_state_file(
+            str(state_file), repo="avibe-bot/avibe", pr_number=153, watch_identity="abc123"
+        )
+        == claim
+    )
     assert list(state_file.parent.glob(".pr-153.json.*")) == []
 
 
@@ -1904,6 +1909,89 @@ def test_state_file_claim_is_visible_to_a_second_watch(tmp_path) -> None:
     assert module._claim_state_file(state_file, repo="avibe-bot/avibe", pr_number=158) is False
     with pytest.raises(module.StateFileOwnershipError):
         module._load_state_file(str(state_file), repo="avibe-bot/avibe", pr_number=158)
+
+
+def test_watch_identity_separates_report_filters_but_not_pacing() -> None:
+    """Two watches on one PR are the same owner only if they report the same things.
+
+    Pacing options are deliberately outside the identity: a watch differing only in
+    interval or settle window sees the same activity, so sharing cursors with it
+    loses nothing, while a differing filter set does lose events.
+    """
+    module = _load_module()
+
+    def _identity(*extra: str) -> str:
+        with patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", *extra],
+        ):
+            return module._watch_identity(module._build_parser().parse_args())
+
+    baseline = _identity("--interval", "60")
+    assert _identity("--interval", "5", "--settle", "20", "--timeout", "0") == baseline
+    assert _identity("--actionable-only") != baseline
+    assert _identity("--include-self-comments") != baseline
+    assert _identity("--ignore-author", "dependabot[bot]") != baseline
+    assert _identity("--ignore-comment-pattern", "^nit") != baseline
+    # Order and duplication are not identity: the same filter set has to hash alike
+    # across cycles however the command happened to be written.
+    assert _identity(
+        "--ignore-author",
+        "Renovate[bot]",
+        "--ignore-author",
+        "dependabot[bot]",
+        "--ignore-author",
+        "dependabot[bot]",
+    ) == _identity("--ignore-author", "dependabot[bot]", "--ignore-author", "renovate[bot]")
+
+
+def test_load_state_file_rejects_another_watch_on_the_same_pr(tmp_path) -> None:
+    """Same PR, different filters: the filtered watch would advance past the other's events."""
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": "actionable",
+                "review_comment_cursor": 400,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.StateFileOwnershipError) as err:
+        module._load_state_file(
+            str(state_file), repo="avibe-bot/avibe", pr_number=153, watch_identity="everything"
+        )
+
+    assert "different reporting filters" in str(err.value)
+
+
+def test_load_state_file_adopts_a_file_written_before_identities_existed(tmp_path) -> None:
+    """An absent identity cannot prove a conflict, so it must not invent one.
+
+    Rejecting it would strand a watch on cursors it wrote itself under an older
+    build of this waiter.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    saved = {
+        "version": module.STATE_FILE_VERSION,
+        "repo": "avibe-bot/avibe",
+        "pr": 153,
+        "review_comment_cursor": 400,
+    }
+    state_file.write_text(json.dumps(saved), encoding="utf-8")
+
+    assert (
+        module._load_state_file(
+            str(state_file), repo="avibe-bot/avibe", pr_number=153, watch_identity="everything"
+        )
+        == saved
+    )
 
 
 def test_write_state_file_refuses_a_path_another_watch_now_owns(tmp_path) -> None:
@@ -1934,6 +2022,115 @@ def test_write_state_file_refuses_a_path_another_watch_now_owns(tmp_path) -> Non
         )
 
     assert state_file.read_text(encoding="utf-8") == other
+
+
+def test_write_state_file_refuses_a_sibling_watch_on_the_same_pr(tmp_path) -> None:
+    """The write guard covers the same-PR case too, not just a foreign PR."""
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    other = json.dumps(
+        {
+            "version": module.STATE_FILE_VERSION,
+            "repo": "avibe-bot/avibe",
+            "pr": 153,
+            "watch": "actionable",
+            "review_comment_cursor": 400,
+        }
+    )
+    state_file.write_text(other, encoding="utf-8")
+
+    with pytest.raises(module.StateFileOwnershipError):
+        module._write_state_file(
+            str(state_file),
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            watch_identity="everything",
+            review_comment_cursor=999,
+        )
+
+    assert state_file.read_text(encoding="utf-8") == other
+
+
+def _new_pr(pr_id: int, number: int) -> dict[str, object]:
+    return {
+        "id": pr_id,
+        "number": number,
+        "title": f"PR {number}",
+        "state": "open",
+        "html_url": f"https://github.com/example/repo/pull/{number}",
+        "user": {"login": "cyhhao"},
+    }
+
+
+def _run_new_pr_catch_up(module, state_file, *extra: str) -> str:
+    def _fake_fetch_new_pr_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
+        return {"pull_requests": [_new_pr(400, 157), _new_pr(410, 158)]}, 1
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--new-prs",
+                "--catch-up",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+                *extra,
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    return stdout.getvalue()
+
+
+def test_main_new_prs_catch_up_ignores_the_saved_cursor(tmp_path) -> None:
+    """--catch-up means "report what is already there", saved cursor or not.
+
+    The PR-activity path already lets --catch-up override saved cursors; inheriting
+    the saved new-PR cursor filtered the freshly fetched history back down to what
+    the previous cycle had seen, so the flag reported nothing.
+    """
+    module = _load_module()
+    state_file = tmp_path / "new-prs.json"
+    state_file.write_text(
+        json.dumps({"version": module.STATE_FILE_VERSION, "repo": "avibe-bot/avibe", "pr": None, "pr_cursor": 410}),
+        encoding="utf-8",
+    )
+
+    output = _run_new_pr_catch_up(module, state_file)
+
+    assert "pull_request #157" in output
+    assert "pull_request #158" in output
+
+
+def test_main_new_prs_catch_up_still_honours_an_explicit_cursor(tmp_path) -> None:
+    """Only an explicitly supplied cursor narrows a catch-up."""
+    module = _load_module()
+    state_file = tmp_path / "new-prs.json"
+    state_file.write_text(
+        json.dumps({"version": module.STATE_FILE_VERSION, "repo": "avibe-bot/avibe", "pr": None, "pr_cursor": 300}),
+        encoding="utf-8",
+    )
+
+    output = _run_new_pr_catch_up(module, state_file, "--since-pr-id", "400")
+
+    assert "pull_request #157" not in output
+    assert "pull_request #158" in output
 
 
 def test_main_stops_when_persisting_advanced_cursors_fails(tmp_path) -> None:
