@@ -441,6 +441,47 @@ def test_transcript_orders_queued_input_at_acceptance_across_all_cursors(isolate
     assert [row["id"] for row in around] == ["msg_001", "msg_003", "msg_002"]
 
 
+def test_append_keeps_subsecond_transcript_order_for_direct_reply(
+    isolated_state,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        messages_service,
+        "_utc_now_iso",
+        lambda: "2026-08-04T00:00:00.750000Z",
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_subsecond")
+        prompt = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_subsecond",
+            platform="avibe",
+            author="user",
+            text="prompt",
+            delivered_at="2026-08-04T00:00:00.500000Z",
+        )
+        reply = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_subsecond",
+            platform="avibe",
+            author="agent",
+            text="reply",
+        )
+
+    with engine.connect() as conn:
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses_subsecond",
+        )["messages"]
+
+    assert reply["created_at"] == "2026-08-04T00:00:00.750000Z"
+    assert [row["text"] for row in transcript] == ["prompt", "reply"]
+
+
 def test_mark_session_read_ties_break_on_id(isolated_state):
     """When ``until_message_id`` points at a message whose ``created_at``
     is shared by newer messages (second precision), only rows at-or-before

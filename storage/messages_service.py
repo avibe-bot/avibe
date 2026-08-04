@@ -38,7 +38,9 @@ from vibe.message_types import types_with
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _timestamp_key(value: Any, row_id: Any) -> tuple[datetime, str]:
@@ -247,7 +249,7 @@ def _transcript_order_value() -> Any:
     A queued Delivery may be submitted while another Turn is active. Its Message
     is authored then but enters the transcript only when native start accepts it,
     recorded in ``delivered_at``. Directly accepted rows have no ``delivered_at``
-    and keep their normal ``created_at`` plus id tie-break.
+    and keep their microsecond ``created_at`` plus id tie-break.
     """
 
     return func.coalesce(

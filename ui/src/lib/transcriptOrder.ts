@@ -19,9 +19,9 @@ export const timestampOrderTimeMs = (timestamp: string): number => {
 
 /** Best available wall-clock position for a durable message row.
  *
- * Canonical `msg_` ids add a microsecond clock to second-resolution created_at;
- * imported ids fall back to created_at. Placement helpers outside the transcript
- * use this authored-time position.
+ * Canonical `msg_` ids recover a microsecond clock for legacy second-resolution
+ * rows; imported ids fall back to created_at. Placement helpers outside the
+ * transcript use this authored-time position.
  */
 export const messageOrderTimeMs = (
   message: Pick<WorkbenchMessage, 'id' | 'created_at'>,
@@ -44,8 +44,8 @@ export const transcriptOrderTimeMs = (
 // chat keeps its rows sorted by transcript-entry time plus id at all times.
 
 // Durable transcript order matches storage.messages_service: acceptance time
-// for queued Deliveries, otherwise creation time with the canonical id's
-// microsecond position, then id as the stable tie-break.
+// for queued Deliveries, otherwise microsecond creation time, then id as the
+// stable tie-break.
 export const byCreatedThenId = (a: WorkbenchMessage, b: WorkbenchMessage): number => {
   const aTime = transcriptOrderTimeMs(a);
   const bTime = transcriptOrderTimeMs(b);

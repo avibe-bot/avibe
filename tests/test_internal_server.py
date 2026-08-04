@@ -2947,7 +2947,16 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
-    ctx = MessageContext(user_id="workbench", channel_id=session_id, platform="avibe")
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id="watch:def-watch:scheduled-busy",
+        platform_specific={
+            "task_trigger_kind": "watch",
+            "task_definition_id": "def-watch",
+        },
+    )
 
     async def _go():
         async def _busy():
@@ -2979,6 +2988,8 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     assert [q["text"] for q in queued] == ["scheduled while busy"]
     assert queued[0]["scope_id"] == scope_id
     assert queued[0]["author"] == "harness"
+    assert queued[0]["author_name"] == "watch"
+    assert queued[0]["author_id"] == "def-watch"
     assert [row["text"] for row in transcript["messages"]] == ["active owner"]
     assert ("queue.updated", {"session_id": session_id}) in published
 
