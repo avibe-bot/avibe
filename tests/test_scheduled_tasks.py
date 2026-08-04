@@ -1010,6 +1010,113 @@ def test_build_context_assigns_hook_message_id() -> None:
     assert context.platform_specific["task_trigger_kind"] == "hook"
 
 
+def test_build_context_carries_the_definition_name_for_display() -> None:
+    """The prompt echo names what fired, so the label cannot be an opaque id."""
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    store = ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
+    service = ScheduledTaskService(controller=controller, store=store)
+    target = parse_session_key("slack::channel::C123")
+
+    store.get_task = (
+        lambda task_id: SimpleNamespace(name="Daily digest", prompt="summarize open PRs")
+        if task_id == "task-1"
+        else None
+    )
+    store.get_watch_definition = (
+        lambda definition_id: {"name": "Deploy watch", "message": "check the deploy"}
+        if definition_id == "watch-1"
+        else None
+    )
+
+    task_context = asyncio.run(service._build_context(target, execution_id="exec-1", task_id="task-1"))
+    watch_context = asyncio.run(
+        service._build_context(target, execution_id="exec-2", task_id="watch-1", trigger_kind="watch")
+    )
+    unknown_context = asyncio.run(service._build_context(target, execution_id="exec-3", task_id="gone"))
+    anonymous_context = asyncio.run(service._build_context(target, execution_id="exec-4", trigger_kind="agent_run"))
+
+    assert task_context.platform_specific["task_definition_name"] == "Daily digest"
+    assert watch_context.platform_specific["task_definition_name"] == "Deploy watch"
+    assert unknown_context.platform_specific["task_definition_name"] is None
+    assert anonymous_context.platform_specific["task_definition_name"] is None
+
+    # The definition's STORED instruction travels next to the name: a watch / hook /
+    # webhook prompt appends machine-generated evidence (waiter stdout, a failure
+    # report) that the outward echo must never publish, so it echoes this instead.
+    assert task_context.platform_specific["harness_display_prompt"] == "summarize open PRs"
+    assert watch_context.platform_specific["harness_display_prompt"] == "check the deploy"
+    assert unknown_context.platform_specific["harness_display_prompt"] is None
+    assert anonymous_context.platform_specific["harness_display_prompt"] is None
+
+
+def test_build_context_prefers_an_explicit_display_prompt_from_the_request() -> None:
+    """A producer that composes the prompt itself can stamp the user-authored part.
+
+    The definition lookup covers task/watch rows; a request whose prompt was composed
+    somewhere else (a hook send with no definition row) can pass the instruction
+    through its metadata instead, and that wins over the stored value.
+    """
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    store = ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
+    service = ScheduledTaskService(controller=controller, store=store)
+    store.get_task = lambda task_id: SimpleNamespace(name="Deploy watch", prompt="stored instruction")
+    target = parse_session_key("slack::channel::C123")
+
+    context = asyncio.run(
+        service._build_context(
+            target,
+            execution_id="exec-1",
+            task_id="task-1",
+            trigger_kind="hook",
+            metadata={"harness_display_prompt": "explicit instruction"},
+        )
+    )
+
+    assert context.platform_specific["harness_display_prompt"] == "explicit instruction"
+
+
+def test_build_context_survives_a_store_that_cannot_name_the_definition() -> None:
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    store = ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
+    service = ScheduledTaskService(controller=controller, store=store)
+
+    def _boom(_identifier):
+        raise RuntimeError("store unavailable")
+
+    store.get_task = _boom
+    target = parse_session_key("slack::channel::C123")
+
+    context = asyncio.run(service._build_context(target, execution_id="exec-1", task_id="task-1"))
+
+    # Display copy must never be able to fail the run it describes.
+    assert context.platform_specific["task_definition_name"] is None
+    assert context.platform_specific["harness_display_prompt"] is None
+    assert context.platform_specific["task_definition_id"] == "task-1"
+
+
 def test_build_context_separates_delivery_target_from_session_target() -> None:
     settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
     controller = SimpleNamespace(
@@ -9438,6 +9545,88 @@ def test_execute_request_im_watch_steers_through_delivery_owner(
     assert error is None
     assert submitted == [(session_id, "send digest", "steer")]
     assert handler_calls == []
+
+
+def test_execute_request_forwards_request_metadata_into_the_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A composed hook/watch/webhook/escalation prompt carries its user-authored part
+    in the request metadata, and ``_build_context`` is the only reader — so
+    ``_execute_request`` has to hand it over, exactly as the ``agent_run`` path already
+    does. Without the forward the IM echo has no instruction to show and stays silent
+    for every enqueued composed request (Codex P2)."""
+    session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        platform="slack",
+        scope_type="channel",
+        scope_native_id="C123",
+    )
+    contexts: list = []
+
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="steer"):
+        contexts.append(ctx)
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_k: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+        session_turn_gate=SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={}),
+        message_handler=SimpleNamespace(),
+    )
+    service = ScheduledTaskService(
+        controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
+    )
+
+    error = asyncio.run(
+        service._execute_request(
+            session_key="slack::channel::C123",
+            post_to=None,
+            deliver_key=None,
+            prompt="check the deploy\n\nwaiter said: token=ghp_SECRET",
+            execution_id="exec-metadata-1",
+            trigger_kind="watch",
+            session_id=session_id,
+            metadata={"harness_display_prompt": "check the deploy"},
+        )
+    )
+
+    assert error is None
+    assert contexts[0].platform_specific["harness_display_prompt"] == "check the deploy"
+
+
+def test_claimed_request_hands_its_metadata_to_the_execution(monkeypatch, tmp_path: Path) -> None:
+    """The enqueued-request lane is where hook / watch / webhook / escalation runs are
+    executed, so the request's own metadata must reach ``_execute_request`` there."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="check the deploy\n\nwaiter said: rows=42",
+        metadata={"harness_display_prompt": "check the deploy"},
+    )
+    calls: list[dict[str, Any]] = []
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=ScheduledTaskStore(),
+        request_store=request_store,
+    )
+    claimed = request_store.claim(request.id)
+    assert claimed is not None
+
+    async def _execute_request(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    service._execute_request = _execute_request  # type: ignore[method-assign]
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert len(calls) == 1
+    assert calls[0]["metadata"] == {"harness_display_prompt": "check the deploy"}
 
 
 def test_execute_request_avibe_falls_back_when_no_gate(monkeypatch, tmp_path) -> None:

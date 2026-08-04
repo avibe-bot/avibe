@@ -4,17 +4,18 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from core.message_output import terminal_turn_output
+from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY, terminal_turn_output
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     backend_dispatch_attempted,
     set_dispatch_phase,
 )
 from core.session_activities import SessionActivityRegistry
+from modules.agents import service as service_module
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
 from storage.db import create_sqlite_engine
@@ -115,6 +116,10 @@ class _OrderRecordingDispatcher:
     async def begin_status_bubble(self, _context):
         self._log.append("begin_status_bubble")
 
+    async def emit_harness_prompt(self, _context, text):
+        self._log.append(f"echo:{text}")
+        return "echo-msg"
+
 
 class _TurnStartController:
     """Records the relative order of the turn-start hooks vs the agent run."""
@@ -161,6 +166,132 @@ def test_agent_service_runs_turn_start_hooks_after_gate_before_agent() -> None:
             "handle_message",
         ]
         assert backend_dispatch_attempted(request.context) is False
+
+    asyncio.run(_run())
+
+
+def test_agent_service_defers_staged_harness_prompt_until_the_gate_is_held() -> None:
+    """A queued Harness turn must not announce its prompt in the channel yet.
+
+    The turn pipeline stages the prompt, but the turn may sit behind another turn on
+    the runtime gate (or be cancelled there). Echoing at turn start keeps the channel
+    reading trigger -> work -> result instead of showing the second task's prompt
+    while the first task is still working (Codex P2).
+    """
+
+    async def _run():
+        log: list[str] = []
+        controller = _TurnStartController(log)
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        agent = _RuntimeAgent(release_first)
+        service.register(agent)
+
+        first_request = _request("first")
+        first = asyncio.create_task(service.handle_message("claude", first_request))
+        await asyncio.sleep(0)
+        assert agent.started == ["first"]
+
+        second_request = _request("second")
+        second_request.context.platform_specific = {
+            HARNESS_PROMPT_ECHO_SPEC_KEY: "summarize open PRs"
+        }
+        second = asyncio.create_task(service.handle_message("claude", second_request))
+        await asyncio.sleep(0.05)
+        assert "echo:summarize open PRs" not in log
+
+        service.release_runtime_turn(first_request.context)
+        release_first.set()
+        await asyncio.wait_for(first, timeout=3)
+        await asyncio.wait_for(second, timeout=3)
+
+        # Echoed only once its OWN turn started (after the first turn's hooks), and
+        # immediately ahead of that turn's status bubble.
+        echo_at = log.index("echo:summarize open PRs")
+        assert log[echo_at - 1] == "update_thread_message_id"
+        assert log[echo_at + 1] == "begin_status_bubble"
+        assert agent.started == ["first", "second"]
+        # Popped, so a retry of the same request cannot post the prompt twice.
+        assert HARNESS_PROMPT_ECHO_SPEC_KEY not in second_request.context.platform_specific
+
+    asyncio.run(_run())
+
+
+def test_agent_service_turn_start_without_a_staged_prompt_echoes_nothing() -> None:
+    async def _run():
+        log: list[str] = []
+        controller = _TurnStartController(log)
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        service.register(_OrderRecordingAgent(log))
+
+        await service.handle_message("claude", _request("hi"))
+
+        assert not any(entry.startswith("echo:") for entry in log)
+
+    asyncio.run(_run())
+
+
+def test_agent_service_failed_harness_prompt_echo_never_breaks_the_turn() -> None:
+    async def _run():
+        class _FailingEchoController:
+            session_turns = None
+            message_dispatcher = SimpleNamespace(
+                emit_harness_prompt=AsyncMock(side_effect=RuntimeError("send failed")),
+                begin_status_bubble=AsyncMock(),
+            )
+
+        controller = _FailingEchoController()
+        service = AgentService(controller=controller)
+        agent = _RuntimeAgent()
+        service.register(agent)
+
+        request = _request("hi")
+        request.context.platform_specific = {HARNESS_PROMPT_ECHO_SPEC_KEY: "do the thing"}
+        await service.handle_message("claude", request)
+
+        assert agent.started == ["hi"]
+        controller.message_dispatcher.begin_status_bubble.assert_awaited_once()
+
+    asyncio.run(_run())
+
+
+def test_agent_service_slow_harness_prompt_echo_does_not_hold_the_gate() -> None:
+    """A degraded IM transport must not stall the turn it is announcing (Codex P2).
+
+    The echo is awaited with the runtime gate held, and an adapter's own request
+    budget is far longer than a turn start should ever wait (Telegram allows 60s), so
+    the wait is bounded like the status-bubble post that follows it.
+    """
+
+    async def _run():
+        started = asyncio.Event()
+
+        async def _hanging_echo(_context, _text):
+            started.set()
+            await asyncio.sleep(30)
+
+        class _SlowEchoController:
+            session_turns = None
+            message_dispatcher = SimpleNamespace(
+                emit_harness_prompt=_hanging_echo,
+                begin_status_bubble=AsyncMock(),
+            )
+
+        controller = _SlowEchoController()
+        service = AgentService(controller=controller)
+        agent = _RuntimeAgent()
+        service.register(agent)
+
+        request = _request("hi")
+        request.context.platform_specific = {HARNESS_PROMPT_ECHO_SPEC_KEY: "do the thing"}
+        with patch.object(service_module, "HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS", 0.05):
+            await asyncio.wait_for(service.handle_message("claude", request), timeout=3)
+
+        assert started.is_set()
+        assert agent.started == ["hi"]
+        controller.message_dispatcher.begin_status_bubble.assert_awaited_once()
 
     asyncio.run(_run())
 

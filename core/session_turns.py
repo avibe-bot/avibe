@@ -1576,6 +1576,40 @@ class SessionTurnManager:
             {
                 "delivery_id": str(deliveries[0]["id"]),
                 "delivery_ids": [str(row["id"]) for row in deliveries],
+                # Every display snapshot this Turn dispatches, in FIFO order.
+                # ``_hydrate_delivery_context`` set the singular ``display_text`` from
+                # the FIRST Delivery only, while ``_segment_dispatch_text`` sends the
+                # whole merged batch to the backend: a consumer that shows one prompt
+                # (the IM prompt echo) would announce one instruction for a result that
+                # answers several. Snapshots, never ``dispatch_text`` — the replay
+                # guards prepended there are backend-only.
+                "display_texts": [
+                    str(payload.get("text") or "")
+                    for payload in payloads
+                    if str(payload.get("text") or "").strip()
+                ],
+                # Same reason, one layer in: for the kinds whose prompt Avibe COMPOSES
+                # (watch / webhook / hook) the snapshot above holds the generated
+                # evidence too, so the echo shows the definition's stored instruction
+                # instead — and an instruction edited between two firings leaves a
+                # merged batch dispatching two different ones. Each Delivery's own
+                # stamped instruction, from its captured provenance.
+                "harness_display_prompts": [
+                    instruction
+                    for instruction in (
+                        str(
+                            (
+                                (_scheduled_provenance(payload) or {}).get(
+                                    "platform_specific"
+                                )
+                                or {}
+                            ).get("harness_display_prompt")
+                            or ""
+                        ).strip()
+                        for payload in payloads
+                    )
+                    if instruction
+                ],
                 "message_content": {
                     "text": "\n".join(
                         str(payload.get("text") or "")

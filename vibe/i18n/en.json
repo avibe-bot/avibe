@@ -13,6 +13,16 @@
     "titleUntitled": "Fork"
   },
   "harness": {
+    "promptEcho": {
+      "scheduled": "⏰ Scheduled task",
+      "watch": "👀 Watch",
+      "webhook": "🔗 Webhook",
+      "hook": "🪝 Hook",
+      "agentRun": "🤖 Agent run",
+      "generic": "⚙️ Background task",
+      "named": "{label} · {name}",
+      "truncated": "… (truncated)"
+    },
     "watch": {
       "supervisorFailed": "Watch worker supervisor failed: {detail}",
       "supervisorExitedDuringStartup": "Watch worker supervisor exited during startup.",

@@ -83,6 +83,9 @@ class AppCompatConfig:
     default_backend: str = DEFAULT_AGENT_BACKEND
     resource_governance: dict = field(default_factory=lambda: {"mode": "auto"})
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    # Mirrors ``V2Config.runtime.harness_prompt_echo``; read on the IM turn path, so
+    # it has to reach the controller's runtime config like ``resource_governance``.
+    harness_prompt_echo: bool = True
 
     def enabled_platforms(self) -> list[str]:
         enabled = self.platforms.get("enabled") if isinstance(self.platforms, dict) else None
@@ -160,4 +163,5 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         reply_enhancements=v2.reply_enhancements,
         resource_governance=v2.runtime.resource_governance,
         memory=v2.memory,
+        harness_prompt_echo=v2.runtime.harness_prompt_echo,
     )

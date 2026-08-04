@@ -13,7 +13,11 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
-from core.message_output import terminal_output_for, terminal_turn_output
+from core.message_output import (
+    HARNESS_PROMPT_ECHO_SPEC_KEY,
+    terminal_output_for,
+    terminal_turn_output,
+)
 from core.message_context import resolve_context_thread_id
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
@@ -711,6 +715,21 @@ class MessageHandler(BaseHandler):
                 # removed here immediately, leaving no processing indicator
                 # for the entire duration of the subagent run.
 
+            # A background task's prompt is only visible in the Workbench transcript
+            # (the ``harness`` Message row); stage it so the IM conversation gets the
+            # question the following reply answers. Staged here because this point is
+            # past every ``suppress_delivery`` resolution (the ``agent_run_target`` and
+            # thread-anchor branches settle it only after ``get_session_info``) and
+            # covers the durable Delivery path too, which skips the mirror branch
+            # above; the send itself happens at the real turn start, once the runtime
+            # gate is held (see ``_stage_harness_prompt_echo``).
+            # ``control_message`` rather than ``message``: subagent routing above
+            # strips a matched ``name:`` prefix off ``message``, and the echo must show
+            # the prompt as it was stored (which is what the Workbench row shows too),
+            # including the prefix that names the requested subagent.
+            if source != self.TURN_SOURCE_HUMAN:
+                self._stage_harness_prompt_echo(context, control_message)
+
             user_message = self._get_user_message(context, message)
             audio_transcripts = await self._transcribe_audio_attachments(context, processed_files or [])
             if audio_transcripts:
@@ -1152,6 +1171,25 @@ class MessageHandler(BaseHandler):
             await self._get_im_client(context).send_message(context, echo)
         except Exception as err:
             logger.debug("Failed to echo audio transcript: %s", err, exc_info=True)
+
+    def _stage_harness_prompt_echo(self, context: MessageContext, message: str) -> None:
+        """Stage the Harness prompt for the outward echo at turn start.
+
+        Staged instead of sent here: ``AgentService.handle_message`` blocks on the
+        runtime turn gate before this turn really starts, so posting now would
+        announce a queued task's prompt while another turn is still working — and
+        would leave that prompt behind if the queued turn is cancelled.
+        ``AgentService._begin_turn_status`` emits it once the gate is held, right
+        before the status bubble, so the channel still reads trigger -> work ->
+        result. The dispatcher still owns every gate (platform,
+        ``suppress_delivery``, trigger kind, the ``runtime.harness_prompt_echo``
+        switch) and the delivery target.
+        """
+        if not (message or "").strip():
+            return
+        spec = dict(context.platform_specific or {})
+        spec[HARNESS_PROMPT_ECHO_SPEC_KEY] = message
+        context.platform_specific = spec
 
     @staticmethod
     def _sanitize_identity(value: str) -> str:
