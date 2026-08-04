@@ -1,6 +1,6 @@
 # Memory Processing Log Page (EverOS step timeline + provider call log)
 
-Status: draft v6 (second review findings incorporated)
+Status: draft v7 (overdesign reductions incorporated)
 Date: 2026-08-04
 
 ## Background
@@ -269,12 +269,15 @@ exception is preserved exactly. After 20 consecutive writer failures, recording
 self-disables for that process. `RecorderHandle` exposes the closed health states
 `active`, `degraded`, and `disabled` through the sidecar health response; degraded
 includes a stable reason such as `writer_failures`, never raw exceptions. The
-controller projects that state into both Memory settings/status and Log list/detail
-responses. Restarting the sidecar is the recovery operation when the persisted
-flag remains enabled. Tests cover a held sqlite write lock, the failure threshold
-through both response surfaces, recovery by restart, queue overflow, original
-exception identity, original EverOS lifespan delegation/state, startup failure
-isolation, bounded shutdown, and shutdown tail persistence.
+controller projects that state once through the existing Memory status payload.
+The Log panel consumes the page's existing status read and reuses the existing
+Memory runtime restart action; list/detail responses and routes do not duplicate
+health or recovery state. Restarting the sidecar is the recovery operation for a
+transient writer failure when the persisted flag remains enabled. Tests cover a
+held sqlite write lock, the failure threshold through the single status surface,
+recovery through the existing restart action, queue overflow, original exception
+identity, original EverOS lifespan delegation/state, startup failure isolation,
+bounded shutdown, and shutdown tail persistence.
 
 ### Retention, corruption, and Clear
 
@@ -299,26 +302,23 @@ There is one sqlite writer owner at a time:
   before starting a recorder-enabled sidecar;
 - runtime shutdown cancels and awaits the host task.
 
-Neither process unlinks a database that the other may have open. Live corruption
-causes the active recorder to self-disable. Quarantine/recreation is allowed only
-at recorder startup or by host maintenance after proving no child has received
-the DB path and repeating the ownership/no-symlink checks. Quarantine names carry
-a validated UTC creation timestamp and are retention data, not permanent forensic
-artifacts. Under the same single-owner lock, recorder startup and every host
-maintenance tick lstat only the narrowly formatted owned quarantine files, delete
-ones at least 14 days old, and then delete oldest quarantines until their combined
-bytes fit a 128 MB hard cap. A deletion failure is reported as degraded and keeps
-a new recorder from opening another database, preventing repeated corruptions
-from bypassing the cap. Tests cover age expiry, size-order cleanup, malformed or
-foreign files preserved, and cleanup failure staying fail-closed.
+Neither process unlinks a database that the other may have open. Corruption causes
+the active recorder or host maintenance task to stop opening the call log and
+report stable `call_log_corrupt` health through Memory status. V1 does not
+quarantine, rotate, or automatically recreate a corrupt diagnostic database. The
+owned files remain in place until an administrator uses the existing Clear flow;
+subsequent restarts remain degraded while those files are corrupt. This keeps
+corruption handling fail-closed without introducing a second retention system.
+Tests cover sidecar and host detection, stable degraded health across restart,
+and recovery only after Clear.
 
 The existing Clear flow first stops any Memory sidecar and serializes with host
 maintenance. After verifying the fixed directory's owner, mode, and no-symlink
 chain, it lstat/unlinks only regular owned files on a strict allowlist:
-`call-log.db`, its WAL/SHM/rollback-journal names, and the recorder's own narrowly
-formatted corruption-quarantine names. Unexpected entries are preserved; the
-directory is removed only if it is then empty. This is intentionally not a
-recursive delete. The DB is recreated only when capture is enabled again.
+`call-log.db` and its WAL/SHM/rollback-journal names. Unexpected entries are
+preserved; the directory is removed only if it is then empty. This is
+intentionally not a recursive delete. The DB is recreated only when capture is
+enabled again.
 
 ### Integration and capture tests
 
@@ -331,20 +331,19 @@ recursive delete. The DB is recreated only when capture is enabled again.
   rollback rule that never restores capture after a disable request.
 - `core/memory/runtime.py`: treat a diagnostics-flag change as a sidecar
   environment reconciliation, switch recorder/host retention ownership under the
-  lifecycle lock, expose recorder health, and own Clear deletion. The settings API
-  relies on that one reconciliation and does not issue a second restart. A disable
-  transition revokes the recorder before preflight; failures can roll back other
-  candidate fields but not the disabled diagnostics flag.
-- `core/memory/artifact.py`: document that a version bump revalidates the
-  insight adapter.
+  lifecycle lock, add recorder health to the existing Memory status, and own Clear
+  deletion. The settings API relies on that one reconciliation and does not issue
+  a second restart. A disable transition revokes the recorder before preflight;
+  failures can roll back other candidate fields but not the disabled diagnostics
+  flag.
 
 `tests/test_memory_call_log.py` covers serialization, recursive redaction across
 all columns, truncation, vectors/attachments omitted, provenance/stage capture,
 Search/Get non-capture, `dropped_before`, failure isolation, lifecycle,
 enabled-to-disabled retention ownership with failing provider preflight,
-quarantine expiry/size cleanup, recorder health/recovery, safe corruption
-behavior, and Clear preserving an unexpected file. Real-wheel tests may skip on
-an ordinary developer machine only when the managed artifact is absent. With
+single-surface recorder health/recovery, corruption remaining degraded until
+Clear, and Clear preserving an unexpected file. Real-wheel tests may skip on an
+ordinary developer machine only when the managed artifact is absent. With
 `AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT=1`, absence, identity mismatch, or any
 skipped contract case is a hard failure.
 
@@ -401,16 +400,16 @@ Public adapter results:
   not tamper detection; the cursor is intentionally unsigned because every query
   still reapplies scope.
 - `entry_detail(scope, memcell_id)`: ordered steps with authorized calls and
-  current-state labels. It returns at most the newest 100 call details and newest
-  100 run/strategy timeline rows, with separate `omitted_call_count` and
-  `omitted_step_count` values. The deterministic 960,000-byte adapter-payload
-  budget measures the complete serialized result, not only provider calls. It
-  replaces response bodies first, then request bodies, then run/step errors, then
-  removes the oldest call details and oldest non-structural run/strategy steps,
-  updating omission counts after each pass. Fixed structural steps remain but
-  contain only their bounded scalar summaries. A route-level test uses many 4 KB
-  run errors plus maximum-size calls and keeps the final encoded envelope at or
-  below 1,000,000 bytes. No unresolved call bucket is returned.
+  current-state labels. It returns at most the newest 20 call details and newest
+  50 run/strategy timeline rows, with separate `omitted_call_count` and
+  `omitted_step_count` values. Projection is a single bounded pass: each returned
+  request and response field has a 12,000-byte JSON-encoded representation cap,
+  each returned error is capped at 1,024 UTF-8 bytes, and every other string uses
+  its declared field cap. A field that exceeds its cap becomes an explicit
+  `omitted_bytes` excerpt marker. These fixed collection and field bounds keep the
+  worst-case route envelope below 1,000,000 encoded bytes without repeatedly
+  serializing and shrinking the whole response. A route-level maximum-input test
+  asserts that bound. No unresolved call bucket is returned.
 
 Routes:
 
@@ -424,9 +423,9 @@ Routes:
   guard, `no-store`, `_memory_internal_response`, and native dispatch. Malformed
   parameters return 400 `memory_invalid_input`; a foreign or absent memcell
   returns 404 `memory_log_entry_not_found` without revealing which case occurred.
-  A new `POST /api/memory/recorder/restart` accepts only a direct-loopback Memory
-  request, requires enabled/degraded recorder state, and delegates to the existing
-  internal reconciliation rather than creating a second restart path.
+  Recorder recovery reuses `POST /api/memory/runtime/restart` and its existing
+  authorization and internal reconciliation; this feature adds no second restart
+  route or client action.
 
 Successful responses use `{"status":"ok", ...}`. Failure envelopes follow the
 existing Memory vocabulary and never persist the new request-only not-found code
@@ -482,20 +481,21 @@ checked in the browser/Incus verification because jsdom has no layout engine.
 - all provider/user text rendered without Markdown or HTML;
 - an explicit current logging-off notice. When the persisted flag is enabled but
   recorder health is `degraded`, show that new provider calls are not being
-  recorded. A direct-loopback administrator gets a "Restart recorder" action
-  through the recorder-restart route; Cloud subjects get the status and
-  local-admin recovery guidance without a global action. For an older step with
-  no provider rows, use the neutral wording "not recorded or expired"; do not
-  invent toggle history. Also label unavailable sections and current-state-only
-  profile/indexing information.
+  recorded. The panel receives the existing Memory status and restart callback
+  from `SettingsMemoryPage`; transient recorder failures use the existing runtime
+  restart action, while `call_log_corrupt` directs the administrator to Clear.
+  For an older step with no provider rows, use the neutral wording "not recorded
+  or expired"; do not invent toggle history. Also label unavailable sections and
+  current-state-only profile/indexing information.
 
 Add `jsdom`, `@testing-library/react`, and `@testing-library/user-event` as
 explicit dev dependencies and use a per-file Vitest jsdom environment. They are
 not currently project dependencies. DOM tests cover load-more, detail/back,
 expand/collapse, refresh, slow-then-fast request supersession, degraded recorder
-state, local restart recovery, and the Cloud read-only variant. Pure helpers cover
-cursor accumulation, JSON guards, and view-model shaping. Static SSR tests
-continue to cover empty, loading, failure, and forbidden render states.
+state, existing runtime restart recovery, and corrupt-log Clear guidance. Pure
+helpers cover cursor accumulation, JSON guards, and view-model shaping. Static SSR tests
+continue to cover empty, loading, failure, and forbidden render states. The Log
+tests stub the existing status/restart props rather than a recorder-specific API.
 
 All new user-facing strings live in both i18n catalogs, including the diagnostic
 disclosure that retained rows survive turning the toggle off until expiry/Clear.
@@ -517,14 +517,15 @@ of Clear.
    followed by `npm run build`.
 3. Reader contract fixture from a snapshot copy of a real `everos-root` plus
    real-wheel patch-path tests. Add a required `memory-insight-contract` PR job
-   to `.github/workflows/lint.yml`: pin `uv==0.9.18`, build the Linux x64 runtime
-   with `scripts/build_memory_runtime.py` from the checksummed
-   `scripts/memory_runtime/uv.lock`, verify the emitted archive/runtime metadata,
-   point the tests at its extracted Python, set
+   to `.github/workflows/lint.yml`: pin `uv==0.9.18`, create an isolated Python
+   3.12 environment directly from the checked-in `scripts/memory_runtime/uv.lock`
+   with `uv sync --frozen`, point the tests at that interpreter, set
    `AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT=1`, and run the private-parser,
    cascade, episode, and transport contract cases unsharded. The job fails when
    the runtime cannot be provisioned or a contract test skips; the ordinary
-   unit-test shards remain artifact-independent.
+   unit-test shards remain artifact-independent. Deployable runtime archive and
+   metadata verification stay in the existing release workflows rather than
+   being repeated on every PR.
 4. Incus regression only, never the local `vibe` service: enable diagnostic
    capture, send a message with and without an attachment, wait for flush/OME,
    inspect the list/detail calls, turn capture off and confirm retained rows are
@@ -543,7 +544,7 @@ New:
 
 Edited:
 
-- `core/memory/{artifact,everos,sidecar,process,runtime,types}.py`
+- `core/memory/{everos,sidecar,process,runtime,types}.py`
 - `config/v2_config.py`
 - `core/internal_server.py`, `vibe/internal_client.py`,
   `vibe/ui_memory_routes.py`
