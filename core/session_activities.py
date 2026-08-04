@@ -247,7 +247,13 @@ class SessionActivityRegistry:
         self._activation_registry = activation_registry
         self._output_settled_callback: Callable[[SessionActivity], None] | None = None
         self._active: dict[tuple[str, str, str], SessionActivity] = {}
+        self._active_identities: dict[
+            tuple[str, str, str], RuntimeActivationIdentity
+        ] = {}
         self._connections: dict[tuple[str, str], tuple[str | None, str]] = {}
+        self._connection_identities: dict[
+            tuple[str, str], RuntimeActivationIdentity
+        ] = {}
         self._completed_outputs: dict[
             tuple[str, str], deque[_CompletedOutputEntry]
         ] = defaultdict(deque)
@@ -415,16 +421,32 @@ class SessionActivityRegistry:
         runtime_key: str,
         session_id: str | None,
         state: str,
-    ) -> None:
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> bool:
         normalized = state if state in CONNECTION_STATES else "unknown"
-        with self._lock:
-            self._connections[(str(backend), str(runtime_key))] = (session_id, normalized)
-            self._persist_connection(
-                backend=str(backend),
-                runtime_key=str(runtime_key),
-                session_id=session_id,
-                state=normalized,
+
+        def persist() -> bool:
+            key = (str(backend), str(runtime_key))
+            with self._lock:
+                self._connections[key] = (session_id, normalized)
+                self._persist_connection(
+                    backend=str(backend),
+                    runtime_key=str(runtime_key),
+                    session_id=session_id,
+                    state=normalized,
+                )
+                if activation_identity is not None:
+                    self._connection_identities[key] = activation_identity
+                return True
+
+        return bool(
+            self._commit_activation_write(
+                backend=backend,
+                activation_identity=activation_identity,
+                operation="connection",
+                commit=persist,
             )
+        )
 
     def start(
         self,
@@ -458,6 +480,7 @@ class SessionActivityRegistry:
                     turn_id=turn_id,
                     run_id=run_id,
                     metadata=metadata,
+                    activation_identity=activation_identity,
                 )
 
         return self._commit_active_upsert(
@@ -494,6 +517,7 @@ class SessionActivityRegistry:
                     turn_id=existing.turn_id if existing else None,
                     run_id=existing.run_id if existing else None,
                     metadata=metadata,
+                    activation_identity=activation_identity,
                 )
 
         return self._commit_active_upsert(
@@ -509,31 +533,47 @@ class SessionActivityRegistry:
         activation_identity: RuntimeActivationIdentity | None,
         upsert: Callable[[], SessionActivity],
     ) -> SessionActivity | None:
+        return self._commit_activation_write(
+            backend=backend,
+            activation_identity=activation_identity,
+            operation="active Activity upsert",
+            commit=upsert,
+        )
+
+    def _commit_activation_write(
+        self,
+        *,
+        backend: str,
+        activation_identity: RuntimeActivationIdentity | None,
+        operation: str,
+        commit: Callable[[], Any],
+    ) -> Any:
         activation_registry = self._activation_registry
         if activation_registry is None:
-            return upsert()
+            return commit()
         if activation_identity is None:
             logger.error(
-                "Refusing active Activity upsert without runtime activation identity "
-                "for backend=%s",
+                "Refusing %s without runtime activation identity for backend=%s",
+                operation,
                 backend,
             )
             return None
         if activation_identity.backend != str(backend):
             logger.error(
-                "Refusing active Activity upsert with mismatched runtime backend "
-                "activity=%s activation=%s",
+                "Refusing %s with mismatched runtime backend activity=%s activation=%s",
+                operation,
                 backend,
                 activation_identity.backend,
             )
             return None
         committed = activation_registry.commit_if_current(
             activation_identity,
-            upsert,
+            commit,
         )
         if not committed.admitted:
             logger.debug(
-                "Ignoring stale active Activity upsert for backend=%s resource=%s generation=%s",
+                "Ignoring stale %s for backend=%s resource=%s generation=%s",
+                operation,
                 activation_identity.backend,
                 activation_identity.resource_key,
                 activation_identity.generation,
@@ -556,6 +596,7 @@ class SessionActivityRegistry:
         turn_id: str | None,
         run_id: str | None,
         metadata: dict[str, Any] | None,
+        activation_identity: RuntimeActivationIdentity | None,
     ) -> SessionActivity:
         key = self._key(backend, runtime_key, activity_id)
         now = _now_iso()
@@ -597,6 +638,10 @@ class SessionActivityRegistry:
             )
         self._persist_activity(activity, phase="active")
         self._active[key] = activity
+        if activation_identity is not None:
+            self._active_identities[key] = activation_identity
+        elif self._activation_registry is None:
+            self._active_identities.pop(key, None)
         return activity
 
     def complete(
@@ -609,36 +654,78 @@ class SessionActivityRegistry:
         metadata: dict[str, Any] | None = None,
         expects_output: bool = False,
         retain_terminal_snapshot: bool = False,
+        activation_identity: RuntimeActivationIdentity | None = None,
     ) -> SessionActivity | None:
         key = self._key(backend, runtime_key, activity_id)
         normalized = status if status in TERMINAL_ACTIVITY_STATUSES else "completed"
-        now = _now_iso()
-        with self._lock:
-            existing = self._active.get(key)
-            if existing is None:
-                return None
-            merged = dict(existing.metadata)
-            merged.update(metadata or {})
-            completed = replace(
-                existing,
-                status=normalized,
-                metadata=merged,
-                updated_at=now,
-                completed_at=now,
-            )
-            if expects_output:
-                self._persist_activity(completed, phase="awaiting_output")
-                self._active.pop(key, None)
-                self._completed_outputs[(str(backend), str(runtime_key))].append(
-                    self._new_completed_output_entry(completed)
+
+        def complete_current() -> SessionActivity | None:
+            with self._lock:
+                if self._activation_registry is not None and (
+                    self._active_identities.get(key) is not activation_identity
+                ):
+                    logger.debug(
+                        "Ignoring Activity completion from a non-owning generation "
+                        "for backend=%s runtime=%s activity=%s",
+                        backend,
+                        runtime_key,
+                        activity_id,
+                    )
+                    return None
+                return self._complete_locked(
+                    key=key,
+                    status=normalized,
+                    metadata=metadata,
+                    expects_output=expects_output,
+                    retain_terminal_snapshot=retain_terminal_snapshot,
                 )
-            elif retain_terminal_snapshot:
-                self._persist_activity(completed, phase=TERMINAL_SNAPSHOT_PHASE)
-                self._active.pop(key, None)
-            else:
-                self._delete_activity(completed)
-                self._active.pop(key, None)
-            return completed
+
+        return self._commit_activation_write(
+            backend=backend,
+            activation_identity=activation_identity,
+            operation="Activity completion",
+            commit=complete_current,
+        )
+
+    def _complete_locked(
+        self,
+        *,
+        key: tuple[str, str, str],
+        status: str,
+        metadata: dict[str, Any] | None,
+        expects_output: bool,
+        retain_terminal_snapshot: bool,
+    ) -> SessionActivity | None:
+        backend, runtime_key, _activity_id = key
+        now = _now_iso()
+        existing = self._active.get(key)
+        if existing is None:
+            return None
+        merged = dict(existing.metadata)
+        merged.update(metadata or {})
+        completed = replace(
+            existing,
+            status=status,
+            metadata=merged,
+            updated_at=now,
+            completed_at=now,
+        )
+        if expects_output:
+            self._persist_activity(completed, phase="awaiting_output")
+            self._active.pop(key, None)
+            self._active_identities.pop(key, None)
+            self._completed_outputs[(backend, runtime_key)].append(
+                self._new_completed_output_entry(completed)
+            )
+        elif retain_terminal_snapshot:
+            self._persist_activity(completed, phase=TERMINAL_SNAPSHOT_PHASE)
+            self._active.pop(key, None)
+            self._active_identities.pop(key, None)
+        else:
+            self._delete_activity(completed)
+            self._active.pop(key, None)
+            self._active_identities.pop(key, None)
+        return completed
 
     def active_for_runtime(self, backend: str, runtime_key: str) -> list[SessionActivity]:
         prefix = (str(backend), str(runtime_key))
@@ -1595,6 +1682,7 @@ class SessionActivityRegistry:
                     runtime_key,
                     status=status,
                     retain_terminal_snapshots=True,
+                    force=True,
                 )
             )
         now = _now_iso()
@@ -1639,40 +1727,73 @@ class SessionActivityRegistry:
         *,
         status: str = "disconnected",
         retain_terminal_snapshots: bool = False,
+        activation_identity: RuntimeActivationIdentity | None = None,
+        force: bool = False,
     ) -> list[SessionActivity]:
         key = (str(backend), str(runtime_key))
+        if (
+            self._activation_registry is not None
+            and activation_identity is None
+            and not force
+        ):
+            logger.error(
+                "Refusing Activity runtime teardown without exact activation identity "
+                "for backend=%s runtime=%s",
+                backend,
+                runtime_key,
+            )
+            return []
         with self._lock:
             connection = self._connections.get(key)
-            active = [
-                activity
-                for (item_backend, item_runtime, _), activity in self._active.items()
-                if (item_backend, item_runtime) == key
+            active_items = [
+                (activity_key, activity)
+                for activity_key, activity in self._active.items()
+                if activity_key[:2] == key
+                and (
+                    force
+                    or self._activation_registry is None
+                    or self._active_identities.get(activity_key) is activation_identity
+                )
             ]
             session_id = connection[0] if connection else None
             if session_id is None:
-                session_id = next((item.session_id for item in active if item.session_id), None)
-            self._connections[key] = (
-                session_id,
-                status if status in CONNECTION_STATES else "disconnected",
+                session_id = next(
+                    (item.session_id for _activity_key, item in active_items if item.session_id),
+                    None,
+                )
+            connection_owned = bool(
+                force
+                or self._activation_registry is None
+                or self._connection_identities.get(key) is activation_identity
             )
-            self._persist_connection(
-                backend=str(backend),
-                runtime_key=str(runtime_key),
-                session_id=session_id,
-                state=status if status in CONNECTION_STATES else "disconnected",
-            )
-            active_ids = [activity.id for activity in active]
-        completed: list[SessionActivity] = []
-        for activity_id in active_ids:
-            activity = self.complete(
-                backend=backend,
-                runtime_key=runtime_key,
-                activity_id=activity_id,
-                status=status if status in TERMINAL_ACTIVITY_STATUSES else "disconnected",
-                retain_terminal_snapshot=retain_terminal_snapshots,
-            )
-            if activity is not None:
-                completed.append(activity)
+            if connection_owned:
+                normalized_state = (
+                    status if status in CONNECTION_STATES else "disconnected"
+                )
+                self._connections[key] = (session_id, normalized_state)
+                self._persist_connection(
+                    backend=str(backend),
+                    runtime_key=str(runtime_key),
+                    session_id=session_id,
+                    state=normalized_state,
+                )
+                self._connection_identities.pop(key, None)
+
+            completed: list[SessionActivity] = []
+            for activity_key, _activity in active_items:
+                activity = self._complete_locked(
+                    key=activity_key,
+                    status=(
+                        status
+                        if status in TERMINAL_ACTIVITY_STATUSES
+                        else "disconnected"
+                    ),
+                    metadata=None,
+                    expects_output=False,
+                    retain_terminal_snapshot=retain_terminal_snapshots,
+                )
+                if activity is not None:
+                    completed.append(activity)
         return completed
 
     def session_state(self, session_id: str) -> dict[str, Any]:

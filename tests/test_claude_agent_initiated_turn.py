@@ -37,7 +37,7 @@ from core.message_dispatcher import (
     ActivityOutputDeliveryError,
     ConsolidatedMessageDispatcher,
 )
-from core.session_activities import TERMINAL_SNAPSHOT_PHASE
+from core.session_activities import SessionActivityRegistry, TERMINAL_SNAPSHOT_PHASE
 from core.runtime_activation import RuntimeActivationRegistry
 from modules.im import MessageContext
 
@@ -488,6 +488,57 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mode, "detached")
         self.assertFalse(gate.lock.locked())
         self.assertEqual(gate.token, "")
+
+    async def test_stale_receiver_uses_its_frozen_generation_for_activity_frames(self):
+        agent, service = _build_agent()
+        registry = RuntimeActivationRegistry()
+        runtime_key = "session-stale-activity:/tmp/work"
+        old_identity = registry.attach("claude", runtime_key)
+        current_identity = registry.attach("claude", runtime_key)
+        service.activation_registry = registry
+        service.activities = SessionActivityRegistry(
+            activation_registry=registry,
+        )
+        self.assertTrue(
+            service.activities.set_connection(
+                backend="claude",
+                runtime_key=runtime_key,
+                session_id="sess-stale-activity",
+                state="connected",
+                activation_identity=current_identity,
+            )
+        )
+        self.assertIsNotNone(
+            service.activities.start(
+                backend="claude",
+                runtime_key=runtime_key,
+                session_id="sess-stale-activity",
+                activity_id="task-690",
+                kind="local_agent",
+                activation_identity=current_identity,
+            )
+        )
+        client = _completed_task_notification_client()
+        client._vibe_runtime_activation_identity = current_identity
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-stale-activity"}
+        )
+
+        await agent._receive_messages(
+            client,
+            "session-stale-activity",
+            "/tmp/work",
+            context,
+            composite_key=runtime_key,
+            receiver_activation_identity=old_identity,
+        )
+
+        self.assertTrue(service.activities.has_active("claude", runtime_key))
+        self.assertFalse(service.activities.has_completed_output("claude", runtime_key))
+        self.assertEqual(
+            service.activities.session_state("sess-stale-activity")["connection"],
+            "connected",
+        )
 
     async def test_claude_query_waits_until_background_output_is_consumed(self):
         agent, service = _build_agent()

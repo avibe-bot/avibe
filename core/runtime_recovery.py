@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from core.runtime_work import RuntimeWorkItem
@@ -41,8 +42,14 @@ class SessionDeliveryRecoveryHandler:
 class FallbackRequestRecoveryHandler:
     """Recover only claimed pre-execution fallback Runs; never admit queued Runs."""
 
-    def __init__(self, store: "SQLiteBackgroundTaskStore") -> None:
+    def __init__(
+        self,
+        store: "SQLiteBackgroundTaskStore",
+        *,
+        live_claims: Callable[[], frozenset[str]] | None = None,
+    ) -> None:
         self.store = store
+        self._live_claims = live_claims or frozenset
 
     def scan(
         self,
@@ -51,9 +58,10 @@ class FallbackRequestRecoveryHandler:
         occupied: frozenset[str],
         cursor: str | None = None,
     ) -> tuple[list[RuntimeWorkItem], bool]:
+        live_claims = self._live_claims()
         rows, has_more = self.store.scan_claimed_pre_execution_runs(
             limit=limit,
-            occupied=occupied,
+            occupied=occupied | live_claims,
             cursor=cursor,
         )
         return [
@@ -63,6 +71,8 @@ class FallbackRequestRecoveryHandler:
 
     async def process(self, item: RuntimeWorkItem) -> bool:
         row = item.observation
+        if str(row["id"]) in self._live_claims():
+            return True
         return self.store.recover_claimed_pre_execution_run(
             run_id=str(row["id"]),
             expected_status=str(row["status"]),

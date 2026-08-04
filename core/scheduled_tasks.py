@@ -139,6 +139,11 @@ class _ScopeAgentTarget(NamedTuple):
     agent_name: Optional[str]
 
 
+class _ClaimedRequestBackendResolution(NamedTuple):
+    authoritative: bool
+    backend: str = ""
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -3258,6 +3263,9 @@ class ScheduledTaskService:
         # Claimed requests currently executing, keyed by request id, so a
         # single slow/hung turn can't stall delivery of every other request.
         self._inflight_executions: Dict[str, "asyncio.Task[Any]"] = {}
+        # Immutable loop-published view consumed by the off-thread recovery scan.
+        # The handler rechecks it on the loop before the recovery CAS.
+        self._live_claimed_run_ids: frozenset[str] = frozenset()
         # The exact claims behind those tasks. The done callback uses this as a
         # terminalization backstop when asyncio cancels a task before its coroutine
         # executes even one line.
@@ -4005,7 +4013,10 @@ class ScheduledTaskService:
             return
         self._request_recovery_token = register(
             RuntimeWorkLane.REQUESTS,
-            FallbackRequestRecoveryHandler(sqlite_store),
+            FallbackRequestRecoveryHandler(
+                sqlite_store,
+                live_claims=lambda: self._live_claimed_run_ids,
+            ),
         )
 
     def _begin_request_recovery_unregistration(
@@ -4214,6 +4225,7 @@ class ScheduledTaskService:
             if self._request_recovery_unregistration_task is request_recovery_stop:
                 self._request_recovery_unregistration_task = None
         self._inflight_executions.clear()
+        self._live_claimed_run_ids = frozenset()
         self._inflight_requests.clear()
         self._inflight_cancellation_causes.clear()
         self._inflight_sessions.clear()
@@ -6313,6 +6325,7 @@ class ScheduledTaskService:
             self._session_lock_owners[lock_key] = request.id
         task = asyncio.create_task(self._execute_claimed_request(request))
         self._inflight_executions[request.id] = task
+        self._live_claimed_run_ids = frozenset(self._inflight_executions)
         self._inflight_requests[request.id] = request
         task.add_done_callback(
             lambda finished, rid=request.id, key=lock_key: self._on_execution_done(rid, key, finished)
@@ -6322,6 +6335,7 @@ class ScheduledTaskService:
         self, request_id: str, lock_key: Optional[str], task: "asyncio.Task[Any]"
     ) -> None:
         self._inflight_executions.pop(request_id, None)
+        self._live_claimed_run_ids = frozenset(self._inflight_executions)
         request = self._inflight_requests.pop(request_id, None)
         interruption = self._inflight_cancellation_causes.pop(
             request_id,
@@ -6375,13 +6389,16 @@ class ScheduledTaskService:
         if exc is not None:
             logger.error("Claimed request %s crashed: %r", request_id, exc, exc_info=exc)
 
-    def _claimed_request_backend(self, request: TaskExecutionRequest) -> str:
+    def _claimed_request_backend_resolution(
+        self,
+        request: TaskExecutionRequest,
+    ) -> _ClaimedRequestBackendResolution:
         observed = request.observed_activation_identity
         if observed is not None:
-            return observed.backend
+            return _ClaimedRequestBackendResolution(True, observed.backend)
         backend = str(request.agent_backend or "").strip()
         if backend:
-            return backend
+            return _ClaimedRequestBackendResolution(True, backend)
         session_id = str(request.session_id or "").strip()
         if session_id:
             try:
@@ -6389,13 +6406,58 @@ class ScheduledTaskService:
             except ValueError:
                 backend = ""
             if backend:
-                return backend
-        service = getattr(self.controller, "agent_service", None)
+                return _ClaimedRequestBackendResolution(True, backend)
+
+        agent_id = str(request.agent_id or "").strip()
         agent_name = str(request.agent_name or "").strip()
-        agents = getattr(service, "agents", None)
-        if isinstance(agents, dict) and agent_name in agents:
-            return agent_name
-        return ""
+        if agent_id or agent_name:
+            catalog = getattr(self.controller, "vibe_agent_store", None)
+            get_by_id = getattr(catalog, "get_by_id", None)
+            get_by_name = getattr(catalog, "get", None)
+            service = getattr(self.controller, "agent_service", None)
+            adapters = getattr(service, "agents", None)
+            try:
+                if agent_id:
+                    if not callable(get_by_id):
+                        if callable(
+                            getattr(
+                                service,
+                                "runtime_activation_identity_for_request",
+                                None,
+                            )
+                        ):
+                            return _ClaimedRequestBackendResolution(False)
+                        return _ClaimedRequestBackendResolution(True)
+                    agent = get_by_id(agent_id)
+                else:
+                    if not callable(get_by_name):
+                        if isinstance(adapters, dict) and agent_name in adapters:
+                            return _ClaimedRequestBackendResolution(True, agent_name)
+                        if callable(
+                            getattr(
+                                service,
+                                "runtime_activation_identity_for_request",
+                                None,
+                            )
+                        ):
+                            return _ClaimedRequestBackendResolution(False)
+                        return _ClaimedRequestBackendResolution(True)
+                    agent = get_by_name(agent_name)
+            except Exception:
+                logger.exception(
+                    "Failed to resolve durable Agent backend for Run %s",
+                    request.id,
+                )
+                return _ClaimedRequestBackendResolution(False)
+            if agent is None:
+                # The execution owner still needs to claim and terminalize a Run
+                # whose Agent was deleted. Authoritative absence means "no runtime
+                # generation to probe", not "scan every adapter".
+                return _ClaimedRequestBackendResolution(True)
+            backend = str(getattr(agent, "backend", "") or "").strip()
+            return _ClaimedRequestBackendResolution(bool(backend), backend)
+
+        return _ClaimedRequestBackendResolution(True)
 
     def _activation_resolution_for_request(
         self,
@@ -6411,6 +6473,11 @@ class ScheduledTaskService:
         )
         if not callable(identity_for_request):
             return None
+        if not backend:
+            return RuntimeActivationResolution(
+                authoritative=True,
+                identity=None,
+            )
 
         request_view: Any = request
         session_id = str(request.session_id or "").strip()
@@ -6424,28 +6491,14 @@ class ScheduledTaskService:
                 request_payload["working_path"] = target.workdir
                 request_view = SimpleNamespace(**request_payload)
 
-        candidates: list[RuntimeActivationIdentity] = []
-        backends = [backend] if backend else list(getattr(service, "agents", {}) or {})
-        for candidate_backend in backends:
-            result = identity_for_request(candidate_backend, request_view)
-            if isinstance(result, RuntimeActivationResolution):
-                if not result.authoritative:
-                    return result
-                identity = result.identity
-            elif isinstance(result, RuntimeActivationIdentity):
-                identity = result
-            elif result is None:
-                identity = None
-            else:
-                return RuntimeActivationResolution(authoritative=False)
-            if isinstance(identity, RuntimeActivationIdentity) and identity not in candidates:
-                candidates.append(identity)
-        if len(candidates) > 1:
-            return RuntimeActivationResolution(authoritative=False)
-        return RuntimeActivationResolution(
-            authoritative=True,
-            identity=candidates[0] if candidates else None,
-        )
+        result = identity_for_request(backend, request_view)
+        if isinstance(result, RuntimeActivationResolution):
+            return result
+        if isinstance(result, RuntimeActivationIdentity):
+            return RuntimeActivationResolution(authoritative=True, identity=result)
+        if result is None:
+            return RuntimeActivationResolution(authoritative=True, identity=None)
+        return RuntimeActivationResolution(authoritative=False)
 
     def _runtime_activation_registry(self) -> Any:
         service = getattr(self.controller, "agent_service", None)
@@ -6458,10 +6511,12 @@ class ScheduledTaskService:
         self,
         pending: TaskExecutionRequest,
     ) -> TaskExecutionRequest | None:
-        backend = self._claimed_request_backend(pending)
+        backend_resolution = self._claimed_request_backend_resolution(pending)
+        if not backend_resolution.authoritative:
+            return None
         resolution = self._activation_resolution_for_request(
             pending,
-            backend=backend,
+            backend=backend_resolution.backend,
         )
         if resolution is not None and not resolution.authoritative:
             return None
@@ -6487,7 +6542,11 @@ class ScheduledTaskService:
         request = self.request_store.refresh_claimed_request(request)
         if request.observed_activation_identity is None:
             request.observed_activation_identity = observed_identity
-        backend = self._claimed_request_backend(request)
+        backend_resolution = self._claimed_request_backend_resolution(request)
+        if not backend_resolution.authoritative:
+            self.request_store.requeue(request.id)
+            return request, False
+        backend = backend_resolution.backend
         service = getattr(self.controller, "agent_service", None)
         activation_identity = request.observed_activation_identity
         if activation_identity is None:

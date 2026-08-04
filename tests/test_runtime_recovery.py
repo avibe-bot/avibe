@@ -479,6 +479,53 @@ async def test_hfr_149_periodic_requests_lane_requeues_only_pre_execution_claim(
         store.close()
 
 
+@pytest.mark.anyio
+async def test_hfr_149_fallback_recovery_preserves_the_live_service_claim(
+    tmp_path: Path,
+) -> None:
+    """HFR-149: rolling refresh cannot requeue the loop-owned active claim."""
+
+    store = SQLiteBackgroundTaskStore(tmp_path / "live-claim.sqlite")
+    live_claims = frozenset({"run-live"})
+    try:
+        store.enqueue_run(
+            {
+                "id": "run-live",
+                "run_type": "scheduled",
+                "status": "running",
+                "agent_name": "codex",
+                "agent_backend": "codex",
+                "pid": None,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        handler = FallbackRequestRecoveryHandler(
+            store,
+            live_claims=lambda: live_claims,
+        )
+
+        hidden, has_more = handler.scan(
+            limit=10,
+            occupied=frozenset(),
+        )
+        assert hidden == []
+        assert has_more is False
+        assert store.get_run("run-live")["status"] == "running"
+
+        live_claims = frozenset()
+        visible, has_more = handler.scan(
+            limit=10,
+            occupied=frozenset(),
+        )
+        assert [item.partition_key for item in visible] == ["run-live"]
+        assert has_more is False
+        assert await handler.process(visible[0])
+        assert store.get_run("run-live")["status"] == "queued"
+    finally:
+        store.close()
+
+
 def test_hfr_151_fallback_scan_advances_with_a_bounded_keyset_cursor(
     tmp_path: Path,
 ) -> None:

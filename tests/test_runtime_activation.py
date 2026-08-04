@@ -442,6 +442,60 @@ def test_hfr_137_codex_session_key_claim_observes_retired_generation() -> None:
     request_store.claim.assert_not_called()
 
 
+def test_hfr_137_legacy_agent_run_resolves_one_catalog_backend_before_probe() -> None:
+    """HFR-137: a legacy Agent reference cannot become a multi-backend probe."""
+
+    registry = RuntimeActivationRegistry()
+    codex_identity = registry.attach("codex", "/work")
+    registry.attach("opencode", "session-1")
+    probes: list[str] = []
+    pending = TaskExecutionRequest(
+        id="run-custom-agent",
+        request_type="agent_run",
+        agent_id="agt-custom",
+        agent_name="reviewer",
+    )
+
+    def resolve(backend: str, _request: Any) -> RuntimeActivationResolution:
+        probes.append(backend)
+        if backend == "codex":
+            return RuntimeActivationResolution(
+                authoritative=True,
+                identity=codex_identity,
+            )
+        return RuntimeActivationResolution(
+            authoritative=True,
+            identity=registry.current("opencode", "session-1"),
+        )
+
+    request_store = SimpleNamespace(claim=Mock(return_value=pending))
+    scheduled = object.__new__(ScheduledTaskService)
+    scheduled.controller = SimpleNamespace(
+        vibe_agent_store=SimpleNamespace(
+            get_by_id=lambda agent_id: (
+                SimpleNamespace(backend="codex")
+                if agent_id == "agt-custom"
+                else None
+            ),
+            get=lambda _name: pytest.fail("stable agent_id must win over its name"),
+        ),
+        agent_service=SimpleNamespace(
+            agents={"codex": object(), "opencode": object()},
+            activation_registry=registry,
+            runtime_activation_identity_for_request=resolve,
+        ),
+        runtime_activation=registry,
+    )
+    scheduled.request_store = request_store
+
+    claimed = scheduled._claim_pending_request(pending)
+
+    assert claimed is pending
+    assert pending.observed_activation_identity is codex_identity
+    assert probes == ["codex"]
+    request_store.claim.assert_called_once_with(pending.id)
+
+
 class _ActivityStore:
     def __init__(self) -> None:
         self.upserts: list[tuple[dict[str, Any], str]] = []
@@ -513,6 +567,81 @@ def test_hfr_137_stale_activity_progress_cannot_rebuild_active_owner(
     assert current is not None
     assert activities.has_active("claude", "runtime-1") is True
     assert [phase for _, phase in store.upserts] == ["active"]
+
+
+def test_hfr_137_stale_activity_completion_and_teardown_preserve_replacement() -> None:
+    """HFR-137: only the exact receiver generation can settle its Activity."""
+
+    activation_registry = RuntimeActivationRegistry()
+    old_identity = activation_registry.attach("claude", "runtime-1")
+    store = _ActivityStore()
+    activities = SessionActivityRegistry(
+        store,
+        activation_registry=activation_registry,
+    )
+    assert activities.set_connection(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        state="connected",
+        activation_identity=old_identity,
+    )
+    assert activities.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+        activation_identity=old_identity,
+    )
+
+    current_identity = activation_registry.attach("claude", "runtime-1")
+    assert activities.set_connection(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        state="connected",
+        activation_identity=current_identity,
+    )
+    assert activities.progress(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        description="Replacement owns progress",
+        activation_identity=current_identity,
+    )
+
+    stale = activities.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        expects_output=True,
+        activation_identity=old_identity,
+    )
+    stale_teardown = activities.end_runtime(
+        "claude",
+        "runtime-1",
+        activation_identity=old_identity,
+        retain_terminal_snapshots=True,
+    )
+
+    assert stale is None
+    assert stale_teardown == []
+    assert activities.has_active("claude", "runtime-1") is True
+    assert activities.session_state("ses-1")["connection"] == "connected"
+
+    completed = activities.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        expects_output=True,
+        activation_identity=current_identity,
+    )
+    assert completed is not None
+    assert activities.has_active("claude", "runtime-1") is False
 
 
 def test_configured_activity_registry_requires_matching_activation_identity() -> None:

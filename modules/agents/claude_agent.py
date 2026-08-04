@@ -173,16 +173,19 @@ class ClaudeAgent(BaseAgent):
                 runtime_session_key not in self.receiver_tasks
                 or self.receiver_tasks[runtime_session_key].done()
             ):
+                receiver_kwargs: dict[str, object] = {
+                    "composite_key": runtime_session_key,
+                }
+                receiver_identity = self._client_activation_identity(client)
+                if receiver_identity is not None:
+                    receiver_kwargs["receiver_activation_identity"] = receiver_identity
                 self.receiver_tasks[runtime_session_key] = asyncio.create_task(
                     self._receive_messages(
                         client,
                         runtime_base_session_id,
                         request.working_path,
                         context,
-                        composite_key=runtime_session_key,
-                        receiver_activation_identity=self._client_activation_identity(
-                            client
-                        ),
+                        **receiver_kwargs,
                     )
                 )
             self.mark_runtime_turn_started(
@@ -1096,7 +1099,12 @@ class ClaudeAgent(BaseAgent):
             if receiver_activation_identity is None:
                 receiver_activation_identity = self._client_activation_identity(client)
             receiver_steering_lock = self._steering_lock(composite_key)
-            self._set_activity_connection(composite_key, context, "connected")
+            self._set_activity_connection(
+                composite_key,
+                context,
+                "connected",
+                activation_identity=receiver_activation_identity,
+            )
 
             # Build a request object for question handler
             request = AgentRequest(
@@ -1159,7 +1167,7 @@ class ClaudeAgent(BaseAgent):
                         message,
                         composite_key,
                         context,
-                        activation_identity=self._client_activation_identity(client),
+                        activation_identity=receiver_activation_identity,
                     ):
                         registry = self._activity_registry()
                         if registry is not None and registry.has_completed_output(
@@ -1782,7 +1790,10 @@ class ClaudeAgent(BaseAgent):
             self._detached_assistant_text.pop(composite_key, None)
             self._detached_unsolicited_outputs.discard(composite_key)
             self._detached_unsolicited_text.pop(composite_key, None)
-            self._end_activity_runtime(composite_key)
+            self._end_activity_runtime(
+                composite_key,
+                activation_identity=receiver_activation_identity,
+            )
             if composite_key is not None:
                 self._retire_steering_state(
                     composite_key,
@@ -2327,6 +2338,8 @@ class ClaudeAgent(BaseAgent):
         composite_key: str,
         context: MessageContext,
         state: str,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
     ) -> None:
         registry = self._activity_registry()
         if registry is None:
@@ -2336,14 +2349,27 @@ class ClaudeAgent(BaseAgent):
             runtime_key=composite_key,
             session_id=self._activity_session_id(context),
             state=state,
+            activation_identity=activation_identity,
         )
 
-    def _end_activity_runtime(self, composite_key: str) -> None:
+    def _end_activity_runtime(
+        self,
+        composite_key: str,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> None:
         service = getattr(self.controller, "agent_service", None)
         end_runtime = getattr(service, "end_activity_runtime", None)
         completed = []
         if callable(end_runtime) and composite_key:
-            completed = end_runtime(self.name, composite_key) or []
+            completed = (
+                end_runtime(
+                    self.name,
+                    composite_key,
+                    activation_identity=activation_identity,
+                )
+                or []
+            )
         if completed:
             self._mark_session_idle_if_runtime_free(composite_key)
         self._signal_activity_output_settled(composite_key)
@@ -2620,6 +2646,7 @@ class ClaudeAgent(BaseAgent):
             metadata=metadata,
             expects_output=status == "completed" and not foreground,
             retain_terminal_snapshot=status != "completed" and not foreground,
+            activation_identity=activation_identity,
         )
         service = getattr(self.controller, "agent_service", None)
         on_terminal = getattr(service, "on_activity_terminal", None)

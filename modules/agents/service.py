@@ -217,13 +217,20 @@ class AgentService:
             )
             return False
 
-    def end_activity_runtime(self, backend: str, runtime_key: str) -> list[Any]:
+    def end_activity_runtime(
+        self,
+        backend: str,
+        runtime_key: str,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> list[Any]:
         """Terminate one backend connection's Activities and notify Run owners."""
 
         completed = self.activities.end_runtime(
             backend,
             runtime_key,
             retain_terminal_snapshots=True,
+            activation_identity=activation_identity,
         )
         for activity in completed:
             self.on_activity_terminal(activity)
