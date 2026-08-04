@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.9.0
+version: 0.9.1
 ---
 
 # Background Watch Hook
@@ -178,7 +178,7 @@ One-shot watch:
 ```bash
 vibe watch add \
   --name "Watch PR 151 reviews" \
-  --message "PR #151 has new review activity. Fetch the latest review state, summarize actionable items, and continue handling them if needed." \
+  --message "PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Do not describe the fixes in this conversation: end the turn with a silent block unless the review passed, you are blocked, or a decision needs the user." \
   -- \
   uv run --no-project scripts/wait_pr.py \
     --repo avibe-bot/avibe \
@@ -203,7 +203,7 @@ Catch up on existing activity first:
 ```bash
 vibe watch add \
   --name "Catch up PR 151 reviews" \
-  --message "PR #151 already has review activity. Fetch the latest review state and continue handling it if needed." \
+  --message "PR #151 already has review activity. Fetch the latest review state and resolve the actionable findings on the PR. Do not describe the fixes in this conversation: end the turn with a silent block unless the review passed, you are blocked, or a decision needs the user." \
   -- \
   uv run --no-project scripts/wait_pr.py \
     --repo avibe-bot/avibe \
@@ -219,7 +219,7 @@ vibe watch add \
   --forever \
   --timeout 21600 \
   --lifetime-timeout 86400 \
-  --message "PR #151 has new review activity. Fetch the latest review state, summarize actionable items, and continue handling them if needed." \
+  --message "PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Do not describe the fixes in this conversation: end the turn with a silent block unless the review passed, you are blocked, or a decision needs the user." \
   -- \
   uv run --no-project scripts/wait_pr.py \
     --repo avibe-bot/avibe \
@@ -261,7 +261,7 @@ GitHub Actions for a pushed commit:
 ```bash
 vibe watch add \
   --name "Watch CI" \
-  --message "GitHub Actions failed. Inspect the result below and fix the failures." \
+  --message "GitHub Actions failed. Inspect the result below and fix the failures. Do not describe the fixes in this conversation: end the turn with a silent block unless you are blocked or a decision needs the user." \
   -- \
   uv run --no-project scripts/wait_action.py \
     --repo cyhhao/sub2api \
@@ -282,6 +282,13 @@ green build is supposed to trigger a deploy.
 ## Practical Advice
 
 - Keep messages action-oriented. Tell the next turn what to do with the waiter result.
+- In a fix loop, tell the follow-up turn to fix silently. A review-fix loop can run
+  many cycles, and a "here is what I changed" message on each one costs tokens and
+  interrupts the user with progress they did not ask to see; what they want is the PR
+  converging. Avibe sends nothing when a reply contains only a
+  `<silent>...</silent>` block, so the turn can resolve the findings, push, re-arm,
+  and stay quiet. Keep a user-facing message for the outcomes a human actually needs:
+  the review passed, the loop is blocked, or a decision has to be made.
 - If this is the first time using `vibe watch add`, read `vibe watch add --help` first; the help text explains both argument syntax and runtime behavior such as how `--message` and waiter stdout become the follow-up Agent Run input.
 - Prefer `vibe watch` over ad-hoc detached shells when the wait should survive the current turn cleanly.
 - Treat GitHub as just one example waiter, not the main point of the skill.
