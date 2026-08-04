@@ -1,6 +1,6 @@
 # Memory Processing Log Page (EverOS step timeline + provider call log)
 
-Status: draft v7 (overdesign reductions incorporated)
+Status: implemented from approved v7 (four complexity reductions retained)
 Date: 2026-08-04
 
 ## Background
@@ -92,8 +92,8 @@ interface stays small:
 ```python
 prepare_call_recorder(db_path) -> RecorderHandle | None
 MemoryInsightPaths(everos_root, capture_db_path, call_log_db_path)
-MemoryInsightReader(paths).list_entries(scope, cursor, limit) -> dict
-MemoryInsightReader(paths).entry_detail(scope, memcell_id) -> dict
+MemoryInsightReader(paths, provider_base_urls=()).list_entries(scope, cursor, limit) -> dict
+MemoryInsightReader(paths, provider_base_urls=()).entry_detail(scope, memcell_id) -> dict
 ```
 
 `MemoryRuntime` constructs the frozen path bundle from its own
@@ -237,8 +237,10 @@ kind.
 The real-wheel contract test exercises the production call paths, not just the
 named attributes: parser enrichment through the package export, the Episode and
 AtomicFact `_build_row` paths, episode extraction, an OME-context call, and the
-two transport classes. It also drives Search and Get through the real app and
-asserts that neither adds a diagnostic row.
+two transport classes. A separate sidecar guard behavior test drives valid Search
+and Get requests through the installed middleware and asserts that neither enters
+the add/flush recorder boundary; it does not boot a second full EverOS app merely
+to repeat that Avibe-owned routing assertion.
 
 ### Async lifecycle and failure behavior
 
@@ -415,7 +417,7 @@ Routes:
 
 - `core/memory/runtime.py`: `log_entries_payload` / `log_entry_payload`.
 - `core/internal_server.py`: `GET /internal/memory/log` (`limit` 1..50,
-  cursor <= 88 chars) and `GET /internal/memory/log/entry` (validated memcell id),
+  cursor <= 256 chars) and `GET /internal/memory/log/entry` (validated memcell id),
   using `_memory_read_scope` exactly like profile.
 - `vibe/internal_client.py`: signed `memory_log` / `memory_log_entry` helpers
   carrying the user-key headers.
@@ -544,17 +546,19 @@ New:
 
 Edited:
 
-- `core/memory/{everos,sidecar,process,runtime,types}.py`
+- `core/memory/{everos,sidecar,process,runtime}.py`
 - `config/v2_config.py`
 - `core/internal_server.py`, `vibe/internal_client.py`,
   `vibe/ui_memory_routes.py`
 - `ui/src/context/ApiContext.tsx`
 - `ui/src/components/settings/SettingsMemoryPage.tsx`
-- `ui/src/components/settings/memory/MemorySettingsPanel.tsx`
+- `ui/src/components/settings/memory/{MemorySettingsPanel,MemorySettingsPanel.test}.tsx`
+- `ui/src/lib/{memoryRead,memorySettings}.ts`
 - `ui/src/i18n/en.json`, `ui/src/i18n/zh.json`
 - `ui/package.json`, `ui/package-lock.json`
 - `README.md`, `.github/workflows/lint.yml`
 - `tests/test_memory_sidecar.py`, `tests/test_memory_runtime.py`,
-  `tests/test_memory_everos.py`, `tests/test_internal_server.py`,
+  `tests/test_memory_everos.py`, `tests/test_memory_everos_insight_patches.py`,
+  `tests/test_internal_server.py`,
   `tests/test_internal_client.py`,
   `tests/test_ui_memory_routes.py`, `tests/test_memory_config.py`
