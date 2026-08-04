@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -60,11 +62,25 @@ STATE_CURSOR_KEYS = (
 SETTLE_MAX_ROUNDS = 3
 
 
-class StatePersistenceError(RuntimeError):
-    """The cursors an explicit ``--state-file`` promised could not be saved.
+class StateFileError(RuntimeError):
+    """The requested ``--state-file`` cannot do the job it was asked to do.
 
     Raised rather than warned about because a forever watch that keeps polling
-    without its cursors loses activity instead of reporting it.
+    without usable cursors loses activity instead of reporting it, and does so
+    silently: every fresh cycle re-baselines from the current PR.
+    """
+
+
+class StatePersistenceError(StateFileError):
+    """The cursors an explicit ``--state-file`` promised could not be saved."""
+
+
+class StateFileOwnershipError(StateFileError):
+    """The state file at this path belongs to a different PR.
+
+    Two watches pointed at one file is a configuration error, not a state to
+    recover from: each would read the other's cursors as absent, re-baseline, and
+    then overwrite them, so both watches keep missing activity between cycles.
     """
 
 
@@ -472,14 +488,28 @@ def _load_state_file(path: str | None, *, repo: str, pr_number: int | None) -> d
     if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
         print(f"Ignoring state file {path}: unrecognised format", file=sys.stderr)
         return {}
-    # Resuming from another PR's cursors would skip that PR's real history.
+    # Resuming from another PR's cursors would skip that PR's real history, and
+    # carrying on would overwrite them with ours on the first cursor advance --
+    # so this is terminal rather than a fresh baseline. A file left behind by an
+    # earlier watch on another PR has to be removed or renamed deliberately.
     if payload.get("repo") != repo or payload.get("pr") != pr_number:
-        print(
-            f"Ignoring state file {path}: it belongs to {payload.get('repo')}#{payload.get('pr')}",
-            file=sys.stderr,
+        raise StateFileOwnershipError(
+            f"State file {path} belongs to {payload.get('repo')}#{payload.get('pr')}, "
+            f"not {repo}#{pr_number}"
         )
-        return {}
     return payload
+
+
+def _state_file_scratch(target: Path) -> tuple[int, str]:
+    """An exclusively created scratch file beside ``target``.
+
+    ``mkstemp`` rather than a derived name such as ``<state-file>.tmp``: this runs
+    in a directory of persisted user state, and a deterministic path both
+    truncates whatever already occupies it and lets two waiters sharing a
+    directory scribble over each other's half-written file.
+    """
+
+    return tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
 
 
 def _verify_state_file_writable(path: str | None) -> None:
@@ -487,26 +517,29 @@ def _verify_state_file_writable(path: str | None) -> None:
 
     A forever watch only discovers a read-only parent directory when the cycle it
     spent minutes on tries to save its cursors, and by then the activity that
-    cycle observed is already unrecoverable. Probing a sibling file leaves the
-    real state file untouched, so a watch resuming from good cursors keeps them.
+    cycle observed is already unrecoverable. The probe is a scratch file, so the
+    real state file is untouched and a watch resuming from good cursors keeps them.
     """
 
     if not path:
         return
 
     target = Path(path)
-    probe = target.with_name(f"{target.name}.probe")
+    handle = None
+    scratch = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        with open(probe, "w", encoding="utf-8") as handle:
-            handle.write("")
+        handle, scratch = _state_file_scratch(target)
     except OSError as err:
         raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
     finally:
-        try:
-            probe.unlink()
-        except OSError:
-            pass
+        if handle is not None:
+            os.close(handle)
+        if scratch is not None:
+            try:
+                os.unlink(scratch)
+            except OSError:
+                pass
 
 
 def _write_state_file(path: str | None, *, repo: str, pr_number: int | None, **fields: Any) -> None:
@@ -515,20 +548,44 @@ def _write_state_file(path: str | None, *, repo: str, pr_number: int | None, **f
 
     payload = {"version": STATE_FILE_VERSION, "repo": repo, "pr": pr_number, **fields}
     target = Path(path)
+    scratch = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         # Written aside and moved into place: a cycle killed mid-write must not
         # leave a truncated file that the next cycle has to discard.
-        temporary = target.with_name(f"{target.name}.tmp")
-        with open(temporary, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
-        os.replace(temporary, target)
+        handle, scratch = _state_file_scratch(target)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+        os.replace(scratch, target)
+        scratch = None
     except OSError as err:
         # Terminal, not a warning. The caller asked for cursors that survive the
         # process; continuing without them lets the next cycle re-baseline from the
         # current PR and silently drop everything that arrived in between, which is
         # the exact loss ``--state-file`` exists to prevent.
         raise StatePersistenceError(f"Could not write state file {path}: {err}") from err
+    finally:
+        # A failed write must not leave its scratch file behind in the state dir.
+        if scratch is not None:
+            try:
+                os.unlink(scratch)
+            except OSError:
+                pass
+
+
+def _token_fingerprint(token: str | None) -> str | None:
+    """Which credentials a cached ``viewer_login`` was resolved under.
+
+    A one-way digest, never the token itself: the state file lives on disk next to
+    the cursors and has no business holding a credential. It exists so a resumed
+    cycle can tell "same account, reuse the saved login" from "the token now
+    belongs to someone else", which otherwise filtered the wrong author's
+    comments out of the review loop.
+    """
+
+    if not token:
+        return None
+    return hashlib.sha256(f"wait_pr/{STATE_FILE_VERSION}/{token}".encode()).hexdigest()[:16]
 
 
 def _saved_int(saved: dict[str, Any], key: str) -> int | None:
@@ -622,10 +679,16 @@ def main() -> int:
     cache = ResponseCache()
     _verify_state_file_writable(args.state_file)
     saved = _load_state_file(args.state_file, repo=args.repo, pr_number=args.pr)
+    token_fingerprint = _token_fingerprint(token)
     viewer_login = None
     if not args.include_self_comments:
-        # The stored login spares a /user request on every cycle of a forever watch.
-        viewer_login = _saved_str(saved, "viewer_login") or get_authenticated_login(token)
+        # The stored login spares a /user request on every cycle of a forever watch,
+        # but only while the token still belongs to the account it was resolved for.
+        # A rotated or swapped credential would otherwise keep filtering out the old
+        # account's comments and let the new account's own comments wake the Agent.
+        if token_fingerprint is not None and _saved_str(saved, "token_fingerprint") == token_fingerprint:
+            viewer_login = _saved_str(saved, "viewer_login")
+        viewer_login = viewer_login or get_authenticated_login(token)
     ignored_authors = _normalize_authors(args.ignore_author)
     try:
         ignore_patterns = _compile_ignore_patterns(
@@ -657,8 +720,20 @@ def main() -> int:
     # contains the PR's full history.
     resume_cursors = {key: _saved_int(saved, key) for key in STATE_CURSOR_KEYS}
     resumed = not args.catch_up and all(value is not None for value in resume_cursors.values())
-    review_comment_since = _saved_str(saved, "review_comment_since") if resumed else None
-    issue_comment_since = _saved_str(saved, "issue_comment_since") if resumed else None
+    # An explicit --since-*-comment-id asks for a replay from that id. The saved
+    # `since` timestamp is only ever a shortcut for the saved cursor, so keeping it
+    # would narrow the fetch to comments newer than the last poll and hide exactly
+    # the history the flag asked to see.
+    review_comment_since = (
+        _saved_str(saved, "review_comment_since")
+        if resumed and args.since_review_comment_id is None
+        else None
+    )
+    issue_comment_since = (
+        _saved_str(saved, "issue_comment_since")
+        if resumed and args.since_issue_comment_id is None
+        else None
+    )
     saved_pr_cursor = _saved_int(saved, "pr_cursor")
     since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
 
@@ -794,6 +869,7 @@ def main() -> int:
                 review_comment_since=review_comment_since,
                 issue_comment_since=issue_comment_since,
                 viewer_login=viewer_login,
+                token_fingerprint=token_fingerprint,
             )
 
         def _settle(
@@ -1006,16 +1082,17 @@ def main() -> int:
 
 
 def run_cli() -> int:
-    """``main`` plus the terminal handling of a broken ``--state-file``.
+    """``main`` plus the terminal handling of an unusable ``--state-file``.
 
-    Exit 1 and not the retryable 75: a directory that cannot be written to will
-    not start working on the next cycle, and a forever watch retrying into it
-    would poll indefinitely while losing the activity it saw.
+    Exit 1 and not the retryable 75: neither a directory that cannot be written
+    to nor a path already owned by another PR starts working on the next cycle,
+    and a forever watch retrying into one would poll indefinitely while losing
+    the activity it saw.
     """
 
     try:
         return main()
-    except StatePersistenceError as err:
+    except StateFileError as err:
         print(f"{err}. Fix the path or drop --state-file, then recreate the watch.", file=sys.stderr)
         return 1
 

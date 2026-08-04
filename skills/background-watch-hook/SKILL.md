@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.10.1
+version: 0.10.2
 ---
 
 # Background Watch Hook
@@ -245,11 +245,15 @@ process, so without it the next cycle re-snapshots the PR as its baseline and
 anything that arrived between the previous cycle's exit and that snapshot is lost.
 The file also carries the `since` filters and the resolved GitHub login forward, so
 a resumed cycle asks GitHub only for what is new instead of re-reading the whole PR.
-It is written on every cursor advance and on timeout, replaced atomically, and
-ignored if it belongs to another PR or is unreadable. A path that cannot be written
-to is terminal, not a warning: the waiter checks writability before its first poll
-and stops the watch with exit `1` rather than polling on without the cursors it was
-asked to keep.
+The login is reused only while the token still fingerprints to the account it was
+resolved for, and an explicit `--since-review-comment-id` /
+`--since-issue-comment-id` drops the matching saved `since` so the replay it asks
+for is not narrowed away. It is written on every cursor advance and on timeout,
+replaced atomically, and ignored when unreadable. Two failures are terminal rather
+than a warning — a path that cannot be written to (checked before the first poll)
+and a path already owned by another PR — and both stop the watch with exit `1`
+rather than polling on without the cursors it was asked to keep, or clobbering
+another watch's.
 
 GitHub-specific notes:
 

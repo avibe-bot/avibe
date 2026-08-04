@@ -1361,6 +1361,7 @@ def test_main_writes_the_state_file_even_with_nothing_to_report(tmp_path) -> Non
     assert saved["repo"] == "avibe-bot/avibe"
     assert saved["pr"] == 153
     assert saved["viewer_login"] == "qiqi"
+    assert saved["token_fingerprint"] == module._token_fingerprint("token")
     assert saved["review_comment_since"] == "2026-08-04T09:59:58Z"
 
 
@@ -1381,6 +1382,7 @@ def test_main_resumes_from_the_state_file_instead_of_re_baselining(tmp_path) -> 
                 "review_comment_since": "2026-08-04T09:00:00Z",
                 "issue_comment_since": "2026-08-04T09:00:00Z",
                 "viewer_login": "qiqi",
+                "token_fingerprint": module._token_fingerprint("token"),
             }
         ),
         encoding="utf-8",
@@ -1411,19 +1413,22 @@ def test_main_resumes_from_the_state_file_instead_of_re_baselining(tmp_path) -> 
     fake_login.assert_not_called()
 
 
-def test_main_ignores_a_state_file_belonging_to_another_pr(tmp_path) -> None:
+def test_main_re_resolves_the_login_when_the_token_changed(tmp_path) -> None:
     module = _load_module()
-    state_file = tmp_path / "pr-999.json"
+    state_file = tmp_path / "pr-153.json"
     state_file.write_text(
         json.dumps(
             {
                 "version": module.STATE_FILE_VERSION,
                 "repo": "avibe-bot/avibe",
-                "pr": 999,
+                "pr": 153,
                 "review_cursor": 0,
                 "review_comment_cursor": 400,
                 "issue_comment_cursor": 0,
                 "reaction_cursor": 0,
+                "pr_status": "open",
+                "viewer_login": "someone-else",
+                "token_fingerprint": module._token_fingerprint("old-token"),
             }
         ),
         encoding="utf-8",
@@ -1433,9 +1438,161 @@ def test_main_ignores_a_state_file_belonging_to_another_pr(tmp_path) -> None:
         return _pr_state(review_comments=[_review_comment(501)]), 1
 
     stdout = io.StringIO()
-    stderr = io.StringIO()
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="new-token"),
+        patch.object(
+            module, "get_authenticated_login", return_value="chatgpt-codex-connector[bot]"
+        ) as fake_login,
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    # The cached login belonged to the previous credential. Reusing it would let the
+    # new account's own comments wake the Agent, so the login is resolved again and
+    # it is the fresh login that filters this cycle.
+    fake_login.assert_called_once_with("new-token")
+    assert rc == 124
+    assert stdout.getvalue() == ""
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["viewer_login"] == "chatgpt-codex-connector[bot]"
+    assert saved["token_fingerprint"] == module._token_fingerprint("new-token")
+
+
+def test_state_file_never_stores_the_token_itself(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        return _pr_state(), 1
+
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="ghp_super_secret"),
+        patch.object(module, "get_authenticated_login", return_value="qiqi"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--timeout",
+                "0.0001",
+                "--interval",
+                "1",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        module.main()
+
+    raw = state_file.read_text(encoding="utf-8")
+    # The fingerprint identifies the credential; it must never carry it.
+    assert "ghp_super_secret" not in raw
+    assert json.loads(raw)["token_fingerprint"] == module._token_fingerprint("ghp_super_secret")
+
+
+def test_main_replays_from_an_explicit_cursor_without_a_saved_since(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_cursor": 0,
+                "review_comment_cursor": 500,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+                "pr_status": "open",
+                "review_comment_since": "2026-08-04T09:00:00Z",
+                "issue_comment_since": "2026-08-04T09:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    since_values: list[tuple[str | None, str | None]] = []
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        since_values.append((kwargs.get("review_comment_since"), kwargs.get("issue_comment_since")))
+        return _pr_state(review_comments=[_review_comment(450)]), 1
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--state-file",
+                str(state_file),
+                "--since-review-comment-id",
+                "400",
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    # An explicit cursor asks for a replay. The saved `since` would have filtered out
+    # comment #450 server-side and the replay would have returned nothing. The stream
+    # with no explicit cursor keeps its cheap incremental `since`.
+    assert since_values == [(None, "2026-08-04T09:00:00Z")]
+    assert rc == 0
+    assert "review_comment #450" in stdout.getvalue()
+
+
+def test_main_refuses_a_state_file_belonging_to_another_pr(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-999.json"
+    foreign = json.dumps(
+        {
+            "version": module.STATE_FILE_VERSION,
+            "repo": "avibe-bot/avibe",
+            "pr": 999,
+            "review_cursor": 0,
+            "review_comment_cursor": 400,
+            "issue_comment_cursor": 0,
+            "reaction_cursor": 0,
+        }
+    )
+    state_file.write_text(foreign, encoding="utf-8")
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value=None),
         patch.object(module.time, "sleep", return_value=None),
@@ -1458,12 +1615,15 @@ def test_main_ignores_a_state_file_belonging_to_another_pr(tmp_path) -> None:
         redirect_stdout(stdout),
         patch("sys.stderr", stderr),
     ):
-        rc = module.main()
+        rc = module.run_cli()
 
-    # Foreign cursors would silently skip this PR's real history, so it baselines.
-    assert rc == 124
+    # Two watches sharing one path is a setup mistake, not something to paper over:
+    # adopting the foreign cursors would skip this PR's history, and overwriting them
+    # would blind the other watch. Stop instead, and leave the other file intact.
+    assert rc == 1
     assert stdout.getvalue() == ""
     assert "belongs to avibe-bot/avibe#999" in stderr.getvalue()
+    assert state_file.read_text(encoding="utf-8") == foreign
 
 
 def test_main_ignores_a_partial_state_file(tmp_path) -> None:
