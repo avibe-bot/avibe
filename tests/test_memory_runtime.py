@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -2422,6 +2424,137 @@ def test_recorder_corruption_stays_degraded_until_clear(
     asyncio.run(run())
 
 
+def test_live_sidecar_with_disabled_recorder_is_reported_as_writer_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=FakeEverOSProcessFactory(),
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+
+        async def recorder_health() -> dict[str, str | None]:
+            return {"state": "disabled", "reason": None}
+
+        async def ready_status() -> memory_runtime.MemoryStatus:
+            return memory_runtime.MemoryStatus(state="ready")
+
+        monkeypatch.setattr(runtime._provider, "recorder_health", recorder_health)
+        monkeypatch.setattr(runtime.module, "status", ready_status)
+        assert (await runtime.status_payload())["recorder"] == {
+            "state": "degraded",
+            "reason": "writer_failures",
+        }
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_recorder_reap_hands_call_log_to_host_until_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A crashed recorder has no DB-owner overlap with its supervised restart."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    maintenance_entered = threading.Event()
+    maintenance_release = threading.Event()
+    maintenance_finished = threading.Event()
+
+    def maintain(path: Path) -> None:
+        assert path == db_path
+        maintenance_entered.set()
+        maintenance_release.wait(timeout=2)
+        maintenance_finished.set()
+        return None
+
+    monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+        db_path.parent.mkdir(parents=True, mode=0o700)
+        initialize_call_log(db_path)
+        recorder = factory.supervised[0]
+        assert recorder.on_reaped is not None
+
+        # This is the supervisor's post-reap notification at the beginning of
+        # its crash-backoff window, before it schedules the restart attempt.
+        recorder._running = False
+        result = recorder.on_reaped()
+        if inspect.isawaitable(result):
+            await result
+        assert await asyncio.to_thread(maintenance_entered.wait, 1)
+        assert runtime._process_records_calls is False
+
+        restarting = asyncio.create_task(recorder.start())
+        await asyncio.sleep(0)
+        assert not restarting.done()
+        assert not maintenance_finished.is_set()
+
+        maintenance_release.set()
+        assert await asyncio.wait_for(restarting, timeout=1)
+        assert maintenance_finished.is_set()
+        assert runtime._process_records_calls is True
+        assert runtime._call_log_retention_task is None
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_stale_recorder_supervisor_cannot_release_host_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+        stale = factory.supervised[0]
+        assert stale.before_start is not None
+        runtime._process = FakeEverOSProcess()
+        with pytest.raises(RuntimeError, match="stale EverOS recorder supervisor"):
+            await stale.before_start()
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4104,6 +4237,78 @@ def _late_helper_disclosures(process: EverOSProcess) -> dict[int, dict]:
             "environ": {"EVEROS_ROOT": str(process.provider_root)},
         }
     }
+
+
+def test_sidecar_notifies_reaped_callback_only_after_tree_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The runtime handoff begins after the exited child's tree is reaped."""
+
+    events: list[str] = []
+
+    async def on_reaped() -> None:
+        assert process._process is None
+        events.append("reaped")
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        on_reaped=on_reaped,
+    )
+    child = _ExitedChild()
+    _supervising(process, child)
+    process._desired_running = False
+
+    async def terminate(*_args, **_kwargs) -> None:
+        events.append("tree-cleaned")
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+    monkeypatch.setattr(process._ownership, "retire_if_group_is_clear", lambda _group: events.append("retired"))
+
+    asyncio.run(process._watch_child(child))
+
+    assert events == ["tree-cleaned", "retired", "reaped"]
+
+
+def test_sidecar_start_failure_after_host_handoff_notifies_reaped(tmp_path: Path) -> None:
+    """A pre-spawn launch failure leaves the host free to reclaim the call log."""
+
+    reaped = 0
+
+    async def on_reaped() -> None:
+        nonlocal reaped
+        reaped += 1
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        on_reaped=on_reaped,
+    )
+    process._consecutive_failures = 4
+    process._validate_launch_inputs = lambda: (_ for _ in ()).throw(RuntimeError("launch rejected"))
+
+    assert asyncio.run(process.start()) is False
+    assert reaped == 1
+    assert process._restart_task is None
+
+
+def test_fake_sidecar_failed_start_notifies_reaped_for_runtime_handoff() -> None:
+    reaped = 0
+
+    async def on_reaped() -> None:
+        nonlocal reaped
+        reaped += 1
+
+    process = FakeEverOSProcess(
+        start_results=deque([False]),
+        on_reaped=on_reaped,
+    )
+
+    assert asyncio.run(process.start()) is False
+    assert reaped == 1
 
 
 @pytest.mark.parametrize("group_holds_a_survivor", [True, False])

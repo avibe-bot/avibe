@@ -80,6 +80,8 @@ class EverOSProcess:
         startup_timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
+        before_start: Callable[[], Awaitable[None] | None] | None = None,
+        on_reaped: Callable[[], Awaitable[None] | None] | None = None,
     ) -> None:
         self._python = Path(python)
         self._effective_home = Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
@@ -103,6 +105,8 @@ class EverOSProcess:
         self._restart_task: asyncio.Task[None] | None = None
         self._owned_processes: dict[int, float] = {}
         self._on_ready = on_ready
+        self._before_start = before_start
+        self._on_reaped = on_reaped
         self._desired_running = False
         self._starting = False
         self._down = False
@@ -204,6 +208,8 @@ class EverOSProcess:
             if monitor_task is not None and monitor_task is not asyncio.current_task():
                 monitor_task.cancel()
             self._remove_owned_socket()
+            if process is not None:
+                await self._notify_reaped()
 
     async def processing_healthy(self) -> bool:
         """Probe processing from a short-lived child with the scrubbed key env."""
@@ -278,6 +284,7 @@ class EverOSProcess:
             await self._ownership.reap()
             self._write_generated_config()
             self._remove_owned_socket()
+            await self._notify_before_start()
             child_env = self._child_environment()
             process = await asyncio.create_subprocess_exec(
                 str(self._python),
@@ -361,6 +368,10 @@ class EverOSProcess:
                 monitor_task.cancel()
             self._remove_owned_socket()
             self._starting = False
+            # A launch may fail before subprocess creation. The runtime still
+            # needs the handoff: ``before_start`` already released host
+            # retention and cleanup has proved this supervisor owns no child.
+            await self._notify_reaped()
             self._record_start_failure_locked()
             return False
 
@@ -418,6 +429,7 @@ class EverOSProcess:
             self._remove_owned_socket()
             self._ownership.retire_if_group_is_clear(process_group)
             self._starting = False
+            await self._notify_reaped()
             if healthy_since is not None and time.monotonic() - healthy_since >= _HEALTHY_RESET_SECONDS:
                 self._consecutive_failures = 0
             if not self._desired_running:
@@ -476,6 +488,7 @@ class EverOSProcess:
                 self._monitor_task = None
                 self._remove_owned_socket()
                 self._ownership.retire_if_group_is_clear(process_group)
+                await self._notify_reaped()
 
     def _record_start_failure_locked(self) -> None:
         self._consecutive_failures += 1
@@ -723,6 +736,25 @@ class EverOSProcess:
                 await result
         except Exception:
             logger.warning("EverOS sidecar ready callback failed")
+
+    async def _notify_before_start(self) -> None:
+        callback = self._before_start
+        if callback is None:
+            return
+        result = callback()
+        if inspect.isawaitable(result):
+            await result
+
+    async def _notify_reaped(self) -> None:
+        callback = self._on_reaped
+        if callback is None:
+            return
+        try:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.warning("EverOS sidecar reaped callback failed")
 
     def _timezone_for_root(self) -> str:
         configured = _iana_timezone(self._settings.timezone)
@@ -1818,6 +1850,8 @@ class EverOSProcessFactory(Protocol):
         settings: EverOSProcessSettings | None = None,
         socket_path: Path | str | None = None,
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
+        before_start: Callable[[], Awaitable[None] | None] | None = None,
+        on_reaped: Callable[[], Awaitable[None] | None] | None = None,
     ) -> EverOSProcessPort: ...
 
 
@@ -1837,6 +1871,8 @@ class FakeEverOSProcess:
     stop_failure: BaseException | None = None
     processing_healthy_flag: bool = True
     on_ready: Callable[[], Awaitable[None] | None] | None = None
+    before_start: Callable[[], Awaitable[None] | None] | None = None
+    on_reaped: Callable[[], Awaitable[None] | None] | None = None
     # Launch inputs the factory captured, for tests asserting on child settings.
     python: Path | None = None
     provider_root: Path | None = None
@@ -1857,13 +1893,22 @@ class FakeEverOSProcess:
 
     async def start(self) -> bool:
         self.starts += 1
+        before_start = self.before_start
+        if before_start is not None:
+            result = before_start()
+            if inspect.isawaitable(result):
+                await result
         if self.start_failure is not None:
+            self._running = False
+            await self._notify_reaped()
             raise self.start_failure
         started = self.start_results.popleft() if self.start_results else True
         self._running = started
         self._starting = False
         if started:
             await self.ready()
+        else:
+            await self._notify_reaped()
         return started
 
     async def stop(self) -> None:
@@ -1873,6 +1918,15 @@ class FakeEverOSProcess:
         self._starting = False
         if self.stop_failure is not None:
             raise self.stop_failure
+        await self._notify_reaped()
+
+    async def _notify_reaped(self) -> None:
+        on_reaped = self.on_reaped
+        if on_reaped is None:
+            return
+        result = on_reaped()
+        if inspect.isawaitable(result):
+            await result
 
     async def processing_healthy(self) -> bool:
         if self.processing_healthy_results:
@@ -1914,10 +1968,14 @@ class FakeEverOSProcessFactory:
         settings: EverOSProcessSettings | None = None,
         socket_path: Path | str | None = None,
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
+        before_start: Callable[[], Awaitable[None] | None] | None = None,
+        on_reaped: Callable[[], Awaitable[None] | None] | None = None,
     ) -> EverOSProcessPort:
         del effective_home, socket_path
         process = self.template()
         process.on_ready = on_ready
+        process.before_start = before_start
+        process.on_reaped = on_reaped
         process.python = Path(python)
         process.provider_root = Path(provider_root) if provider_root is not None else None
         process.settings = settings

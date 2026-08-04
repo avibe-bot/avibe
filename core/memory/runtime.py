@@ -473,17 +473,34 @@ class MemoryRuntime:
         records_calls = config.diagnostics.log_provider_calls
         if records_calls:
             await self._stop_call_log_retention()
-        self._process = self._process_factory(
+        sidecar: EverOSProcessPort | None = None
+
+        async def before_recorder_start() -> None:
+            if sidecar is not self._process:
+                raise RuntimeError("stale EverOS recorder supervisor")
+            await self._stop_call_log_retention()
+
+        async def recorder_reaped() -> None:
+            if sidecar is not self._process:
+                return
+            self._process_records_calls = False
+            self._ensure_call_log_retention()
+
+        settings = _process_settings(
+            config,
+            call_log_db_path=self._call_log_db_path if records_calls else None,
+        )
+        sidecar = self._process_factory(
             python,
             provider_root=self._provider_root,
             effective_home=self._effective_home,
-            settings=_process_settings(
-                config,
-                call_log_db_path=self._call_log_db_path if records_calls else None,
-            ),
+            settings=settings,
             socket_path=self._socket_path,
             on_ready=self._on_sidecar_ready,
+            before_start=before_recorder_start if records_calls else None,
+            on_reaped=recorder_reaped if records_calls else None,
         )
+        self._process = sidecar
         self._process_records_calls = records_calls
         try:
             started = await self._process.start()
@@ -541,6 +558,10 @@ class MemoryRuntime:
         try:
             health = await self._provider.recorder_health()
         except Exception:
+            health = dict(_RECORDER_DEGRADED)
+        if health.get("state") == "disabled":
+            # Diagnostics was explicitly enabled. A live sidecar with its
+            # recorder off is a writer failure, not an intentional disable.
             health = dict(_RECORDER_DEGRADED)
         self._recorder_health = dict(health)
         return dict(self._recorder_health)
