@@ -843,7 +843,7 @@ def _scrub_json(
     value: JsonValue,
     *,
     base_urls: tuple[str, ...],
-    exact_values: tuple[str, ...],
+    exact_values: tuple[str, ...] = (),
 ) -> JsonValue:
     if isinstance(value, str):
         return _scrub_text(value, base_urls=base_urls, exact_values=exact_values)
@@ -889,7 +889,7 @@ def _scrub_text(
     value: str,
     *,
     base_urls: tuple[str, ...],
-    exact_values: tuple[str, ...],
+    exact_values: tuple[str, ...] = (),
 ) -> str:
     scrubbed = value
     for exact_value in exact_values:
