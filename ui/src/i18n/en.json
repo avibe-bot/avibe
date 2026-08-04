@@ -1233,6 +1233,7 @@
     "memory_provider_response_invalid": "Memory returned an invalid response.",
     "memory_processing_failed": "Memory processing failed.",
     "memory_clear_failed": "Clearing Memory data failed.",
+    "memory_restart_failed": "Restarting the Memory engine failed.",
     "memory_runtime_unpublished": "This Avibe version hasn't published a memory runtime yet.",
     "memory_runtime_manifest_missing": "The memory runtime manifest is missing.",
     "memory_runtime_manifest_unavailable": "The memory runtime manifest couldn't be downloaded.",
@@ -3504,11 +3505,11 @@
         "engine": "The Memory engine reported an internal error. Restarting it usually clears the fault."
       },
       "faultAction": {
-        "credential": "Open credential settings",
-        "engine": "Restart Memory engine"
+        "credential": "Open credential settings"
       },
       "dismissFault": "Dismiss processing alert",
-      "engineRestartStarted": "Memory engine restart started.",
+      "restartEngine": "Restart engine",
+      "engineRestartCompleted": "Memory engine restarted.",
       "engineRestartFailed": "Memory engine restart failed.",
       "providerTitle": "Memory engine (EverOS)",
       "providerSubtitle": "Latest provider observation",
@@ -3586,7 +3587,6 @@
       "loggingOff": "Provider payload logging is off. The normal processing timeline and retained diagnostic rows remain available.",
       "recorderDegraded": "New provider calls aren't being recorded. Existing rows remain readable.",
       "recorderCorrupt": "The provider call log is corrupt. Clear all Memory data to remove it before recording can resume.",
-      "restartAction": "Restart Memory engine",
       "clearAction": "Open Clear all",
       "sectionUnavailable": "{{section}} is unavailable ({{reason}}). Other sections may still be complete.",
       "sectionPartial": "{{section}} is partially available ({{reason}}).",

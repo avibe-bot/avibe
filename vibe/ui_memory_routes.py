@@ -88,20 +88,22 @@ def _memory_log_entry_query(request: FastAPIRequest) -> str:
     return memcell_id
 
 
-async def _memory_internal_response(call: Callable[[], Any]) -> Response:
+async def _memory_internal_result(call: Callable[[], Any]) -> tuple[dict, int]:
     from vibe import internal_client
 
     try:
         result = await call()
     except internal_client.InternalServerUnavailable:
-        return _memory_response(
-            {"status": "failed", "error": "memory_sidecar_unavailable"},
-            status_code=503,
-        )
+        return {"status": "failed", "error": "memory_sidecar_unavailable"}, 503
     body = result.get("body") or {}
     if not isinstance(body, dict):
         body = {"status": "failed", "error": "memory_provider_response_invalid"}
-    return _memory_response(body, status_code=result.get("status_code", 503))
+    return body, result.get("status_code", 503)
+
+
+async def _memory_internal_response(call: Callable[[], Any]) -> Response:
+    body, status_code = await _memory_internal_result(call)
+    return _memory_response(body, status_code=status_code)
 
 
 def _memory_settings_projection(memory: object, *, diagnostics_mutable: bool) -> dict:
@@ -202,6 +204,8 @@ def _memory_closed_error(payload: dict, *, fallback: str) -> str:
 
 _settings_write_lock: asyncio.Lock | None = None
 _settings_write_lock_loop: asyncio.AbstractEventLoop | None = None
+_restart_request_task: asyncio.Task[tuple[dict, int]] | None = None
+_restart_request_task_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _memory_settings_write_lock() -> asyncio.Lock:
@@ -220,6 +224,36 @@ def _memory_settings_write_lock() -> asyncio.Lock:
         _settings_write_lock = asyncio.Lock()
         _settings_write_lock_loop = loop
     return _settings_write_lock
+
+
+async def _run_memory_restart_request() -> tuple[dict, int]:
+    from vibe import internal_client
+
+    async with _memory_settings_write_lock():
+        return await _memory_internal_result(internal_client.memory_restart)
+
+
+def _memory_restart_request_task() -> asyncio.Task[tuple[dict, int]]:
+    """Create or join the UI process' loop-scoped restart request owner."""
+
+    global _restart_request_task, _restart_request_task_loop
+
+    loop = asyncio.get_running_loop()
+    if _restart_request_task_loop is not loop:
+        _restart_request_task = None
+        _restart_request_task_loop = loop
+    if _restart_request_task is None:
+        task = loop.create_task(_run_memory_restart_request())
+        _restart_request_task = task
+
+        def clear_finished(finished: asyncio.Task[tuple[dict, int]]) -> None:
+            global _restart_request_task
+
+            if _restart_request_task is finished:
+                _restart_request_task = None
+
+        task.add_done_callback(clear_finished)
+    return _restart_request_task
 
 
 async def _apply_memory_settings_patch(
@@ -472,21 +506,16 @@ def register_memory_routes(app) -> None:
 
     @app.post("/api/memory/runtime/restart", include_in_schema=False)
     async def memory_runtime_restart_post(starlette_request: FastAPIRequest):
-        """Restart the live sidecar without reinstalling the managed runtime.
-
-        An ``engine`` processing fault is classified *after* a successful
-        processing-health probe, so the supervised sidecar is normally still
-        alive -- and ``MemoryRuntime.install_artifact`` refuses to run while it
-        is. Reconciliation is the repair that fits that state: it stops the old
-        child and starts a fresh one from the persisted settings.
-        """
+        """Restart the live sidecar without changing persisted settings."""
 
         async def handler():
             if _memory_ui_user_key() is None:
                 return _memory_forbidden_response()
-            from vibe import internal_client
-
-            return await _memory_internal_response(internal_client.reconcile_memory)
+            body, status_code = await asyncio.shield(_memory_restart_request_task())
+            # The retained task shares only the internal transport result. Each
+            # request needs its own Response so request-local after hooks cannot
+            # mix remote-session cookies across concurrent callers.
+            return _memory_response(body, status_code=status_code)
 
         return await app.dispatch_native_request(starlette_request, handler)
 

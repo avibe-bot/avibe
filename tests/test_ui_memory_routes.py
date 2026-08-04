@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+import urllib.parse
+
+import httpx
 
 from config.v2_config import (
     AgentsConfig,
@@ -39,6 +44,27 @@ def _save_remote_config(tmp_path) -> V2Config:
     cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
     config.save()
     return config
+
+
+def _renewable_remote_session_cookie(
+    config: V2Config,
+    email: str,
+    subject: str,
+) -> str:
+    expires_at = int(time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    payload = {
+        "email": email,
+        "sub": subject,
+        "instance_id": config.remote_access.vibe_cloud.instance_id,
+        "iat": expires_at - remote_access.SESSION_TTL_SECONDS,
+        "exp": expires_at,
+    }
+    payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
+    signature = remote_access._session_signature(
+        config.remote_access.vibe_cloud.session_secret,
+        payload_text,
+    )
+    return f"{payload_text}.{signature}"
 
 
 def _local_headers() -> dict[str, str]:
@@ -682,23 +708,16 @@ def test_memory_clear_requires_the_global_csrf_proof(monkeypatch, tmp_path) -> N
     assert calls == []
 
 
-def test_memory_runtime_restart_reconciles_the_live_sidecar(monkeypatch, tmp_path) -> None:
-    """An engine fault leaves the sidecar running, so the repair is a restart.
-
-    ``MemoryRuntime.install_artifact`` refuses while the supervisor is up
-    (``memory_runtime_install_requires_disabled_memory``), which is exactly the
-    state an ``engine`` fault describes. Reconciliation replaces the child.
-    """
-
+def test_memory_runtime_restart_calls_the_dedicated_transport(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     calls: list[bool] = []
 
-    async def reconcile():
+    async def restart():
         calls.append(True)
         return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
 
-    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
     client = app.test_client()
     response = client.post(
         "/api/memory/runtime/restart",
@@ -718,11 +737,11 @@ def test_memory_runtime_restart_rejects_cross_origin_callers(monkeypatch, tmp_pa
     _save_config(tmp_path)
     calls: list[bool] = []
 
-    async def reconcile():
+    async def restart():
         calls.append(True)
         return {"status_code": 200, "body": {"ok": True}}
 
-    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
     response = app.test_client().post(
         "/api/memory/runtime/restart",
         json={},
@@ -733,3 +752,238 @@ def test_memory_runtime_restart_rejects_cross_origin_callers(monkeypatch, tmp_pa
 
     assert response.status_code == 403
     assert calls == []
+
+
+def test_memory_runtime_restart_maps_internal_unavailability(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def restart():
+        raise internal_client.InternalServerUnavailable("controller offline")
+
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/restart",
+        json={},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_sidecar_unavailable",
+    }
+
+
+def test_memory_restart_route_shares_retained_request_and_blocks_settings_after_cancellation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    restart_started = asyncio.Event()
+    release_restart = asyncio.Event()
+    patch_entered = asyncio.Event()
+    restart_calls: list[bool] = []
+    reconcile_calls: list[bool] = []
+
+    async def restart():
+        restart_calls.append(True)
+        restart_started.set()
+        await release_restart.wait()
+        return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    apply_settings_patch = ui_memory_routes._apply_memory_settings_patch
+
+    async def tracked_settings_patch(*args, **kwargs):
+        patch_entered.set()
+        return await apply_settings_patch(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ui_memory_routes,
+        "_apply_memory_settings_patch",
+        tracked_settings_patch,
+    )
+
+    async def _go() -> None:
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
+        headers = {
+            "Origin": "http://127.0.0.1:15131",
+            "X-Vibe-CSRF-Token": "restart-csrf",
+        }
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:15131",
+            cookies={"vibe_csrf_token": "restart-csrf"},
+        ) as client:
+            first = asyncio.create_task(
+                client.post("/api/memory/runtime/restart", json={}, headers=headers)
+            )
+            await restart_started.wait()
+            second = asyncio.create_task(
+                client.post("/api/memory/runtime/restart", json={}, headers=headers)
+            )
+            await asyncio.sleep(0)
+            first.cancel()
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+
+            patch = asyncio.create_task(
+                client.patch(
+                    "/api/memory/settings",
+                    json={"enabled": False},
+                    headers=headers,
+                )
+            )
+            await patch_entered.wait()
+            await asyncio.sleep(0)
+            assert restart_calls == [True]
+            assert reconcile_calls == []
+            assert not second.done()
+            assert not patch.done()
+
+            release_restart.set()
+            second_response = await second
+            patch_response = await patch
+
+        assert second_response.status_code == 200
+        assert second_response.json() == {"ok": True, "state": "ready"}
+        assert patch_response.status_code == 200
+        assert reconcile_calls == [True]
+
+    asyncio.run(_go())
+
+
+def test_memory_restart_route_isolates_remote_session_cookie_renewal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_config(tmp_path)
+    restart_started = asyncio.Event()
+    release_restart = asyncio.Event()
+    second_waiter_joined = asyncio.Event()
+    restart_calls: list[bool] = []
+    restart_waiters = 0
+
+    async def restart():
+        restart_calls.append(True)
+        restart_started.set()
+        await release_restart.wait()
+        return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
+
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
+    restart_request_task = ui_memory_routes._memory_restart_request_task
+
+    def tracked_restart_request_task():
+        nonlocal restart_waiters
+        restart_waiters += 1
+        if restart_waiters == 2:
+            second_waiter_joined.set()
+        return restart_request_task()
+
+    monkeypatch.setattr(
+        ui_memory_routes,
+        "_memory_restart_request_task",
+        tracked_restart_request_task,
+    )
+
+    async def _go() -> tuple[httpx.Response, httpx.Response]:
+        completed_after_hooks = 0
+        after_hooks_released = asyncio.Event()
+
+        async def hold_after_hooks(response):
+            nonlocal completed_after_hooks
+            completed_after_hooks += 1
+            if completed_after_hooks == 2:
+                after_hooks_released.set()
+            await after_hooks_released.wait()
+            return response
+
+        # Run this after the normal hooks so both renewal mutations are present
+        # before either response is sent. Sharing a Response then fails
+        # deterministically instead of depending on ASGI scheduling.
+        app._after_request_handlers.insert(0, hold_after_hooks)
+        try:
+            origin = "https://alex.avibe.bot"
+            first_transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 12345))
+            second_transport = httpx.ASGITransport(app=app, client=("203.0.113.11", 12346))
+            first_cookies = {
+                remote_access.SESSION_COOKIE_NAME: _renewable_remote_session_cookie(
+                    config,
+                    "one@example.com",
+                    "user-1",
+                ),
+                "vibe_csrf_token": "csrf-one",
+            }
+            second_cookies = {
+                remote_access.SESSION_COOKIE_NAME: _renewable_remote_session_cookie(
+                    config,
+                    "two@example.com",
+                    "user-2",
+                ),
+                "vibe_csrf_token": "csrf-two",
+            }
+            async with (
+                httpx.AsyncClient(
+                    transport=first_transport,
+                    base_url=origin,
+                    cookies=first_cookies,
+                ) as first_client,
+                httpx.AsyncClient(
+                    transport=second_transport,
+                    base_url=origin,
+                    cookies=second_cookies,
+                ) as second_client,
+            ):
+                first = asyncio.create_task(
+                    first_client.post(
+                        "/api/memory/runtime/restart",
+                        json={},
+                        headers={"Origin": origin, "X-Vibe-CSRF-Token": "csrf-one"},
+                    )
+                )
+                await restart_started.wait()
+                second = asyncio.create_task(
+                    second_client.post(
+                        "/api/memory/runtime/restart",
+                        json={},
+                        headers={"Origin": origin, "X-Vibe-CSRF-Token": "csrf-two"},
+                    )
+                )
+                await second_waiter_joined.wait()
+                release_restart.set()
+                return await asyncio.wait_for(asyncio.gather(first, second), timeout=2.0)
+        finally:
+            app._after_request_handlers.remove(hold_after_hooks)
+
+    first_response, second_response = asyncio.run(_go())
+
+    def renewed_subject(response: httpx.Response) -> str:
+        session_headers = [
+            value
+            for value in response.headers.get_list("set-cookie")
+            if value.startswith(f"{remote_access.SESSION_COOKIE_NAME}=")
+        ]
+        assert len(session_headers) == 1
+        cookie_value = session_headers[0].split(";", 1)[0].split("=", 1)[1]
+        payload = remote_access.parse_session_cookie(config, cookie_value)
+        assert payload is not None
+        return str(payload["sub"])
+
+    assert restart_calls == [True]
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert renewed_subject(first_response) == "user-1"
+    assert renewed_subject(second_response) == "user-2"

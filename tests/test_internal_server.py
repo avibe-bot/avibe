@@ -626,6 +626,61 @@ def test_memory_clear_accepts_only_a_clear_scoped_ui_proof() -> None:
     controller.memory_runtime.clear.assert_awaited_once_with()
 
 
+def test_memory_restart_returns_the_runtime_result() -> None:
+    controller = _build_controller_double()
+    controller.memory_runtime = types.SimpleNamespace(
+        restart=AsyncMock(return_value={"ok": True, "state": "ready"}),
+    )
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/memory/restart")
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "state": "ready"}
+    controller.memory_runtime.restart.assert_awaited_once_with()
+
+
+def test_memory_restart_reports_a_missing_runtime() -> None:
+    controller = _build_controller_double()
+    controller.memory_runtime = None
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/memory/restart")
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 503
+    assert response.json() == {"ok": False, "error": "memory_runtime_missing"}
+
+
+def test_memory_restart_maps_unhandled_runtime_errors(caplog) -> None:
+    controller = _build_controller_double()
+    controller.memory_runtime = types.SimpleNamespace(
+        restart=AsyncMock(side_effect=RuntimeError("replacement failed")),
+    )
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/memory/restart")
+
+    with caplog.at_level(logging.ERROR, logger="core.internal_server"):
+        response = asyncio.run(_go())
+
+    assert response.status_code == 503
+    assert response.json() == {"ok": False, "error": "memory_restart_failed"}
+    assert "replacement failed" in caplog.text
+
+
 def test_memory_internal_reads_reject_an_unassociated_agent_session():
     controller = _build_controller_double()
     calls: list[str] = []

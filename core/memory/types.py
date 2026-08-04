@@ -28,6 +28,7 @@ MemoryErrorCode = Literal[
     "memory_runtime_unsupported",
     "memory_runtime_install_failed",
     "memory_reconcile_failed",
+    "memory_restart_failed",
     "memory_sidecar_unavailable",
     "memory_provider_timeout",
     "memory_provider_response_invalid",
@@ -35,9 +36,9 @@ MemoryErrorCode = Literal[
     "memory_clear_failed",
 ]
 
-# Transport vocabulary, wider than the persistable one: like
-# ``memory_access_denied``, ``memory_reconcile_failed`` is only ever produced at
-# a request boundary and never reaches a stored ``last_error`` column.
+# Transport vocabulary, wider than the persistable one: errors such as
+# ``memory_access_denied``, ``memory_reconcile_failed``, and
+# ``memory_restart_failed`` never reach a stored ``last_error`` column.
 CLOSED_MEMORY_ERROR_CODES = frozenset(
     {
         "memory_disabled",
@@ -51,6 +52,7 @@ CLOSED_MEMORY_ERROR_CODES = frozenset(
         "memory_runtime_unsupported",
         "memory_runtime_install_failed",
         "memory_reconcile_failed",
+        "memory_restart_failed",
         "memory_sidecar_unavailable",
         "memory_provider_timeout",
         "memory_provider_response_invalid",

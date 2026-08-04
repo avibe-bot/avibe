@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, Brain, Loader2, ShieldAlert } from 'lucide-react';
+import { ArrowUpRight, Brain, Loader2, RotateCw, ShieldAlert } from 'lucide-react';
 
 import { SettingsPageShell } from './SettingsPageShell';
 import { Button } from '../ui/button';
@@ -140,21 +140,17 @@ export const SettingsMemoryPage: React.FC = () => {
     }
   };
 
-  // Only reachable from an `engine` processing fault, which the worker
-  // classifies after a SUCCESSFUL processing-health probe -- so the supervised
-  // sidecar is normally still live. Installing the managed runtime is refused
-  // in that state (`memory_runtime_install_requires_disabled_memory`), so the
-  // action that fits is reconciliation: stop the old child, start a fresh one.
   const restartEngine = async () => {
     setRestarting(true);
     try {
       const res = await api.restartMemoryRuntime();
-      showToast(
-        res.ok ? t('memory.status.engineRestartStarted') : t('memory.status.engineRestartFailed'),
-        res.ok ? 'success' : 'error',
-      );
-      void loadDependency();
-      void loadStatus();
+      if (res.ok) {
+        showToast(t('memory.status.engineRestartCompleted'), 'success');
+        void loadStatus();
+        void loadFailures();
+      } else {
+        showToast(memoryErrorMessage(t, res.error), 'error');
+      }
     } catch {
       showToast(t('memory.status.engineRestartFailed'), 'error');
     } finally {
@@ -205,13 +201,23 @@ export const SettingsMemoryPage: React.FC = () => {
       title={t('memory.title')}
       subtitle={t('memory.subtitle')}
     >
-      {!remoteUnavailable && settings?.enabled === false ? (
-        <MemoryRecorderFaultBanner
-          status={status}
-          onRestartRuntime={() => void restartEngine()}
-          restarting={restarting}
-          onClearAll={() => setClearOpen(true)}
-        />
+      {!remoteUnavailable &&
+        settings?.enabled === false &&
+        status?.recorder?.reason === 'call_log_corrupt' ? (
+        <MemoryRecorderFaultBanner status={status} onClearAll={() => setClearOpen(true)} />
+      ) : null}
+      {!remoteUnavailable && settings?.enabled === true ? (
+        <div className="flex justify-end">
+          <Button
+            variant="secondary"
+            size="xs"
+            onClick={() => void restartEngine()}
+            disabled={restarting}
+          >
+            {restarting ? <Loader2 className="animate-spin" /> : <RotateCw />}
+            {t('memory.status.restartEngine')}
+          </Button>
+        </div>
       ) : null}
       {remoteUnavailable ? (
         <div className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-10 text-center">
@@ -270,8 +276,6 @@ export const SettingsMemoryPage: React.FC = () => {
                 void loadFailures();
               }}
               onOpenSettings={() => setTab('settings')}
-              onRestartEngine={() => void restartEngine()}
-              restarting={restarting}
             />
           )}
 
@@ -285,8 +289,6 @@ export const SettingsMemoryPage: React.FC = () => {
               enabled={settings.enabled}
               loggingEnabled={memoryDiagnostics(settings).logProviderCalls}
               status={status}
-              onRestartRuntime={() => void restartEngine()}
-              restarting={restarting}
               onClearAll={() => setClearOpen(true)}
             />
           ) : null}

@@ -46,8 +46,6 @@ const renderPanel = (status: MemoryStatus | null, error: string | null) =>
       error={error}
       onRefresh={() => undefined}
       onOpenSettings={() => undefined}
-      onRestartEngine={() => undefined}
-      restarting={false}
     />,
   );
 
@@ -65,5 +63,19 @@ describe('MemoryStatusPanel', () => {
 
     expect(html).toContain('initial load failed');
     expect(html).not.toContain('memory.status.state.ready');
+  });
+
+  it('keeps credential recovery but does not duplicate the engine restart action', () => {
+    const credentialHtml = renderPanel(
+      { ...STATUS, processing_fault_kind: 'credential', processing_fault_since: '2026-08-04T00:00:00Z' },
+      null,
+    );
+    const engineHtml = renderPanel(
+      { ...STATUS, processing_fault_kind: 'engine', processing_fault_since: '2026-08-04T00:00:00Z' },
+      null,
+    );
+
+    expect(credentialHtml).toContain('memory.status.faultAction.credential');
+    expect(engineHtml).not.toContain('memory.status.faultAction.engine');
   });
 });

@@ -372,6 +372,40 @@ def test_memory_clear_signs_the_selected_ui_owner(monkeypatch, socket_path):
     )
 
 
+def test_memory_restart_posts_and_passes_through_the_runtime_result(socket_path):
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"ok": True, "state": "ready"})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return await internal_client.memory_restart(socket_path=socket_path)
+
+    result = asyncio.run(_go())
+
+    assert result == {
+        "status_code": 200,
+        "body": {"ok": True, "state": "ready"},
+    }
+    assert captured == {
+        "method": "POST",
+        "path": "/internal/memory/restart",
+        "timeout": {
+            "connect": 5.0,
+            "read": None,
+            "write": None,
+            "pool": None,
+        },
+    }
+
+
 def test_memory_log_helpers_forward_structured_query_and_sign_owner(monkeypatch, socket_path):
     from core.memory import ui_access
 

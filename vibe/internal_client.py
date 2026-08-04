@@ -313,6 +313,20 @@ async def reconcile_memory(
     return await _memory_request("POST", "/internal/reconcile-memory", socket_path=socket_path, timeout=timeout)
 
 
+async def memory_restart(
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Wait without a reporting deadline for the retained Runtime restart."""
+
+    return await _memory_request(
+        "POST",
+        "/internal/memory/restart",
+        socket_path=socket_path,
+        timeout=None,
+    )
+
+
 def memory_install_runtime_sync(
     *,
     socket_path: Optional[Path] = None,
@@ -518,15 +532,20 @@ async def _memory_request(
     params: dict[str, str | int] | None = None,
     headers: dict[str, str] | None = None,
     socket_path: Optional[Path] = None,
-    timeout: float,
+    timeout: float | None,
 ) -> dict[str, Any]:
     target = await _verified_socket_path_async(socket_path)
     transport = httpx.AsyncHTTPTransport(uds=str(target))
+    client_timeout = (
+        httpx.Timeout(None, connect=5.0)
+        if timeout is None
+        else httpx.Timeout(timeout, connect=min(timeout, 5.0))
+    )
     try:
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://localhost",
-            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
+            timeout=client_timeout,
         ) as client:
             response = await client.request(
                 method,

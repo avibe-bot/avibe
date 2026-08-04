@@ -12,7 +12,6 @@ import {
   FileWarning,
   Loader2,
   RefreshCw,
-  RotateCcw,
   Trash2,
 } from 'lucide-react';
 
@@ -470,10 +469,8 @@ const MemoryLogDetail: React.FC<{
 
 export const MemoryRecorderFaultBanner: React.FC<{
   status: MemoryStatus | null;
-  onRestartRuntime: () => void;
-  restarting: boolean;
   onClearAll: () => void;
-}> = ({ status, onRestartRuntime, restarting, onClearAll }) => {
+}> = ({ status, onClearAll }) => {
   const { t } = useTranslation();
   const recorderFault = status?.recorder?.state === 'degraded';
   const corrupt = recorderFault && status?.recorder?.reason === 'call_log_corrupt';
@@ -490,12 +487,7 @@ export const MemoryRecorderFaultBanner: React.FC<{
           <Trash2 />
           {t('memory.log.clearAction')}
         </Button>
-      ) : (
-        <Button variant="secondary" size="xs" onClick={onRestartRuntime} disabled={restarting}>
-          {restarting ? <Loader2 className="animate-spin" /> : <RotateCcw />}
-          {t('memory.log.restartAction')}
-        </Button>
-      )}
+      ) : null}
     </div>
   );
 };
@@ -504,10 +496,8 @@ export const MemoryLogPanel: React.FC<{
   enabled: boolean;
   loggingEnabled: boolean;
   status: MemoryStatus | null;
-  onRestartRuntime: () => void;
-  restarting: boolean;
   onClearAll: () => void;
-}> = ({ enabled, loggingEnabled, status, onRestartRuntime, restarting, onClearAll }) => {
+}> = ({ enabled, loggingEnabled, status, onClearAll }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [entries, setEntries] = useState<MemoryLogEntry[]>([]);
@@ -572,8 +562,6 @@ export const MemoryLogPanel: React.FC<{
       ) : null}
       <MemoryRecorderFaultBanner
         status={status}
-        onRestartRuntime={onRestartRuntime}
-        restarting={restarting}
         onClearAll={onClearAll}
       />
       {selected ? (
