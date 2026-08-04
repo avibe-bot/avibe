@@ -1887,6 +1887,7 @@ def test_state_file_preflight_claims_a_missing_path_before_polling(tmp_path) -> 
         "repo": "avibe-bot/avibe",
         "pr": 153,
         "watch": "abc123",
+        "owner": None,
     }
     assert json.loads(state_file.read_text(encoding="utf-8")) == claim
     # No cursors, so a resume is not attempted and the cycle baselines as before.
@@ -2229,3 +2230,176 @@ def test_main_state_file_round_trips_new_pr_cursor(tmp_path) -> None:
     saved = json.loads(state_file.read_text(encoding="utf-8"))
     assert saved["pr_cursor"] == 410
     assert saved["pr"] is None
+
+
+def test_main_rejects_a_bad_ignore_pattern_without_claiming_the_state_file(tmp_path) -> None:
+    """Argument validation happens before any state is claimed.
+
+    Claiming first left the file owned by a watch identity derived from the very
+    pattern that was rejected, so the corrected re-run was refused as a different
+    watch's state until the file was deleted by hand.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    stderr = io.StringIO()
+
+    with (
+        patch.object(module, "get_token", return_value="token"),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--ignore-comment-pattern",
+                "[unclosed",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 2
+    assert "Invalid --ignore-comment-pattern" in stderr.getvalue()
+    assert not state_file.exists()
+
+
+def test_main_rejects_missing_auth_without_claiming_the_state_file(tmp_path) -> None:
+    """The same rule for the auth precondition."""
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    stderr = io.StringIO()
+
+    with (
+        patch.object(module, "get_token", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 2
+    assert "GitHub authentication is required" in stderr.getvalue()
+    assert not state_file.exists()
+
+
+def test_state_file_records_the_managed_watch_that_owns_it() -> None:
+    """Two identically configured watches still cannot share one state file.
+
+    The filter digest is equal for both, so only the managed watch id tells them
+    apart. It is read from the environment `vibe watch` sets for the cycle.
+    """
+    module = _load_module()
+
+    with patch.dict("os.environ", {module.WATCH_ID_ENV: "wat_123"}, clear=False):
+        assert module._managed_watch_id() == "wat_123"
+    with patch.dict("os.environ", {module.WATCH_ID_ENV: "  "}, clear=False):
+        assert module._managed_watch_id() is None
+
+
+def test_load_state_file_rejects_a_sibling_watch_with_the_same_filters(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": "abc123",
+                "owner": "wat_first",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.StateFileOwnershipError) as excinfo:
+        module._load_state_file(
+            str(state_file),
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            watch_identity="abc123",
+            watch_id="wat_second",
+        )
+
+    assert "belongs to watch wat_first" in str(excinfo.value)
+    # A manual run has no watch id, so it adopts the file rather than refusing it.
+    assert (
+        module._load_state_file(
+            str(state_file), repo="avibe-bot/avibe", pr_number=153, watch_identity="abc123"
+        )["owner"]
+        == "wat_first"
+    )
+
+
+def test_main_skips_the_settle_window_that_would_outlast_the_timeout(tmp_path) -> None:
+    """A settle window is never worth losing the report to a timeout kill.
+
+    `vibe watch` terminates the waiter at its deadline, so re-polling past that
+    point throws away the batch that was already worth an Agent turn.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_cursor": 0,
+                "review_comment_cursor": 500,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+                "pr_status": "open",
+                "viewer_login": "qiqi",
+                "token_fingerprint": module._token_fingerprint("token"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    fetches: list[object] = []
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        fetches.append(kwargs)
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep") as fake_sleep,
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--settle",
+                "30",
+                "--timeout",
+                "5",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert "review_comment #501" in stdout.getvalue()
+    assert "Settle window would outlast --timeout" in stderr.getvalue()
+    # No settle sleep, and no settle re-poll: one fetch is the whole run.
+    fake_sleep.assert_not_called()
+    assert len(fetches) == 1

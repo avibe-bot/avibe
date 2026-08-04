@@ -3493,3 +3493,92 @@ def test_a_dropped_watch_mirror_recovers_with_no_unrelated_commit_to_wake_it() -
         "the durable row changed, so the failed write committed something and the "
         "recovery above was reading a different definition than the one that was dropped"
     )
+
+
+def test_quiet_cycle_marker_must_be_a_line_of_its_own() -> None:
+    """The marker is a protocol line, not a substring.
+
+    A waiter that prints the marker's name while explaining the protocol — a usage
+    message, a log line quoting it — would otherwise have its exit 64 read as a
+    quiet cycle, and its failure notice would never reach the user.
+    """
+    from core.watches import _is_quiet_cycle
+
+    def _result(text: str) -> _CycleResult:
+        return _CycleResult(exit_code=NO_EVENT_EXIT_CODE, stdout="", stderr=text, timed_out=False)
+
+    assert _is_quiet_cycle(_result(f"nothing new\n{NO_EVENT_MARKER}\n"))
+    # Indentation is still a line of its own; the surrounding prose is not.
+    assert _is_quiet_cycle(_result(f"  {NO_EVENT_MARKER}  "))
+    assert not _is_quiet_cycle(_result(f"usage: exit 64 with '{NO_EVENT_MARKER}' to end quietly"))
+    assert not _is_quiet_cycle(_result(f"{NO_EVENT_MARKER} is the marker"))
+
+
+def test_quiet_cycle_summary_keeps_the_end_of_a_long_waiter_report() -> None:
+    """The verdict is at the end of a waiter's report, so truncate from the front.
+
+    A green CI waiter prints the run table first and its conclusion last. Squashing
+    from the front kept the table and dropped the one line worth logging.
+    """
+    from core.watches import NO_EVENT_SUMMARY_LOG_LIMIT, _squash_tail
+
+    short = "All watched workflows succeeded: lint, build"
+    assert _squash_tail(f"  {short}\n", limit=NO_EVENT_SUMMARY_LOG_LIMIT) == short
+
+    long_report = ("workflow line\n" * 500) + short
+    squashed = _squash_tail(long_report, limit=NO_EVENT_SUMMARY_LOG_LIMIT)
+    assert len(squashed) <= NO_EVENT_SUMMARY_LOG_LIMIT
+    assert squashed.endswith(short)
+    assert squashed.startswith("…")
+
+
+def test_managed_watch_service_names_the_watch_in_the_cycle_environment(tmp_path: Path) -> None:
+    """A waiter can tell which watch it is a cycle of.
+
+    Waiters that keep per-watch state on disk own that state by this id, so two
+    identically configured watches cannot silently share one state file.
+    """
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    echoed = tmp_path / "watch-id.txt"
+    watch = store.add_watch(
+        name="Identity echo waiter",
+        session_key="slack::channel::C123",
+        command=[
+            sys.executable,
+            "-c",
+            (
+                "import os, pathlib; "
+                f"pathlib.Path({str(echoed)!r}).write_text(os.environ.get('AVIBE_WATCH_ID', ''))"
+            ),
+        ],
+        shell_command=None,
+        prefix="Something happened.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        service.start()
+        for _ in range(100):
+            if echoed.exists() and echoed.read_text(encoding="utf-8"):
+                break
+            await asyncio.sleep(0.02)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    assert echoed.read_text(encoding="utf-8") == watch.id

@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.11.1
+version: 0.11.2
 ---
 
 # Background Watch Hook
@@ -214,7 +214,9 @@ burst of inline comments plus an envelope, so the poll that happens to catch the
 first fragment would otherwise report it alone and the rest would arrive as a second
 event. With `--settle` the waiter re-polls until the set stops growing (at most three
 extra polls) and reports the whole batch as one event, which is one Agent turn
-instead of several. 20 seconds is a reasonable starting point.
+instead of several. 20 seconds is a reasonable starting point. The window never runs
+past `--timeout`: a batch already worth a turn is reported rather than lost to the
+timeout kill, so keep `--settle` well under it.
 
 Catch up on existing activity first:
 
@@ -273,7 +275,14 @@ Identity is the repo, the PR, and the options that decide what the watch reports
 `--include-self-comments`, `--new-prs`) — two watches on the same PR that report
 different things cannot share cursors either, because the filtered one advances past
 events the other never reported. Pacing options such as `--interval` and `--settle`
-are not part of it. Give each watch its own state file.
+are not part of it. When `vibe watch` runs the cycle it also names the watch in
+`AVIBE_WATCH_ID`, and the waiter records it as the owner, so even two watches
+configured identically down to the last filter are kept apart; a manual run has no
+id and adopts whatever it finds. Give each watch its own state file.
+
+Arguments are validated before any of this: a rejected `--ignore-comment-pattern` or
+a missing token exits `2` without claiming the path, so the corrected re-run is not
+refused as a different watch's state.
 
 GitHub-specific notes:
 

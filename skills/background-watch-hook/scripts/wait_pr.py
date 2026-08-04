@@ -35,6 +35,7 @@ from _github_wait_common import (  # noqa: E402
     requests_per_poll,
     ResponseCache,
     squash,
+    WATCH_ID_ENV,
 )
 
 CODEX_REVIEW_PASS_REACTION_USER = "chatgpt-codex-connector[bot]"
@@ -495,22 +496,38 @@ def _watch_identity(args: argparse.Namespace) -> str:
     return hashlib.sha256(f"wait_pr/{STATE_FILE_VERSION}/{material}".encode()).hexdigest()[:16]
 
 
+def _managed_watch_id() -> str | None:
+    """The id of the ``vibe watch`` this waiter is a cycle of, when there is one.
+
+    Two separately managed watches on the same PR with the same filters are
+    indistinguishable by configuration alone, and sharing a state file means
+    whichever polls first advances the cursors past events the other never
+    reported. The supervisor hands the id down, so the owner can be exact. A manual
+    run has none, which is not a conflict -- only proof of one is.
+    """
+
+    value = os.environ.get(WATCH_ID_ENV, "").strip()
+    return value or None
+
+
 def _owner_conflict(
-    owner: tuple[Any, Any, Any] | None,
+    owner: tuple[Any, Any, Any, Any] | None,
     *,
     repo: str,
     pr_number: int | None,
     watch_identity: str | None,
+    watch_id: str | None,
 ) -> str | None:
     """Why ``owner`` is somebody else's claim on the path, or ``None`` when it is ours.
 
-    A state file written before identities existed carries none, and an absent
-    identity cannot prove a conflict, so such a file is adopted rather than rejected.
+    Only a proven mismatch is a conflict. A state file written before identities
+    existed carries none, and a manual run has no watch id, so an absent value on
+    either side is adopted rather than rejected.
     """
 
     if owner is None:
         return None
-    saved_repo, saved_pr, saved_watch = owner
+    saved_repo, saved_pr, saved_watch, saved_owner = owner
     if saved_repo != repo or saved_pr != pr_number:
         return f"belongs to {saved_repo}#{saved_pr}, not {repo}#{pr_number}"
     if saved_watch is not None and watch_identity is not None and saved_watch != watch_identity:
@@ -518,6 +535,8 @@ def _owner_conflict(
             f"belongs to another watch on {saved_repo}#{saved_pr} with different "
             "reporting filters"
         )
+    if saved_owner is not None and watch_id is not None and saved_owner != watch_id:
+        return f"belongs to watch {saved_owner}, not watch {watch_id}"
     return None
 
 
@@ -527,6 +546,7 @@ def _load_state_file(
     repo: str,
     pr_number: int | None,
     watch_identity: str | None = None,
+    watch_id: str | None = None,
 ) -> dict[str, Any]:
     """Read cursors left behind by an earlier run of this same waiter.
 
@@ -556,10 +576,11 @@ def _load_state_file(
     # terminal rather than a fresh baseline. A file left behind by another watch has
     # to be removed, or that watch given its own path, deliberately.
     conflict = _owner_conflict(
-        (payload.get("repo"), payload.get("pr"), payload.get("watch")),
+        (payload.get("repo"), payload.get("pr"), payload.get("watch"), payload.get("owner")),
         repo=repo,
         pr_number=pr_number,
         watch_identity=watch_identity,
+        watch_id=watch_id,
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} {conflict}")
@@ -578,7 +599,7 @@ def _state_file_scratch(target: Path) -> tuple[int, str]:
     return tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
 
 
-def _state_file_owner(target: Path) -> tuple[Any, Any, Any] | None:
+def _state_file_owner(target: Path) -> tuple[Any, Any, Any, Any] | None:
     """Which watch the file at ``target`` currently claims, or ``None`` if it says nothing.
 
     Missing and unusable files both answer ``None``, matching ``_load_state_file``:
@@ -592,7 +613,7 @@ def _state_file_owner(target: Path) -> tuple[Any, Any, Any] | None:
         return None
     if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
         return None
-    return payload.get("repo"), payload.get("pr"), payload.get("watch")
+    return payload.get("repo"), payload.get("pr"), payload.get("watch"), payload.get("owner")
 
 
 def _claim_state_file(
@@ -601,6 +622,7 @@ def _claim_state_file(
     repo: str,
     pr_number: int | None,
     watch_identity: str | None = None,
+    watch_id: str | None = None,
 ) -> bool:
     """Take a currently missing state file for this PR, atomically.
 
@@ -628,6 +650,7 @@ def _claim_state_file(
                     "repo": repo,
                     "pr": pr_number,
                     "watch": watch_identity,
+                    "owner": watch_id,
                 },
                 stream,
             )
@@ -642,6 +665,7 @@ def _verify_state_file_writable(
     repo: str,
     pr_number: int | None,
     watch_identity: str | None = None,
+    watch_id: str | None = None,
 ) -> None:
     """Claim the requested state file, and fail before the first poll if it is unusable.
 
@@ -673,7 +697,11 @@ def _verify_state_file_writable(
         raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
 
     if not exists and _claim_state_file(
-        target, repo=repo, pr_number=pr_number, watch_identity=watch_identity
+        target,
+        repo=repo,
+        pr_number=pr_number,
+        watch_identity=watch_identity,
+        watch_id=watch_id,
     ):
         # Creating the real file in the real directory is the write probe, and the
         # rename in later cycles lands on a file this process owns.
@@ -707,6 +735,7 @@ def _write_state_file(
     repo: str,
     pr_number: int | None,
     watch_identity: str | None = None,
+    watch_id: str | None = None,
     **fields: Any,
 ) -> None:
     if not path:
@@ -717,6 +746,7 @@ def _write_state_file(
         "repo": repo,
         "pr": pr_number,
         "watch": watch_identity,
+        "owner": watch_id,
         **fields,
     }
     target = Path(path)
@@ -730,6 +760,7 @@ def _write_state_file(
         repo=repo,
         pr_number=pr_number,
         watch_identity=watch_identity,
+        watch_id=watch_id,
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} now {conflict}")
@@ -867,23 +898,10 @@ def main() -> int:
 
     token = get_token()
     cache = ResponseCache()
-    watch_identity = _watch_identity(args)
-    _verify_state_file_writable(
-        args.state_file, repo=args.repo, pr_number=args.pr, watch_identity=watch_identity
-    )
-    saved = _load_state_file(
-        args.state_file, repo=args.repo, pr_number=args.pr, watch_identity=watch_identity
-    )
-    token_fingerprint = _token_fingerprint(token)
-    viewer_login = None
-    if not args.include_self_comments:
-        # The stored login spares a /user request on every cycle of a forever watch,
-        # but only while the token still belongs to the account it was resolved for.
-        # A rotated or swapped credential would otherwise keep filtering out the old
-        # account's comments and let the new account's own comments wake the Agent.
-        if token_fingerprint is not None and _saved_str(saved, "token_fingerprint") == token_fingerprint:
-            viewer_login = _saved_str(saved, "viewer_login")
-        viewer_login = viewer_login or get_authenticated_login(token)
+    # Everything that can reject the arguments runs BEFORE any state is claimed. A
+    # bad --ignore-comment-pattern used to leave a claimed state file behind on its
+    # way to exit 2, and fixing the regex changes the watch identity, so the very
+    # next run was refused as another watch's until the file was deleted by hand.
     ignored_authors = _normalize_authors(args.ignore_author)
     try:
         ignore_patterns = _compile_ignore_patterns(
@@ -903,6 +921,33 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+
+    watch_identity = _watch_identity(args)
+    watch_id = _managed_watch_id()
+    _verify_state_file_writable(
+        args.state_file,
+        repo=args.repo,
+        pr_number=args.pr,
+        watch_identity=watch_identity,
+        watch_id=watch_id,
+    )
+    saved = _load_state_file(
+        args.state_file,
+        repo=args.repo,
+        pr_number=args.pr,
+        watch_identity=watch_identity,
+        watch_id=watch_id,
+    )
+    token_fingerprint = _token_fingerprint(token)
+    viewer_login = None
+    if not args.include_self_comments:
+        # The stored login spares a /user request on every cycle of a forever watch,
+        # but only while the token still belongs to the account it was resolved for.
+        # A rotated or swapped credential would otherwise keep filtering out the old
+        # account's comments and let the new account's own comments wake the Agent.
+        if token_fingerprint is not None and _saved_str(saved, "token_fingerprint") == token_fingerprint:
+            viewer_login = _saved_str(saved, "viewer_login")
+        viewer_login = viewer_login or get_authenticated_login(token)
 
     base_interval = max(args.interval, 1.0)
     effective_interval = base_interval
@@ -1062,6 +1107,7 @@ def main() -> int:
                 repo=args.repo,
                 pr_number=args.pr,
                 watch_identity=watch_identity,
+                watch_id=watch_id,
                 review_cursor=review_cursor,
                 review_comment_cursor=review_comment_cursor,
                 issue_comment_cursor=issue_comment_cursor,
@@ -1085,6 +1131,18 @@ def main() -> int:
 
             best = first
             for _round in range(SETTLE_MAX_ROUNDS):
+                # The batch is already worth a turn, so waiting for the rest of it must
+                # not push the waiter past its own deadline: `vibe watch` kills the
+                # process on timeout and the report would be lost with it.
+                if args.timeout > 0:
+                    remaining = args.timeout - (time.monotonic() - start)
+                    if remaining <= settle_seconds:
+                        print(
+                            "Settle window would outlast --timeout; reporting the batch "
+                            "seen so far.",
+                            file=sys.stderr,
+                        )
+                        return best
                 time.sleep(settle_seconds)
                 try:
                     state, _count = _fetch_state(
@@ -1161,6 +1219,7 @@ def main() -> int:
             repo=args.repo,
             pr_number=None,
             watch_identity=watch_identity,
+            watch_id=watch_id,
             pr_cursor=pr_cursor,
         )
         if initial_output is not None:
@@ -1283,6 +1342,7 @@ def main() -> int:
                 repo=args.repo,
                 pr_number=None,
                 watch_identity=watch_identity,
+                watch_id=watch_id,
                 pr_cursor=pr_cursor,
             )
             if output is None:

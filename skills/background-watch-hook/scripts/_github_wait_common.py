@@ -25,6 +25,10 @@ RETRY_EXIT_CODE = 75
 # always exit through `no_event()` rather than returning the bare code.
 NO_EVENT_EXIT_CODE = 64
 NO_EVENT_MARKER = "avibe-watch: no-event"
+# `vibe watch` names the watch a waiter is a cycle of here. A waiter that keeps
+# per-watch state on disk should own that state by this id, so two identically
+# configured watches cannot silently share one file. Absent for a manual run.
+WATCH_ID_ENV = "AVIBE_WATCH_ID"
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 NOT_MODIFIED_STATUS = 304
 # GitHub compares timestamps at one-second resolution, and a bot that posts a

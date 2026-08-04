@@ -66,6 +66,10 @@ NO_EVENT_MARKER = "avibe-watch: no-event"
 # state, and the whole point of the code is that it costs nothing to reach. The limit is
 # wider than an error squash because a suppressed summary lists every watched workflow.
 NO_EVENT_SUMMARY_LOG_LIMIT = 1000
+# The watch id, handed to every waiter through its environment. Waiters that keep
+# per-watch state on disk use it as the owner of that state, so two identically
+# configured watches cannot silently share one file.
+WATCH_ID_ENV = "AVIBE_WATCH_ID"
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
@@ -1410,7 +1414,7 @@ class ManagedWatchService:
                 # summary, the review comments a filter swallowed -- and no hook
                 # carries it, so without this line it is discarded with the process.
                 # The stamp says a cycle ran and found nothing; the log says what.
-                summary = _squash_error(result.stderr, limit=NO_EVENT_SUMMARY_LOG_LIMIT) or _squash_error(
+                summary = _squash_tail(result.stderr, limit=NO_EVENT_SUMMARY_LOG_LIMIT) or _squash_tail(
                     result.stdout, limit=NO_EVENT_SUMMARY_LOG_LIMIT
                 )
                 logger.info(
@@ -1513,6 +1517,11 @@ class ManagedWatchService:
                 label=f"watch {watch.id}",
                 on_spawn=_register_spawn,
                 max_output_bytes=None,
+                # Which watch this waiter belongs to. A waiter that keeps persistent
+                # state per watch -- cursor files, locks -- cannot otherwise tell
+                # itself apart from an identically configured sibling watch, and two
+                # of them sharing one file lose whichever events the other reports.
+                extra_env={WATCH_ID_ENV: watch.id},
             )
         except SupervisedCommandStartupError as exc:
             detail = self._localize_watch_worker_error(exc.detail)
@@ -1686,7 +1695,19 @@ def _is_quiet_cycle(result: "_CycleResult") -> bool:
 
     if result.exit_code != NO_EVENT_EXIT_CODE:
         return False
-    return NO_EVENT_MARKER in (result.stderr or "") or NO_EVENT_MARKER in (result.stdout or "")
+    return _has_no_event_marker(result.stderr) or _has_no_event_marker(result.stdout)
+
+
+def _has_no_event_marker(text: Optional[str]) -> bool:
+    """Is the marker a line of its own in ``text``?
+
+    A whole line, not a substring: an EX_USAGE failure that merely mentions the
+    protocol -- "missing avibe-watch: no-event marker" -- would otherwise be read as
+    a quiet cycle, and its failure notice swallowed and, in forever mode, its broken
+    command rerun forever.
+    """
+
+    return any(line.strip() == NO_EVENT_MARKER for line in (text or "").splitlines())
 
 
 def _squash_error(text: str, *, limit: int = 240) -> str:
@@ -1694,3 +1715,18 @@ def _squash_error(text: str, *, limit: int = 240) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "…"
+
+
+def _squash_tail(text: str, *, limit: int) -> str:
+    """The END of ``text``, squashed to ``limit``.
+
+    A quiet cycle's point is its last words. ``wait_action.py --only-on-failure``
+    prints its green workflow summary just before exiting, after however many
+    "still waiting" lines the poll took, so head-first truncation logs the waiting
+    and drops the summary this log line exists to preserve.
+    """
+
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return "…" + compact[-(limit - 1) :].lstrip()
