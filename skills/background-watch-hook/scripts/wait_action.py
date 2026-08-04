@@ -18,11 +18,13 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from _github_wait_common import (  # noqa: E402
     NO_EVENT_EXIT_CODE,
+    NO_EVENT_MARKER,
     RETRY_EXIT_CODE,
     get_token,
     github_get,
     is_retryable_http_error,
     min_interval_for_unauthenticated,
+    no_event,
 )
 
 DEFAULT_SUCCESS_CONCLUSIONS = {"success", "skipped", "neutral"}
@@ -195,7 +197,8 @@ def main() -> int:
         action="store_true",
         help=(
             "Do not wake the Agent when every watched workflow succeeded; exit with the "
-            f"no-event code {NO_EVENT_EXIT_CODE} instead. Failures still exit 0 with the full report."
+            f"no-event code {NO_EVENT_EXIT_CODE} and the '{NO_EVENT_MARKER}' marker instead. "
+            "Failures still exit 0 with the full report."
         ),
     )
     parser.add_argument("--cursor-output", help=argparse.SUPPRESS)
@@ -319,12 +322,10 @@ def main() -> int:
                     # costs a full Agent turn to say "nothing to do", so keep the
                     # summary on stderr where it stays inspectable via the watch log.
                     print(output, file=sys.stderr)
-                    print(
+                    return no_event(
                         "All watched workflows succeeded; exiting without an Agent follow-up "
-                        "because --only-on-failure is set.",
-                        file=sys.stderr,
+                        "because --only-on-failure is set."
                     )
-                    return NO_EVENT_EXIT_CODE
                 print(output)
                 return 0
 

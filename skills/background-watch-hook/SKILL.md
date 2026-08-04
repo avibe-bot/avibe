@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.10.2
+version: 0.11.0
 ---
 
 # Background Watch Hook
@@ -83,7 +83,7 @@ Management commands:
 Write waiters to follow this contract:
 
 - `exit 0`: event detected; final summary printed to `stdout`
-- `exit 64`: cycle completed with nothing worth reporting; **no follow-up Agent Run**, the watch ends (`once`) or re-arms (`--forever`)
+- `exit 64` **plus the line `avibe-watch: no-event` on `stderr`**: cycle completed with nothing worth reporting; **no follow-up Agent Run**, the watch ends (`once`) or re-arms (`--forever`)
 - `exit 124`: timeout; still send a timeout follow-up
 - other non-zero: failure; the watch stops and sends a failure follow-up
 
@@ -92,6 +92,14 @@ so a waiter whose normal outcome is uninteresting — green CI, review chatter t
 was filtered out — should end on 64 rather than reporting "nothing to do". It is a
 clean ending, so a `once` watch that retires on 64 reads as completed rather than
 failed, and whatever the waiter wrote to `stderr` is logged beside the watch id.
+
+The marker is not optional. 64 is also BSD `sysexits` EX_USAGE, so a watched command
+that rejects its own arguments exits with it — and it must keep failing loudly rather
+than being read as a quiet cycle and, in `--forever`, rerun indefinitely. A bare 64
+is therefore treated as a failure; only 64 with the marker is a no-event cycle. In
+the bundled waiters, `_github_wait_common.no_event("<summary>")` prints the summary
+and the marker to `stderr` and returns the code, so `return no_event(...)` is the
+only place the contract has to be spelled out.
 
 Keep the output split clean:
 
@@ -169,7 +177,7 @@ This skill ships bundled GitHub waiters:
 
 Use bundled waiters as examples or as ready-to-run building blocks. The main skill is still `vibe watch`; the waiter is only the thing that blocks until the condition is met.
 When running a bundled script through `uv`, prefer `uv run --no-project ...` so the script does not accidentally attach itself to an unrelated parent project.
-Bundled GitHub waiters use exit code `75` for retryable startup errors such as temporary network failures or GitHub `408/429/5xx` responses, and exit code `64` when a cycle finished with nothing worth an Agent turn.
+Bundled GitHub waiters use exit code `75` for retryable startup errors such as temporary network failures or GitHub `408/429/5xx` responses, and exit code `64` with the `avibe-watch: no-event` marker when a cycle finished with nothing worth an Agent turn.
 
 ## GitHub Example Waiter
 
@@ -304,7 +312,7 @@ vibe watch add \
     --interval 60
 ```
 
-`--only-on-failure` exits `64` when every watched workflow succeeded, so a green
+`--only-on-failure` exits `64` with the no-event marker when every watched workflow succeeded, so a green
 build ends the watch silently instead of spending an Agent turn to say so. The
 full summary still goes to `stderr`, which the supervisor records in the Avibe log
 (`~/.avibe/logs/vibe_remote.log`) beside the watch id; `vibe watch show` reports

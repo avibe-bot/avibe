@@ -368,6 +368,7 @@ def test_main_only_on_failure_skips_agent_turn_for_green_run() -> None:
         )
 
     stdout = io.StringIO()
+    stderr = io.StringIO()
     with (
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "_fetch_workflow_runs", side_effect=_fake_fetch_workflow_runs),
@@ -387,12 +388,17 @@ def test_main_only_on_failure_skips_agent_turn_for_green_run() -> None:
             ],
         ),
         redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
     ):
         rc = module.main()
 
     assert rc == module.NO_EVENT_EXIT_CODE
     # Nothing on stdout means vibe watch builds no follow-up prompt.
     assert stdout.getvalue() == ""
+    # The code alone is sysexits EX_USAGE; the marker is what makes it a quiet cycle
+    # rather than a failure, so the waiter has to print it.
+    assert module.NO_EVENT_MARKER in stderr.getvalue()
+    assert "All watched workflows succeeded" in stderr.getvalue()
 
 
 def test_main_only_on_failure_still_reports_failed_run() -> None:

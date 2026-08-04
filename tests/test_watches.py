@@ -24,6 +24,7 @@ from core.process_isolation import (
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import (
     NO_EVENT_EXIT_CODE,
+    NO_EVENT_MARKER,
     ManagedWatchService,
     ManagedWatchStore,
     WatchRuntimeStateStore,
@@ -33,6 +34,20 @@ from storage.background import SQLiteBackgroundTaskStore
 
 TEST_MARKER = "test-watch-worker"
 TEST_FINGERPRINT = fingerprint_process_marker(TEST_MARKER)
+
+
+def _quiet_waiter_command(summary: str = "") -> list[str]:
+    """A waiter that ends a cycle the way the no-event protocol asks it to.
+
+    The marker is half the signal: the exit code on its own is ``sysexits`` EX_USAGE
+    and stays a failure.
+    """
+
+    script = "import sys; "
+    if summary:
+        script += f"print({summary!r}, file=sys.stderr); "
+    script += f"print({NO_EVENT_MARKER!r}, file=sys.stderr); sys.exit({NO_EVENT_EXIT_CODE})"
+    return [sys.executable, "-c", script]
 
 
 class _FakeStdin:
@@ -1116,7 +1131,7 @@ def test_managed_watch_service_once_no_event_exit_finishes_without_follow_up(tmp
     watch = store.add_watch(
         name="Green CI waiter",
         session_key="slack::channel::C123",
-        command=[sys.executable, "-c", f"import sys; sys.exit({NO_EVENT_EXIT_CODE})"],
+        command=_quiet_waiter_command(),
         shell_command=None,
         prefix="CI failed. Fix it.",
         cwd=None,
@@ -1169,12 +1184,7 @@ def test_managed_watch_service_logs_what_a_quiet_cycle_suppressed(tmp_path: Path
     watch = store.add_watch(
         name="Green CI waiter",
         session_key="slack::channel::C123",
-        command=[
-            sys.executable,
-            "-c",
-            "import sys; print('All watched workflows succeeded: lint, build', file=sys.stderr); "
-            f"sys.exit({NO_EVENT_EXIT_CODE})",
-        ],
+        command=_quiet_waiter_command("All watched workflows succeeded: lint, build"),
         shell_command=None,
         prefix="CI failed. Fix it.",
         cwd=None,
@@ -1219,7 +1229,7 @@ def test_managed_watch_service_forever_no_event_exit_rearms_without_follow_up(tm
     watch = store.add_watch(
         name="Quiet forever waiter",
         session_key="slack::channel::C123",
-        command=[sys.executable, "-c", f"import sys; sys.exit({NO_EVENT_EXIT_CODE})"],
+        command=_quiet_waiter_command(),
         shell_command=None,
         prefix="Something happened.",
         cwd=None,
@@ -1251,6 +1261,64 @@ def test_managed_watch_service_forever_no_event_exit_rearms_without_follow_up(tm
     assert saved.last_exit_code == NO_EVENT_EXIT_CODE
     assert saved.last_error is None
     assert request_store.list_pending() == []
+
+
+def test_managed_watch_service_treats_an_unmarked_exit_64_as_a_failure(tmp_path: Path) -> None:
+    """64 is ``sysexits`` EX_USAGE, not a private Avibe signal.
+
+    A generic watched command that rejects its own arguments exits 64. Reading that
+    as a quiet cycle would swallow the failure notice the user relies on and, in
+    forever mode, rerun the broken command for as long as the watch lives.
+    """
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Misconfigured forever waiter",
+        session_key="slack::channel::C123",
+        command=[
+            sys.executable,
+            "-c",
+            f"import sys; print('usage: mytool [--flag]', file=sys.stderr); sys.exit({NO_EVENT_EXIT_CODE})",
+        ],
+        shell_command=None,
+        prefix="Investigate the failure.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        await _start_watch_service(service)
+        for _ in range(100):
+            if watch.id not in service._active_tasks:
+                break
+            await asyncio.sleep(0.02)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    saved = store.get_watch(watch.id)
+    pending = request_store.list_pending()
+    assert saved is not None
+    # Stopped, recorded with its error text, and reported once — as before the
+    # no-event code existed.
+    assert saved.enabled is False
+    assert saved.last_exit_code == NO_EVENT_EXIT_CODE
+    assert saved.last_error and "usage: mytool" in saved.last_error
+    assert len(pending) == 1
+    assert "usage: mytool" in pending[0].prompt
 
 
 def test_managed_watch_service_forever_non_retry_error_disables_and_enqueues_failure(tmp_path: Path) -> None:

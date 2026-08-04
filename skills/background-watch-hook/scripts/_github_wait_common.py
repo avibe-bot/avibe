@@ -8,6 +8,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
@@ -17,7 +18,13 @@ from typing import Any
 RETRY_EXIT_CODE = 75
 # Cycle completed, nothing worth waking the Agent for. `vibe watch` records the
 # cycle and ends or re-arms without creating a follow-up run.
+#
+# The code alone is not enough: 64 is BSD `sysexits` EX_USAGE, so a watched command
+# that rejects its own arguments exits with it and must keep failing loudly. `vibe
+# watch` reads a quiet cycle only when the marker is on the waiter's output too, so
+# always exit through `no_event()` rather than returning the bare code.
 NO_EVENT_EXIT_CODE = 64
+NO_EVENT_MARKER = "avibe-watch: no-event"
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 NOT_MODIFIED_STATUS = 304
 # GitHub compares timestamps at one-second resolution, and a bot that posts a
@@ -27,6 +34,19 @@ NOT_MODIFIED_STATUS = 304
 SINCE_REWIND_SECONDS = 2
 
 _MISSING = object()
+
+
+def no_event(summary: str = "") -> int:
+    """End the cycle with nothing to report, and say so where the watch can see it.
+
+    The summary goes to stderr so it stays in the watch log: it is the only record
+    of what the waiter saw and chose not to forward, and no Agent turn carries it.
+    """
+
+    if summary:
+        print(summary, file=sys.stderr)
+    print(NO_EVENT_MARKER, file=sys.stderr)
+    return NO_EVENT_EXIT_CODE
 
 
 def get_token() -> str | None:

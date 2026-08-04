@@ -333,6 +333,10 @@ _TIMEOUT_EXIT_CODE = 124
 # two layers cannot drift), read here because it is a CLEAN ending: the projections
 # below classify every finished non-zero code as a failure, which reported an
 # intentionally quiet cycle -- green CI, filtered review chatter -- as an error.
+# 64 is also BSD ``sysexits`` EX_USAGE, so the supervisor only records it bare like
+# this for a waiter that also printed the no-event marker; a generic command that
+# rejects its own arguments is recorded with its error text and stays a failure
+# here, because every branch above requires ``no_error``.
 NO_EVENT_EXIT_CODE = 64
 # The runs a definition's own executions are recorded as. A watch's supervisor
 # heartbeat is *also* an ``agent_runs`` row and is ``running`` for as long as the

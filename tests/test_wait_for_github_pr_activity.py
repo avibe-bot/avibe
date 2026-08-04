@@ -1758,6 +1758,76 @@ def test_main_refuses_to_poll_when_the_state_file_cannot_be_written(tmp_path) ->
     assert not state_file.exists()
 
 
+def test_main_refuses_to_poll_when_the_state_file_cannot_be_replaced(tmp_path) -> None:
+    """The preflight has to probe the replace, not just the parent directory.
+
+    A target that is a directory — a stale path, a mistyped mount — accepts new
+    siblings all day and fails only at ``os.replace``. Probing creation alone let a
+    fresh forever cycle establish a baseline, poll, and then lose it, which is
+    exactly what the fail-before-poll promise rules out.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.mkdir()
+
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.run_cli()
+
+    assert rc == 1
+    assert "Cannot write state file" in stderr.getvalue()
+    # No scratch file left behind in the directory the probe failed on.
+    assert list(state_file.parent.glob(".pr-153.json.*")) == []
+
+
+def test_state_file_preflight_leaves_saved_cursors_untouched(tmp_path) -> None:
+    """The probe rewrites an existing state file with its own bytes, not with junk.
+
+    Probing the replace means writing to the real path, so a watch resuming from
+    good cursors has to come out the other side with exactly those cursors.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    saved = json.dumps(
+        {
+            "version": module.STATE_FILE_VERSION,
+            "repo": "avibe-bot/avibe",
+            "pr": 153,
+            "review_cursor": 0,
+            "review_comment_cursor": 400,
+            "issue_comment_cursor": 0,
+            "reaction_cursor": 0,
+        }
+    )
+    state_file.write_text(saved, encoding="utf-8")
+
+    module._verify_state_file_writable(str(state_file))
+
+    assert state_file.read_text(encoding="utf-8") == saved
+    assert list(tmp_path.glob(".pr-153.json.*")) == []
+
+
+def test_state_file_preflight_leaves_no_placeholder_behind(tmp_path) -> None:
+    """A first cycle must start from "no state file", not from an empty one."""
+    module = _load_module()
+    state_file = tmp_path / "cursors" / "pr-153.json"
+
+    module._verify_state_file_writable(str(state_file))
+
+    assert not state_file.exists()
+    assert list(state_file.parent.iterdir()) == []
+
+
 def test_main_stops_when_persisting_advanced_cursors_fails(tmp_path) -> None:
     """The same rule once polling is under way: losing cursors stops the watch."""
     module = _load_module()
@@ -1766,12 +1836,23 @@ def test_main_stops_when_persisting_advanced_cursors_fails(tmp_path) -> None:
     def _fake_fetch_state(repo, pr_number, token, **kwargs):
         return _pr_state(review_comments=[_review_comment(501)]), 1
 
+    real_replace = module.os.replace
+    replaces = {"count": 0}
+
+    def _replace_then_break(src, dst):
+        # The preflight probe gets through; the disk goes away while the watch is
+        # already polling, which is the case this test is about.
+        replaces["count"] += 1
+        if replaces["count"] == 1:
+            return real_replace(src, dst)
+        raise OSError("disk went away")
+
     stderr = io.StringIO()
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value=None),
-        patch.object(module.os, "replace", side_effect=OSError("disk went away")),
+        patch.object(module.os, "replace", side_effect=_replace_then_break),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",

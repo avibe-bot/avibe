@@ -517,24 +517,40 @@ def _verify_state_file_writable(path: str | None) -> None:
 
     A forever watch only discovers a read-only parent directory when the cycle it
     spent minutes on tries to save its cursors, and by then the activity that
-    cycle observed is already unrecoverable. The probe is a scratch file, so the
-    real state file is untouched and a watch resuming from good cursors keeps them.
+    cycle observed is already unrecoverable.
+
+    The probe is the whole write, ``os.replace`` included, because that is the step
+    persistence actually depends on and the step a sibling-creation check cannot
+    speak for: a target that is a directory, or one in a sticky-bit directory owned
+    by somebody else, accepts new siblings all day and still refuses the rename.
+    An existing state file is rewritten with the bytes it already holds, so a watch
+    resuming from good cursors keeps them either way.
     """
 
     if not path:
         return
 
     target = Path(path)
-    handle = None
-    scratch = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
+        existing: bytes | None = target.read_bytes() if target.exists() else None
+    except OSError as err:
+        raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
+
+    scratch = None
+    try:
         handle, scratch = _state_file_scratch(target)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(existing if existing is not None else b"")
+        os.replace(scratch, target)
+        scratch = None
+        if existing is None:
+            # The probe must not leave a placeholder behind: an empty file here would
+            # be read next cycle as an unusable state file rather than a fresh start.
+            os.unlink(target)
     except OSError as err:
         raise StatePersistenceError(f"Cannot write state file {path}: {err}") from err
     finally:
-        if handle is not None:
-            os.close(handle)
         if scratch is not None:
             try:
                 os.unlink(scratch)

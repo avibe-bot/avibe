@@ -55,6 +55,13 @@ DEFAULT_RETRY_EXIT_CODE = 75
 # agree that this code is a CLEAN ending. A second literal here is exactly how the
 # supervisor and those projections disagreed about it before.
 #
+# The code alone is NOT the signal. 64 is BSD ``sysexits`` EX_USAGE, so any watched
+# command that rejects its own arguments or configuration exits with it -- and reading
+# that as "nothing to report" would swallow the failure notice and, in forever mode,
+# rerun the broken command indefinitely. A quiet cycle therefore has to say so: the
+# waiter prints this marker, which a command that never heard of the protocol cannot
+# emit by accident, and everything else keeps failing loudly.
+NO_EVENT_MARKER = "avibe-watch: no-event"
 # A quiet cycle's own output is logged rather than stored: it is diagnostic detail, not
 # state, and the whole point of the code is that it costs nothing to reach. The limit is
 # wider than an error squash because a suppressed summary lists every watched workflow.
@@ -1397,7 +1404,7 @@ class ManagedWatchService:
                     return
                 continue
 
-            if result.exit_code == NO_EVENT_EXIT_CODE:
+            if _is_quiet_cycle(result):
                 # A quiet cycle still has to leave a trace. Its output is the ONLY
                 # record of what the waiter saw and chose not to report -- a green CI
                 # summary, the review comments a filter swallowed -- and no hook
@@ -1667,6 +1674,19 @@ def _build_prompt(prefix: Optional[str], body: Optional[str]) -> str:
         if body_text:
             parts.append(body_text)
     return "\n\n".join(parts).strip()
+
+
+def _is_quiet_cycle(result: "_CycleResult") -> bool:
+    """Did the waiter finish and say, in so many words, that nothing happened?
+
+    Both halves are required. The exit code cannot carry this on its own because it
+    is also ``sysexits`` EX_USAGE, and the marker cannot carry it on its own because
+    a waiter that reports an event prints its findings and exits 0.
+    """
+
+    if result.exit_code != NO_EVENT_EXIT_CODE:
+        return False
+    return NO_EVENT_MARKER in (result.stderr or "") or NO_EVENT_MARKER in (result.stdout or "")
 
 
 def _squash_error(text: str, *, limit: int = 240) -> str:
