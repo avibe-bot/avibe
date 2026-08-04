@@ -1,6 +1,6 @@
 # Memory Processing Log Page (EverOS step timeline + provider call log)
 
-Status: draft v4 (simplified after implementation review)
+Status: draft v5 (review findings incorporated)
 Date: 2026-08-04
 
 ## Background
@@ -91,14 +91,22 @@ interface stays small:
 
 ```python
 prepare_call_recorder(db_path) -> RecorderHandle | None
-list_entries(scope, cursor, limit) -> dict
-entry_detail(scope, memcell_id) -> dict
+MemoryInsightPaths(everos_root, capture_db_path, call_log_db_path)
+MemoryInsightReader(paths).list_entries(scope, cursor, limit) -> dict
+MemoryInsightReader(paths).entry_detail(scope, memcell_id) -> dict
 ```
 
-`RecorderHandle.start()` / `close()` are lifecycle methods, and
+`MemoryRuntime` constructs the frozen path bundle from its own
+`self._provider_root`, the injected/opened `MemoryStore.path`, and its owned
+call-log path, then injects one configured reader. The adapter never rediscovers
+`~/.avibe`, calls `memory_store_path()`, or reads global path configuration.
+This keeps alternate `effective_home` runtimes and hermetic tests confined to
+their injected state.
+
+`RecorderHandle.start()` / async `close()` are lifecycle methods, and
 `boundary_request()` is the synchronous ContextVar context manager used by the
 validated sidecar guard. Only the sidecar launcher sees the handle. Other callers
-and tests cross the same `list_entries` / `entry_detail` interface. An
+and tests cross the same configured-reader interface. An
 `EVEROS_VERSION` change requires re-verifying this adapter and its real-wheel
 contract tests, not scattered callers.
 
@@ -119,7 +127,7 @@ authorization through the call's exact provenance:
 |---|---|
 | `request_id` | The call was admitted inside a validated add/flush boundary, and matching Avibe queue rows all belong to the requested principal/project; a mixed or missing group is rejected |
 | `memcell_id` | The referenced memcell passes the base singleton-principal check |
-| `run_id` | The joined `run_record` event has matching app/project and either matching `owner_id` or a referenced memcell that passes the base check |
+| `run_id` | The joined `run_record` event has matching app/project. If `owner_id` is present, it is authoritative and must exactly match the requested principal; only an event with no owner field may fall back to a referenced memcell that passes the base check |
 | cascade entry | Captured app/project/owner matches, and `parent_type` / `parent_id` follows an exact path back to this memcell |
 
 If none of those proofs succeeds, the call is omitted. There is no time-window,
@@ -128,10 +136,20 @@ session-text, `LIKE`, or "unattributed calls" fallback.
 ### Privacy model
 
 Raw provider payload capture is opt-in and defaults to off through
-`memory.diagnostics.log_provider_calls`. Enabling it is a global diagnostic
-setting and gets explicit English and Chinese disclosure copy. Disabling it
-stops new capture; already recorded rows remain readable until their 14-day
-expiry or Clear.
+`memory.diagnostics.log_provider_calls`. V1 deliberately treats this as an
+installation-administrator decision, not per-Cloud-subject consent: only a
+direct-loopback Memory request admitted by `is_direct_loopback_memory_request()`
+may change this field. An authenticated Avibe Cloud subject may read only its
+own authorized rows but receives 403 when a PATCH tries to enable or disable
+global capture; the remote UI renders the control read-only. The local toggle
+gets explicit English and Chinese disclosure that it captures payloads for all
+principals using this installation. Tests prove a remote subject cannot mutate
+the field even when the same PATCH changes other Memory settings.
+
+Disabling capture stops new rows; already recorded rows remain readable until
+their 14-day expiry or Clear. Because the recorder receives its database path
+only when the persisted flag is enabled, the recording boundary independently
+enforces the local administrator's choice rather than trusting UI state.
 
 Recording uses an explicit field whitelist. Every retained string, including
 prompt and response text, is recursively scrubbed for bearer/API-key values,
@@ -214,20 +232,26 @@ asserts that neither adds a diagnostic row.
 ### Async lifecycle and failure behavior
 
 `prepare_call_recorder` installs the synchronous wrappers and returns a handle;
-it does not create an asyncio task because `sidecar.serve()` has no running event
-loop at that point. After `create_app()`, the launcher wraps the existing
+it does not start the worker because `sidecar.serve()` has not entered the ASGI
+lifespan yet. After `create_app()`, the launcher wraps the existing
 `app.router.lifespan_context` with an async context manager. The wrapper starts
 the handle, delegates to and yields the original EverOS lifespan state unchanged,
-then calls `handle.close(timeout=0.5)` in `finally`. Start/close failures remain
-diagnostic-only. Shutdown performs a bounded drain, then cancels the writer and
-closes sqlite. This is a lifespan wrapper, not `add_event_handler`, because the
-pinned app already installs a custom lifespan.
+then executes `await handle.close(timeout=1.0)` in `finally`. `close` is async:
+it requests a bounded drain and awaits the worker's join through
+`asyncio.to_thread`, so ASGI shutdown never blocks its own event loop. The worker
+uses a shorter SQLite busy timeout and the same shutdown deadline; at the
+deadline it rolls back the active batch, discards the remaining in-memory tail,
+closes SQLite on its owning thread, and acknowledges termination. Start/close
+failures remain diagnostic-only. This is a lifespan wrapper, not
+`add_event_handler`, because the pinned app already installs a custom lifespan.
 
 Transport wrappers only whitelist, scrub, truncate, and append a completed row
-to a 256-item in-memory queue. A single writer task batches sqlite inserts. On
-overflow it drops the oldest row and puts the accumulated loss count in the
-next stored row's `dropped_before`; the UI renders that as a gap notice. Database
-waits, checkpoints, and pruning never run on the provider call path.
+to a thread-safe 256-item in-memory queue without waiting. A dedicated writer
+thread creates and exclusively owns the SQLite connection and batches inserts,
+checkpoints, and pruning; no synchronous SQLite operation runs on the sidecar's
+ASGI event-loop thread. On overflow the producer drops the oldest row and puts
+the accumulated loss count in the next stored row's `dropped_before`; the UI
+renders that as a gap notice. Database waits never run on the provider call path.
 
 Recorder errors are swallowed, while the provider call's original result or
 exception is preserved exactly. After 20 consecutive writer failures, recording
@@ -290,8 +314,10 @@ recursive delete. The DB is recreated only when capture is enabled again.
 all columns, truncation, vectors/attachments omitted, provenance/stage capture,
 Search/Get non-capture, `dropped_before`, failure isolation, lifecycle,
 enabled-to-disabled retention ownership, safe corruption behavior, and Clear
-preserving an unexpected file. Real-wheel tests skip only when the managed
-artifact is absent.
+preserving an unexpected file. Real-wheel tests may skip on an ordinary
+developer machine only when the managed artifact is absent. With
+`AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT=1`, absence, identity mismatch, or any
+skipped contract case is a hard failure.
 
 ## Phase 2 - Read path and routes
 
@@ -318,7 +344,7 @@ Exact joins:
 | memcell -> capture | intersect `memcell.message_ids_json` with derived `m_{queue.session_id}_{queue.provider_timestamp_ms}_000` |
 | capture -> add/flush calls | exact add/flush `request_id`; validate every matching queue tombstone has the same requested scope |
 | memcell -> episode call | exact `provider_call.memcell_id` after base memcell authorization |
-| memcell -> OME runs | exact `json_extract(event_payload, '$.memcell_id')`; validate event app/project and owner when present |
+| memcell -> OME runs | exact `json_extract(event_payload, '$.memcell_id')`; validate event app/project, require an explicit owner to match, and use memcell ownership only when the event has no owner field |
 | run -> strategy calls | exact authorized `run_record.run_id = provider_call.run_id` |
 | profile trigger | authorized `extract_user_profile` run whose trigger event names this memcell; label it as a trigger, not proof of batch inclusion |
 | direct cascade -> memcell | cascade `parent_type='memcell' AND parent_id=:memcell_id` plus captured scope |
@@ -367,7 +393,9 @@ Read-path tests include:
 - a synthetic multi-owner memcell omitted for every principal;
 - exact derived message-id attribution and rejection of shared-flush shortcuts;
 - request groups with mixed scope rejected fail-closed;
-- run-event owner checks and trigger-only profile wording;
+- an explicit mismatched run-event owner rejected even when its referenced
+  memcell belongs to the requester, ownerless-event fallback, and trigger-only
+  profile wording;
 - direct and atomic-fact cascade parent chains;
 - malformed event JSON, cursor structure/order, exact response-byte cap, expired
   queue row, missing/locked DB, and Clear serialization;
@@ -416,6 +444,10 @@ continue to cover empty, loading, failure, and forbidden render states.
 
 All new user-facing strings live in both i18n catalogs, including the diagnostic
 disclosure that retained rows survive turning the toggle off until expiry/Clear.
+Add `docs/MEMORY.md` and `docs/MEMORY_ZH.md`, linked from the README Docs section,
+covering what provider payload capture records and omits, local-administrator-only
+enablement, owner-scoped Cloud reads, the 14-day/5000-row retention contract,
+retention after disabling, and the destructive scope of Clear.
 
 ## Verification
 
@@ -427,7 +459,15 @@ disclosure that retained rows survive turning the toggle off until expiry/Clear.
 2. `ruff check` on changed Python files; `cd ui && npm test -- MemoryLogPanel`
    followed by `npm run build`.
 3. Reader contract fixture from a snapshot copy of a real `everos-root` plus
-   real-wheel patch-path tests.
+   real-wheel patch-path tests. Add a required `memory-insight-contract` PR job
+   to `.github/workflows/lint.yml`: pin `uv==0.9.18`, build the Linux x64 runtime
+   with `scripts/build_memory_runtime.py` from the checksummed
+   `scripts/memory_runtime/uv.lock`, verify the emitted archive/runtime metadata,
+   point the tests at its extracted Python, set
+   `AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT=1`, and run the private-parser,
+   cascade, episode, and transport contract cases unsharded. The job fails when
+   the runtime cannot be provisioned or a contract test skips; the ordinary
+   unit-test shards remain artifact-independent.
 4. Incus regression only, never the local `vibe` service: enable diagnostic
    capture, send a message with and without an attachment, wait for flush/OME,
    inspect the list/detail calls, turn capture off and confirm retained rows are
@@ -442,6 +482,7 @@ New:
 - `tests/test_memory_call_log.py`, `tests/test_memory_insight.py`
 - `ui/src/components/settings/memory/MemoryLogPanel.tsx`
 - `ui/src/components/settings/memory/MemoryLogPanel.test.tsx`
+- `docs/MEMORY.md`, `docs/MEMORY_ZH.md`
 
 Edited:
 
@@ -454,6 +495,7 @@ Edited:
 - `ui/src/components/settings/memory/MemorySettingsPanel.tsx`
 - `ui/src/i18n/en.json`, `ui/src/i18n/zh.json`
 - `ui/package.json`, `ui/package-lock.json`
+- `README.md`, `.github/workflows/lint.yml`
 - `tests/test_memory_sidecar.py`, `tests/test_memory_runtime.py`,
   `tests/test_internal_server.py`, `tests/test_internal_client.py`,
   `tests/test_ui_memory_routes.py`, `tests/test_memory_config.py`
