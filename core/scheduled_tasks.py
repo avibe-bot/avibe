@@ -97,6 +97,7 @@ from storage.background import (
     COMMAND_WORKER_REAP_ATTEMPTS_KEY,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
+    EXECUTION_RUN_TYPES,
     NOTICE_FAILED,
     NOTICE_PENDING,
     NOTICE_SENT,
@@ -2466,16 +2467,7 @@ class TaskExecutionStore:
                 # does: it is a queued Agent turn the drain loop must claim. Left out,
                 # the escalation row would be durable and never executed -- a failure
                 # report the atomic stamp promised and nothing ever delivered.
-                if item.get("request_type")
-                in {
-                    "task_run",
-                    "hook_send",
-                    "agent_run",
-                    "scheduled",
-                    "watch",
-                    "webhook",
-                    "task_escalation",
-                }
+                if item.get("request_type") in EXECUTION_RUN_TYPES
             ]
         self._ensure_dirs()
         requests: list[TaskExecutionRequest] = []

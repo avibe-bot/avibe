@@ -774,19 +774,25 @@ class Controller:
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
 
+        def inbound(callback):
+            return self._dispatch_to_controller_loop(
+                callback,
+                wait_for_owner_recovery=True,
+            )
+
         # Command handlers dict
         # Admin protection for "set_cwd" and "settings" is now handled by
         # the centralized auth pipeline (core.auth.check_auth) in IM entry points.
         command_handlers = {
-            "start": self._dispatch_to_controller_loop(self.command_handler.handle_start),
-            "new": self._dispatch_to_controller_loop(self.command_handler.handle_new),
-            "cwd": self._dispatch_to_controller_loop(self.command_handler.handle_cwd),
-            "set_cwd": self._dispatch_to_controller_loop(self.command_handler.handle_set_cwd),
-            "resume": self._dispatch_to_controller_loop(self.command_handler.handle_resume),
-            "setup": self._dispatch_to_controller_loop(self.command_handler.handle_setup),
-            "settings": self._dispatch_to_controller_loop(self.settings_handler.handle_settings),
-            "stop": self._dispatch_to_controller_loop(self.command_handler.handle_stop),
-            "bind": self._dispatch_to_controller_loop(self.command_handler.handle_bind),
+            "start": inbound(self.command_handler.handle_start),
+            "new": inbound(self.command_handler.handle_new),
+            "cwd": inbound(self.command_handler.handle_cwd),
+            "set_cwd": inbound(self.command_handler.handle_set_cwd),
+            "resume": inbound(self.command_handler.handle_resume),
+            "setup": inbound(self.command_handler.handle_setup),
+            "settings": inbound(self.settings_handler.handle_settings),
+            "stop": inbound(self.command_handler.handle_stop),
+            "bind": inbound(self.command_handler.handle_bind),
         }
 
         # IM inbound messages funnel through ``core.services.dispatch``
@@ -801,25 +807,45 @@ class Controller:
 
         # Register callbacks with the IM client
         self.im_client.register_callbacks(
-            on_message=self._dispatch_im_message_to_controller_loop(_on_im_message),
+            on_message=self._dispatch_im_message_to_controller_loop(
+                _on_im_message,
+                wait_for_owner_recovery=True,
+            ),
             on_command=command_handlers,
-            on_callback_query=self._dispatch_to_controller_loop(self.message_handler.handle_callback_query),
-            on_settings_update=self._dispatch_to_controller_loop(self.settings_handler.handle_settings_update),
-            on_change_cwd=self._dispatch_to_controller_loop(self.command_handler.handle_change_cwd_submission),
-            on_routing_update=self._dispatch_to_controller_loop(self.settings_handler.handle_routing_update),
-            on_routing_modal_update=self._dispatch_to_controller_loop(
+            on_callback_query=inbound(self.message_handler.handle_callback_query),
+            on_settings_update=inbound(self.settings_handler.handle_settings_update),
+            on_change_cwd=inbound(self.command_handler.handle_change_cwd_submission),
+            on_routing_update=inbound(self.settings_handler.handle_routing_update),
+            on_routing_modal_update=inbound(
                 self.settings_handler.handle_routing_modal_update
             ),
-            on_resume_session=self._dispatch_to_controller_loop(self.session_handler.handle_resume_session_submission),
+            on_resume_session=inbound(
+                self.session_handler.handle_resume_session_submission
+            ),
             on_ready=self._dispatch_to_controller_loop(self._on_runtime_ready),
-            on_transport_ready=self._dispatch_to_controller_loop(self._on_im_ready),
+            on_transport_ready=inbound(self._on_im_ready),
         )
 
-    def _dispatch_to_controller_loop(self, callback):
+    async def _await_runtime_owner_recovery(self) -> None:
+        recovery_complete = getattr(self, "_delivery_recovery_complete", None)
+        if recovery_complete is not None:
+            await recovery_complete.wait()
+
+    def _dispatch_to_controller_loop(
+        self,
+        callback,
+        *,
+        wait_for_owner_recovery: bool = False,
+    ):
         async def _wrapped(*args, **kwargs):
+            async def _invoke():
+                if wait_for_owner_recovery:
+                    await self._await_runtime_owner_recovery()
+                return await callback(*args, **kwargs)
+
             loop = self._loop
             if loop is None:
-                return await callback(*args, **kwargs)
+                return await _invoke()
 
             try:
                 current_loop = asyncio.get_running_loop()
@@ -827,21 +853,31 @@ class Controller:
                 current_loop = None
 
             if current_loop is loop:
-                return await callback(*args, **kwargs)
+                return await _invoke()
 
-            future = asyncio.run_coroutine_threadsafe(callback(*args, **kwargs), loop)
+            future = asyncio.run_coroutine_threadsafe(_invoke(), loop)
             return await asyncio.wrap_future(future)
 
         return _wrapped
 
-    def _dispatch_im_message_to_controller_loop(self, callback):
+    def _dispatch_im_message_to_controller_loop(
+        self,
+        callback,
+        *,
+        wait_for_owner_recovery: bool = False,
+    ):
         tracked_platforms = {"telegram", "wechat"}
 
         async def _wrapped(context, *args, **kwargs):
+            async def _invoke():
+                if wait_for_owner_recovery:
+                    await self._await_runtime_owner_recovery()
+                return await callback(context, *args, **kwargs)
+
             platform = self._platform_for_im_callback_context(context)
             if platform in tracked_platforms:
-                return await self._run_on_controller_loop(callback, context, *args, **kwargs)
-            self._schedule_controller_callback(callback, context, *args, **kwargs)
+                return await self._run_on_controller_loop(_invoke)
+            self._schedule_controller_callback(_invoke)
             return None
 
         return _wrapped

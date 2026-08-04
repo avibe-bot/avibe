@@ -5,6 +5,7 @@ import threading
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -204,6 +205,129 @@ def test_dispatch_im_message_to_controller_loop_waits_for_standalone_wechat_with
     assert result["finished"] is True
     assert result["thread"] == "controller-loop"
     assert result["value"] == "hello"
+
+
+def test_dispatch_to_controller_loop_can_gate_runtime_admission_on_recovery():
+    controller = Controller.__new__(Controller)
+    controller._loop = None
+    called: list[str] = []
+
+    async def scenario() -> None:
+        controller._delivery_recovery_complete = asyncio.Event()
+
+        async def callback(value: str) -> str:
+            called.append(value)
+            return value.upper()
+
+        wrapped = Controller._dispatch_to_controller_loop(
+            controller,
+            callback,
+            wait_for_owner_recovery=True,
+        )
+        task = asyncio.create_task(wrapped("hello"))
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert called == []
+        controller._delivery_recovery_complete.set()
+        assert await task == "HELLO"
+
+    asyncio.run(scenario())
+    assert called == ["hello"]
+
+
+def test_dispatch_im_message_to_controller_loop_gates_admission_on_recovery():
+    controller = Controller.__new__(Controller)
+    controller._loop = None
+    called: list[str] = []
+
+    async def scenario() -> None:
+        controller._delivery_recovery_complete = asyncio.Event()
+
+        async def callback(_context, value: str) -> str:
+            called.append(value)
+            return value.upper()
+
+        wrapped = Controller._dispatch_im_message_to_controller_loop(
+            controller,
+            callback,
+            wait_for_owner_recovery=True,
+        )
+        context = SimpleNamespace(
+            platform="telegram",
+            platform_specific={"platform": "telegram"},
+        )
+        task = asyncio.create_task(wrapped(context, "hello"))
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert called == []
+        controller._delivery_recovery_complete.set()
+        assert await task == "HELLO"
+
+    asyncio.run(scenario())
+    assert called == ["hello"]
+
+
+def test_setup_callbacks_gates_every_platform_callback_except_runtime_ready():
+    controller = Controller.__new__(Controller)
+    callback = AsyncMock()
+    controller.command_handler = SimpleNamespace(
+        handle_start=callback,
+        handle_new=callback,
+        handle_cwd=callback,
+        handle_set_cwd=callback,
+        handle_resume=callback,
+        handle_setup=callback,
+        handle_stop=callback,
+        handle_bind=callback,
+        handle_change_cwd_submission=callback,
+    )
+    controller.settings_handler = SimpleNamespace(
+        handle_settings=callback,
+        handle_settings_update=callback,
+        handle_routing_update=callback,
+        handle_routing_modal_update=callback,
+    )
+    controller.message_handler = SimpleNamespace(handle_callback_query=callback)
+    controller.session_handler = SimpleNamespace(
+        handle_resume_session_submission=callback
+    )
+    controller._on_runtime_ready = callback
+    controller._on_im_ready = callback
+    registered: dict[str, object] = {}
+    controller.im_client = SimpleNamespace(
+        register_callbacks=lambda **kwargs: registered.update(kwargs)
+    )
+
+    controller._dispatch_to_controller_loop = Mock(
+        side_effect=lambda target, *, wait_for_owner_recovery=False: (
+            "controller",
+            target,
+            wait_for_owner_recovery,
+        )
+    )
+    controller._dispatch_im_message_to_controller_loop = Mock(
+        side_effect=lambda target, *, wait_for_owner_recovery=False: (
+            "message",
+            target,
+            wait_for_owner_recovery,
+        )
+    )
+
+    Controller._setup_callbacks(controller)
+
+    assert all(value[2] is True for value in registered["on_command"].values())
+    assert registered["on_message"][0::2] == ("message", True)
+    for name in (
+        "on_callback_query",
+        "on_settings_update",
+        "on_change_cwd",
+        "on_routing_update",
+        "on_routing_modal_update",
+        "on_resume_session",
+        "on_transport_ready",
+    ):
+        assert registered[name][0::2] == ("controller", True)
+    assert registered["on_ready"][0::2] == ("controller", False)
 
 
 def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:

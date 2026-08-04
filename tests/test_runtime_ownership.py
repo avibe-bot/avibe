@@ -1236,6 +1236,31 @@ def test_hfr_136_watch_runtime_never_pins_but_execution_run_does(tmp_path: Path)
     engine.dispose()
 
 
+def test_hfr_148_task_escalation_is_runnable_and_wakes_requests(tmp_path: Path) -> None:
+    """HFR-148: every drainable Agent Run shares the execution vocabulary."""
+
+    engine = _engine(tmp_path, "task-escalation.sqlite")
+    with engine.begin() as conn:
+        _run(
+            conn,
+            "run-escalation",
+            status="queued",
+            legacy_session_key="route:base",
+            run_type="task_escalation",
+        )
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
+    assert snapshot.disposition is SessionRuntimeDisposition.RUNNABLE
+    assert snapshot.sessionless_fallback_run_ids == ("run-escalation",)
+
+    notify = Mock()
+    wake_runtime_ownership(
+        SimpleNamespace(runtime_work_supervisor=SimpleNamespace(notify=notify)),
+        snapshot,
+    )
+    notify.assert_called_once_with(RuntimeWorkLane.REQUESTS)
+    engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("status", "pid", "expected"),
     [

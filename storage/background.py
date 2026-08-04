@@ -334,14 +334,22 @@ _TIMEOUT_EXIT_CODE = 124
 # read as "running" and leave "waiting" unreachable. Waiter liveness is a
 # separate field (``process_alive``), not a state.
 _WATCH_RUNTIME_RUN_TYPE = "watch_runtime"
-EXECUTION_RUN_TYPES = frozenset(
-    {"task_run", "hook_send", "agent_run", "scheduled", "watch", "webhook"}
-)
 # The Agent turn a ``--on-failure agent`` command fire queues to REPORT its failure.
 # It carries the failing definition's own ``definition_id`` -- that link is how the
 # Harness shows the turn beside the task -- and it settles ``succeeded`` whenever the
 # Agent answers, because answering is all it was asked to do.
 _TASK_ESCALATION_RUN_TYPE = "task_escalation"
+EXECUTION_RUN_TYPES = frozenset(
+    {
+        "task_run",
+        "hook_send",
+        "agent_run",
+        "scheduled",
+        "watch",
+        "webhook",
+        _TASK_ESCALATION_RUN_TYPE,
+    }
+)
 # Rows that carry a definition's id but are NOT a verdict on that definition. Both
 # members present as the newest row for the definition and both settle ``succeeded``
 # on their own schedule, so counted as verdicts they make a broken definition read
