@@ -1209,7 +1209,8 @@
     "memory_runtime_manifest_unavailable": "无法下载记忆运行时的清单。",
     "memory_runtime_archive_unavailable": "记忆运行时的下载包当前不可用。",
     "session_agent_unavailable": "源会话的 Agent 已不可用。请选择一个已启用的 Agent 来复刻此会话。",
-    "reserved_session": "该会话由 Avibe 管理，只接收工作区通知。"
+    "reserved_session": "该会话由 Avibe 管理，只接收工作区通知。",
+    "remote_execution_disabled": "当前版本的远程访问仅支持查看，不能执行 Agent、Harness、终端或文件操作。请在运行 Avibe 的机器上执行此操作。"
   },
   "apps": {
     "title": "应用",

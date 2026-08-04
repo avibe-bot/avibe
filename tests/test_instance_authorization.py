@@ -15,7 +15,7 @@ def _remote_context(role: str) -> AuthorizationContext:
     return AuthorizationContext(instance_role=role, is_remote=True)
 
 
-def test_role_capabilities_are_monotonic() -> None:
+def test_remote_roles_keep_management_monotonic_but_execution_disabled() -> None:
     viewer = AuthorizationContext(instance_role="viewer", is_remote=True)
     editor = AuthorizationContext(instance_role="editor", is_remote=True)
     owner = AuthorizationContext(instance_role="owner", is_remote=True)
@@ -23,11 +23,16 @@ def test_role_capabilities_are_monotonic() -> None:
     assert viewer.can_read_instance is True
     assert viewer.can_chat is False
     assert editor.can_read_instance is True
-    assert editor.can_chat is True
+    assert editor.can_chat is False
     assert editor.can_manage_projects is False
+    assert owner.can_chat is False
     assert owner.can_manage_projects is True
     assert owner.can_manage_agents is True
+    assert owner.can_use_terminal is False
+    assert owner.can_use_files is False
+    assert owner.can_use_system is False
     assert trusted_local_context().can_manage_instance is True
+    assert trusted_local_context().can_chat is True
 
 
 @pytest.mark.parametrize(
@@ -68,7 +73,7 @@ def test_context_uses_role_not_diagnostic_source_for_owner() -> None:
     )
 
     assert context.is_instance_owner is False
-    assert context.can_chat is True
+    assert context.can_chat is False
     assert context.can_manage_instance is False
     assert context.authorization_revision == 0
 

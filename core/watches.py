@@ -481,8 +481,12 @@ class ManagedWatchStore:
         user_context: Any = None,
     ) -> ManagedWatch:
         from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import metadata_with_resource_user_context
+        from storage.resource_access_service import (
+            ensure_local_harness_definition_write,
+            metadata_with_resource_user_context,
+        )
 
+        ensure_local_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         watch = ManagedWatch(
             id=uuid4().hex[:12],
@@ -579,8 +583,12 @@ class ManagedWatchStore:
         user_context: Any = None,
     ) -> ManagedWatch:
         from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import metadata_with_resource_user_context
+        from storage.resource_access_service import (
+            ensure_local_harness_definition_write,
+            metadata_with_resource_user_context,
+        )
 
+        ensure_local_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         watch = self._watches[watch_id]
         # Captured before the first mutation: the state ``vibe watch update`` read and
@@ -1294,6 +1302,11 @@ class ManagedWatchService:
         return False
 
     async def _run_watch(self, watch_id: str) -> None:
+        from storage.resource_access_service import (
+            REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+            metadata_has_remote_resource_context,
+        )
+
         lifetime_started = asyncio.get_running_loop().time()
         self._watch_started_at[watch_id] = _utc_now_iso()
         self._runtime_state_dirty = True
@@ -1308,6 +1321,19 @@ class ManagedWatchService:
                 return
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
+                return
+            if metadata_has_remote_resource_context(watch.metadata):
+                self._watch_store_call(
+                    watch.id,
+                    "suspend_remote_origin",
+                    lambda: self.store.mark_cycle_result(
+                        watch.id,
+                        exit_code=None,
+                        error=REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+                        disable=True,
+                    ),
+                    guarded=True,
+                )
                 return
 
             if watch.mode == "forever" and watch.lifetime_timeout_seconds > 0:

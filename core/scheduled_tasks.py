@@ -1505,8 +1505,12 @@ class ScheduledTaskStore:
         user_context: Any = None,
     ) -> ScheduledTask:
         from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import metadata_with_resource_user_context
+        from storage.resource_access_service import (
+            ensure_local_harness_definition_write,
+            metadata_with_resource_user_context,
+        )
 
+        ensure_local_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         task = ScheduledTask(
             id=uuid4().hex[:12],
@@ -1596,8 +1600,12 @@ class ScheduledTaskStore:
         user_context: Any = None,
     ) -> ScheduledTask:
         from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import metadata_with_resource_user_context
+        from storage.resource_access_service import (
+            ensure_local_harness_definition_write,
+            metadata_with_resource_user_context,
+        )
 
+        ensure_local_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         task = self._tasks[task_id]
         # Captured before the first mutation: this is the state the CALLER read
@@ -1812,6 +1820,20 @@ class ScheduledTaskStore:
             queued_run=queued_run,
             expected_uncanceled_run_id=expected_uncanceled_run_id,
         )
+
+    def suspend_task(self, task_id: str, *, error: str) -> bool:
+        """Atomically disable a definition before an unsafe execution boundary."""
+
+        self.maybe_reload()
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        expect = self._read_state(task)
+        task.enabled = False
+        task.last_run_at = _utc_now_iso()
+        task.last_error = error
+        task.updated_at = _utc_now_iso()
+        return self._write_task(task, expect)
 
 
 class TaskExecutionStore:
@@ -6326,6 +6348,16 @@ class ScheduledTaskService:
         #: which is what stops the same failure being reported twice.
         escalation_run_id: Optional[str] = None
         try:
+            from storage.resource_access_service import (
+                REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+                metadata_has_remote_resource_context,
+            )
+
+            if (
+                request.request_type not in {"task_run", "scheduled"}
+                and metadata_has_remote_resource_context(request.metadata)
+            ):
+                raise PermissionError(REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE)
             if request.request_type in {"task_run", "scheduled"}:
                 self.store.maybe_reload()
                 task = self.store.get_task(request.task_id or "")
@@ -6988,12 +7020,31 @@ class ScheduledTaskService:
         disable_one_shot: bool,
         agent_id: Optional[str] = None,
     ) -> TaskExecutionResult:
+        from storage.resource_access_service import (
+            REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+            metadata_has_remote_resource_context,
+        )
+
         error: Optional[str] = None
         complete_on_return = True
         reconcile_delivery_on_return = False
         failure_code: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
+        if metadata_has_remote_resource_context(task.metadata):
+            error = REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE
+            if not self.store.suspend_task(task.id, error=error):
+                logger.warning(
+                    "Remote-origin scheduled task %s changed before it could be suspended",
+                    task.id,
+                )
+            self.reconcile_jobs()
+            return TaskExecutionResult(
+                error=error,
+                session_key=session_key,
+                session_id=session_id,
+                failure_code=REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+            )
         user_context = self._resource_user_context(task.metadata)
         binding_change: Optional[SessionBindingChange] = None
         # HFR-276: an earlier fire of THIS definition may have reserved a replacement

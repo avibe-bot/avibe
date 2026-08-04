@@ -2233,6 +2233,40 @@ def enforce_instance_role_capabilities():
     return None
 
 
+def _is_remote_local_execution_request(method: str, path: str) -> bool:
+    normalized_method = method.upper()
+    if path.startswith(("/api/files/", "/api/browse")):
+        return True
+    if path.startswith("/api/terminal/"):
+        return True
+    if path.startswith("/api/harness/") and normalized_method not in {
+        "GET",
+        "HEAD",
+        "OPTIONS",
+    }:
+        return True
+    return normalized_method == "POST" and bool(
+        re.fullmatch(
+            r"/api/sessions/[^/]+/(?:messages|attachments|queue/[^/]+/send-now)",
+            path,
+        )
+    )
+
+
+@app.before_request
+def enforce_remote_local_execution_boundary():
+    """Keep shell-capable Workbench surfaces on the trusted-local origin."""
+
+    context = getattr(g, "authorization_context", None)
+    if (
+        context is None
+        or not context.is_remote
+        or not _is_remote_local_execution_request(request.method, request.path)
+    ):
+        return None
+    return _remote_execution_disabled_response()
+
+
 _PROJECT_RESOURCE_PATHS = (
     ("project", re.compile(r"^/api/projects/([^/]+)(?:/agents-md)?$")),
     ("session", re.compile(r"^/api/sessions/([^/]+)(?:/.*)?$")),
@@ -2746,12 +2780,15 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         await websocket.close(code=1008)
         return
 
-    await websocket.accept()
     config = _load_remote_access_config()
     remote_payload = _remote_access_websocket_session_claims(websocket, config)
     if remote_payload is None and not _websocket_is_local_request(websocket, config):
         await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
         return
+    if remote_payload is not None:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
     remote_addr = _websocket_client_host(websocket) or "unknown"
     remote_subject = None
     authorization_refresh_at = None
@@ -8039,6 +8076,7 @@ RESERVED_SESSION_PROTECTED_I18N_KEY = "harness.notice.workspaceSessionProtected"
 #: is not an answer to "why did my message not send", and the composer's own inert-state
 #: notice has to say the same thing this body says.
 RESERVED_SESSION_READ_ONLY_I18N_KEY = "harness.notice.workspaceSessionReadOnly"
+REMOTE_EXECUTION_DISABLED_I18N_KEY = "harness.notice.remoteExecutionDisabled"
 
 
 def _reserved_session_response(i18n_key: str, *, code: str = "reserved_session"):
@@ -8059,6 +8097,17 @@ def _reserved_session_response(i18n_key: str, *, code: str = "reserved_session")
 
     lang = settings_service.load_config_or_default().language
     return _coded_error_response(code, t(i18n_key, lang), 403)
+
+
+def _remote_execution_disabled_response():
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    return _coded_error_response(
+        "remote_execution_disabled",
+        t(REMOTE_EXECUTION_DISABLED_I18N_KEY, lang),
+        403,
+    )
 
 
 def _backend_locked_response(err):
@@ -11313,6 +11362,13 @@ async def _show_event_response_from_payload(
     public_share_id: str | None = None,
     allow_dispatch: bool = True,
 ):
+    context = getattr(g, "authorization_context", None)
+    if (
+        context is not None
+        and context.is_remote
+        and show_event_requests_dispatch(payload)
+    ):
+        return _remote_execution_disabled_response()
     if show_event_payload_session_mismatch(session_id, payload):
         return (
             jsonify(

@@ -77,7 +77,7 @@ class AuthorizationContext:
 
     @property
     def can_chat(self) -> bool:
-        return self.has_role("editor")
+        return not self.is_remote and self.has_role("editor")
 
     @property
     def can_manage_projects(self) -> bool:
@@ -104,19 +104,19 @@ class AuthorizationContext:
 
     @property
     def can_use_terminal_files(self) -> bool:
-        return self.has_role("owner")
+        return not self.is_remote and self.has_role("owner")
 
     @property
     def can_use_terminal(self) -> bool:
-        return self.has_role("owner")
+        return not self.is_remote and self.has_role("owner")
 
     @property
     def can_use_files(self) -> bool:
-        return self.has_role("owner")
+        return not self.is_remote and self.has_role("owner")
 
     @property
     def can_use_system(self) -> bool:
-        return self.has_role("owner")
+        return not self.is_remote and self.has_role("owner")
 
     def capability_projection(self) -> dict[str, bool]:
         return {

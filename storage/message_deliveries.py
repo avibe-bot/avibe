@@ -358,6 +358,16 @@ def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def delivery_has_remote_resource_context(row: dict[str, Any]) -> bool:
+    """Return whether an immutable Delivery snapshot records remote origin."""
+
+    metadata = delivery_payload(row).get("metadata")
+    return isinstance(metadata, dict) and isinstance(
+        metadata.get("resource_user_context"),
+        dict,
+    )
+
+
 def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     """Return a Delivery payload without server-owned identity metadata."""
 

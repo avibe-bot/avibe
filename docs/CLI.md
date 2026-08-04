@@ -173,6 +173,12 @@ Start the guided Avibe Cloud remote-access setup.
 vibe remote
 ```
 
+In the conservative Organization release, the remote Workbench remains
+available for Organization management and authorized Project, Session, message,
+and history reads. Agent turns, Harness definition changes and autonomous
+execution, terminal access, and file operations remain trusted-local only; open
+Avibe on the machine to perform those actions.
+
 **Flow:**
 - The CLI explains what remote access does before asking for anything.
 - Open `https://avibe.bot`, sign up or log in, create a new remote-access bot, claim your personal domain, and copy the one-time pairing key.

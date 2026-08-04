@@ -731,7 +731,10 @@ def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     assert payload["help_command"] == "vibe task list"
 
 
-def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_remote_task_add_is_rejected_without_persisting_definition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     # ``patch.dict(..., clear=False)`` below pins only the five ids this test names, so
     # the ORIGIN half of the contract (platform/channel/session_key/...) leaked in from
     # the Avibe Agent shell that runs the suite and appeared in the asserted metadata.
@@ -772,26 +775,11 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys, monkey
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch("vibe.cli._task_store", return_value=store),
     ):
-        result = cli.cmd_task_add(args)
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
 
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert "task" not in payload
-    expected = {
-        "kind": "caller_context",
-        "caller": {
-            "session_id": "sesCaller",
-            "run_id": "runCaller",
-            "source": "agent_turn",
-            "backend": "codex",
-            "native_session_id": "native-codex-1",
-        },
-    }
-    assert payload["definition"]["metadata"]["created_by"] == expected
-    stored = cli.ScheduledTaskStore(store_path).get_task(payload["definition"]["id"])
-    assert stored is not None
-    assert stored.metadata["created_by"] == expected
-    assert stored.metadata["resource_user_context"]["sub"] == "remote-editor"
+    assert result == 1
+    assert payload["code"] == "remote_autonomous_harness_disabled"
+    assert cli.ScheduledTaskStore(store_path).list_tasks() == []
 
 
 def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:

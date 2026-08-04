@@ -416,7 +416,7 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
         environ_base=_remote_peer(),
     )
     assert blocked_legacy_turn.status_code == 403
-    assert blocked_legacy_turn.get_json()["code"] == "agent_access_forbidden"
+    assert blocked_legacy_turn.get_json()["code"] == "remote_execution_disabled"
     assert dispatch_calls == []
 
     with engine.begin() as connection:
@@ -437,10 +437,13 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
         environ_base=_remote_peer(),
     )
     assert revoked_turn.status_code == 403
-    assert revoked_turn.get_json()["code"] == "agent_access_forbidden"
+    assert revoked_turn.get_json()["code"] == "remote_execution_disabled"
     assert dispatch_calls == []
 
-    with pytest.raises(VibeAgentAccessError):
+    with pytest.raises(
+        resource_access_service.ResourceAccessError,
+        match="remote_autonomous_harness_disabled",
+    ):
         ScheduledTaskStore(tmp_path / "tasks.json").add_task(
             session_key="avibe::project::proj_acl_agents",
             prompt="run",
@@ -450,7 +453,10 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
             timezone_name="UTC",
             user_context=context,
         )
-    with pytest.raises(VibeAgentAccessError):
+    with pytest.raises(
+        resource_access_service.ResourceAccessError,
+        match="remote_autonomous_harness_disabled",
+    ):
         ManagedWatchStore(tmp_path / "watches.json").add_watch(
             name="acl watch",
             session_key="avibe::project::proj_acl_agents",
@@ -505,7 +511,10 @@ def test_remote_external_guest_cannot_create_agent(monkeypatch, tmp_path) -> Non
         store.close()
 
 
-def test_remote_background_definitions_recheck_agent_acl_before_dispatch(monkeypatch, tmp_path) -> None:
+def test_remote_background_definitions_are_rejected_and_legacy_rows_fail_before_dispatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     agent_store, agents = _seed_agents_with_policies()
     context = _organization_context("member-1")
@@ -513,6 +522,43 @@ def test_remote_background_definitions_recheck_agent_acl_before_dispatch(monkeyp
     watch_store = ManagedWatchStore(tmp_path / "watches.json")
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     try:
+        with pytest.raises(
+            resource_access_service.ResourceAccessError,
+            match="remote_autonomous_harness_disabled",
+        ):
+            task_store.add_task(
+                session_key="slack::channel::C123",
+                prompt="run task",
+                schedule_type="cron",
+                agent_name=agents["public"].name,
+                cron="0 * * * *",
+                timezone_name="UTC",
+                user_context=context,
+            )
+        with pytest.raises(
+            resource_access_service.ResourceAccessError,
+            match="remote_autonomous_harness_disabled",
+        ):
+            watch_store.add_watch(
+                name="acl watch",
+                session_key="slack::channel::C123",
+                command=["true"],
+                shell_command=None,
+                prefix=None,
+                cwd=str(tmp_path),
+                mode="once",
+                timeout_seconds=1,
+                lifetime_timeout_seconds=0,
+                retry_exit_codes=[75],
+                retry_delay_seconds=1,
+                post_to=None,
+                deliver_key=None,
+                agent_name=agents["public"].name,
+                user_context=context,
+            )
+        assert task_store.list_tasks() == []
+        assert watch_store.list_watches() == []
+
         task = task_store.add_task(
             session_key="slack::channel::C123",
             prompt="run task",
@@ -520,13 +566,14 @@ def test_remote_background_definitions_recheck_agent_acl_before_dispatch(monkeyp
             agent_name=agents["public"].name,
             cron="0 * * * *",
             timezone_name="UTC",
-            metadata={
-                resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
-                    "sub": "owner-1",
-                }
-            },
-            user_context=context,
+            shell_command="touch should-not-run",
         )
+        task.metadata = {
+            resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+                "sub": "legacy-remote-user"
+            }
+        }
+        task_store.upsert_task(task)
         watch = watch_store.add_watch(
             name="acl watch",
             session_key="slack::channel::C123",
@@ -542,21 +589,13 @@ def test_remote_background_definitions_recheck_agent_acl_before_dispatch(monkeyp
             post_to=None,
             deliver_key=None,
             agent_name=agents["public"].name,
-            user_context=context,
         )
-        assert task.metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]["sub"] == "member-1"
-        assert watch.metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]["sub"] == "member-1"
-
-        with agent_store.engine.begin() as connection:
-            resource_access_service.apply_control_plane_intent(
-                connection,
-                organization_id="org-1",
-                resource_kind="agent",
-                resource_id=agents["public"].id,
-                revision=1,
-                access_level="private",
-                group_ids=[],
-            )
+        watch.metadata = {
+            resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+                "sub": "legacy-remote-user"
+            }
+        }
+        watch_store.upsert_watch(watch)
 
         service = ScheduledTaskService(
             controller=SimpleNamespace(),
@@ -566,7 +605,12 @@ def test_remote_background_definitions_recheck_agent_acl_before_dispatch(monkeyp
         task_result = asyncio.run(
             service._execute_task(task, execution_id="task-run", disable_one_shot=False)
         )
-        assert task_result.error == "Agent access is not permitted."
+        assert task_result.error == "remote_autonomous_harness_disabled"
+        stored_task = task_store.get_task(task.id)
+        assert stored_task is not None
+        assert stored_task.enabled is False
+        assert stored_task.last_error == "remote_autonomous_harness_disabled"
+        assert not (tmp_path / "should-not-run").exists()
 
         request = request_store.enqueue_hook_send(
             session_key=watch.session_key,
@@ -584,6 +628,6 @@ def test_remote_background_definitions_recheck_agent_acl_before_dispatch(monkeyp
         completed = request_store.get_run(request.id)
         assert completed is not None
         assert completed["status"] == "failed"
-        assert completed["error"] == "Agent access is not permitted."
+        assert completed["error"] == "remote_autonomous_harness_disabled"
     finally:
         agent_store.close()

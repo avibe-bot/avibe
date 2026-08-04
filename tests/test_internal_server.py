@@ -1664,6 +1664,53 @@ def test_dispatch_async_replay_of_queued_delivery_is_idempotent(monkeypatch, tmp
     assert transcript == []
 
 
+def test_dispatch_async_retires_remote_reservation_before_turn_start(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_remote_dispatch_reservation",
+    )
+    with engine.begin() as conn:
+        remote = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="remote reserved input",
+            metadata={"resource_user_context": {"sub": "remote-user"}},
+        )
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": "remote reserved input",
+                    "user_message_id": remote["id"],
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "remote_execution_disabled"
+    controller.message_handler.handle_user_message.assert_not_awaited()
+    with engine.connect() as conn:
+        stored = message_deliveries.get_delivery(conn, remote["id"])
+    assert stored is not None
+    assert stored["state"] == "retired"
+
+
 def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
     monkeypatch,
     tmp_path,
@@ -5166,6 +5213,105 @@ def _manager_accepting_runs():
 
     manager._run = _accept
     return manager, runs
+
+
+def test_flush_retires_remote_head_and_runs_later_local_delivery(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_remote_queue_retirement",
+    )
+    with engine.begin() as conn:
+        remote = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="remote queued input",
+            metadata={"resource_user_context": {"sub": "remote-user"}},
+        )
+        local = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="local queued input",
+            metadata={
+                session_turns.MEMORY_USER_ID_METADATA: "local",
+                session_turns.MEMORY_ORDINARY_TEXT_METADATA: True,
+            },
+        )
+
+    manager, runs = _manager_accepting_runs()
+    assert asyncio.run(manager.flush_queue(session["id"])) is True
+
+    assert [(text, source) for text, source, _context in runs] == [
+        ("local queued input", SOURCE_HUMAN)
+    ]
+    with engine.connect() as conn:
+        remote_saved = message_deliveries.get_delivery(conn, remote["id"])
+        local_saved = message_deliveries.get_delivery(conn, local["id"])
+    assert remote_saved is not None
+    assert remote_saved["state"] == "retired"
+    assert local_saved is not None
+    assert local_saved["state"] == "accepted"
+
+
+def test_claimed_remote_turn_is_terminalized_before_native_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_remote_claimed_turn",
+    )
+    turn_id = message_deliveries.new_turn_id()
+    with engine.begin() as conn:
+        queued = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="claimed remote input",
+            metadata={"resource_user_context": {"sub": "remote-user"}},
+        )
+        row = message_deliveries.get_delivery(conn, queued["id"])
+        assert row is not None
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session["id"],
+            backend="claude",
+            deliveries=[row],
+            dispatch_text="claimed remote input",
+        )
+
+    manager = session_turns.SessionTurnManager(
+        controller=types.SimpleNamespace(),
+        build_context=lambda sid: MessageContext(
+            user_id="U",
+            channel_id="C",
+            platform="avibe",
+            platform_specific={"agent_session_id": sid},
+        ),
+    )
+
+    async def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("remote-origin turn must not reach native dispatch")
+
+    manager._run = unexpected_run
+    assert asyncio.run(manager._start_persisted_turn(turn_id)) is False
+
+    with engine.connect() as conn:
+        saved_turn = message_deliveries.get_turn(conn, turn_id)
+        saved_delivery = message_deliveries.get_delivery(conn, queued["id"])
+    assert saved_turn is not None
+    assert saved_turn["state"] == "terminal"
+    assert saved_turn["terminal_outcome"] == "not_written"
+    assert saved_turn["settled_by"] == "remote_execution_disabled"
+    assert saved_delivery is not None
+    assert saved_delivery["state"] == "retired"
 
 
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):

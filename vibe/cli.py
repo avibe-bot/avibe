@@ -273,6 +273,25 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     # payload builder below.
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
+    from storage.resource_access_service import (
+        REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+        ResourceAccessError,
+    )
+
+    if (
+        isinstance(exc, ResourceAccessError)
+        and exc.code == REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE
+    ):
+        try:
+            lang = V2Config.load().language
+        except Exception:
+            lang = "en"
+        exc = TaskCliError(
+            str(exc),
+            code=exc.code,
+            hint=i18n_t("harness.notice.remoteExecutionDisabled", lang),
+            help_command=help_command,
+        )
     if isinstance(exc, TaskCliError):
         payload = {
             "schema_version": 1,

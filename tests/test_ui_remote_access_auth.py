@@ -798,7 +798,7 @@ def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_pat
         "capabilities": {
             "is_instance_owner": True,
             "can_read_instance": True,
-            "can_chat": True,
+            "can_chat": False,
             "can_manage_projects": True,
             "can_manage_agents": True,
             "can_manage_instance": True,
@@ -806,12 +806,170 @@ def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_pat
             "can_use_skills": True,
             "can_use_vault_secrets": True,
             "can_use_show_pages": True,
-            "can_use_terminal_files": True,
-            "can_use_terminal": True,
-            "can_use_files": True,
-            "can_use_system": True,
+            "can_use_terminal_files": False,
+            "can_use_terminal": False,
+            "can_use_files": False,
+            "can_use_system": False,
         },
     }
+
+
+def test_remote_file_api_is_blocked_while_local_file_browsing_still_works(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    remote_response = client.get(
+        "/api/files/list",
+        params={"path": str(tmp_path)},
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    local_response = app.test_client().get(
+        "/api/files/list",
+        params={"path": str(tmp_path)},
+        base_url="http://localhost",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert remote_response.status_code == 403
+    assert remote_response.get_json()["code"] == "remote_execution_disabled"
+    assert local_response.status_code == 200
+    assert local_response.get_json()["path"] == str(tmp_path.resolve())
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("PATCH", "/api/harness/tasks/task-1", {"enabled": False}),
+        ("DELETE", "/api/harness/tasks/task-1", None),
+        ("PATCH", "/api/harness/watches/watch-1", {"enabled": False}),
+        ("DELETE", "/api/harness/watches/watch-1", None),
+    ],
+)
+def test_remote_harness_mutations_are_blocked_before_store_access(
+    monkeypatch,
+    tmp_path,
+    method,
+    path,
+    json_body,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.request(
+        method,
+        path,
+        json=json_body,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_show_dispatch_is_rejected_before_event_reservation(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+    monkeypatch.setattr(ui_server, "_is_cli_show_event_request", lambda: True)
+
+    def unexpected_store():
+        raise AssertionError("remote Show dispatch must not reserve an event")
+
+    monkeypatch.setattr(ui_server, "_show_session_event_store", unexpected_store)
+    response = client.post(
+        "/api/show/sessions/ses-remote/events",
+        json={
+            "type": "human.intent.submitted",
+            "actor": "human",
+            "payload": {"intent": "choose", "dispatch": True},
+        },
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_owner_can_still_read_authorized_session_history(
+    monkeypatch,
+    tmp_path,
+):
+    from storage import messages_service, workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_remote_history",
+            now="2026-08-04T00:00:00Z",
+        )
+        session = workbench_sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="codex",
+            agent_name="worker",
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="user",
+            message_type="user",
+            text="readable history",
+        )
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+    response = client.get(
+        f"/api/sessions/{session['id']}/messages",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    assert [row["text"] for row in response.get_json()["messages"]] == [
+        "readable history"
+    ]
 
 
 def test_remote_viewer_can_read_but_cannot_use_management_api(monkeypatch, tmp_path):
@@ -2514,7 +2672,7 @@ def test_terminal_websocket_rejects_remote_same_host_different_origin(monkeypatc
 
 @pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
 @pytest.mark.parametrize("origin", ["https://alex.avibe.bot", "https://alex.avibe.bot:443"])
-def test_terminal_websocket_accepts_remote_exact_trusted_origin(monkeypatch, tmp_path, origin):
+def test_terminal_websocket_rejects_remote_exact_trusted_origin(monkeypatch, tmp_path, origin):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -2532,17 +2690,19 @@ def test_terminal_websocket_accepts_remote_exact_trusted_origin(monkeypatch, tmp
         domain="alex.avibe.bot",
     )
 
-    with client.websocket_connect(
-        "wss://alex.avibe.bot/api/terminal/test",
-        headers={
-            "host": "alex.avibe.bot",
-            "origin": origin,
-            "x-forwarded-for": "203.0.113.10",
-        },
-    ):
-        pass
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(
+            "wss://alex.avibe.bot/api/terminal/test",
+            headers={
+                "host": "alex.avibe.bot",
+                "origin": origin,
+                "x-forwarded-for": "203.0.113.10",
+            },
+        ):
+            pass
 
-    assert accepted is True
+    assert exc.value.code == 1008
+    assert accepted is False
 
 
 @pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
@@ -2578,7 +2738,7 @@ def test_terminal_websocket_rejects_remote_viewer(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
-def test_terminal_websocket_accepts_active_custom_hostname(monkeypatch, tmp_path):
+def test_terminal_websocket_rejects_remote_active_custom_hostname(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -2602,17 +2762,19 @@ def test_terminal_websocket_accepts_active_custom_hostname(monkeypatch, tmp_path
         domain="max.fileguard.io",
     )
 
-    with client.websocket_connect(
-        "wss://max.fileguard.io/api/terminal/test",
-        headers={
-            "host": "max.fileguard.io",
-            "origin": "https://max.fileguard.io",
-            "x-forwarded-for": "203.0.113.10",
-        },
-    ):
-        pass
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(
+            "wss://max.fileguard.io/api/terminal/test",
+            headers={
+                "host": "max.fileguard.io",
+                "origin": "https://max.fileguard.io",
+                "x-forwarded-for": "203.0.113.10",
+            },
+        ):
+            pass
 
-    assert accepted is True
+    assert exc.value.code == 1008
+    assert accepted is False
 
 
 def test_terminal_effective_session_id_scopes_remote_subjects():
@@ -2629,7 +2791,7 @@ def test_terminal_effective_session_id_scopes_remote_subjects():
 
 
 @pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
-def test_terminal_websocket_scopes_remote_session_id_by_authenticated_subject(monkeypatch, tmp_path):
+def test_terminal_websocket_never_starts_a_remote_subject_session(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -2647,23 +2809,23 @@ def test_terminal_websocket_scopes_remote_session_id_by_authenticated_subject(mo
             remote_session_cookie(config, f"{subject}@example.com", subject),
             domain="alex.avibe.bot",
         )
-        with client.websocket_connect(
-            "wss://alex.avibe.bot/api/terminal/shared-session",
-            headers={
-                "host": "alex.avibe.bot",
-                "origin": "https://alex.avibe.bot",
-                "x-forwarded-for": "203.0.113.10",
-            },
-        ):
-            pass
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(
+                "wss://alex.avibe.bot/api/terminal/shared-session",
+                headers={
+                    "host": "alex.avibe.bot",
+                    "origin": "https://alex.avibe.bot",
+                    "x-forwarded-for": "203.0.113.10",
+                },
+            ):
+                pass
+        assert exc.value.code == 1008
 
     connect_as("user-1")
     connect_as("user-1")
     connect_as("user-2")
 
-    assert handled_session_ids[0] == handled_session_ids[1]
-    assert handled_session_ids[0] != handled_session_ids[2]
-    assert all(session_id.endswith("-shared-session") for session_id in handled_session_ids)
+    assert handled_session_ids == []
 
 
 @pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")

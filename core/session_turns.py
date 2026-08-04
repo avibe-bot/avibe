@@ -1129,6 +1129,25 @@ class SessionTurnManager:
             if not segment or any(row is None for row in segment):
                 return None
             delivery_rows = [row for row in segment if row is not None]
+            remote_rows = [
+                row
+                for row in delivery_rows
+                if delivery_store.delivery_has_remote_resource_context(row)
+            ]
+            if remote_rows:
+                for row in remote_rows:
+                    if not self._retire_delivery_not_written(
+                        conn,
+                        session_id,
+                        str(row["id"]),
+                        reason="remote_execution_disabled",
+                    ):
+                        raise RuntimeError("remote FIFO Delivery retirement lost")
+                    logger.warning(
+                        "retired remote-origin queued Delivery=%s before Agent dispatch",
+                        row["id"],
+                    )
+                continue
             invalid_rows = [
                 row
                 for row in delivery_rows
@@ -2767,6 +2786,7 @@ class SessionTurnManager:
         archived_before_dispatch = False
         run_terminal_before_dispatch = False
         invalid_delivery_ids: set[str] = set()
+        remote_delivery_ids: set[str] = set()
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             latest = delivery_store.get_turn(conn, turn_id)
@@ -2794,6 +2814,11 @@ class SessionTurnManager:
                 str(row["id"])
                 for row in deliveries
                 if not self._has_resolvable_delivery_input(conn, row)
+            }
+            remote_delivery_ids = {
+                str(row["id"])
+                for row in deliveries
+                if delivery_store.delivery_has_remote_resource_context(row)
             }
             run_ids = list(
                 dict.fromkeys(
@@ -2840,6 +2865,25 @@ class SessionTurnManager:
                 evidence_kind="agent_run_terminal_before_native_dispatch",
             )
             if terminal.get("changed"):
+                await self._resume_post_terminal(str(turn["session_id"]))
+            return False
+        if remote_delivery_ids:
+            logger.warning(
+                "durable Turn=%s was blocked because it contains remote-origin input",
+                turn_id,
+            )
+            terminal = self._terminalize_durable_turn(
+                turn_id,
+                "not_written",
+                settled_by="remote_execution_disabled",
+                evidence_kind="remote_origin_before_native_dispatch",
+                retire_unwritten_delivery_ids={
+                    str(row["id"])
+                    for row in deliveries
+                },
+            )
+            if terminal.get("changed"):
+                self._publish_queue_update(str(turn["session_id"]))
                 await self._resume_post_terminal(str(turn["session_id"]))
             return False
         if invalid_delivery_ids:

@@ -1209,7 +1209,8 @@
     "memory_runtime_manifest_unavailable": "The memory runtime manifest couldn't be downloaded.",
     "memory_runtime_archive_unavailable": "The memory runtime download isn't available right now.",
     "session_agent_unavailable": "The source session's Agent is no longer available. Choose an enabled Agent to fork this session.",
-    "reserved_session": "Avibe owns this session — it only receives workspace notifications."
+    "reserved_session": "Avibe owns this session — it only receives workspace notifications.",
+    "remote_execution_disabled": "Remote access is read-only for Agent, Harness, terminal, and file execution in this release. Open Avibe on the machine to run this action."
   },
   "apps": {
     "title": "Apps",

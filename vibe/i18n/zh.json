@@ -97,6 +97,7 @@
       "workspaceSession": "工作区通知",
       "workspaceSessionProtected": "该会话用于接收 Avibe 的工作区失败通知，无法归档或修改。",
       "workspaceSessionReadOnly": "该会话只接收 Avibe 的工作区失败通知，不接受发送消息。",
+      "remoteExecutionDisabled": "当前版本的远程访问仅支持查看，不能执行 Agent、Harness、终端或文件操作。请在运行 Avibe 的机器上执行此操作。",
       "failureClass": "失败类型:{failureClass}",
       "lastSucceeded": "上次成功时间:{when}",
       "origin": "创建位置:{origin}",

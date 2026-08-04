@@ -423,7 +423,9 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     assert payload["definition"]["retry_exit_codes"] == [75]
 
 
-def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> None:
+def test_remote_watch_add_is_rejected_without_startup_or_persistence(
+    tmp_path: Path,
+) -> None:
     store_path = tmp_path / "watches.json"
     runtime_path = tmp_path / "watch_runtime.json"
     store = ManagedWatchStore(store_path)
@@ -455,32 +457,25 @@ def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> No
         ),
     }
 
+    startup_calls: list[str] = []
+
+    def unexpected_startup(*args, **kwargs):
+        startup_calls.append(args[2])
+        raise AssertionError("remote Watch must not start")
+
     with (
         patch.dict(os.environ, caller_env, clear=False),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
-        patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
+        patch("vibe.cli._wait_for_watch_startup", side_effect=unexpected_startup),
     ):
-        result = cli.cmd_watch_add(args)
+        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
 
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    expected = {
-        "kind": "caller_context",
-        "caller": {
-            "session_id": "sesCaller",
-            "run_id": "runCaller",
-            "source": "agent_turn",
-            "backend": "opencode",
-            "native_session_id": "native-opencode-1",
-        },
-    }
-    assert payload["definition"]["metadata"]["created_by"] == expected
-    stored = ManagedWatchStore(store_path).get_watch(payload["definition"]["id"])
-    assert stored is not None
-    assert stored.metadata["created_by"] == expected
-    assert stored.metadata["resource_user_context"]["sub"] == "remote-editor"
+    assert result == 1
+    assert payload["code"] == "remote_autonomous_harness_disabled"
+    assert ManagedWatchStore(store_path).list_watches() == []
+    assert startup_calls == []
 
 
 def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:
