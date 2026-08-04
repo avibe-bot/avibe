@@ -1010,6 +1010,62 @@ def test_build_context_assigns_hook_message_id() -> None:
     assert context.platform_specific["task_trigger_kind"] == "hook"
 
 
+def test_build_context_carries_the_definition_name_for_display() -> None:
+    """The prompt echo names what fired, so the label cannot be an opaque id."""
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    store = ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
+    service = ScheduledTaskService(controller=controller, store=store)
+    target = parse_session_key("slack::channel::C123")
+
+    store.get_task = lambda task_id: SimpleNamespace(name="Daily digest") if task_id == "task-1" else None
+    store.get_watch_definition = lambda definition_id: {"name": "Deploy watch"} if definition_id == "watch-1" else None
+
+    task_context = asyncio.run(service._build_context(target, execution_id="exec-1", task_id="task-1"))
+    watch_context = asyncio.run(
+        service._build_context(target, execution_id="exec-2", task_id="watch-1", trigger_kind="watch")
+    )
+    unknown_context = asyncio.run(service._build_context(target, execution_id="exec-3", task_id="gone"))
+    anonymous_context = asyncio.run(service._build_context(target, execution_id="exec-4", trigger_kind="agent_run"))
+
+    assert task_context.platform_specific["task_definition_name"] == "Daily digest"
+    assert watch_context.platform_specific["task_definition_name"] == "Deploy watch"
+    assert unknown_context.platform_specific["task_definition_name"] is None
+    assert anonymous_context.platform_specific["task_definition_name"] is None
+
+
+def test_build_context_survives_a_store_that_cannot_name_the_definition() -> None:
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    store = ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
+    service = ScheduledTaskService(controller=controller, store=store)
+
+    def _boom(_identifier):
+        raise RuntimeError("store unavailable")
+
+    store.get_task = _boom
+    target = parse_session_key("slack::channel::C123")
+
+    context = asyncio.run(service._build_context(target, execution_id="exec-1", task_id="task-1"))
+
+    # Display copy must never be able to fail the run it describes.
+    assert context.platform_specific["task_definition_name"] is None
+    assert context.platform_specific["task_definition_id"] == "task-1"
+
+
 def test_build_context_separates_delivery_target_from_session_target() -> None:
     settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
     controller = SimpleNamespace(

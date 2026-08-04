@@ -3754,3 +3754,197 @@ class PostSendBookkeepingDeliveryEvidenceTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(client.delivered, ["bot-msg-1"])
         self.assertEqual(message_id, "bot-msg-1")
         self.assertEqual(calls, [("record", "run-bookkeeping", "delivered body", "bot-msg-1", "succeeded")])
+
+
+class HarnessPromptEchoTests(unittest.IsolatedAsyncioTestCase):
+    """MESSAGE-DELIVERY-018: a Harness turn announces its prompt in the IM channel.
+
+    Without the echo an IM conversation only ever received the agent's reply, so a
+    scheduled/watch/webhook/hook/``agent run`` result read as an answer to a question
+    nobody in the channel could see.
+    """
+
+    def _context(self, **spec):
+        payload = {
+            "task_trigger_kind": "scheduled",
+            "task_execution_id": "run-echo-1",
+            "task_definition_id": "task-echo-1",
+        }
+        payload.update(spec)
+        return MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform=payload.pop("platform", "slack"),
+            thread_id=payload.pop("thread_id", None),
+            message_id=payload.pop("message_id", "scheduled:run-echo-1"),
+            platform_specific=payload,
+        )
+
+    async def test_scheduled_prompt_is_echoed_to_the_channel(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        message_id = await dispatcher.emit_harness_prompt(
+            self._context(task_definition_name="Daily digest"),
+            "summarize yesterday's deploys",
+        )
+
+        self.assertEqual(message_id, "bot-msg-1")
+        self.assertEqual(len(controller.im_client.sent), 1)
+        channel_id, thread_id, text = controller.im_client.sent[0]
+        self.assertEqual(channel_id, "C123")
+        self.assertIsNone(thread_id)
+        self.assertIn("Daily digest", text)
+        self.assertIn("> summarize yesterday's deploys", text)
+
+    async def test_every_harness_trigger_kind_is_echoed(self):
+        for kind in ("scheduled", "watch", "webhook", "hook", "agent_run"):
+            with self.subTest(kind=kind):
+                controller = _StubController()
+                dispatcher = ConsolidatedMessageDispatcher(controller)
+                await dispatcher.emit_harness_prompt(
+                    self._context(task_trigger_kind=kind),
+                    "do the thing",
+                )
+                self.assertEqual(len(controller.im_client.sent), 1)
+
+    async def test_activity_recovery_and_human_turns_are_not_echoed(self):
+        # ``activity_recovery`` is a runtime re-injection, not a user-authored
+        # instruction; a human turn's prompt IS the IM message already on screen.
+        for kind in ("activity_recovery", "", "human"):
+            with self.subTest(kind=kind):
+                controller = _StubController()
+                dispatcher = ConsolidatedMessageDispatcher(controller)
+                result = await dispatcher.emit_harness_prompt(
+                    self._context(task_trigger_kind=kind),
+                    "do the thing",
+                )
+                self.assertIsNone(result)
+                self.assertEqual(controller.im_client.sent, [])
+
+    async def test_workbench_platform_is_not_echoed(self):
+        # Workbench Chat renders the ``harness`` Message row itself.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(
+            self._context(platform="avibe"),
+            "do the thing",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_background_session_is_not_echoed(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(
+            self._context(suppress_delivery=True),
+            "do the thing",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_disabled_runtime_switch_keeps_result_only_behavior(self):
+        controller = _StubController()
+        controller.config.harness_prompt_echo = False
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_echo_follows_the_delivery_override_target(self):
+        # The question must land where the answer lands (``post_to`` / deliver key).
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                delivery_override={
+                    "user_id": "U9",
+                    "channel_id": "C999",
+                    "thread_id": "T9",
+                    "platform": "slack",
+                    "is_dm": False,
+                }
+            ),
+            "do the thing",
+        )
+
+        self.assertEqual(controller.im_client.sent[0][0], "C999")
+        self.assertEqual(controller.im_client.sent[0][1], "T9")
+
+    async def test_repeat_dispatch_of_one_delivery_echoes_once(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = self._context()
+
+        first = await dispatcher.emit_harness_prompt(context, "do the thing")
+        second = await dispatcher.emit_harness_prompt(context, "do the thing")
+
+        self.assertEqual(first, "bot-msg-1")
+        self.assertIsNone(second)
+        self.assertEqual(len(controller.im_client.sent), 1)
+
+    async def test_distinct_runs_in_one_channel_each_echo(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(self._context(message_id="scheduled:run-a"), "first")
+        await dispatcher.emit_harness_prompt(self._context(message_id="scheduled:run-b"), "second")
+
+        self.assertEqual(len(controller.im_client.sent), 2)
+
+    async def test_echo_memory_stays_bounded(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        limit = message_dispatcher_module.HARNESS_PROMPT_ECHO_MEMORY
+
+        for index in range(limit + 5):
+            await dispatcher.emit_harness_prompt(
+                self._context(message_id=f"scheduled:run-{index}"),
+                "do the thing",
+            )
+
+        self.assertEqual(len(dispatcher._harness_prompt_echo_keys), limit)
+        self.assertEqual(len(dispatcher._harness_prompt_echo_order), limit)
+
+    async def test_long_prompt_is_truncated_and_every_line_quoted(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        limit = message_dispatcher_module.HARNESS_PROMPT_ECHO_MAX_CHARS
+
+        await dispatcher.emit_harness_prompt(self._context(), "line one\nline two\n" + "x" * (limit * 2))
+
+        text = controller.im_client.sent[0][2]
+        body = text.split("\n", 1)[1]
+        self.assertTrue(all(line.startswith("> ") for line in body.splitlines()))
+        self.assertIn("truncated", text)
+        self.assertLess(len(text), limit * 2)
+
+    async def test_silent_only_prompt_sends_nothing(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(
+            self._context(),
+            "<silent>internal bookkeeping</silent>",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_send_failure_never_blocks_the_turn(self):
+        controller = _StubController()
+        controller.im_client = _FailingIMClient()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertIsNone(result)
+        # Not remembered, so a later healthy attempt for the same run can still echo.
+        self.assertEqual(dispatcher._harness_prompt_echo_keys, set())

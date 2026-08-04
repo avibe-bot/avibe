@@ -45,6 +45,25 @@ from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
+# Harness prompt echo (``emit_harness_prompt``). The echo is context for the reply
+# that follows, not the payload, so a long generated prompt is cut rather than split
+# across messages the way a result is.
+HARNESS_PROMPT_ECHO_MAX_CHARS = 800
+# Bounded per-process memory of already-echoed Harness deliveries, so an in-process
+# re-dispatch of one delivery cannot read as the task having fired twice.
+HARNESS_PROMPT_ECHO_MEMORY = 256
+# Harness kinds whose prompt is a user-authored instruction worth showing. Excludes
+# ``activity_recovery``: that turn is a runtime re-injection describing a resumed
+# Activity, so echoing it would explain internals nobody asked about.
+HARNESS_PROMPT_ECHO_TRIGGER_KINDS = HARNESS_TRIGGER_KINDS - {"activity_recovery"}
+_HARNESS_PROMPT_ECHO_I18N_KEYS = {
+    "scheduled": "harness.promptEcho.scheduled",
+    "watch": "harness.promptEcho.watch",
+    "webhook": "harness.promptEcho.webhook",
+    "hook": "harness.promptEcho.hook",
+    "agent_run": "harness.promptEcho.agentRun",
+}
+
 
 class ActivityOutputDeliveryError(RuntimeError):
     """An Activity result did not complete its local output boundary."""
@@ -235,6 +254,12 @@ class ConsolidatedMessageDispatcher:
         # first use per turn (see ``_concise_progress_style``), dropped in
         # ``_drop_status_keys``.
         self._turn_progress_style: dict[str, str] = {}
+        # Harness deliveries whose prompt has already been echoed to IM, kept as a
+        # bounded FIFO (see ``emit_harness_prompt``). Per-process only: a restart
+        # replay writes a new Delivery anyway, and a duplicated echo is cosmetic
+        # while a missing one defeats the feature.
+        self._harness_prompt_echo_keys: set[str] = set()
+        self._harness_prompt_echo_order: list[str] = []
         # Injectable monotonic-ish clock (wall time) so tests get deterministic
         # elapsed/stale values without sleeping.
         self._now = time.time
@@ -1554,6 +1579,111 @@ class ConsolidatedMessageDispatcher:
                 first_message_id = message_id
 
         return first_message_id
+
+    async def emit_harness_prompt(
+        self,
+        context: MessageContext,
+        text: str,
+    ) -> Optional[str]:
+        """Echo a Harness-originated prompt into its IM conversation.
+
+        A scheduled task / watch / webhook / hook / ``vibe agent run`` turn writes a
+        ``harness`` Message row (``mirror_harness_inbound`` and the durable Delivery
+        snapshot), which the Workbench transcript renders as the turn that asked the
+        question. An IM channel has no such view: it only ever received the agent's
+        reply, so a scheduled result read as an answer to a question nobody could see.
+        This posts that question once, right before the turn is dispatched.
+
+        Deliberately NOT routed through ``emit_agent_message``: this is neither an
+        agent output nor a lifecycle event. It must not consolidate into the status
+        bubble, settle a turn, touch an ``agent_runs`` row, or persist a second row on
+        top of the ``harness`` one that already exists. Best-effort — a failed echo
+        never blocks the turn.
+
+        Skipped for:
+        * ``avibe`` — the Workbench Chat already renders the ``harness`` row.
+        * ``suppress_delivery`` — a background Session delivers nothing outward.
+        * a trigger kind that is not a Harness run (a human turn is the IM message).
+        * ``runtime.harness_prompt_echo = false``.
+        """
+
+        spec = context.platform_specific or {}
+        if context.platform == "avibe":
+            return None
+        if spec.get("suppress_delivery"):
+            return None
+        trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
+        if trigger_kind not in HARNESS_PROMPT_ECHO_TRIGGER_KINDS:
+            return None
+        if not getattr(self.controller.config, "harness_prompt_echo", True):
+            return None
+        body = self._harness_prompt_body(trigger_kind, spec.get("task_definition_name"), text)
+        if not body:
+            return None
+        # The prompt is delivered to the SAME target as the run's result (post_to /
+        # deliver_key overrides included), so the question and its answer cannot land
+        # in different conversations.
+        target_context = self._get_target_context(context)
+        echo_key = "|".join(
+            [
+                str(target_context.platform or ""),
+                str(target_context.channel_id or ""),
+                str(target_context.thread_id or ""),
+                str(spec.get("native_message_id") or context.message_id or ""),
+            ]
+        )
+        if echo_key in self._harness_prompt_echo_keys:
+            # One echo per Harness delivery. A queue flush or a fallback re-dispatch
+            # can reach this turn twice in one process; the prompt text is identical,
+            # so the second post would only read as the task having fired twice.
+            return None
+        try:
+            message_id = await self._get_im_client(context).send_message(
+                target_context,
+                body,
+            )
+        except Exception as err:
+            logger.warning(
+                "Failed to echo harness prompt (%s) to %s: %s",
+                trigger_kind,
+                target_context.channel_id,
+                err,
+                exc_info=True,
+            )
+            return None
+        self._remember_harness_prompt_echo(echo_key)
+        return message_id
+
+    def _harness_prompt_body(
+        self,
+        trigger_kind: str,
+        definition_name: Any,
+        text: str,
+    ) -> Optional[str]:
+        prompt = strip_silent_blocks(text or "").strip()
+        if not prompt:
+            return None
+        if len(prompt) > HARNESS_PROMPT_ECHO_MAX_CHARS:
+            prompt = prompt[:HARNESS_PROMPT_ECHO_MAX_CHARS].rstrip() + self._t(
+                "harness.promptEcho.truncated"
+            )
+        label = self._t(
+            _HARNESS_PROMPT_ECHO_I18N_KEYS.get(trigger_kind, "harness.promptEcho.generic")
+        )
+        name = str(definition_name or "").strip()
+        if name:
+            label = self._t("harness.promptEcho.named", label=label, name=name)
+        # Quoted body: plain-text platforms still read it as a quote, and the
+        # markdown platforms render it de-emphasized, so the echo never competes
+        # with the agent's own reply.
+        quoted = "\n".join(f"> {line}" for line in prompt.splitlines())
+        return f"{label}\n{quoted}"
+
+    def _remember_harness_prompt_echo(self, echo_key: str) -> None:
+        self._harness_prompt_echo_keys.add(echo_key)
+        self._harness_prompt_echo_order.append(echo_key)
+        while len(self._harness_prompt_echo_order) > HARNESS_PROMPT_ECHO_MEMORY:
+            self._harness_prompt_echo_keys.discard(self._harness_prompt_echo_order.pop(0))
 
     async def emit_agent_message(
         self,

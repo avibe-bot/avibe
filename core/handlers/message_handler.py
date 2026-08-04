@@ -634,6 +634,20 @@ class MessageHandler(BaseHandler):
                 # removed here immediately, leaving no processing indicator
                 # for the entire duration of the subagent run.
 
+            # A background task's prompt is only visible in the Workbench transcript
+            # (the ``harness`` Message row); echo it into the IM conversation so the
+            # reply that follows has its question. Deliberately here rather than at the
+            # mirror boundary above: this point is past every ``suppress_delivery``
+            # resolution (the ``agent_run_target`` and thread-anchor branches settle it
+            # only after ``get_session_info``) and still before the status bubble and
+            # dispatch, so the channel reads trigger -> work -> result in order. A
+            # queued Harness turn cannot announce itself early either: its durable
+            # admission happens upstream, and ``_handle_turn`` is entered only when the
+            # turn actually runs. It covers the durable Delivery path too, which skips
+            # the mirror branch above.
+            if source != self.TURN_SOURCE_HUMAN:
+                await self._echo_harness_prompt(context, message)
+
             user_message = self._get_user_message(context, message)
             audio_transcripts = await self._transcribe_audio_attachments(context, processed_files or [])
             if audio_transcripts:
@@ -1078,6 +1092,23 @@ class MessageHandler(BaseHandler):
             await self._get_im_client(context).send_message(context, echo)
         except Exception as err:
             logger.debug("Failed to echo audio transcript: %s", err, exc_info=True)
+
+    async def _echo_harness_prompt(self, context: MessageContext, message: str) -> None:
+        """Post the Harness prompt to the turn's IM conversation, best-effort.
+
+        The dispatcher owns every gate (platform, ``suppress_delivery``, trigger kind,
+        the ``runtime.harness_prompt_echo`` switch) and the delivery target, because it
+        already owns outbound routing. Guarded with ``getattr`` because several test
+        controllers substitute a minimal dispatcher.
+        """
+        dispatcher = getattr(self.controller, "message_dispatcher", None)
+        emit = getattr(dispatcher, "emit_harness_prompt", None)
+        if not callable(emit):
+            return
+        try:
+            await emit(context, message)
+        except Exception:
+            logger.debug("harness prompt echo failed; turn continues", exc_info=True)
 
     @staticmethod
     def _sanitize_identity(value: str) -> str:

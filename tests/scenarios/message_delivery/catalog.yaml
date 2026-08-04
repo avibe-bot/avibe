@@ -116,6 +116,18 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_start_write_ambiguity_replays_once_after_restart
+  - id: MESSAGE-DELIVERY-018
+    name: Harness turn echoes its prompt to IM before the result
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/scenarios/message_delivery/test_message_delivery_scenarios.py::test_scheduled_turn_scenario_shows_its_prompt_before_the_result
+  - id: MESSAGE-DELIVERY-019
+    name: Background-visibility Harness turn echoes nothing outward
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/scenarios/message_delivery/test_message_delivery_scenarios.py::test_background_session_scenario_stays_silent_including_its_prompt
   - id: MESSAGE-DELIVERY-101
     name: Unresolved fallback-capable delivery fences only later FIFO submissions
     status: covered

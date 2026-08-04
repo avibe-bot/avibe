@@ -9057,6 +9057,9 @@ class ScheduledTaskService:
                 # definition id (task / watch). Carried so the message mirror can
                 # attribute the injected prompt to its precise definition.
                 "task_definition_id": task_id,
+                # Human label for the same definition, so an outward echo of the
+                # injected prompt can name what fired instead of an opaque id.
+                "task_definition_name": self._definition_display_name(task_id),
                 "vibe_agent_name": agent_name,
                 "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
@@ -9085,6 +9088,28 @@ class ScheduledTaskService:
                 ),
             },
         )
+
+    def _definition_display_name(self, definition_id: Optional[str]) -> Optional[str]:
+        """The task/watch name for *definition_id*, or ``None`` when unnamed.
+
+        Resolved the same way the failure notice does it (``get_task`` mirrors
+        scheduled tasks only, so a watch needs the definition row), and best-effort:
+        this only feeds display copy, so a store that cannot answer must not break
+        the run it is describing. ``agent_run`` has no definition and passes ``None``.
+        """
+
+        identifier = str(definition_id or "").strip()
+        if not identifier:
+            return None
+        try:
+            task = self.store.get_task(identifier)
+            if task is not None:
+                return str(getattr(task, "name", "") or "").strip() or None
+            watch = self.store.get_watch_definition(identifier)
+        except Exception:
+            logger.debug("failed to resolve definition name for %s", identifier, exc_info=True)
+            return None
+        return str((watch or {}).get("name") or "").strip() or None
 
     def _resolve_target_context(self, target: ParsedSessionKey) -> Dict[str, Any]:
         platform = target.platform
