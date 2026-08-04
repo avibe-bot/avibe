@@ -40,10 +40,11 @@ newest 5,000 calls are kept.
 
 ## Recovery and Clear
 
-If the recorder reports a transient failure, use the existing **Restart Memory
-engine** action. Restarting does not delete retained rows. If the call-log
-database is corrupt, recording remains degraded across restarts; use **Clear
-all** to remove the corrupt owned files before recording can resume.
+While Memory is enabled, **Restart engine** replaces only the managed sidecar;
+it does not change Memory settings or delete retained data. Use it when the
+recorder reports a transient failure. If the call-log database is corrupt,
+recording remains degraded across restarts; use **Clear all** to remove the
+corrupt owned files before recording can resume.
 
 Clear all removes the dedicated local Memory data, processing queue, indexes,
 and retained provider-call diagnostics owned by this installation. It does not

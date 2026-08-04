@@ -32,6 +32,7 @@ from vibe.internal_client import (
     MEMORY_STATUS_TIMEOUT_SECONDS,
     memory_profile,
     memory_profile_sync,
+    memory_restart,
     memory_search,
     memory_search_sync,
     memory_status,
@@ -82,6 +83,10 @@ def _reconcile_lifecycle_budget_seconds() -> float:
 
 def test_reconcile_client_outlasts_every_bounded_lifecycle_step() -> None:
     assert MEMORY_RECONCILE_TIMEOUT_SECONDS > _reconcile_lifecycle_budget_seconds()
+
+
+def test_restart_client_has_no_reporting_timeout() -> None:
+    assert "timeout" not in inspect.signature(memory_restart).parameters
 
 
 def test_clear_client_outlasts_clear_and_enabled_reconciliation() -> None:

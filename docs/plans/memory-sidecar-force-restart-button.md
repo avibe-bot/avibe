@@ -458,10 +458,11 @@ exists:
 
 ## Todo
 
-- [ ] Replay `_restart_config`, single-flight task, and focused Runtime tests
-- [ ] Locked Clear recovery and serialized Runtime Clear
-- [ ] Five-second worker drain, store-call settlement, and lease rotation
-- [ ] Linear old-stop/new-start flow and failure postconditions
-- [ ] Internal transport and existing UI route switch
-- [ ] One page-level action, toast/i18n, and engine-banner deduplication
-- [ ] Focused Python/TypeScript validation and local Incus `SIGSTOP` scenario
+- [x] Replay `_restart_config`, single-flight task, and focused Runtime tests
+- [x] Locked Clear recovery and serialized Runtime Clear
+- [x] Five-second worker drain, store-call settlement, and lease rotation
+- [x] Linear old-stop/new-start flow and failure postconditions
+- [x] Internal transport and existing UI route switch
+- [x] One page-level action, toast/i18n, and engine-banner deduplication
+- [x] Focused Python/TypeScript validation
+- [ ] Local Incus `SIGSTOP` scenario

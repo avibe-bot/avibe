@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import { SettingsMemoryPage } from './SettingsMemoryPage';
+import type { MemoryStatus } from '../../context/ApiContext';
 
 const api = vi.hoisted(() => ({
   clearMemory: vi.fn(),
@@ -58,7 +59,6 @@ vi.mock('./memory/MemoryLogPanel', async (loadOriginal) => {
 vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
 vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
 vi.mock('./memory/MemorySettingsPanel', () => ({ MemorySettingsPanel: () => null }));
-vi.mock('./memory/MemoryStatusPanel', () => ({ MemoryStatusPanel: () => null }));
 
 const endpoint = {
   base_url: 'https://provider.example.test/v1',
@@ -66,6 +66,33 @@ const endpoint = {
   api_key: null,
   has_api_key: false,
 };
+
+const readyStatus = (processingFaultKind: MemoryStatus['processing_fault_kind'] = null): MemoryStatus => ({
+  status: 'ok',
+  state: 'ready',
+  buckets: { syncing: 0, succeeded: 0, unknown: 0, failed: 0, dead: 0, missed: 0 },
+  pending: 0,
+  processing: 0,
+  awaiting_receipt: 0,
+  succeeded: 0,
+  receipt_unknown: 0,
+  distill_failed: 0,
+  dead: 0,
+  missed: 0,
+  queue_plaintext_bytes: 0,
+  provider_disk_bytes: 0,
+  last_success_at: null,
+  last_flush_observation: null,
+  last_flush_status: null,
+  last_flush_error_code: null,
+  last_flush_request_id: null,
+  last_flush_at: null,
+  processing_fault_kind: processingFaultKind,
+  processing_fault_since: processingFaultKind ? '2026-08-04T00:00:00Z' : null,
+  processing_alert_active: processingFaultKind !== null,
+  error: null,
+  data_exists: false,
+});
 
 beforeEach(() => {
   logMounts.count = 0;
@@ -78,6 +105,7 @@ beforeEach(() => {
   api.getMemoryStatus.mockResolvedValue({ status: 'failed', error: 'memory_status_failed' });
   api.getMemoryFailures.mockResolvedValue({ items: [], retention_days: 90 });
   api.listDependencies.mockResolvedValue({ ok: true, deps: [] });
+  api.restartMemoryRuntime.mockResolvedValue({ ok: true, state: 'ready' });
 });
 
 afterEach(() => {
@@ -116,6 +144,43 @@ describe('SettingsMemoryPage Clear handling', () => {
   });
 });
 
+describe('SettingsMemoryPage restart action', () => {
+  it('stays available when status cannot be loaded', async () => {
+    render(<SettingsMemoryPage />);
+
+    expect(await screen.findByRole('button', { name: 'memory.status.restartEngine' })).toBeTruthy();
+  });
+
+  it('is disabled and shows progress while the request is pending', async () => {
+    let finishRestart: ((value: { ok: true; state: string }) => void) | undefined;
+    api.restartMemoryRuntime.mockReturnValue(
+      new Promise((resolve) => {
+        finishRestart = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<SettingsMemoryPage />);
+    const action = await screen.findByRole('button', { name: 'memory.status.restartEngine' });
+    await user.click(action);
+
+    expect((action as HTMLButtonElement).disabled).toBe(true);
+    expect(action.querySelector('.animate-spin')).toBeTruthy();
+
+    finishRestart?.({ ok: true, state: 'ready' });
+    await waitFor(() => expect((action as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it('renders exactly one restart action for an engine fault', async () => {
+    api.getMemoryStatus.mockResolvedValue(readyStatus('engine'));
+
+    render(<SettingsMemoryPage />);
+
+    expect(await screen.findByText('memory.status.fault.engine')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'memory.status.restartEngine' })).toHaveLength(1);
+  });
+});
+
 describe('SettingsMemoryPage disabled recorder health', () => {
   beforeEach(() => {
     api.getMemorySettings.mockResolvedValue({
@@ -141,19 +206,19 @@ describe('SettingsMemoryPage disabled recorder health', () => {
     expect(screen.queryByRole('radio', { name: 'memory.tabs.log' })).toBeNull();
   });
 
-  it('surfaces a retained call-log writer failure with the Restart recovery action', async () => {
+  it('does not offer a restart that the disabled runtime must reject', async () => {
     api.getMemoryStatus.mockResolvedValue({
       status: 'ok',
       state: 'disabled',
       recorder: { state: 'degraded', reason: 'writer_failures' },
     });
-    api.restartMemoryRuntime.mockResolvedValue({ ok: true });
-    const user = userEvent.setup();
 
     render(<SettingsMemoryPage />);
-    await user.click(await screen.findByRole('button', { name: 'memory.log.restartAction' }));
 
-    await waitFor(() => expect(api.restartMemoryRuntime).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.getMemoryStatus).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('memory.log.recorderDegraded')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
+    expect(api.restartMemoryRuntime).not.toHaveBeenCalled();
     expect(screen.queryByRole('radio', { name: 'memory.tabs.log' })).toBeNull();
   });
 
@@ -182,5 +247,6 @@ describe('SettingsMemoryPage disabled recorder health', () => {
 
     expect(await screen.findByText('memory.setup.runtimeRequired')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'memory.status.restartEngine' })).toBeTruthy();
   });
 });

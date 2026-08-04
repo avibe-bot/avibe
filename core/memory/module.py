@@ -453,30 +453,35 @@ class MemoryModule:
         if self._clear_active:
             return None
         async with self._lifecycle_lock:
-            async with self._root_lifecycle_lock():
-                if self._clear_active:
-                    return None
-                try:
-                    meta = await self._store_call(self._store.get_meta)
-                except Exception:
-                    return OperationFailed(error="memory_clear_failed")
-                if meta is None or not meta.clear_in_progress:
-                    self._worker.resume_claims()
-                    return None
+            return await self._recover_interrupted_clear_locked()
 
-                try:
-                    if not await self._worker.pause_and_wait(
-                        timeout_seconds=self._clear_drain_timeout_seconds
-                    ):
-                        raise _ClearStepFailure("worker drain did not stop in time")
-                    await self._clear_provider_data_or_fail(meta)
-                    await self._store_call(self._store.finish_clear)
-                except Exception:
-                    await self._record_clear_failure()
-                    return OperationFailed(error="memory_clear_failed")
+    async def _recover_interrupted_clear_locked(self) -> OperationFailed | None:
+        """Recover a durable Clear while ``_lifecycle_lock`` is already held."""
 
+        async with self._root_lifecycle_lock():
+            if self._clear_active:
+                return None
+            try:
+                meta = await self._store_call(self._store.get_meta)
+            except Exception:
+                return OperationFailed(error="memory_clear_failed")
+            if meta is None or not meta.clear_in_progress:
                 self._worker.resume_claims()
                 return None
+
+            try:
+                if not await self._worker.pause_and_wait(
+                    timeout_seconds=self._clear_drain_timeout_seconds
+                ):
+                    raise _ClearStepFailure("worker drain did not stop in time")
+                await self._clear_provider_data_or_fail(meta)
+                await self._store_call(self._store.finish_clear)
+            except Exception:
+                await self._record_clear_failure()
+                return OperationFailed(error="memory_clear_failed")
+
+            self._worker.resume_claims()
+            return None
 
     async def _skipped_with_missed(self, error: MemoryErrorCode) -> CaptureReceipt:
         try:

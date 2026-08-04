@@ -154,8 +154,6 @@ const renderPanel = (props?: Partial<React.ComponentProps<typeof MemoryLogPanel>
       enabled
       loggingEnabled
       status={null}
-      onRestartRuntime={() => undefined}
-      restarting={false}
       onClearAll={() => undefined}
       {...props}
     />,
@@ -276,14 +274,12 @@ describe('MemoryLogPanel', () => {
     expect(screen.getByText('Fast')).toBeTruthy();
   });
 
-  it('reuses runtime restart for transient recorder degradation', async () => {
+  it('leaves transient recorder recovery to the page-level restart action', async () => {
     api.getMemoryLog.mockResolvedValue(listResult([]));
-    const restart = vi.fn();
-    const user = userEvent.setup();
-    renderPanel({ loggingEnabled: false, status: status('writer_failures'), onRestartRuntime: restart });
+    renderPanel({ loggingEnabled: false, status: status('writer_failures') });
 
-    await user.click(await screen.findByRole('button', { name: 'memory.log.restartAction' }));
-    expect(restart).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText('memory.log.recorderDegraded')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
     expect(screen.getByText('memory.log.loggingOff')).toBeTruthy();
   });
 
@@ -323,8 +319,6 @@ describe('MemoryLogPanel', () => {
             enabled
             loggingEnabled
             status={null}
-            onRestartRuntime={() => undefined}
-            restarting={false}
             onClearAll={() => undefined}
           />
         </>

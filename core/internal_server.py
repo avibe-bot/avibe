@@ -750,6 +750,26 @@ def create_app(
             logger.exception("internal memory reconcile failed")
             return JSONResponse(status_code=503, content={"ok": False, "error": "memory_reconcile_failed"})
 
+    @app.post("/internal/memory/restart")
+    async def _memory_restart() -> Any:
+        """Replace the live Memory sidecar through the Runtime lifecycle."""
+
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing"},
+            )
+        try:
+            result = await runtime.restart()
+            return JSONResponse(status_code=200, content=result)
+        except Exception:
+            logger.exception("internal memory restart failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_restart_failed"},
+            )
+
     @app.post("/internal/memory/install-runtime")
     async def _memory_install_runtime() -> Any:
         """Install or repair the managed runtime on the controller lifecycle."""

@@ -32,6 +32,7 @@ from core.memory.artifact import (
     MemoryProviderRootState,
     MemoryRuntimeActivationError,
 )
+from core.memory.everos import FakeMemoryProvider
 import core.memory.process as memory_process
 import core.memory.runtime as memory_runtime
 from core.memory.process import (
@@ -1689,7 +1690,7 @@ def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch,
     async def interrupted_clear() -> OperationFailed:
         return OperationFailed(error="memory_clear_failed")
 
-    monkeypatch.setattr(runtime.module, "_recover_interrupted_clear", interrupted_clear)
+    monkeypatch.setattr(runtime.module, "_recover_interrupted_clear_locked", interrupted_clear)
 
     async def run() -> None:
         assert await runtime.reconcile(runtime._config) == {"ok": False, "error": "memory_clear_failed"}
@@ -1721,6 +1722,23 @@ def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) 
     assert callable(artifact.activation_coordinator)
     assert calls == [True]
     assert runtime._config.enabled is False
+
+
+def test_runtime_install_artifact_converts_background_ensure_exception(
+    tmp_path: Path,
+) -> None:
+    artifact = _installed_artifact(ensure_failure=RuntimeError("install failed"))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+
+    assert asyncio.run(runtime.install_artifact()) == {
+        "ok": False,
+        "reason": "memory_runtime_install_failed",
+        "download_error": None,
+    }
 
 
 def test_distribution_metadata_bundles_only_the_memory_runtime_manifest() -> None:
@@ -2426,6 +2444,10 @@ def test_disabling_diagnostics_stops_recorder_before_fallible_preflight(
         assert runtime._config.processing == initial.processing
         assert runtime._config.diagnostics.log_provider_calls is False
         assert factory.created[-1].settings.call_log_db_path is None
+
+        assert await runtime.restart() == {"ok": True, "state": "ready"}
+        assert factory.supervised[-1].settings.call_log_db_path is None
+        assert runtime._config.diagnostics.log_provider_calls is False
         await runtime.close()
 
     asyncio.run(run())
@@ -2577,6 +2599,9 @@ def test_recorder_reap_hands_call_log_to_host_until_restart(
         maintenance_release.set()
         assert await asyncio.wait_for(restarting, timeout=1)
         assert maintenance_finished.is_set()
+        async with asyncio.timeout(1):
+            while not runtime._process_records_calls:
+                await asyncio.sleep(0)
         assert runtime._process_records_calls is True
         assert runtime._call_log_retention_task is None
         await runtime.close()
@@ -3090,6 +3115,800 @@ def _processing_config() -> MemoryProcessingConfig:
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-secret"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embedding-secret"),
     )
+
+
+def test_runtime_restart_replaces_process_without_processing_preflight(tmp_path: Path) -> None:
+    factory = FakeEverOSProcessFactory()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess()
+    runtime._process = old
+
+    async def run() -> None:
+        assert await runtime.restart() == {"ok": True, "state": "ready"}
+        assert old.stops == 1
+        assert len(factory.created) == 1
+        assert factory.supervised[0].starts == 1
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_restart_is_retained_when_one_caller_is_cancelled(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingStop(FakeEverOSProcess):
+        async def stop(self) -> None:
+            self.stops += 1
+            entered.set()
+            await release.wait()
+            self.stopped = True
+            self._running = False
+
+    factory = FakeEverOSProcessFactory()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    old = BlockingStop()
+    runtime._process = old
+
+    async def run() -> None:
+        detached = asyncio.create_task(runtime.restart())
+        await entered.wait()
+        detached.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await detached
+
+        joined = asyncio.create_task(runtime.restart())
+        await asyncio.sleep(0)
+        assert joined.done() is False
+        release.set()
+        assert await joined == {"ok": True, "state": "ready"}
+        assert old.stops == 1
+        assert len(factory.created) == 1
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_stop_worker_supports_python_310_task_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    async def run() -> None:
+        started = asyncio.Event()
+
+        async def worker() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(worker())
+        runtime._worker_task = task
+        await started.wait()
+
+        class Python310Task:
+            """Python 3.10 tasks do not expose ``Task.cancelling()``."""
+
+        try:
+            with monkeypatch.context() as patcher:
+                patcher.setattr(memory_runtime.asyncio, "current_task", lambda: Python310Task())
+                await runtime._stop_worker()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert task.cancelled()
+        assert runtime._worker_task is None
+
+    asyncio.run(run())
+
+
+def test_stop_worker_settles_worker_before_propagating_caller_cancellation(
+    tmp_path: Path,
+) -> None:
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    async def run() -> None:
+        started = asyncio.Event()
+        cancellation_started = asyncio.Event()
+        release_cancellation = asyncio.Event()
+
+        async def worker() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_started.set()
+                await release_cancellation.wait()
+                raise
+
+        worker_task = asyncio.create_task(worker())
+        runtime._worker_task = worker_task
+        await started.wait()
+
+        stopping = asyncio.create_task(runtime._stop_worker())
+        await cancellation_started.wait()
+        stopping.cancel()
+        await asyncio.sleep(0)
+
+        assert stopping.done() is False
+        assert runtime._worker_task is worker_task
+
+        release_cancellation.set()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+
+        assert worker_task.cancelled()
+        assert runtime._worker_task is None
+
+    asyncio.run(run())
+
+
+def test_stop_worker_propagates_worker_cleanup_failure(tmp_path: Path) -> None:
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    async def run() -> None:
+        started = asyncio.Event()
+
+        async def worker() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise RuntimeError("worker cleanup failed")
+
+        worker_task = asyncio.create_task(worker())
+        runtime._worker_task = worker_task
+        await started.wait()
+
+        with pytest.raises(RuntimeError, match="worker cleanup failed"):
+            await runtime._stop_worker()
+
+        assert runtime._worker_task is None
+
+    asyncio.run(run())
+
+
+def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    factory = FakeEverOSProcessFactory()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess()
+    runtime._process = old
+    store = runtime._store
+    assert store is not None
+    worker = runtime.module._worker
+    old_lease = worker._boot_id
+    accepted = store.enqueue_request(
+        source_message_id="old-lease-row",
+        session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="recover this row",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert accepted.row is not None
+    claimed = store.claim_due(
+        lease_owner=old_lease,
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    recover_after_boot = store.recover_after_boot
+
+    def blocking_recovery(*, lease_owner: str, clock):
+        entered.set()
+        release.wait(timeout=2.0)
+        return recover_after_boot(lease_owner=lease_owner, clock=clock)
+
+    monkeypatch.setattr(store, "recover_after_boot", blocking_recovery)
+
+    async def no_grace_wait(*, timeout_seconds: float) -> bool:
+        del timeout_seconds
+        worker.pause_claims()
+        return False
+
+    monkeypatch.setattr(worker, "pause_and_wait", no_grace_wait)
+    monkeypatch.setattr(runtime, "_ensure_worker", lambda: None)
+
+    async def run() -> None:
+        runtime._worker_task = asyncio.create_task(worker.drain_once())
+        assert await asyncio.to_thread(entered.wait, 1.0)
+        restarting = asyncio.create_task(runtime.restart())
+        await asyncio.sleep(0.05)
+        assert restarting.done() is False
+        assert old.stops == 0
+        assert factory.created == []
+
+        release.set()
+        assert await restarting == {"ok": True, "state": "ready"}
+        assert old.stops == 1
+        assert len(factory.created) == 1
+        assert worker._boot_id != old_lease
+        assert store.list_queue_rows()[0].state == "processing"
+
+        # The first tick under the replacement lease must reclaim old claimed
+        # work before claims can resume.
+        worker.pause_claims()
+        assert await worker.drain_once() == 0
+        assert store.list_queue_rows()[0].state == "pending"
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_restart_preserves_drain_completed_inside_grace_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    add_entered = asyncio.Event()
+    release_add = asyncio.Event()
+    pause_timeouts: list[float] = []
+
+    class BlockingProvider(FakeMemoryProvider):
+        async def add(self, capture):
+            add_entered.set()
+            await release_add.wait()
+            return await super().add(capture)
+
+    factory = FakeEverOSProcessFactory()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess()
+    runtime._process = old
+    provider = BlockingProvider()
+    runtime._provider = provider
+    runtime.module._replace_provider(provider)
+    store = runtime._store
+    assert store is not None
+    accepted = store.enqueue_request(
+        source_message_id="graceful-row",
+        session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="finish before replacement",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert accepted.row is not None
+    worker = runtime.module._worker
+    pause_and_wait = worker.pause_and_wait
+
+    async def tracked_pause(*, timeout_seconds: float) -> bool:
+        pause_timeouts.append(timeout_seconds)
+        return await pause_and_wait(timeout_seconds=timeout_seconds)
+
+    monkeypatch.setattr(worker, "pause_and_wait", tracked_pause)
+
+    async def run() -> None:
+        runtime._worker_task = asyncio.create_task(worker.drain_once())
+        await asyncio.wait_for(add_entered.wait(), timeout=1.0)
+        restarting = asyncio.create_task(runtime.restart())
+        await asyncio.sleep(0)
+        assert old.stops == 0
+
+        release_add.set()
+        assert await restarting == {"ok": True, "state": "ready"}
+        assert pause_timeouts == [5.0]
+        assert old.stops == 1
+        row = store.list_queue_rows()[0]
+        assert row.state == "delivered"
+        assert row.payload_text is None
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_restart_returns_closed_errors_when_not_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    disabled_home = tmp_path / "disabled"
+    monkeypatch.setenv("AVIBE_HOME", str(disabled_home))
+    disabled = MemoryRuntime(
+        MemoryConfig(enabled=False),
+        artifact_manager=_installed_artifact(),
+        effective_home=disabled_home,
+    )
+
+    def unavailable_store(*_args, **_kwargs):
+        raise OSError("store unavailable")
+
+    monkeypatch.setattr(memory_runtime, "MemoryStore", unavailable_store)
+    unavailable = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path / "unavailable",
+    )
+
+    async def run() -> None:
+        assert await disabled.restart() == {
+            "ok": False,
+            "error": "memory_disabled",
+        }
+        assert await unavailable.restart() == {
+            "ok": False,
+            "error": "memory_store_unavailable",
+        }
+        await disabled.close()
+        await unavailable.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_restart_replays_last_success_after_failed_candidate(tmp_path: Path) -> None:
+    class ConfigAwareProcess(FakeEverOSProcess):
+        async def processing_healthy(self) -> bool:
+            return self.settings is not None and self.settings.llm_model != "rejected"
+
+    factory = FakeEverOSProcessFactory(template=ConfigAwareProcess)
+    applied = MemoryConfig(enabled=True, processing=_processing_config())
+    rejected = replace(
+        applied,
+        processing=replace(
+            applied.processing,
+            llm=replace(applied.processing.llm, model="rejected"),
+        ),
+    )
+    runtime = MemoryRuntime(
+        applied,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+
+    async def run() -> None:
+        assert await runtime.reconcile(applied) == {"ok": True, "state": "ready"}
+        assert await runtime.reconcile(rejected) == {
+            "ok": False,
+            "error": "memory_processing_failed",
+        }
+        assert await runtime.restart() == {"ok": True, "state": "ready"}
+        assert factory.supervised[-1].settings is not None
+        assert factory.supervised[-1].settings.llm_model == "chat"
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_marker_settlement_updates_only_replay_marker_after_candidate_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    class ConfigAwareProcess(FakeEverOSProcess):
+        async def processing_healthy(self) -> bool:
+            return self.settings is not None and self.settings.llm_model != "rejected"
+
+    startup = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        embedding_change_pending=True,
+    )
+    candidate = replace(
+        startup,
+        processing=replace(
+            startup.processing,
+            llm=replace(startup.processing.llm, model="rejected"),
+            embedding=replace(startup.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    factory = FakeEverOSProcessFactory(template=ConfigAwareProcess)
+    runtime = MemoryRuntime(
+        startup,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess(settings=_settings())
+    runtime._process = old
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+
+    async def run() -> None:
+        assert await runtime.reconcile(candidate) == {
+            "ok": False,
+            "error": "memory_processing_failed",
+        }
+        settled = V2Config.load().memory
+        assert settled.embedding_change_pending is False
+        assert settled.processing.llm.model == "rejected"
+        persisted_after_failure = (tmp_path / "config" / "config.json").read_bytes()
+
+        assert await runtime.restart() == {"ok": True, "state": "ready"}
+        replacement = factory.supervised[-1]
+        assert replacement.settings is not None
+        assert replacement.settings.llm_model == "chat"
+        assert replacement.settings.embedding_model == "embed"
+        assert (tmp_path / "config" / "config.json").read_bytes() == persisted_after_failure
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_restart_stop_failure_retains_old_process_and_paused_claims(
+    tmp_path: Path,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess(stop_failure=RuntimeError("still owned"))
+    runtime._process = old
+
+    async def run() -> None:
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_restart_failed",
+        }
+        assert runtime._process is old
+        assert factory.created == []
+        assert runtime.module._worker._claims_paused is True
+        old.stop_failure = None
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    marked_factory = FakeEverOSProcessFactory()
+    marked = MemoryRuntime(
+        MemoryConfig(
+            enabled=True,
+            processing=_processing_config(),
+            embedding_change_pending=True,
+        ),
+        artifact_manager=_installed_artifact(),
+        process_factory=marked_factory,
+        effective_home=tmp_path / "marked",
+    )
+    recovery_factory = FakeEverOSProcessFactory()
+    recovering = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        process_factory=recovery_factory,
+        effective_home=tmp_path / "recovery",
+    )
+
+    async def failed_recovery() -> OperationFailed:
+        return OperationFailed(error="memory_clear_failed")
+
+    monkeypatch.setattr(
+        recovering.module,
+        "_recover_interrupted_clear_locked",
+        failed_recovery,
+    )
+
+    async def run() -> None:
+        assert await marked.restart() == {
+            "ok": False,
+            "error": "memory_clear_failed",
+        }
+        assert await recovering.restart() == {
+            "ok": False,
+            "error": "memory_clear_failed",
+        }
+        assert marked_factory.created == []
+        assert recovery_factory.created == []
+        await marked.close()
+        await recovering.close()
+
+    asyncio.run(run())
+
+
+def test_ready_callback_activates_only_the_current_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    starts = deque((False, True))
+
+    def process_template() -> FakeEverOSProcess:
+        return FakeEverOSProcess(start_results=deque((starts.popleft(),)))
+
+    factory = FakeEverOSProcessFactory(template=process_template)
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    activations: list[None] = []
+    activated = asyncio.Event()
+
+    def record_activation() -> None:
+        activations.append(None)
+        activated.set()
+
+    monkeypatch.setattr(runtime, "_ensure_worker", record_activation)
+
+    async def run() -> None:
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_sidecar_unavailable",
+        }
+        recovering = factory.supervised[0]
+        recovering._running = True
+        await recovering.ready()
+        await asyncio.wait_for(activated.wait(), timeout=1.0)
+        assert len(activations) == 1
+        assert runtime.module._worker._claims_paused is False
+
+        activated.clear()
+        assert await runtime.restart() == {"ok": True, "state": "ready"}
+        assert len(activations) == 2
+        recovering._running = True
+        await recovering.ready()
+        await asyncio.sleep(0.05)
+        assert len(activations) == 2
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_ready_callback_survives_rejected_artifact_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    process = FakeEverOSProcess()
+    runtime._process = process
+    activated = asyncio.Event()
+    monkeypatch.setattr(runtime, "_ensure_worker", activated.set)
+
+    async def run() -> None:
+        runtime._activation_loop = asyncio.get_running_loop()
+        process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
+
+        await process.ready()
+        assert await runtime.install_artifact() == {
+            "ok": False,
+            "reason": "memory_runtime_install_requires_disabled_memory",
+            "download_error": None,
+        }
+
+        await asyncio.wait_for(activated.wait(), timeout=1.0)
+        assert runtime.module._worker._claims_paused is False
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lifecycle", ["clear", "reconcile", "artifact"])
+def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lifecycle: str,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path / lifecycle,
+    )
+    process = FakeEverOSProcess()
+    runtime._process = process
+    activations: list[None] = []
+    monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
+
+    async def run() -> None:
+        runtime._activation_loop = asyncio.get_running_loop()
+        process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
+
+        if lifecycle == "clear":
+            async def blocked_clear():
+                entered.set()
+                await release.wait()
+                return OperationFailed(error="memory_clear_failed")
+
+            monkeypatch.setattr(runtime.module, "clear", blocked_clear)
+            operation = asyncio.create_task(runtime.clear())
+        elif lifecycle == "reconcile":
+            async def blocked_reconcile(*_args, **_kwargs):
+                entered.set()
+                await release.wait()
+                return {"ok": False, "error": "memory_processing_failed"}
+
+            monkeypatch.setattr(runtime, "_reconcile_locked", blocked_reconcile)
+            operation = asyncio.create_task(runtime.reconcile(config))
+        else:
+            worker = runtime.module._worker
+
+            async def blocked_pause(**_kwargs):
+                worker.pause_claims()
+                entered.set()
+                await release.wait()
+                return True
+
+            async def accepted_reconcile(*_args, **_kwargs):
+                return {"ok": True, "state": "ready"}
+
+            monkeypatch.setattr(worker, "pause_and_wait", blocked_pause)
+            monkeypatch.setattr(runtime, "_reconcile_locked", accepted_reconcile)
+            operation = asyncio.create_task(
+                runtime._activate_artifact_candidate(
+                    MemoryArtifactCandidate(
+                        provider_root_format="everos-test-next",
+                        compatible_provider_root_formats=frozenset(),
+                        artifact_fingerprint="next-artifact",
+                    ),
+                    MemoryProviderRootState(exists=False),
+                    lambda: None,
+                    lambda: None,
+                )
+            )
+
+        await entered.wait()
+        await process.ready()
+        await asyncio.sleep(0)
+        assert activations == []
+        release.set()
+        await operation
+        ready_task = runtime._ready_activation_task
+        if ready_task is not None:
+            await asyncio.wait_for(asyncio.shield(ready_task), timeout=1.0)
+        assert activations == ([] if lifecycle == "artifact" else [None])
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_close_rejects_ready_callback_during_process_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    class BlockingStop(FakeEverOSProcess):
+        async def stop(self) -> None:
+            self.stops += 1
+            stop_entered.set()
+            await release_stop.wait()
+            self.stopped = True
+            self._running = False
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    process = BlockingStop()
+    runtime._process = process
+    activations: list[None] = []
+    monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
+
+    async def run() -> None:
+        runtime._activation_loop = asyncio.get_running_loop()
+        process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
+        closing = asyncio.create_task(runtime.close())
+        await stop_entered.wait()
+
+        await process.ready()
+        await asyncio.sleep(0.01)
+        assert activations == []
+
+        release_stop.set()
+        await closing
+        assert activations == []
+
+    asyncio.run(run())
+
+
+def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict:
+            self.ensure_calls.append(force)
+            entered.set()
+            release.wait(timeout=2.0)
+            return dict(self.ensure_payload)
+
+    artifact = BlockingArtifact(python=Path(sys.executable))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=artifact,
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    activations: list[None] = []
+    monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
+
+    async def run() -> None:
+        installing = asyncio.create_task(runtime.install_artifact())
+        assert await asyncio.to_thread(entered.wait, 1.0)
+        candidate = FakeEverOSProcess()
+        candidate.on_ready = lambda: runtime._schedule_sidecar_ready(candidate)
+        runtime._process = candidate
+        await candidate.ready()
+        await asyncio.sleep(0)
+        assert activations == []
+
+        installing.cancel()
+        await asyncio.sleep(0)
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_restart_failed",
+        }
+        assert installing.done() is False
+        installing.cancel()
+        await asyncio.sleep(0)
+        assert installing.done() is False
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_restart_failed",
+        }
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await installing
+        assert await runtime.restart() == {"ok": True, "state": "ready"}
+        assert activations == [None]
+        await runtime.close()
+
+    asyncio.run(run())
 
 
 class _BlockingProbeProcess:

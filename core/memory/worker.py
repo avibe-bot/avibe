@@ -85,6 +85,12 @@ class MemoryWorker:
         self._activation_pending = True
         self._recovery_sessions = []
 
+    def begin_new_lease_activation(self) -> None:
+        """Rotate the claim lease before activating a replacement worker."""
+
+        self._boot_id = uuid.uuid4().hex
+        self.begin_activation()
+
     def pause_claims(self) -> None:
         """Prevent future claims while allowing a current provider call to finish."""
 
@@ -451,7 +457,20 @@ class MemoryWorker:
             return False
 
     async def _store_call(self, method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-        return await asyncio.to_thread(method, *args, **kwargs)
+        task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+        if cancellation is not None:
+            try:
+                task.result()
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise cancellation
+        return task.result()
 
     def _pause_for_system_failure(self, now: datetime) -> None:
         self._system_paused = True
