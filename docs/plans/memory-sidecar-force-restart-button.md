@@ -1,15 +1,15 @@
-# Add a forced sidecar restart action to Memory settings (rev11)
+# Add a forced sidecar restart action to Memory settings (rev12)
 
-> Rev11 keeps one public recovery action and a focused set of internal fixes:
+> Rev12 keeps one public recovery action and a focused set of internal fixes:
 > replayable configuration, config-wide write serialization, restart-specific
-> and Clear-intent admission, generation-fenced ready activation, complete
+> and lifecycle-intent admission, generation-fenced ready activation, complete
 > supervisor quiescing, bounded orphan recovery, disk/live replay convergence,
 > marker-free replay promotion, store-thread settlement, worker lease rotation,
 > locked clear-marker recovery, bounded readiness, supervisor callback rebinding,
-> and authoritative UI settings refresh. Timed-out work remains owned until it
-> is either joined or proven unable to mutate state. It does not add a lifecycle
-> coordinator, explicit state machine, provider/store port, or frontend DOM test
-> framework.
+> authoritative controller/UI settings refresh, and queued-read exclusion.
+> Timed-out work remains owned until it is either joined or proven unable to
+> mutate state. It does not add a lifecycle coordinator, explicit state machine,
+> provider/store port, or frontend DOM test framework.
 
 ## Background and goals
 
@@ -67,10 +67,12 @@ Add private `_restart_config` and `_persisted_memory_snapshot` values to
   a first-start failure can still be retried with the same configuration.
 - Update `_restart_config` with another deep copy only when enabled or disabled
   reconcile has completed successfully, while `_reconcile_lock` is held.
-- Initialize `_persisted_memory_snapshot` from the startup config. At the start
-  of `Controller.reconcile_memory()`, pass an explicit `persisted=True` contract
-  into `MemoryRuntime.reconcile()`: that controller entry point hot-applies a
-  freshly loaded, successfully saved V2 config. After acquiring
+- Initialize `_persisted_memory_snapshot` from the startup config. Add a narrow
+  `MemoryRuntime.reconcile_persisted()` entry point used only by
+  `Controller.reconcile_memory()`: it hot-applies a freshly loaded, successfully
+  saved V2 config and returns both the transport result and a deep copy of the
+  exact applied `MemoryConfig` on success. The ordinary `reconcile()` keeps its
+  current dict return for runtime-internal callers. After acquiring
   `_reconcile_lock`, a persisted reconcile replaces the snapshot with a deep
   copy of its candidate before live application, so the complete expected disk
   block is retained even if reconciliation later fails. Runtime-internal calls
@@ -115,6 +117,13 @@ Add private `_restart_config` and `_persisted_memory_snapshot` values to
   fails, keep the previous last-good `_restart_config` while retaining the exact
   marker-free `_persisted_memory_snapshot` for conditional disk convergence on a
   later restart.
+- `Controller.reconcile_memory()` installs only the successful applied config
+  returned by `reconcile_persisted()` into `Controller.config.memory`; it never
+  reuses its original marker-bearing argument. The returned candidate is already
+  the exact settled block, so controller shared state, runtime live/replay state,
+  and disk converge without mutating an object from the settlement thread. A
+  failed reconcile returns no applied candidate and leaves controller config at
+  its previous value.
 
 These snapshots answer which configuration an explicit restart replays and
 which exact Memory block it may conditionally replace on disk. They do not
@@ -251,8 +260,17 @@ An explicit restart must not wait silently behind another lifecycle operation.
 Otherwise the transport can time out first while the controller later performs
 an abandoned restart, and a user retry can enqueue a second one.
 
-- Before any await, `restart()` checks `_clear_pending_count`, `_reconcile_lock`,
-  and `module._lifecycle_lock`. If a destructive Clear is pending/active or
+- Add a synchronous, read-only `MemoryModule.lifecycle_busy` admission property
+  backed by a private `_lifecycle_pending_count`. Search, profile, Clear, and the
+  interrupted-clear wrapper enter a synchronous intent scope after input
+  validation but before their first lifecycle await, and leave it in `finally`
+  only after their complete lifecycle-lock path exits. The scope covers both the
+  current owner and every queued operation, including the interval between clear
+  recovery and a search/profile provider call. Nested locked helpers reuse the
+  outer intent; no code reads private `asyncio.Lock` waiter state.
+- Before any await, `restart()` checks `_clear_pending_count`,
+  `module.lifecycle_busy`, `_reconcile_lock`, and `module._lifecycle_lock`. If a
+  complete Runtime Clear or any module lifecycle operation is active/queued, or
   either lock is held, return
   `{ok: false, error: 'memory_restart_busy'}` without changing the process,
   claims, or worker.
@@ -267,19 +285,23 @@ an abandoned restart, and a user retry can enqueue a second one.
   acquiring both lifecycle locks, before the first lifecycle await, and clears
   it only in final ownership cleanup. `MemoryRuntime.clear()` checks the restart
   boolean and, if false, increments the Clear counter in the same event-loop turn
-  before its first await. Keep the counter owned across `module.clear()` and the
+  before its first await. Keep that counter owned across `module.clear()` and the
   subsequent reconcile, then decrement it in `finally` on every completion or
-  cancellation path. Multiple queued Clears each own one count.
+  cancellation path. `MemoryModule.clear()` also owns its module lifecycle
+  intent only for its direct lifecycle-lock path. Multiple queued Runtime Clears
+  and module operations retain independent counts.
 - `MemoryRuntime.clear()` still returns `memory_clear_failed` without starting
   or queueing `begin_clear()` when an explicit restart already owns admission.
   `MemoryModule.clear()` retains its existing queued lifecycle-lock behavior, so
   search/profile/read contention still serializes. While a Clear waits behind
-  such a reader, the nonzero counter makes restart return
+  such a reader, the nonzero lifecycle counter makes restart return
   `memory_restart_busy`; restart cannot exploit the brief unlocked handoff while
-  `asyncio.Lock` wakes the queued Clear. Conversely, once restart admission has
-  started, the active boolean rejects Clear before it increments the counter.
-  Both updates and admission checks contain no intervening await, so one side
-  wins deterministically without inspecting private lock waiters.
+  `asyncio.Lock` wakes any queued Clear, search, or profile request. Conversely,
+  once restart admission has started, the active boolean rejects Clear before it
+  enters module lifecycle intent; reads keep their existing queued behavior
+  behind restart. Intent updates and admission checks contain no intervening
+  await, so one side wins deterministically without inspecting private lock
+  waiters or adding an unbudgeted predecessor to restart.
 - Bound interrupted-clear recovery and the embedding guard/config convergence
   separately by `CLEAR_CLEANUP_TIMEOUT_SECONDS`, because both phases can run in
   one request. Transaction timeout is a reporting threshold, not permission to
@@ -334,8 +356,8 @@ an abandoned restart, and a user retry can enqueue a second one.
 
 No additional restart lock or queue is needed. The existing UI settings lock,
 config-wide write transaction, installer flag, restart-ownership boolean,
-Clear-intent counter, and controller/module lifecycle locks define single-flight
-ownership.
+Clear-intent counter, module lifecycle-intent counter, and controller/module
+lifecycle locks define single-flight ownership.
 
 ### 5. Forced replacement and lease handoff
 
@@ -535,11 +557,16 @@ exceptions use the transport-only `memory_restart_failed`.
    live/replay candidate from marker settlement's exact return; conditionally
    converge disk to replay before launch; retain worker/store tasks that outlive
    cancellation; reject restart while artifact installation is active; make only
-   restart/Clear contention fail fast.
-   `Controller.reconcile_memory()` marks only its persisted candidate explicitly;
-   post-Clear and artifact-internal reconciles cannot change the disk snapshot.
+   explicit restart admission fail fast. Add `reconcile_persisted()` to return
+   the exact successful candidate alongside the transport result while ordinary
+   `reconcile()` preserves its dict contract.
+   `Controller.reconcile_memory()` installs that returned candidate into
+   `Controller.config.memory`; post-Clear and artifact-internal reconciles cannot
+   claim a persisted snapshot or change controller shared config.
 3. `core/memory/module.py`: extract locked clear recovery while retaining the
-   wrapper and existing queued lifecycle-lock behavior for read/Clear paths.
+   wrapper and existing queued lifecycle-lock behavior for read/Clear paths. Add
+   the synchronous lifecycle-intent scope and `lifecycle_busy` property covering
+   active and queued search, profile, Clear, and recovery operations.
 4. `core/memory/worker.py`: retain and shield explicit store-thread tasks, expose
    bounded settlement, and rotate the lease owner only after their registry is
    empty.
@@ -609,6 +636,10 @@ exceptions use the transport-only `memory_restart_failed`.
     return `memory_restart_busy`, create no waiters, and change no ownership.
     An installer paused inside unlocked `ensure(force=True)` also returns busy
     before artifact resolution, worker fencing, or process replacement.
+    Hold one search/profile request in the module lock and queue a second; across
+    the owner's release/waiter-wakeup gap, `lifecycle_busy` remains true and
+    restart returns busy without joining the read queue. After both reads finish,
+    restart can acquire admission normally.
   - Clear started while `_explicit_restart_active` is true returns before
     `begin_clear()` and leaves no waiter or durable marker; the inverse ordering
     makes restart return busy. A search/profile call holding the same module lock
@@ -662,6 +693,12 @@ exceptions use the transport-only `memory_restart_failed`.
     restored claims.
   - Cancellation while stopping the worker and after a new child is spawned
     reaches the documented cleanup state and re-raises `CancelledError`.
+- `tests/test_memory_slice3.py`: a successful persisted reconcile that settles
+  the embedding marker returns the exact marker-free applied config to
+  `Controller.reconcile_memory()`, which installs a deep copy into
+  `Controller.config.memory`. Disk, controller, runtime live state, and replay
+  state must match; the original marker-bearing request object is not installed.
+  Failure returns no candidate and preserves the prior controller config.
 - `tests/test_internal_server.py`: success, missing runtime, and exception mapping.
 - `tests/test_internal_client.py` / `tests/test_internal_client_timeouts.py`:
   POST and busy response passthrough; deadline computed from both clear phases,
@@ -741,10 +778,12 @@ conditionally converge the known persisted Memory block to that same config;
 config mutation cannot race any whole-file V2 writer, start from an unlocked
 baseline, lose a custom target path, hold `CONFIG_LOCK` during a file-lock wait,
 block an async event loop, or outlive its transaction; every successful
-runtime-owned mutation refreshes the exact persisted snapshot; explicit restart
-and destructive Clear cannot queue behind or leapfrog each other while ordinary
-reads retain their existing serialization; artifact installation excludes
-launch; orphan recovery has one complete cap; every active process lifecycle
+runtime-owned mutation refreshes the exact persisted snapshot and successful
+settlement propagates the same exact block into controller shared config;
+explicit restart cannot queue behind or leapfrog any active or queued module
+lifecycle operation, while reads and destructive Clear retain their existing
+serialization; artifact installation excludes launch; orphan recovery has one
+complete cap; every active process lifecycle
 owner is settled and budgeted before stop; readiness, including the final health
 request, has one hard cap; delayed automatic activation and re-armed supervision
 are bound to the current lifecycle generation and both runtime locks; pending
@@ -752,7 +791,7 @@ embeddings cannot bypass the root guard or remain in a successful replay
 snapshot; claimed rows require a new lease only after the old worker and every
 shielded store thread exit; activation success is observable; UI settings reload
 from the converged disk block; and clear markers serialize with root/child
-lifecycle. The implementation adds two private snapshots, two narrow admission
+lifecycle. The implementation adds two private snapshots, three narrow admission
 fields, focused helpers, and two precise transport-only error codes while reusing
 existing locks, guards, recovery SQL, supervision, and UI primitives.
 
@@ -764,6 +803,7 @@ implementation appears to require one, revise this plan before expanding scope.
 
 - [ ] Replay/disk snapshots, conditional C1-to-C0 convergence, focused tests
 - [ ] Marker-settlement persisted/live/replay refresh and later-restart regression
+- [ ] Persisted reconcile propagation into Controller.config
 - [ ] Settings/restart serialization and stale-C0 overwrite regression
 - [ ] Path-aware token-bound config mutation and custom-target regression
 - [ ] File-lock-first order, async writers off-thread, inline-reader responsiveness
@@ -773,6 +813,7 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] Shielded store-thread registry, bounded settlement, and retry
 - [ ] Locked clear recovery and race regression
 - [ ] Restart/Clear intent admission, queued-Clear handoff, artifact admission
+- [ ] Queued read intent admission and waiter-handoff regression
 - [ ] Supervisor handoff/rebind, lifecycle-owner settlement, readiness/deadline contract
 - [ ] Lifecycle-generation ready activation and Clear/reconcile race regression
 - [ ] Complete orphan/start budgets, explicit activation, failed-start cleanup
