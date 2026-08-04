@@ -1,6 +1,6 @@
 # Memory Processing Log Page (EverOS step timeline + provider call log)
 
-Status: draft v5 (review findings incorporated)
+Status: draft v6 (second review findings incorporated)
 Date: 2026-08-04
 
 ## Background
@@ -151,6 +151,17 @@ their 14-day expiry or Clear. Because the recorder receives its database path
 only when the persisted flag is enabled, the recording boundary independently
 enforces the local administrator's choice rather than trusting UI state.
 
+An enabled-to-disabled transition is privacy-first. While holding the lifecycle
+lock, `MemoryRuntime` stops the recorder-enabled child and transfers call-log
+ownership to host maintenance before artifact resolution, provider health
+preflight, or any other fallible replacement work. It then reconciles a child
+that never receives the database path. If that replacement cannot start, the
+settings response may report Memory degraded, but persisted capture remains off:
+rollback restores other failed settings while forcing
+`memory.diagnostics.log_provider_calls=False`. Tests hold both provider probes
+failed and prove the old recorder is stopped, no replacement receives the path,
+and neither runtime nor persisted config re-enables capture.
+
 Recording uses an explicit field whitelist. Every retained string, including
 prompt and response text, is recursively scrubbed for bearer/API-key values,
 authorization-like fields, configured provider base URLs, and absolute local
@@ -255,9 +266,15 @@ renders that as a gap notice. Database waits never run on the provider call path
 
 Recorder errors are swallowed, while the provider call's original result or
 exception is preserved exactly. After 20 consecutive writer failures, recording
-self-disables for that process. Tests cover a held sqlite write lock, queue
-overflow, original exception identity, original EverOS lifespan delegation/state,
-startup failure isolation, bounded shutdown, and shutdown tail persistence.
+self-disables for that process. `RecorderHandle` exposes the closed health states
+`active`, `degraded`, and `disabled` through the sidecar health response; degraded
+includes a stable reason such as `writer_failures`, never raw exceptions. The
+controller projects that state into both Memory settings/status and Log list/detail
+responses. Restarting the sidecar is the recovery operation when the persisted
+flag remains enabled. Tests cover a held sqlite write lock, the failure threshold
+through both response surfaces, recovery by restart, queue overflow, original
+exception identity, original EverOS lifespan delegation/state, startup failure
+isolation, bounded shutdown, and shutdown tail persistence.
 
 ### Retention, corruption, and Clear
 
@@ -285,7 +302,15 @@ There is one sqlite writer owner at a time:
 Neither process unlinks a database that the other may have open. Live corruption
 causes the active recorder to self-disable. Quarantine/recreation is allowed only
 at recorder startup or by host maintenance after proving no child has received
-the DB path and repeating the ownership/no-symlink checks.
+the DB path and repeating the ownership/no-symlink checks. Quarantine names carry
+a validated UTC creation timestamp and are retention data, not permanent forensic
+artifacts. Under the same single-owner lock, recorder startup and every host
+maintenance tick lstat only the narrowly formatted owned quarantine files, delete
+ones at least 14 days old, and then delete oldest quarantines until their combined
+bytes fit a 128 MB hard cap. A deletion failure is reported as degraded and keeps
+a new recorder from opening another database, preventing repeated corruptions
+from bypassing the cap. Tests cover age expiry, size-order cleanup, malformed or
+foreign files preserved, and cleanup failure staying fail-closed.
 
 The existing Clear flow first stops any Memory sidecar and serializes with host
 maintenance. After verifying the fixed directory's owner, mode, and no-symlink
@@ -302,20 +327,24 @@ recursive delete. The DB is recreated only when capture is enabled again.
 - `core/memory/process.py`: pass `AVIBE_MEMORY_CALL_LOG_DB` only when the
   diagnostic flag is enabled; prepare the owned directory.
 - `config/v2_config.py` and the settings route/UI: add the nested default-off
-  boolean, PATCH validation, toggle, and disclosure.
+  boolean, PATCH validation, local-only toggle, disclosure, and the asymmetric
+  rollback rule that never restores capture after a disable request.
 - `core/memory/runtime.py`: treat a diagnostics-flag change as a sidecar
   environment reconciliation, switch recorder/host retention ownership under the
-  lifecycle lock, and own Clear deletion. The settings API relies on that one
-  reconciliation and does not issue a second restart.
+  lifecycle lock, expose recorder health, and own Clear deletion. The settings API
+  relies on that one reconciliation and does not issue a second restart. A disable
+  transition revokes the recorder before preflight; failures can roll back other
+  candidate fields but not the disabled diagnostics flag.
 - `core/memory/artifact.py`: document that a version bump revalidates the
   insight adapter.
 
 `tests/test_memory_call_log.py` covers serialization, recursive redaction across
 all columns, truncation, vectors/attachments omitted, provenance/stage capture,
 Search/Get non-capture, `dropped_before`, failure isolation, lifecycle,
-enabled-to-disabled retention ownership, safe corruption behavior, and Clear
-preserving an unexpected file. Real-wheel tests may skip on an ordinary
-developer machine only when the managed artifact is absent. With
+enabled-to-disabled retention ownership with failing provider preflight,
+quarantine expiry/size cleanup, recorder health/recovery, safe corruption
+behavior, and Clear preserving an unexpected file. Real-wheel tests may skip on
+an ordinary developer machine only when the managed artifact is absent. With
 `AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT=1`, absence, identity mismatch, or any
 skipped contract case is a hard failure.
 
@@ -324,13 +353,22 @@ skipped contract case is a hard failure.
 `reader.py` uses short-lived read-only `mode=ro` connections with
 `busy_timeout=2000` for EverOS and call-log sqlite files. The synchronous reader
 runs via `asyncio.to_thread` while holding the existing async Memory lifecycle
-guard. A missing, expired, malformed, or locked section degrades to an explicit
-"unavailable" step instead of failing the whole page.
+guard. The runtime creates a task for the thread await and shields it from request
+cancellation. If the request is cancelled, it records that cancellation, awaits
+the reader task to completion while still holding the guard, closes every
+short-lived connection, releases the guard, and only then re-raises
+`CancelledError`. Clear therefore cannot unlink or replace any database while a
+cancelled reader still holds or may open it. A missing, expired, malformed, or
+locked section degrades to an explicit "unavailable" step instead of failing the
+whole page.
 
 EverOS JSON columns are join inputs, not response objects. The reader constructs
 every step from a strict output whitelist: ids, labels, status, timing, scope,
-4 KB path-scrubbed errors, and an owner-authorized text preview capped at 512
-UTF-8 bytes. Attachments contribute only type plus a sanitized, 128-byte basename
+4 KB fully scrubbed errors, and an owner-authorized text preview capped at 512
+UTF-8 bytes. Provider-call serialization and timeline projection share one
+recursive scrubber for bearer/API-key values, authorization-like field values,
+configured provider base URLs, and absolute local paths before applying field
+caps. Attachments contribute only type plus a sanitized, 128-byte basename
 placeholder. It never returns raw `memcell.payload_json`,
 `run_record.event_payload`, an embedded MemCell, absolute URI/path fields, or
 stored `md_path`. Provider request/response bodies come only from the already
@@ -363,12 +401,16 @@ Public adapter results:
   not tamper detection; the cursor is intentionally unsigned because every query
   still reapplies scope.
 - `entry_detail(scope, memcell_id)`: ordered steps with authorized calls and
-  current-state labels. It returns at most the newest 100 call details plus an
-  `omitted_call_count`. A deterministic 960,000-byte adapter-payload budget
-  replaces response bodies first, then request bodies, then the oldest call
-  details with explicit omission markers/counts. Bounded step and call summaries
-  remain, and a route-level test keeps the final encoded envelope at or below
-  1,000,000 bytes. No unresolved call bucket is returned.
+  current-state labels. It returns at most the newest 100 call details and newest
+  100 run/strategy timeline rows, with separate `omitted_call_count` and
+  `omitted_step_count` values. The deterministic 960,000-byte adapter-payload
+  budget measures the complete serialized result, not only provider calls. It
+  replaces response bodies first, then request bodies, then run/step errors, then
+  removes the oldest call details and oldest non-structural run/strategy steps,
+  updating omission counts after each pass. Fixed structural steps remain but
+  contain only their bounded scalar summaries. A route-level test uses many 4 KB
+  run errors plus maximum-size calls and keeps the final encoded envelope at or
+  below 1,000,000 bytes. No unresolved call bucket is returned.
 
 Routes:
 
@@ -382,6 +424,9 @@ Routes:
   guard, `no-store`, `_memory_internal_response`, and native dispatch. Malformed
   parameters return 400 `memory_invalid_input`; a foreign or absent memcell
   returns 404 `memory_log_entry_not_found` without revealing which case occurred.
+  A new `POST /api/memory/recorder/restart` accepts only a direct-loopback Memory
+  request, requires enabled/degraded recorder state, and delegates to the existing
+  internal reconciliation rather than creating a second restart path.
 
 Successful responses use `{"status":"ok", ...}`. Failure envelopes follow the
 existing Memory vocabulary and never persist the new request-only not-found code
@@ -398,7 +443,12 @@ Read-path tests include:
   profile wording;
 - direct and atomic-fact cascade parent chains;
 - malformed event JSON, cursor structure/order, exact response-byte cap, expired
-  queue row, missing/locked DB, and Clear serialization;
+  queue row, missing/locked DB, many maximum-error run rows, and Clear
+  serialization;
+- cancellation after the reader thread starts, proving Clear waits for that
+  thread and all its connections before deleting owned files;
+- secret-bearing `run_record.error` and event-error fixtures proving the full
+  provider-secret/base-URL/path scrubber runs before projection;
 - raw event/memcell payloads containing large text, attachment URIs, and absolute
   paths never projected into list/detail responses;
 - local authenticated access, authenticated Avibe Cloud access, wrong-subject
@@ -430,16 +480,21 @@ checked in the browser/Incus verification because jsdom has no layout engine.
   JSON falls back to an inert `<pre>` string instead of mounting an unbounded
   `PreviewJson` tree;
 - all provider/user text rendered without Markdown or HTML;
-- an explicit current logging-off notice. For an older step with no provider
-  rows, use the neutral wording "not recorded or expired"; do not invent toggle
-  history. Also label unavailable sections and current-state-only profile/indexing
-  information.
+- an explicit current logging-off notice. When the persisted flag is enabled but
+  recorder health is `degraded`, show that new provider calls are not being
+  recorded. A direct-loopback administrator gets a "Restart recorder" action
+  through the recorder-restart route; Cloud subjects get the status and
+  local-admin recovery guidance without a global action. For an older step with
+  no provider rows, use the neutral wording "not recorded or expired"; do not
+  invent toggle history. Also label unavailable sections and current-state-only
+  profile/indexing information.
 
 Add `jsdom`, `@testing-library/react`, and `@testing-library/user-event` as
 explicit dev dependencies and use a per-file Vitest jsdom environment. They are
 not currently project dependencies. DOM tests cover load-more, detail/back,
-expand/collapse, refresh, and slow-then-fast request supersession. Pure helpers
-cover cursor accumulation, JSON guards, and view-model shaping. Static SSR tests
+expand/collapse, refresh, slow-then-fast request supersession, degraded recorder
+state, local restart recovery, and the Cloud read-only variant. Pure helpers cover
+cursor accumulation, JSON guards, and view-model shaping. Static SSR tests
 continue to cover empty, loading, failure, and forbidden render states.
 
 All new user-facing strings live in both i18n catalogs, including the diagnostic
@@ -447,13 +502,15 @@ disclosure that retained rows survive turning the toggle off until expiry/Clear.
 Add `docs/MEMORY.md` and `docs/MEMORY_ZH.md`, linked from the README Docs section,
 covering what provider payload capture records and omits, local-administrator-only
 enablement, owner-scoped Cloud reads, the 14-day/5000-row retention contract,
-retention after disabling, and the destructive scope of Clear.
+retention after disabling, degraded-recorder recovery, and the destructive scope
+of Clear.
 
 ## Verification
 
 1. Focused Python tests:
    `tests/test_memory_call_log.py`, `tests/test_memory_insight.py`,
-   `tests/test_memory_sidecar.py`, `tests/test_memory_runtime.py`,
+   `tests/test_memory_sidecar.py`, `tests/test_memory_everos.py`,
+   `tests/test_memory_runtime.py`,
    `tests/test_internal_server.py`, `tests/test_internal_client.py`,
    `tests/test_ui_memory_routes.py`, and `tests/test_memory_config.py`.
 2. `ruff check` on changed Python files; `cd ui && npm test -- MemoryLogPanel`
@@ -486,7 +543,7 @@ New:
 
 Edited:
 
-- `core/memory/{artifact,sidecar,process,runtime,types}.py`
+- `core/memory/{artifact,everos,sidecar,process,runtime,types}.py`
 - `config/v2_config.py`
 - `core/internal_server.py`, `vibe/internal_client.py`,
   `vibe/ui_memory_routes.py`
@@ -497,5 +554,6 @@ Edited:
 - `ui/package.json`, `ui/package-lock.json`
 - `README.md`, `.github/workflows/lint.yml`
 - `tests/test_memory_sidecar.py`, `tests/test_memory_runtime.py`,
-  `tests/test_internal_server.py`, `tests/test_internal_client.py`,
+  `tests/test_memory_everos.py`, `tests/test_internal_server.py`,
+  `tests/test_internal_client.py`,
   `tests/test_ui_memory_routes.py`, `tests/test_memory_config.py`
