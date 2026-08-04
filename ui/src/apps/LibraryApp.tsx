@@ -5,6 +5,14 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 
+import {
+  appLaunchIntent,
+  appTabHref,
+  appTabHrefForDockId,
+  isAppleContextClick,
+  tabModifierLabel,
+  type LaunchModifiers,
+} from './appLaunch';
 import { APP_LIST, APP_REGISTRY, type AppDefinition, type AppId } from './registry';
 import { deriveAppRows, partitionByDock, type AppRow } from './appLibrary';
 import { SHARED_ACTION_ZONE } from './rowLayout';
@@ -40,12 +48,24 @@ type LibraryTab = 'apps' | 'showpages';
  * navigate to their in-shell `/apps/*` route and a Show Page navigates to the
  * full-screen `/apps/show/:sessionId` route (§7.1b) — both keep the AppShell
  * chrome instead of dropping the user onto the raw page or a new browser tab.
+ *
+ * `launch` carries the opening event's modifiers so this surface honors the same
+ * rule as the Dock (§7.1m): the platform tab modifier (⌘ on Apple, Ctrl elsewhere)
+ * hands the app to the browser as a real tab. Otherwise — plain click, or an app
+ * with no standalone surface — the behavior above is unchanged.
  */
 function useOpenApp() {
   const wm = useWindowManager();
   const navigate = useNavigate();
   return useCallback(
-    (appId: AppId, opts?: { title?: string; sessionId?: string }) => {
+    (appId: AppId, opts?: { title?: string; sessionId?: string }, launch?: LaunchModifiers | null) => {
+      if (launch && appLaunchIntent(launch) === 'newTab') {
+        const href = appTabHref({ appId, sessionId: opts?.sessionId });
+        if (href) {
+          window.open(href, '_blank', 'noopener,noreferrer');
+          return;
+        }
+      }
       const desktop = typeof window !== 'undefined' && !!window.matchMedia?.('(min-width: 768px)').matches;
       if (desktop) {
         wm.openApp(appId, {
@@ -104,7 +124,10 @@ export const LibraryApp: React.FC<{ windowId?: string; params?: Record<string, u
         {tab === 'apps' ? (
           <AppsView pages={controller.pages} openApp={openApp} />
         ) : (
-          <ShowPagesView {...controller} onOpenApp={(sessionId, title) => openApp('showpage', { sessionId, title })} />
+          <ShowPagesView
+            {...controller}
+            onOpenApp={(sessionId, title, launch) => openApp('showpage', { sessionId, title }, launch)}
+          />
         )}
       </div>
     </div>
@@ -171,7 +194,8 @@ interface AppLibraryRowProps {
   leading?: React.ReactNode;
   /** The last row overall carries no bottom divider (single-list look). */
   last?: boolean;
-  onOpen: () => void;
+  /** Receives the opening event so a ⌘/Ctrl-click can open a browser tab (§7.1m). */
+  onOpen: (launch?: LaunchModifiers) => void;
   onDockToggle: () => void;
   onRemove?: () => void;
 }
@@ -190,11 +214,20 @@ const AppLibraryRow: React.FC<AppLibraryRowProps> = ({ item, leading, last, onOp
     <div
       role="button"
       tabIndex={0}
-      onClick={onOpen}
+      // Hover hint for the otherwise invisible modifier gesture (§7.1m) — but only on a
+      // row that HAS a tab surface, or it would promise a tab where the Library (and
+      // any other window-only app) falls back to a workbench window.
+      title={
+        appTabHrefForDockId(row.dockId)
+          ? t('apps.dock.newTabChord', { key: tabModifierLabel() })
+          : undefined
+      }
+      // A macOS Ctrl-click is the right-click gesture: leave it to the context menu.
+      onClick={(e) => !isAppleContextClick(e) && onOpen(e)}
       onKeyDown={(e) => {
         if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
           e.preventDefault();
-          onOpen();
+          onOpen(e);
         }
       }}
       className={clsx(
@@ -276,7 +309,7 @@ const AppLibraryRow: React.FC<AppLibraryRowProps> = ({ item, leading, last, onOp
 const DockedReorderRow: React.FC<{
   item: ResolvedRow;
   last?: boolean;
-  onOpen: () => void;
+  onOpen: (launch?: LaunchModifiers) => void;
   onDockToggle: () => void;
   onRemove?: () => void;
   onCommit: () => void;
@@ -305,12 +338,12 @@ const DockedReorderRow: React.FC<{
         item={item}
         last={last}
         leading={<GripHandle controls={controls} />}
-        onOpen={() => {
+        onOpen={(launch) => {
           if (draggedRef.current) {
             draggedRef.current = false;
             return;
           }
-          onOpen();
+          onOpen(launch);
         }}
         onDockToggle={onDockToggle}
         onRemove={onRemove}
@@ -389,15 +422,19 @@ const AppsView: React.FC<{ pages: ShowPage[]; openApp: ReturnType<typeof useOpen
     void setOrder(next);
   };
 
-  const openRow = (row: AppRow) =>
+  const openRow = (row: AppRow, launch?: LaunchModifiers) =>
     row.kind === 'builtin'
-      ? openApp(row.builtinId as AppId)
-      : openApp('showpage', {
-          sessionId: row.sessionId ?? '',
-          title: pageBySession.get(row.sessionId ?? '')?.title ?? undefined,
-        });
+      ? openApp(row.builtinId as AppId, undefined, launch)
+      : openApp(
+          'showpage',
+          {
+            sessionId: row.sessionId ?? '',
+            title: pageBySession.get(row.sessionId ?? '')?.title ?? undefined,
+          },
+          launch,
+        );
   const handlers = (item: ResolvedRow) => ({
-    onOpen: () => openRow(item.row),
+    onOpen: (launch?: LaunchModifiers) => openRow(item.row, launch),
     onDockToggle: () => void (item.row.docked ? undock(item.row.dockId) : dock(item.row.dockId)),
     onRemove: item.row.kind === 'showpage' && item.row.sessionId ? () => void unpin(item.row.sessionId!) : undefined,
   });

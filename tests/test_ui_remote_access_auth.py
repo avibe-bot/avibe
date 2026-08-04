@@ -929,6 +929,37 @@ def test_remote_agent_termination_is_blocked_before_controller_access(
     assert response.get_json()["code"] == "remote_execution_disabled"
 
 
+def test_remote_session_archive_is_blocked_before_store_access(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_archive(*args, **kwargs):
+        raise AssertionError("remote archive reached the local session store")
+
+    monkeypatch.setattr(
+        "core.services.sessions.archive_session",
+        unexpected_archive,
+    )
+    response = client.delete(
+        "/api/sessions/ses-local",
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
 def test_remote_show_dispatch_is_rejected_before_event_reservation(
     monkeypatch,
     tmp_path,
