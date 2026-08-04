@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { AlertCircle, Loader2, Search } from 'lucide-react';
 
-import { tabModifierLabel, type LaunchModifiers } from '../../../apps/appLaunch';
+import { appTabHref, tabModifierLabel, type LaunchModifiers } from '../../../apps/appLaunch';
 import { useMessageSearch } from '../../../lib/useMessageSearch';
 import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
@@ -71,6 +71,16 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
   // A changed result set falls back to its first row without a state-sync
   // effect. Arrow navigation only stores an explicit key while it stays valid.
   const selectedTarget = flatTargets.find((target) => target.key === selectedKey) ?? flatTargets[0];
+  // Whether the highlighted row actually HAS a browser-tab surface: the ⌘↵ hint below
+  // must not promise a tab for a message hit, nor for a window-only app such as the
+  // Library, where `openSearchApp` falls back to a workbench window (§7.1m).
+  const selectedTabHref =
+    selectedTarget?.kind === 'app'
+      ? appTabHref({
+          appId: selectedTarget.result.appId,
+          sessionId: selectedTarget.result.kind === 'showpage' ? selectedTarget.result.sessionId : null,
+        })
+      : null;
 
   const handleSelect = (sessionId: string, messageId: string) => {
     navigate(`/chat/${encodeURIComponent(sessionId)}?msg=${encodeURIComponent(messageId)}`);
@@ -222,10 +232,11 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
           <div className="flex shrink-0 items-center gap-4 border-t border-border bg-foreground/[0.02] px-4 py-[11px]">
             <FooterHint keyLabel="↑↓" label={t('workbench.search.kbdNavigate')} />
             <FooterHint keyLabel="↵" label={t('workbench.search.kbdOpen')} />
-            {/* Only while an APP is highlighted: ⌘↵ opens it as a browser tab (§7.1m),
-                which a message hit has no equivalent of — so the hint appears with the
-                target it applies to instead of always sitting in the footer. */}
-            {selectedTarget?.kind === 'app' && (
+            {/* Only while an app WITH a tab surface is highlighted: ⌘↵ opens it as a
+                browser tab (§7.1m), which a message hit has no equivalent of — so the
+                hint appears with the target it applies to instead of always sitting in
+                the footer. */}
+            {selectedTabHref && (
               <FooterHint
                 keyLabel={`${tabModifierLabel()}↵`}
                 label={t('workbench.search.kbdNewTab')}

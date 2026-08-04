@@ -8,6 +8,7 @@ import clsx from 'clsx';
 import {
   appLaunchIntent,
   appTabHref,
+  appTabHrefForDockId,
   isAppleContextClick,
   tabModifierLabel,
   type LaunchModifiers,
@@ -213,8 +214,14 @@ const AppLibraryRow: React.FC<AppLibraryRowProps> = ({ item, leading, last, onOp
     <div
       role="button"
       tabIndex={0}
-      // Hover hint for the otherwise invisible modifier gesture (§7.1m).
-      title={t('apps.dock.newTabChord', { key: tabModifierLabel() })}
+      // Hover hint for the otherwise invisible modifier gesture (§7.1m) — but only on a
+      // row that HAS a tab surface, or it would promise a tab where the Library (and
+      // any other window-only app) falls back to a workbench window.
+      title={
+        appTabHrefForDockId(row.dockId)
+          ? t('apps.dock.newTabChord', { key: tabModifierLabel() })
+          : undefined
+      }
       // A macOS Ctrl-click is the right-click gesture: leave it to the context menu.
       onClick={(e) => !isAppleContextClick(e) && onOpen(e)}
       onKeyDown={(e) => {

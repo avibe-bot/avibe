@@ -811,12 +811,15 @@ behaves identically instead of re-deriving it):
     `shortcut` slot on the shared `ContextMenuItem`; the Dock menu widens to 268px only
     when that row is present).
   - **hover tooltips** spell the chord on the surfaces where a click is the only
-    affordance: the Dock tile (appended after the existing `⌥{n}` switch hint, and only
-    when the app HAS a tab surface), the App Library rows, and the Show Pages row's
-    open cluster.
+    affordance: the Dock tile (appended after the existing `⌥{n}` switch hint), the App
+    Library rows, and the Show Pages row's open cluster.
   - the **⌘K palette footer** gains a `⌘↵ New Tab` hint that appears **only while an app
     result is highlighted** — a message hit has no tab equivalent, so the hint travels
     with the target it applies to instead of always occupying the footer.
+  - EVERY hint is gated on `appTabHref` resolving for that exact target, not merely on
+    "this is an app": the Library falls back to a workbench window, so promising it a
+    tab would be a lie the click then breaks (Codex bot review on PR #1168, two P2s —
+    the Library row tooltip and the palette footer hint).
   - the chord text is one interpolated string, `apps.dock.newTabChord` = `{{key}}-click →
     new tab`, with `tabModifierLabel()` supplying `⌘`/`Ctrl` from the SAME `IS_APPLE`
     used by `appLaunchIntent` (a test asserts the labelled key is the one that actually

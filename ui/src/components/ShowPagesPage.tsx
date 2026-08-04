@@ -25,7 +25,7 @@ import { useWindowManager } from '../context/WindowManagerContext';
 import { copyTextToClipboard } from '../lib/utils';
 import { copyHref, displayLink, type ShowPageLinkInfo } from '../lib/showPageLinks';
 import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
-import { isAppleContextClick, tabModifierLabel, type LaunchModifiers } from '../apps/appLaunch';
+import { appTabHref, isAppleContextClick, tabModifierLabel, type LaunchModifiers } from '../apps/appLaunch';
 import { filterShowPages, type ShowPageFilter } from '../apps/appLibrary';
 import { SHARED_ACTION_ZONE } from '../apps/rowLayout';
 import { ShowPageAvatarTile } from '../apps/showPageAvatarTile';
@@ -130,8 +130,16 @@ function ShowPageRow({
             type="button"
             // A macOS Ctrl-click is the right-click gesture: leave it to the context menu.
             onClick={(e) => !isAppleContextClick(e) && onOpen(e)}
-            // …plus the modifier gesture, which has no other tell here (§7.1m).
-            title={`${t('showPages.openApp')} · ${t('apps.dock.newTabChord', { key: tabModifierLabel() })}`}
+            // …plus the modifier gesture, which has no other tell here — appended only
+            // when this page really resolves to a tab surface (§7.1m).
+            title={[
+              t('showPages.openApp'),
+              appTabHref({ appId: 'showpage', sessionId: page.session_id })
+                ? t('apps.dock.newTabChord', { key: tabModifierLabel() })
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
             className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
           >
             <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} iconVersion={page.icon_version} />
