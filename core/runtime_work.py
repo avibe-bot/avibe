@@ -88,6 +88,7 @@ class _Registration:
     worker_started_at: dict[str, float] = field(default_factory=dict)
     backoff_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     scan_continuation_task: asyncio.Task[None] | None = None
+    rewind_after_partitions: set[str] = field(default_factory=set)
     scan_started_at: float | None = None
     scan_cursor: str | None = None
     rewind_requested: bool = False
@@ -418,6 +419,7 @@ class RuntimeWorkSupervisor:
             if owner.done() and registration.workers.get(partition) is owner:
                 registration.workers.pop(partition, None)
                 registration.worker_started_at.pop(partition, None)
+                self._rewind_after_partition_release(registration, partition)
 
         assert owner_task is not None
         return await asyncio.shield(owner_task)
@@ -431,7 +433,20 @@ class RuntimeWorkSupervisor:
         if registration.workers.get(partition) is owner:
             registration.workers.pop(partition, None)
             registration.worker_started_at.pop(partition, None)
+            self._rewind_after_partition_release(registration, partition)
         if registration.live and self._active and not self._stopping:
+            registration.event.set()
+
+    @staticmethod
+    def _rewind_after_partition_release(
+        registration: _Registration,
+        partition: str,
+    ) -> None:
+        if partition not in registration.rewind_after_partitions:
+            return
+        registration.rewind_after_partitions.remove(partition)
+        if registration.live:
+            registration.rewind_requested = True
             registration.event.set()
 
     async def run_sync(self, operation: Callable[[], _T]) -> _T:
@@ -636,11 +651,15 @@ class RuntimeWorkSupervisor:
                     registration.scan_cursor = None
                 for item in items:
                     partition = str(item.partition_key or "").strip()
-                    if (
-                        not partition
-                        or partition in registration.workers
-                        or partition in registration.backoff_tasks
-                    ):
+                    if not partition:
+                        continue
+                    if partition in registration.workers:
+                        # Row ordering can be finer-grained than the execution
+                        # partition. Preserve the skipped durable observation
+                        # without polling its still-live owner.
+                        registration.rewind_after_partitions.add(partition)
+                        continue
+                    if partition in registration.backoff_tasks:
                         continue
                     task = asyncio.create_task(
                         self._run_item(registration, item),
@@ -719,6 +738,12 @@ class RuntimeWorkSupervisor:
             if current is asyncio.current_task():
                 registration.workers.pop(partition, None)
                 registration.worker_started_at.pop(partition, None)
+                if should_backoff:
+                    # Backoff completion already owns the retry rewind. Do not
+                    # race it with an immediate scan of the guarded partition.
+                    registration.rewind_after_partitions.discard(partition)
+                else:
+                    self._rewind_after_partition_release(registration, partition)
             if should_backoff and registration.live and not self._stopping:
                 self._start_partition_backoff(registration, partition)
             if (

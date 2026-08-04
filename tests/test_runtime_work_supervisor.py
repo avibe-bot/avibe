@@ -1023,6 +1023,188 @@ async def test_hfr_158_duplicate_pages_continue_only_after_bounded_backoff() -> 
 
 
 @pytest.mark.anyio
+async def test_hfr_158_skipped_partition_rewinds_when_its_owner_releases() -> None:
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+    completed: set[int] = set()
+    scans = 0
+
+    class _SamePartitionCallbacks(RuntimeWorkHandler):
+        ready = False
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            nonlocal scans
+            del occupied
+            if not self.ready:
+                return [], False
+            scans += 1
+            rows = [
+                RuntimeWorkItem(
+                    "session-a",
+                    index,
+                    cursor_key=f"{index:02d}",
+                    rearm_after_process=False,
+                )
+                for index in (1, 2)
+                if index not in completed
+                and (cursor is None or f"{index:02d}" > cursor)
+            ]
+            return rows[:limit], len(rows) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            index = int(item.observation)
+            if index == 1:
+                first_started.set()
+                await release_first.wait()
+            else:
+                second_started.set()
+            completed.add(index)
+
+    handler = _SamePartitionCallbacks()
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=2,
+        scan_page_size=2,
+    )
+    supervisor.register(RuntimeWorkLane.RUN_CALLBACKS, handler)
+    await supervisor.activate()
+    handler.ready = True
+    supervisor.notify(RuntimeWorkLane.RUN_CALLBACKS)
+
+    await asyncio.wait_for(first_started.wait(), 1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert scans == 1
+    assert not second_started.is_set()
+
+    release_first.set()
+    await asyncio.wait_for(second_started.wait(), 1)
+    assert completed == {1, 2}
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_158_live_owner_release_rewinds_skipped_partition_rows() -> None:
+    live_entered = asyncio.Event()
+    release_live = asyncio.Event()
+    recovered: list[int] = []
+    both_recovered = asyncio.Event()
+
+    class _HiddenRecoveryRows(RuntimeWorkHandler):
+        ready = False
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del occupied
+            if not self.ready:
+                return [], False
+            rows = [
+                RuntimeWorkItem(
+                    "session-a",
+                    index,
+                    cursor_key=f"{index:02d}",
+                    rearm_after_process=False,
+                )
+                for index in (1, 2)
+                if index not in recovered
+                and (cursor is None or f"{index:02d}" > cursor)
+            ]
+            return rows[:limit], len(rows) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            recovered.append(int(item.observation))
+            if len(recovered) == 2:
+                both_recovered.set()
+
+    async def live_owner() -> None:
+        live_entered.set()
+        await release_live.wait()
+
+    handler = _HiddenRecoveryRows()
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=2,
+        scan_page_size=2,
+    )
+    supervisor.register(RuntimeWorkLane.RUN_CALLBACKS, handler)
+    await supervisor.activate()
+    live = asyncio.create_task(
+        supervisor.run_in_partition(
+            RuntimeWorkLane.RUN_CALLBACKS,
+            "session-a",
+            live_owner,
+        )
+    )
+    await asyncio.wait_for(live_entered.wait(), 1)
+    handler.ready = True
+    supervisor.notify(RuntimeWorkLane.RUN_CALLBACKS)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert recovered == []
+
+    release_live.set()
+    await live
+    await asyncio.wait_for(both_recovered.wait(), 1)
+    assert recovered == [1, 2]
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_162_backoff_owns_rewind_for_a_skipped_partition() -> None:
+    first_attempt = asyncio.Event()
+    retry_waiting = asyncio.Event()
+    release_retry = asyncio.Event()
+    second_recovered = asyncio.Event()
+    attempts: dict[int, int] = {}
+    completed: set[int] = set()
+
+    async def controlled_retry(_delay: float) -> None:
+        retry_waiting.set()
+        await release_retry.wait()
+
+    class _RetryingPartition(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del occupied
+            rows = [
+                RuntimeWorkItem("session-a", index, cursor_key=f"{index:02d}")
+                for index in (1, 2)
+                if index not in completed
+                and (cursor is None or f"{index:02d}" > cursor)
+            ]
+            return rows[:limit], len(rows) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> bool:
+            index = int(item.observation)
+            attempts[index] = attempts.get(index, 0) + 1
+            if index == 1 and attempts[index] == 1:
+                first_attempt.set()
+                return False
+            completed.add(index)
+            if index == 2:
+                second_recovered.set()
+            return True
+
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=2,
+        scan_page_size=2,
+        retry_wait=controlled_retry,
+    )
+    supervisor.register(RuntimeWorkLane.RUN_CALLBACKS, _RetryingPartition())
+    await supervisor.activate()
+    await asyncio.wait_for(first_attempt.wait(), 1)
+    await asyncio.wait_for(retry_waiting.wait(), 1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not second_recovered.is_set()
+
+    release_retry.set()
+    await asyncio.wait_for(second_recovered.wait(), 1)
+    assert attempts == {1: 2, 2: 1}
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
 async def test_hfr_160_live_partition_owner_blocks_recovery_and_unregisters_by_join() -> None:
     """HFR-160/HFR-166: one exact owner survives wake and registration teardown."""
 
