@@ -65,6 +65,7 @@ describe('MemorySettingsPanel rolling compatibility', () => {
         status={null}
         dependencyReady
         onSaved={onSaved}
+        onReloadSettings={() => undefined}
         onReloadStatus={() => undefined}
         onClearAll={() => undefined}
         clearing={false}
@@ -85,5 +86,38 @@ describe('MemorySettingsPanel rolling compatibility', () => {
       processing: { llm: { base_url: 'https://new.example.test/v1' } },
     }));
     expect(onSaved).toHaveBeenCalledWith(saved);
+  });
+
+  it('reloads authoritative settings when disabling diagnostics is persisted before a failed save', async () => {
+    const settings: MemorySettings = {
+      ...legacySettings,
+      diagnostics: { log_provider_calls: true, mutable: true },
+    };
+    api.saveMemorySettings.mockResolvedValue({ status: 'failed', error: 'memory_processing_failed' });
+    const onReloadSettings = vi.fn();
+    const onReloadStatus = vi.fn();
+    const user = userEvent.setup();
+
+    render(
+      <MemorySettingsPanel
+        settings={settings}
+        status={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={onReloadSettings}
+        onReloadStatus={onReloadStatus}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.providerCallLoggingLabel' }));
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
+      diagnostics: { log_provider_calls: false },
+    }));
+    expect(onReloadSettings).toHaveBeenCalledTimes(1);
+    expect(onReloadStatus).toHaveBeenCalledTimes(1);
   });
 });

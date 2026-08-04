@@ -53,7 +53,7 @@ def test_normalize_provider_call_scrubs_every_serialized_column() -> None:
     base_url = "https://provider.example.test/v1"
     row = normalize_provider_call(
         _call(
-            model=f"model via {base_url}",
+            model=f"model {echoed_provider_key} via {base_url}",
             error=(
                 f"Authorization: Bearer token-value at {local_path}; "
                 f"provider echoed {echoed_provider_key}"
@@ -75,8 +75,8 @@ def test_normalize_provider_call_scrubs_every_serialized_column() -> None:
                 "content": f"read file://{local_path} with {echoed_provider_key}",
             },
             md_path=local_path,
-            request_id=f"request-{echoed_provider_key}",
-            strategy_name=f"strategy-{echoed_provider_key}",
+            request_id="request-1",
+            strategy_name="strategy-1",
         ),
         provider_base_urls=(base_url,),
         exact_redaction_values=(echoed_provider_key,),
@@ -107,6 +107,54 @@ def test_free_text_authorization_redacts_basic_and_digest_values() -> None:
     assert "Basic" not in row.error
     assert "Digest" not in row.error
     assert row.error.count("[REDACTED]") == 2
+
+
+def test_exact_provider_key_does_not_mutate_authorization_attribution() -> None:
+    short_provider_key = "u"
+    owner_id = "u-" + "a" * 32
+    project_id = "p-" + "1" * 32
+    row = normalize_provider_call(
+        _call(
+            request={"content": f"provider echoed {short_provider_key}"},
+            response={"content": f"response {short_provider_key}"},
+            model=f"model-{short_provider_key}",
+            error=f"failed with {short_provider_key}",
+            request_id="request-u-1",
+            strategy_name="extract_user_profile",
+            run_id="run-u-1",
+            memcell_id="memcell-u-1",
+            app_id="avibe",
+            project_id=project_id,
+            owner_id=owner_id,
+            md_path=f"avibe/{project_id}/users/{owner_id}/user.md",
+            entry_id="entry-u-1",
+            parent_type="memcell",
+            parent_id="parent-u-1",
+        ),
+        exact_redaction_values=(short_provider_key,),
+    )
+
+    assert row.owner_id == owner_id
+    assert row.project_id == project_id
+    assert row.request_id == "request-u-1"
+    assert row.strategy_name == "extract_user_profile"
+    assert row.run_id == "run-u-1"
+    assert row.memcell_id == "memcell-u-1"
+    assert row.md_path == f"avibe/{project_id}/users/{owner_id}/user.md"
+    assert row.entry_id == "entry-u-1"
+    assert row.parent_type == "memcell"
+    assert row.parent_id == "parent-u-1"
+    assert short_provider_key not in row.request_json
+    assert short_provider_key not in (row.response_json or "")
+    assert row.model == "model-[REDACTED]"
+    assert row.error == "failed with [REDACTED]"
+
+
+def test_free_text_scrubs_forward_slash_windows_paths() -> None:
+    raw_path = "C:/Users/alice/private/secret.txt"
+    row = normalize_provider_call(_call(error=f"provider failed at {raw_path}"))
+
+    assert row.error == "provider failed at [LOCAL_PATH]"
 
 
 def test_llm_capture_has_deterministic_message_and_payload_budgets() -> None:

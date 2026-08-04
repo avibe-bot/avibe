@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from core.memory.artifact import EVEROS_VERSION
-from core.memory.everos_insight import prepare_call_recorder
+from core.memory.everos_insight import install_error_scrubbers, prepare_call_recorder
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
 
 
@@ -38,6 +38,7 @@ def serve(uds: Path) -> None:
     from starlette.responses import JSONResponse
     import uvicorn
 
+    install_error_scrubbers()
     recorder = None
     if call_log_db := os.environ.get("AVIBE_MEMORY_CALL_LOG_DB"):
         recorder = prepare_call_recorder(Path(call_log_db))

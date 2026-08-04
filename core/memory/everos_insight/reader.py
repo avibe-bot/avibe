@@ -41,7 +41,20 @@ _ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}")
 _PRINCIPAL_RE = re.compile(r"u-[0-9a-f]{32}")
 _PROJECT_RE = re.compile(r"p-[0-9a-f]{32}")
 _ATTACHMENT_TYPES = frozenset(
-    {"attachment", "audio", "document", "file", "image", "input_audio", "input_file", "input_image"}
+    {
+        "attachment",
+        "audio",
+        "doc",
+        "document",
+        "email",
+        "file",
+        "html",
+        "image",
+        "input_audio",
+        "input_file",
+        "input_image",
+        "pdf",
+    }
 )
 
 
@@ -488,42 +501,69 @@ class MemoryInsightReader:
                     ],
                     separators=(",", ":"),
                 )
-                clauses = [
-                    "pc.memcell_id = page.memcell_id",
+                ctes = [
                     """
-                    (pc.stage = 'cascade' AND pc.app_id = :app_id
-                     AND pc.project_id = :project_id AND pc.owner_id = :owner_id
-                     AND pc.parent_type = 'memcell' AND pc.parent_id = page.memcell_id)
+                    page AS MATERIALIZED (
+                        SELECT json_extract(page_item.value, '$.memcell_id') AS memcell_id,
+                               json_extract(page_item.value, '$.message_ids') AS message_ids_json
+                        FROM json_each(:page_json) AS page_item
+                    )
+                    """
+                ]
+                call_branches = [
+                    """
+                    SELECT page.memcell_id, pc.id AS call_id
+                    FROM page
+                    CROSS JOIN provider_call AS pc INDEXED BY provider_call_memcell_id_idx
+                    WHERE pc.memcell_id = page.memcell_id
+                    """,
+                    """
+                    SELECT page.memcell_id, pc.id AS call_id
+                    FROM page
+                    CROSS JOIN provider_call AS pc INDEXED BY provider_call_parent_idx
+                    WHERE pc.parent_type = 'memcell' AND pc.parent_id = page.memcell_id
+                      AND pc.stage = 'cascade' AND pc.app_id = :app_id
+                      AND pc.project_id = :project_id AND pc.owner_id = :owner_id
                     """,
                 ]
                 if capture_available:
-                    clauses.append(
+                    capture_links = " UNION ".join(
+                        f"""
+                        SELECT page.memcell_id, owned_queue.{request_column} AS request_id
+                        FROM page
+                        JOIN capture.memory_capture_queue AS owned_queue
+                          ON owned_queue.principal_id = :owner_id
+                         AND owned_queue.project_ref = :project_id
+                        WHERE typeof(owned_queue.{request_column}) = 'text'
+                          AND owned_queue.{request_column} != ''
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(page.message_ids_json) AS message_id
+                              WHERE message_id.type = 'text'
+                                AND message_id.value =
+                                    'm_' || owned_queue.session_id || '_'
+                                    || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM capture.memory_capture_queue AS any_queue
+                              WHERE (
+                                  any_queue.add_request_id = owned_queue.{request_column}
+                                  OR any_queue.flush_request_id = owned_queue.{request_column}
+                              ) AND (
+                                  any_queue.principal_id IS NOT :owner_id
+                                  OR any_queue.project_ref IS NOT :project_id
+                              )
+                          )
                         """
-                        (typeof(pc.request_id) = 'text' AND pc.request_id != '' AND EXISTS (
-                            SELECT 1 FROM capture.memory_capture_queue AS owned_queue
-                            WHERE owned_queue.principal_id = :owner_id
-                              AND owned_queue.project_ref = :project_id
-                              AND (
-                                  owned_queue.add_request_id = pc.request_id
-                                  OR owned_queue.flush_request_id = pc.request_id
-                              )
-                              AND EXISTS (
-                                  SELECT 1 FROM json_each(page.message_ids_json) AS message_id
-                                  WHERE message_id.type = 'text'
-                                    AND message_id.value =
-                                        'm_' || owned_queue.session_id || '_'
-                                        || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
-                              )
-                        ) AND NOT EXISTS (
-                            SELECT 1 FROM capture.memory_capture_queue AS any_queue
-                            WHERE (
-                                any_queue.add_request_id = pc.request_id
-                                OR any_queue.flush_request_id = pc.request_id
-                            ) AND (
-                                any_queue.principal_id IS NOT :owner_id
-                                OR any_queue.project_ref IS NOT :project_id
-                            )
-                        ))
+                        for request_column in ("add_request_id", "flush_request_id")
+                    )
+                    ctes.append(f"capture_links AS MATERIALIZED ({capture_links})")
+                    call_branches.append(
+                        """
+                        SELECT capture_links.memcell_id, pc.id AS call_id
+                        FROM capture_links
+                        CROSS JOIN provider_call AS pc INDEXED BY provider_call_request_id_idx
+                        WHERE pc.request_id = capture_links.request_id
+                          AND typeof(pc.request_id) = 'text' AND pc.request_id != ''
                         """
                     )
                 if runs_available:
@@ -543,33 +583,54 @@ class MemoryInsightReader:
                             )
                         ELSE 0 END
                     """
-                    clauses.append(
-                        f"pc.run_id IN (SELECT rr.run_id FROM ome.run_record AS rr WHERE {run_scope})"
-                    )
-                    clauses.append(
+                    ctes.append(
                         f"""
-                        (pc.stage = 'cascade' AND pc.app_id = :app_id
-                         AND pc.project_id = :project_id AND pc.owner_id = :owner_id
-                         AND pc.parent_type = 'episode' AND pc.parent_id IN (
-                            SELECT json_extract(rr.event_payload, '$.episode_entry_id')
+                        authorized_runs AS MATERIALIZED (
+                            SELECT page.memcell_id, rr.run_id,
+                                   CASE
+                                     WHEN substr(rr.event_topic, -length(':EpisodeExtracted'))
+                                              = ':EpisodeExtracted' COLLATE BINARY
+                                      AND json_type(
+                                              rr.event_payload, '$.episode_entry_id'
+                                          ) = 'text'
+                                     THEN json_extract(
+                                              rr.event_payload, '$.episode_entry_id'
+                                          )
+                                   END AS episode_entry_id
                             FROM ome.run_record AS rr
+                            CROSS JOIN page
                             WHERE {run_scope}
-                              AND substr(rr.event_topic, -length(':EpisodeExtracted'))
-                                  = ':EpisodeExtracted'
-                              AND json_type(rr.event_payload, '$.episode_entry_id') = 'text'
-                         ))
+                        )
                         """
                     )
+                    call_branches.extend(
+                        (
+                            """
+                            SELECT authorized_runs.memcell_id, pc.id AS call_id
+                            FROM authorized_runs
+                            CROSS JOIN provider_call AS pc INDEXED BY provider_call_run_id_idx
+                            WHERE pc.run_id = authorized_runs.run_id
+                              AND typeof(pc.run_id) = 'text'
+                            """,
+                            """
+                            SELECT authorized_runs.memcell_id, pc.id AS call_id
+                            FROM authorized_runs
+                            CROSS JOIN provider_call AS pc INDEXED BY provider_call_parent_idx
+                            WHERE authorized_runs.episode_entry_id IS NOT NULL
+                              AND pc.parent_type = 'episode'
+                              AND pc.parent_id = authorized_runs.episode_entry_id
+                              AND pc.stage = 'cascade' AND pc.app_id = :app_id
+                              AND pc.project_id = :project_id AND pc.owner_id = :owner_id
+                            """,
+                        )
+                    )
+                ctes.append(f"authorized_calls AS ({' UNION '.join(call_branches)})")
                 rows = conn.execute(
                     f"""
-                    SELECT page.memcell_id, COUNT(pc.id) AS total
-                    FROM (
-                        SELECT json_extract(page_item.value, '$.memcell_id') AS memcell_id,
-                               json_extract(page_item.value, '$.message_ids') AS message_ids_json
-                        FROM json_each(:page_json) AS page_item
-                    ) AS page
-                    LEFT JOIN provider_call AS pc ON ({' OR '.join(clauses)})
-                    GROUP BY page.memcell_id
+                    WITH {', '.join(ctes)}
+                    SELECT memcell_id, COUNT(*) AS total
+                    FROM authorized_calls
+                    GROUP BY memcell_id
                     """,
                     {
                         "page_json": page_json,
@@ -579,6 +640,8 @@ class MemoryInsightReader:
                     },
                 )
                 counts = {str(row["memcell_id"]): int(row["total"]) for row in rows}
+                for memcell in memcells:
+                    counts.setdefault(str(memcell["memcell_id"]), 0)
                 return counts, {"status": "available"}
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}

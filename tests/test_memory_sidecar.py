@@ -44,6 +44,7 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
             return None
 
     monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.1")
+    monkeypatch.setattr(sidecar, "install_error_scrubbers", lambda: None)
     monkeypatch.setattr(sidecar.importlib, "import_module", lambda _module: _FactoryModule())
     monkeypatch.setattr(sidecar.os, "umask", lambda _mode: 0o022)
     monkeypatch.setattr(uvicorn, "Config", _Config)
@@ -127,6 +128,11 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
             asyncio.run(exercise())
 
     monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.1")
+    monkeypatch.setattr(
+        sidecar,
+        "install_error_scrubbers",
+        lambda: events.append("install-error-scrubbers"),
+    )
     monkeypatch.setattr(sidecar, "prepare_call_recorder", prepare)
     monkeypatch.setattr(
         sidecar.importlib,
@@ -143,6 +149,7 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
     sidecar.serve(tmp_path / "everos.sock")
 
     assert events == [
+        "install-error-scrubbers",
         ("prepare", db_path),
         "import-app",
         "create-app",

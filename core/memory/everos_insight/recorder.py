@@ -98,7 +98,7 @@ _LABELED_SECRET_RE = re.compile(
 _PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:sk|rk|pk|api)-[A-Za-z0-9_-]{8,}")
 _FILE_URL_RE = re.compile(r"(?i)\bfile:///(?:[^\s\"'<>]|\\ )+")
 _POSIX_PATH_RE = re.compile(r"(?<![:/\w])/(?:[^\s\"'<>]|\\ )+")
-_WINDOWS_PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:\\|\\\\)[^\s\"'<>]+")
+_WINDOWS_PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,39 +523,44 @@ def normalize_provider_call(
         request = _llm_request(request)
         response = _bounded_json(response, _LLM_PAYLOAD_BYTES) if response is not None else None
 
-    scrub = lambda value: _scrub_optional_text(
+    scrub_provider = lambda value: _scrub_optional_text(
         value,
         base_urls=base_urls,
         exact_values=exact_values,
     )
+    scrub_internal = lambda value: _scrub_optional_text(
+        value,
+        base_urls=base_urls,
+        exact_values=(),
+    )
     row = ProviderCallRow(
-        id=_required_bounded_text(scrub(call.id), _IDENTITY_BYTES, "id"),
+        id=_required_bounded_text(scrub_internal(call.id), _IDENTITY_BYTES, "id"),
         started_at_ms=call.started_at_ms,
         duration_ms=call.duration_ms,
         kind=call.kind,
-        stage=_required_bounded_text(scrub(call.stage), _LABEL_BYTES, "stage"),
-        model=_bounded_text(scrub(call.model), _MODEL_BYTES),
-        status=_required_bounded_text(scrub(call.status), _LABEL_BYTES, "status"),
-        error=_bounded_text(scrub(call.error), _ERROR_BYTES),
-        finish_reason=_bounded_text(scrub(call.finish_reason), _LABEL_BYTES),
+        stage=_required_bounded_text(scrub_internal(call.stage), _LABEL_BYTES, "stage"),
+        model=_bounded_text(scrub_provider(call.model), _MODEL_BYTES),
+        status=_required_bounded_text(scrub_internal(call.status), _LABEL_BYTES, "status"),
+        error=_bounded_text(scrub_provider(call.error), _ERROR_BYTES),
+        finish_reason=_bounded_text(scrub_provider(call.finish_reason), _LABEL_BYTES),
         prompt_tokens=call.prompt_tokens,
         completion_tokens=call.completion_tokens,
         request_json=_serialize_payload(request, _LLM_PAYLOAD_BYTES),
         response_json=_serialize_payload(response, _LLM_PAYLOAD_BYTES) if response is not None else None,
         request_bytes=request_bytes,
         response_bytes=response_bytes,
-        request_id=_bounded_provenance(scrub(call.request_id)),
-        strategy_name=_bounded_text(scrub(call.strategy_name), _PROVENANCE_BYTES),
-        run_id=_bounded_provenance(scrub(call.run_id)),
+        request_id=_bounded_provenance(scrub_internal(call.request_id)),
+        strategy_name=_bounded_text(scrub_internal(call.strategy_name), _PROVENANCE_BYTES),
+        run_id=_bounded_provenance(scrub_internal(call.run_id)),
         attempt=call.attempt,
-        memcell_id=_bounded_provenance(scrub(call.memcell_id)),
-        app_id=_bounded_provenance(scrub(call.app_id)),
-        project_id=_bounded_provenance(scrub(call.project_id)),
-        owner_id=_bounded_provenance(scrub(call.owner_id)),
-        md_path=_bounded_provenance(scrub(call.md_path), _MD_PATH_BYTES),
-        entry_id=_bounded_provenance(scrub(call.entry_id)),
-        parent_type=_bounded_provenance(scrub(call.parent_type)),
-        parent_id=_bounded_provenance(scrub(call.parent_id)),
+        memcell_id=_bounded_provenance(scrub_internal(call.memcell_id)),
+        app_id=_bounded_provenance(scrub_internal(call.app_id)),
+        project_id=_bounded_provenance(scrub_internal(call.project_id)),
+        owner_id=_bounded_provenance(scrub_internal(call.owner_id)),
+        md_path=_bounded_provenance(scrub_internal(call.md_path), _MD_PATH_BYTES),
+        entry_id=_bounded_provenance(scrub_internal(call.entry_id)),
+        parent_type=_bounded_provenance(scrub_internal(call.parent_type)),
+        parent_id=_bounded_provenance(scrub_internal(call.parent_id)),
         dropped_before=call.dropped_before,
     )
     if _json_size(asdict(row)) > _MAX_ROW_ENCODED_BYTES:

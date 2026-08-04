@@ -187,6 +187,9 @@ export const SettingsMemoryPage: React.FC = () => {
         void loadStatus();
         void loadDependency();
       }}
+      onReloadSettings={() => {
+        void loadSettings();
+      }}
       onReloadStatus={() => {
         void loadStatus();
         void loadDependency();

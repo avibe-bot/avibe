@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .recorder import ProviderCallInput, ProviderKind
+from .recorder import ProviderCallInput, ProviderKind, _scrub_text
 from .recorder import RecorderHandle as _WriterHandle
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,8 @@ _current_context: ContextVar[_CallContext | None] = ContextVar(
     "avibe_memory_call_context", default=None
 )
 _active_handle: RecorderHandle | Any | None = None
+_persisted_error_base_urls: tuple[str, ...] = ()
+_persisted_error_exact_values: tuple[str, ...] = ()
 
 
 class RecorderHandle:
@@ -98,6 +100,30 @@ def prepare_call_recorder(db_path: Path) -> RecorderHandle | None:
         _active_handle = previous
         logger.warning("memory_call_recorder_prepare_failed", exc_info=True)
         return None
+
+
+def install_error_scrubbers() -> None:
+    """Scrub provider credentials before EverOS persists diagnostic errors."""
+    global _persisted_error_base_urls, _persisted_error_exact_values
+
+    _persisted_error_base_urls = _provider_base_urls()
+    _persisted_error_exact_values = tuple(
+        sorted(set(_provider_api_keys()), key=len, reverse=True)
+    )
+    run_record = importlib.import_module("everos.infra.ome._stores.run_record")
+    md_change_state = importlib.import_module(
+        "everos.infra.persistence.sqlite.repos.md_change_state"
+    )
+    _patch_attribute(
+        run_record.RunRecordStore,
+        "_update_status",
+        _run_record_status_wrapper,
+    )
+    _patch_attribute(
+        type(md_change_state.md_change_state_repo),
+        "mark_failed",
+        _md_change_failure_wrapper,
+    )
 
 
 @contextmanager
@@ -158,6 +184,51 @@ def _patch_attribute(owner: Any, name: str, factory: Callable[[Any], Any]) -> No
     wrapped = factory(current)
     setattr(wrapped, "__avibe_memory_call_patch__", True)
     setattr(owner, name, wrapped)
+
+
+def _persisted_error(error: str) -> str:
+    try:
+        return _scrub_text(
+            error,
+            base_urls=_persisted_error_base_urls,
+            exact_values=_persisted_error_exact_values,
+        )
+    except Exception:
+        return "[REDACTED]"
+
+
+def _run_record_status_wrapper(original: Callable[..., Any]) -> Callable[..., Any]:
+    async def wrapped(
+        self: Any,
+        run_id: str,
+        status: Any,
+        finished_at: Any,
+        error: str | None,
+    ) -> Any:
+        clean_error = _persisted_error(error) if isinstance(error, str) else error
+        return await original(self, run_id, status, finished_at, clean_error)
+
+    return wraps(original)(wrapped)
+
+
+def _md_change_failure_wrapper(original: Callable[..., Any]) -> Callable[..., Any]:
+    async def wrapped(
+        self: Any,
+        md_path: str,
+        *,
+        retryable: bool,
+        error: str,
+        new_retry_count: int,
+    ) -> Any:
+        return await original(
+            self,
+            md_path,
+            retryable=retryable,
+            error=_persisted_error(error),
+            new_retry_count=new_retry_count,
+        )
+
+    return wraps(original)(wrapped)
 
 
 def _chat_wrapper(original: Callable[..., Any]) -> Callable[..., Any]:

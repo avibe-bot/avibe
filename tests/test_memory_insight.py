@@ -149,6 +149,10 @@ def insight_paths(tmp_path: Path) -> MemoryInsightPaths:
                 parent_id TEXT,
                 dropped_before INTEGER NOT NULL DEFAULT 0
             );
+            CREATE INDEX provider_call_request_id_idx ON provider_call(request_id);
+            CREATE INDEX provider_call_run_id_idx ON provider_call(run_id);
+            CREATE INDEX provider_call_memcell_id_idx ON provider_call(memcell_id);
+            CREATE INDEX provider_call_parent_idx ON provider_call(parent_type, parent_id);
             """
         )
     return MemoryInsightPaths(root, capture_db, call_db)
@@ -433,11 +437,30 @@ def test_list_page_bounds_history_before_python_projection(
     assert {entry["memcell_id"]: entry["run_summary"] for entry in result["entries"]} == {
         memcell_id: {"total": 0, "statuses": {}} for memcell_id in expected_counts
     }
-    selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
+    selects = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+    ]
     assert len(selects) == 4
     assert "LIMIT 51" in selects[0]
     assert "COUNT(*) AS total" in selects[2]
-    assert "COUNT(pc.id) AS total" in selects[3]
+    assert " UNION " in selects[3]
+
+    with original_connect(insight_paths.call_log_db_path) as conn:
+        conn.execute("ATTACH DATABASE ? AS capture", (str(insight_paths.capture_db_path),))
+        conn.execute("ATTACH DATABASE ? AS ome", (str(insight_paths.ome_db_path),))
+        query_plan = "\n".join(
+            str(row[3]) for row in conn.execute(f"EXPLAIN QUERY PLAN {selects[3]}")
+        )
+    for index_name in (
+        "provider_call_memcell_id_idx",
+        "provider_call_request_id_idx",
+        "provider_call_run_id_idx",
+        "provider_call_parent_idx",
+    ):
+        assert f"SEARCH pc USING INDEX {index_name}" in query_plan
+    assert "SCAN pc" not in query_plan
 
 
 def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsightPaths) -> None:
@@ -666,6 +689,38 @@ def test_projection_scrubs_and_never_returns_raw_payload_or_paths(
     assert "file:///private" not in encoded
     assert "[REDACTED]" in encoded
     assert "[LOCAL_PATH]" in encoded
+
+
+def test_preview_includes_every_supported_document_attachment_kind(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    payload = {
+        "items": [
+            {
+                "role": "user",
+                "sender_id": ALICE,
+                "content": [
+                    {"type": "doc", "name": "notes.txt"},
+                    {"type": "pdf", "name": "report.pdf"},
+                    {"type": "html", "name": "page.html"},
+                    {"type": "email", "name": "message.eml"},
+                ],
+            }
+        ]
+    }
+    _insert_memcell(
+        insight_paths,
+        "mc_document_attachments",
+        ALICE,
+        timestamp_ms=10_250,
+        payload=payload,
+    )
+
+    result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
+
+    assert result["entries"][0]["preview"] == (
+        "[doc: notes.txt] [pdf: report.pdf] [html: page.html] [email: message.eml]"
+    )
 
 
 def test_configured_provider_urls_are_scrubbed_from_runs_and_calls(

@@ -246,6 +246,48 @@ def test_prepare_call_recorder_passes_configured_provider_keys_to_scrubber(
         patches._active_handle = previous
 
 
+def test_everos_errors_are_scrubbed_before_persistence_across_key_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_key = "plain-old-provider-credential"
+    new_key = "plain-new-provider-credential"
+    persisted: list[str] = []
+    monkeypatch.setattr(patches, "_persisted_error_base_urls", ())
+    monkeypatch.setattr(patches, "_persisted_error_exact_values", (old_key,))
+
+    async def update_status(_self, _run_id, _status, _finished_at, error):
+        persisted.append(error)
+
+    async def mark_failed(
+        _self,
+        _md_path,
+        *,
+        retryable,
+        error,
+        new_retry_count,
+    ):
+        assert retryable is True
+        assert new_retry_count == 1
+        persisted.append(error)
+
+    run_update = patches._run_record_status_wrapper(update_status)
+    md_failure = patches._md_change_failure_wrapper(mark_failed)
+    asyncio.run(run_update(object(), "run-1", object(), object(), f"run failed with {old_key}"))
+    asyncio.run(
+        md_failure(
+            object(),
+            "profile.md",
+            retryable=True,
+            error=f"index failed with {old_key}",
+            new_retry_count=1,
+        )
+    )
+
+    monkeypatch.setattr(patches, "_persisted_error_exact_values", (new_key,))
+    assert persisted == ["run failed with [REDACTED]", "index failed with [REDACTED]"]
+    assert all(old_key not in error for error in persisted)
+
+
 def test_pinned_everos_patch_contract(monkeypatch, tmp_path: Path) -> None:
     """Exercise the patched, public EverOS 1.2.1 call surfaces offline.
 
@@ -270,6 +312,10 @@ def test_pinned_everos_patch_contract(monkeypatch, tmp_path: Path) -> None:
     from everos.memory.cascade.handlers.atomic_fact import AtomicFactHandler
     from everos.memory.cascade.handlers.episode import EpisodeHandler
     from everos.memory.extract.pipeline import user_memory
+    from everos.infra.ome._stores.run_record import RunRecordStore
+    from everos.infra.persistence.sqlite.repos.md_change_state import (
+        md_change_state_repo,
+    )
     from pydantic import SecretStr
     from structlog.contextvars import bind_contextvars, reset_contextvars
 
@@ -304,9 +350,32 @@ def test_pinned_everos_patch_contract(monkeypatch, tmp_path: Path) -> None:
             "md_path",
             "entry",
         ]
+    assert list(inspect.signature(RunRecordStore._update_status).parameters) == [
+        "self",
+        "run_id",
+        "status",
+        "finished_at",
+        "error",
+    ]
+    assert list(
+        inspect.signature(type(md_change_state_repo).mark_failed).parameters
+    ) == [
+        "self",
+        "md_path",
+        "retryable",
+        "error",
+        "new_retry_count",
+    ]
 
+    patches.install_error_scrubbers()
     handle = patches.prepare_call_recorder(tmp_path / "call-log.db")
     assert handle is not None
+    assert getattr(RunRecordStore._update_status, "__avibe_memory_call_patch__", False)
+    assert getattr(
+        type(md_change_state_repo).mark_failed,
+        "__avibe_memory_call_patch__",
+        False,
+    )
     assert getattr(OpenAICompatClient.chat, "__avibe_memory_call_patch__", False)
     assert getattr(
         OpenAIEmbeddingProvider._embed_chunk,
