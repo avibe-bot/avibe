@@ -80,6 +80,9 @@ class _StubSessions:
         self.recorded.append(key)
         return True
 
+    def seed_legacy_claim(self, channel_id, thread_ts, message_ts):
+        self._claimed.add((channel_id, thread_ts, message_ts))
+
 
 class _StubSettingsManager:
     def __init__(self):
@@ -233,11 +236,7 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
         )
         handler = MessageHandler(controller)
         handler._is_duplicate_human_delivery = Mock(
-            side_effect=lambda context: controller.settings_manager.sessions.is_message_already_processed(
-                context.channel_id,
-                context.thread_id or context.message_id,
-                context.message_id,
-            )
+            side_effect=lambda context: handler._native_human_event_processed(context)
         )
         context = MessageContext(
             user_id="U1",
@@ -252,7 +251,7 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(consumed, ["sk-opencode-secret"])
         self.assertEqual(
             controller.settings_manager.sessions.recorded,
-            [("C1", "m-setup", "m-setup")],
+            [("im:slack:C1", "im:slack:m-setup", "im:slack:m-setup")],
         )
         self.assertEqual(
             controller.agent_auth_service.maybe_consume_setup_reply.await_count,

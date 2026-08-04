@@ -9168,18 +9168,10 @@ def _registered_media_response(
     response = send_file(candidate, mimetype=mime_type)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    # Cache for a bounded window so re-renders / scrolling / re-opening the chat
-    # reuse the bytes instead of re-fetching — but do NOT promise immutability: a
-    # token maps to a MUTABLE ``local_path`` (an agent can overwrite a file in
-    # place), so an eternal ``immutable`` cache could pin stale bytes in one
-    # client while another reads new bytes from disk. Cheap revalidation isn't an
-    # option here — Starlette's FileResponse doesn't emit 304s (verified; it
-    # re-sends 200), so ``must-revalidate`` would force a full re-download every
-    # time and reintroduce the very re-fetch this avoids. A short max-age is the
-    # balance: no re-fetch during active use, and any stale/split window is
-    # bounded to an hour, after which the next fetch re-reads the current file.
-    # ``private`` because the file is auth-gated (served only to its user).
-    response.headers["Cache-Control"] = "private, max-age=3600"
+    # Authorization is checked on every request and can change independently of
+    # the opaque token. Browser-profile account switching must not reuse bytes
+    # cached under a previous remote identity.
+    response.headers["Cache-Control"] = "private, no-store"
     filename = row.get("file_name") or candidate.name
     # Force download for non-allowlisted (active) types even without ?download=1,
     # so previewing an agent-produced HTML/SVG can't run script on this origin.
@@ -9596,7 +9588,7 @@ async def sessions_messages_create(session_id: str):
         web_push_authorization_context_record,
     )
     from modules.im.message_facts import is_ordinary_workbench_text
-    from storage import messages_service
+    from storage import messages_service, resource_access_service
     from storage.agent_session_rows import session_is_runtime_owned
     from vibe import internal_client
 
@@ -9655,7 +9647,7 @@ async def sessions_messages_create(session_id: str):
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     except PermissionError as err:
-        return jsonify({"error": str(err), "code": "agent_access_forbidden"}), 403
+        return _coded_error_response("agent_access_forbidden", str(err), 403)
 
     dispatch_text = (
         (text if isinstance(text, str) else None)
@@ -9686,13 +9678,16 @@ async def sessions_messages_create(session_id: str):
             if workbench_sessions_service.is_session_archived(conn, session_id):
                 return None
             delivery_id = message_deliveries.new_delivery_id()
-            message_metadata = {
-                **(payload.get("metadata") or {}),
-                "_web_push_user_key": web_push_user_key,
-                "_memory_user_id": memory_user_id,
-                "_memory_cli_admitted": memory_cli_admitted,
-                "_memory_ordinary_text": memory_ordinary_text,
-            }
+            message_metadata = resource_access_service.metadata_with_resource_user_context(
+                {
+                    **(payload.get("metadata") or {}),
+                    "_web_push_user_key": web_push_user_key,
+                    "_memory_user_id": memory_user_id,
+                    "_memory_cli_admitted": memory_cli_admitted,
+                    "_memory_ordinary_text": memory_ordinary_text,
+                },
+                getattr(g, "authorization_context", None),
+            )
             message_metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
             if web_push_authorization_context is not None:
                 message_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = [

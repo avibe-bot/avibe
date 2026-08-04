@@ -830,10 +830,6 @@ class VibeAgentStore:
 
     def require_manageable(self, name: str, *, user_context: Any = None) -> VibeAgent:
         """Return an Agent only when the caller may change its resource."""
-
-        from storage import resource_access_service
-
-        context = resolve_resource_access_context(user_context)
         with self.engine.connect() as conn:
             row = conn.execute(
                 select(agents).where(agents.c.normalized_name == normalize_agent_name(name)).limit(1)
@@ -841,14 +837,32 @@ class VibeAgentStore:
             if row is None:
                 raise ValueError(f"agent '{name}' not found")
             agent = self._from_row(row)
-            if not resource_access_service.can_manage_resource_acl(
-                context,
-                "agent",
-                agent.id,
-                connection=conn,
-            ):
-                raise VibeAgentAccessError("Agent access is not permitted.")
-            return agent
+            return self._require_manageable_agent(
+                conn,
+                agent,
+                user_context=user_context,
+            )
+
+    @staticmethod
+    def _require_manageable_agent(
+        conn: Connection,
+        agent: VibeAgent,
+        *,
+        user_context: Any = None,
+    ) -> VibeAgent:
+        """Check mutation access using the transaction that owns the Agent row."""
+
+        from storage import resource_access_service
+
+        context = resolve_resource_access_context(user_context)
+        if not resource_access_service.can_manage_resource_acl(
+            context,
+            "agent",
+            agent.id,
+            connection=conn,
+        ):
+            raise VibeAgentAccessError("Agent access is not permitted.")
+        return agent
 
     def create(
         self,
@@ -921,7 +935,6 @@ class VibeAgentStore:
         user_context: Any = None,
     ) -> VibeAgent:
         normalized = normalize_agent_name(name)
-        self.require_manageable(name, user_context=user_context)
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
             row = conn.execute(
@@ -932,6 +945,11 @@ class VibeAgentStore:
                     f"agent '{name}' not found", agent_name=name, reason="missing"
                 )
             existing = self._from_row(row)
+            self._require_manageable_agent(
+                conn,
+                existing,
+                user_context=user_context,
+            )
             if existing.archived_at is not None:
                 raise AgentArchivedEditError(agent_name=name)
 
@@ -971,7 +989,6 @@ class VibeAgentStore:
         *,
         user_context: Any = None,
     ) -> VibeAgent:
-        self.require_manageable(name, user_context=user_context)
         raw_new_name, new_normalized = _validated_public_agent_name(new_name)
         old_normalized = normalize_agent_name(name)
         now = _utc_now_iso()
@@ -984,8 +1001,13 @@ class VibeAgentStore:
                 if row is None:
                     raise AgentUnavailableError(
                         f"agent '{name}' not found", agent_name=name, reason="missing"
-                    )
+                )
                 agent = self._from_row(row)
+                self._require_manageable_agent(
+                    conn,
+                    agent,
+                    user_context=user_context,
+                )
                 if agent.archived_at is not None:
                     raise AgentArchivedEditError(agent_name=name)
                 if is_builtin_default_agent(agent):
@@ -1048,10 +1070,18 @@ class VibeAgentStore:
                 legacy = self._legacy_archive_for_original_name(conn, normalized)
                 if legacy is None:
                     return None
-                self.require_manageable(legacy.name, user_context=user_context)
+                self._require_manageable_agent(
+                    conn,
+                    legacy,
+                    user_context=user_context,
+                )
                 return self._compact_legacy_archive(conn, legacy, now=now)
             agent = self._from_row(row)
-            self.require_manageable(agent.name, user_context=user_context)
+            self._require_manageable_agent(
+                conn,
+                agent,
+                user_context=user_context,
+            )
             if is_builtin_default_agent(agent):
                 raise AgentArchiveError(
                     code="agent_builtin",
@@ -1220,15 +1250,24 @@ class VibeAgentStore:
     def remove(self, name: str, *, user_context: Any = None) -> bool:
         from storage import resource_access_service
 
-        agent = self.get(name)
-        if agent is None:
-            return False
-        self.require_manageable(name, user_context=user_context)
-        if is_builtin_default_agent(agent):
-            raise ValueError(f"agent '{agent.name}' is built in and cannot be deleted")
-        normalized = agent.normalized_name
         with self.engine.begin() as conn:
-            result = conn.execute(agents.delete().where(agents.c.normalized_name == normalized))
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agents)
+                .where(agents.c.normalized_name == normalize_agent_name(name))
+                .limit(1)
+            ).mappings().first()
+            if row is None:
+                return False
+            agent = self._from_row(row)
+            self._require_manageable_agent(
+                conn,
+                agent,
+                user_context=user_context,
+            )
+            if is_builtin_default_agent(agent):
+                raise ValueError(f"agent '{agent.name}' is built in and cannot be deleted")
+            result = conn.execute(agents.delete().where(agents.c.id == agent.id))
             if result.rowcount:
                 resource_access_service.delete_resource_policy(conn, "agent", agent.id)
             return bool(result.rowcount)
@@ -1612,7 +1651,6 @@ class VibeAgentStore:
         user_context: Any = None,
     ) -> None:
         normalized = normalize_agent_name(name)
-        self.require_manageable(name, user_context=user_context)
         now = _utc_now_iso()
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
@@ -1624,6 +1662,11 @@ class VibeAgentStore:
                     f"agent '{name}' not found", agent_name=name, reason="missing"
                 )
             agent = self._from_row(row)
+            self._require_manageable_agent(
+                conn,
+                agent,
+                user_context=user_context,
+            )
             if not agent.enabled or agent.archived_at is not None:
                 raise AgentUnavailableError(
                     f"agent '{agent.name}' is disabled",

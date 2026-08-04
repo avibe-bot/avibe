@@ -131,6 +131,13 @@ _EXECUTION_ROUTING_KEYS = _FLUSH_REBUILT_KEYS | frozenset(
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 MEMORY_USER_ID_METADATA = "_memory_user_id"
 MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
+_MEMORY_METADATA_KEYS = frozenset(
+    {
+        MEMORY_USER_ID_METADATA,
+        MEMORY_ORDINARY_TEXT_METADATA,
+        "_memory_cli_admitted",
+    }
+)
 
 _NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex"})
 _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS = 1
@@ -308,6 +315,7 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         return segment
 
     segment: list[dict[str, Any]] = []
+    segment_is_memory_scoped: bool | None = None
     segment_owner: str | None = None
     for row in rows:
         if _scheduled_provenance(row) is not None:
@@ -315,11 +323,18 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         if delivery_store.message_merge_identity(row) != message_identity:
             break
         metadata = row.get("metadata") or {}
+        is_memory_scoped = any(key in metadata for key in _MEMORY_METADATA_KEYS)
         owner = str(metadata.get(MEMORY_USER_ID_METADATA) or "").strip() or None
         if segment and (
-            owner is None
-            or segment_owner is None
-            or owner != segment_owner
+            is_memory_scoped != segment_is_memory_scoped
+            or (
+                is_memory_scoped
+                and (
+                    owner is None
+                    or segment_owner is None
+                    or owner != segment_owner
+                )
+            )
         ):
             break
         native_message_id = str(row.get("native_message_id") or "").strip()
@@ -328,8 +343,10 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 segment.append(row)
             break
         segment.append(row)
+        if len(segment) == 1:
+            segment_is_memory_scoped = is_memory_scoped
         segment_owner = owner
-        if owner is None:
+        if is_memory_scoped and owner is None:
             break
     return segment
 
@@ -1228,14 +1245,7 @@ class SessionTurnManager:
             for payload in payloads
         ]
         memory_metadata_present = any(
-            any(
-                key in metadata
-                for key in (
-                    MEMORY_USER_ID_METADATA,
-                    MEMORY_ORDINARY_TEXT_METADATA,
-                    "_memory_cli_admitted",
-                )
-            )
+            any(key in metadata for key in _MEMORY_METADATA_KEYS)
             for metadata in metadata_rows
         )
         memory_users = list(

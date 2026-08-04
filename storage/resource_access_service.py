@@ -222,6 +222,8 @@ def metadata_with_resource_user_context(
         "vibe_membership_version": context.membership_version,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
+        "claims_issued_at": context.claims_issued_at,
+        "vibe_instance_authorization_revision": context.authorization_revision,
         "authorization_expires_at": _resource_context_expires_at(context),
     }
     return result

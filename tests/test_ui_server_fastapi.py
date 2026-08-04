@@ -1335,6 +1335,8 @@ def test_project_patch_forwards_stable_agent_ids_and_localizes_conflicts(monkeyp
         headers=csrf_headers(client),
     )
 
+    authorization_context = captured.pop("authorization_context")
+    assert authorization_context.is_instance_owner
     assert captured == {
         "project_id": "proj-stale",
         "display_name": None,

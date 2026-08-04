@@ -63,12 +63,14 @@ def test_context_uses_role_not_diagnostic_source_for_owner() -> None:
             "vibe_instance_id": "inst-1",
             "vibe_instance_role": "editor",
             "vibe_instance_access_source": "owner",
+            "vibe_instance_authorization_revision": 0,
         }
     )
 
     assert context.is_instance_owner is False
     assert context.can_chat is True
     assert context.can_manage_instance is False
+    assert context.authorization_revision == 0
 
 
 def test_malformed_role_context_fails_closed() -> None:

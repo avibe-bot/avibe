@@ -76,7 +76,6 @@ def test_public_surface_is_stable():
         "is_session_archived",
         "list_sessions",
         "list_sessions_page",
-        "reset_running_agent_status",
         "set_agent_status",
         "touch_session",
         "update_session",
@@ -116,7 +115,6 @@ def test_each_workbench_function_delegates_to_storage():
         "get_session",
         "is_session_archived",
         "list_sessions",
-        "reset_running_agent_status",
         "set_agent_status",
         "touch_session",
         "update_session",
@@ -884,19 +882,3 @@ def test_workbench_default_action_drops_the_explicit_override_marker(isolated_st
         f"dispatch handed the backend reasoning_effort="
         f"{request.vibe_agent_reasoning_effort!r} instead of the default Agent's"
     )
-
-
-def test_reset_running_agent_status_clears_only_running(isolated_state):
-    """Startup recovery: stale ``running`` → ``idle``; failed/idle untouched."""
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = _seed_avibe_scope(conn)
-        running = sessions_service.create_session(conn, scope_id=scope_id, agent_backend="claude")["id"]
-        failed = sessions_service.create_session(conn, scope_id=scope_id, agent_backend="claude")["id"]
-        sessions_service.set_agent_status(conn, running, "running")
-        sessions_service.set_agent_status(conn, failed, "failed")
-        reset = sessions_service.reset_running_agent_status(conn)
-    assert reset == 1
-    with engine.connect() as conn:
-        assert sessions_service.get_session(conn, running)["agent_status"] == "idle"
-        assert sessions_service.get_session(conn, failed)["agent_status"] == "failed"

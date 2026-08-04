@@ -70,6 +70,7 @@ def _new_message_id() -> str:
 
 
 _PRIVATE_WEB_PUSH_METADATA_PREFIX = "_web_push_"
+_PRIVATE_RESOURCE_USER_CONTEXT_KEY = "resource_user_context"
 
 
 def _row_to_payload(
@@ -91,7 +92,8 @@ def _row_to_payload(
         metadata = {
             key: value
             for key, value in metadata.items()
-            if not str(key).startswith(_PRIVATE_WEB_PUSH_METADATA_PREFIX)
+            if key != _PRIVATE_RESOURCE_USER_CONTEXT_KEY
+            and not str(key).startswith(_PRIVATE_WEB_PUSH_METADATA_PREFIX)
         }
     return {
         "id": row["id"],

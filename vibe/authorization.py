@@ -50,6 +50,7 @@ class AuthorizationContext:
     group_ids: frozenset[str] = frozenset()
     membership_version: str | None = None
     claims_issued_at: int | None = None
+    authorization_revision: int | None = None
     is_remote: bool = False
     is_trusted_local: bool = False
 
@@ -157,6 +158,16 @@ def _optional_positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationContext:
     role = _optional_string(payload.get("vibe_instance_role", payload.get("instance_role")))
     if role not in INSTANCE_ROLES:
@@ -196,6 +207,12 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
         ),
         claims_issued_at=_optional_positive_int(
             payload.get("claims_issued_at", payload.get("iat"))
+        ),
+        authorization_revision=_optional_nonnegative_int(
+            payload.get(
+                "vibe_instance_authorization_revision",
+                payload.get("authorization_revision"),
+            )
         ),
         is_remote=True,
     )

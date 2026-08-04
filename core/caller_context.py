@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 import os
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 AVIBE_SESSION_ID_ENV = "AVIBE_SESSION_ID"
 AVIBE_RUN_ID_ENV = "AVIBE_RUN_ID"
@@ -21,6 +22,10 @@ AVIBE_CALLER_CHANNEL_ID_ENV = "AVIBE_CALLER_CHANNEL_ID"
 AVIBE_CALLER_SESSION_KEY_ENV = "AVIBE_CALLER_SESSION_KEY"
 AVIBE_CALLER_MESSAGE_ID_ENV = "AVIBE_CALLER_MESSAGE_ID"
 AVIBE_CALLER_WORKSPACE_ID_ENV = "AVIBE_CALLER_WORKSPACE_ID"
+AVIBE_CALLER_REMOTE_ENV = "AVIBE_CALLER_REMOTE"
+AVIBE_CALLER_RESOURCE_CONTEXT_ENV = "AVIBE_CALLER_RESOURCE_CONTEXT"
+
+_RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,8 @@ class CallerContext:
     session_key: Optional[str] = None
     message_id: Optional[str] = None
     workspace_id: Optional[str] = None
+    is_remote: bool = False
+    resource_user_context: Optional[Mapping[str, Any]] = None
 
     def session_stable(self) -> "CallerContext":
         """This context minus every origin field that changes from turn to turn.
@@ -79,11 +86,13 @@ class CallerContext:
           person, which is worse than not notifying anybody.
 
         What survives is what the SESSION owns: platform, channel, session key,
-        workspace. So a Claude-created definition still names the conversation it came
-        from and still lights up rung (3); it gets no owner-DM rung and no deep link,
-        because a permalink needs the message id this deliberately drops. Codex and
-        OpenCode rewrite their caller env per turn (a ``BASH_ENV`` script and a binding
-        file respectively) and therefore keep the full origin.
+        workspace. A trusted remote Workbench authorization snapshot also survives:
+        unlike an IM author id, it is required to authorize any CLI resource write.
+        When that snapshot changes the Claude cache comparison deliberately recreates
+        the client, so one remote user's ACL can never be reused for another. Thus a
+        Claude-created definition still names its conversation and remote authority,
+        while ordinary IM sessions get no owner-DM rung or deep link. Codex and
+        OpenCode rewrite their caller env per turn and keep the full origin.
 
         A DM is the case where nothing is lost: its session key is
         ``<platform>::user::<id>``, so the person is carried by the scope itself.
@@ -115,6 +124,14 @@ class CallerContext:
             env[AVIBE_CALLER_MESSAGE_ID_ENV] = self.message_id
         if self.workspace_id:
             env[AVIBE_CALLER_WORKSPACE_ID_ENV] = self.workspace_id
+        if self.is_remote:
+            env[AVIBE_CALLER_REMOTE_ENV] = "1"
+            if self.resource_user_context is not None:
+                env[AVIBE_CALLER_RESOURCE_CONTEXT_ENV] = json.dumps(
+                    dict(self.resource_user_context),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
         return env
 
     def to_metadata(self) -> dict[str, str]:
@@ -161,6 +178,30 @@ class CallerContext:
 
 def _clean(value: object) -> str:
     return str(value or "").strip()
+
+
+def _resource_context_from_env(source: Mapping[str, str]) -> Optional[dict[str, Any]]:
+    raw = _clean(source.get(AVIBE_CALLER_RESOURCE_CONTEXT_ENV))
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return dict(parsed) if isinstance(parsed, dict) else None
+
+
+def caller_resource_user_context(context: Optional[CallerContext]) -> Optional[Mapping[str, Any]]:
+    """Return explicit remote ACL context for a CLI write.
+
+    ``None`` is reserved for a genuinely local caller. A remote Agent invocation
+    with missing or malformed authorization provenance returns an empty mapping,
+    which resource services parse as an anonymous remote context and reject.
+    """
+
+    if context is None or not context.is_remote:
+        return None
+    return dict(context.resource_user_context or {})
 
 
 def _scope_id_from_session_key(session_key: str) -> Optional[str]:
@@ -275,6 +316,8 @@ def caller_context_from_env(env: Mapping[str, str] | None = None) -> Optional[Ca
         session_key=_clean(source.get(AVIBE_CALLER_SESSION_KEY_ENV)) or None,
         message_id=_clean(source.get(AVIBE_CALLER_MESSAGE_ID_ENV)) or None,
         workspace_id=_clean(source.get(AVIBE_CALLER_WORKSPACE_ID_ENV)) or None,
+        is_remote=_clean(source.get(AVIBE_CALLER_REMOTE_ENV)).lower() in {"1", "true"},
+        resource_user_context=_resource_context_from_env(source),
     )
 
 
@@ -335,6 +378,16 @@ def caller_context_from_platform_payload(
         )
         workspace_id = _origin_workspace_id(platform, payload)
 
+    is_remote = platform == "avibe" and user_id.startswith("remote:")
+    resource_user_context: Optional[dict[str, Any]] = None
+    message_metadata = payload.get("message_metadata")
+    if is_remote and isinstance(message_metadata, Mapping):
+        raw_resource_context = message_metadata.get(_RESOURCE_USER_CONTEXT_METADATA_KEY)
+        if isinstance(raw_resource_context, Mapping):
+            subject = _clean(raw_resource_context.get("sub"))
+            if subject and user_id == f"remote:{subject}":
+                resource_user_context = dict(raw_resource_context)
+
     return CallerContext(
         session_id=session_id,
         run_id=run_id or None,
@@ -347,6 +400,8 @@ def caller_context_from_platform_payload(
         session_key=session_key,
         message_id=message_id or None,
         workspace_id=workspace_id,
+        is_remote=is_remote,
+        resource_user_context=resource_user_context,
     )
 
 

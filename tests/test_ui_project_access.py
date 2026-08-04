@@ -218,7 +218,9 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
     inbox = _get(client, "/api/inbox").get_json()
     assert [row["session_id"] for row in inbox["sessions"]] == [ids["session_a"]]
     assert set(inbox["unread_by_session"]) == {ids["session_a"]}
-    assert _get(client, f"/api/media/{ids['media_a']}").status_code == 200
+    media_response = _get(client, f"/api/media/{ids['media_a']}")
+    assert media_response.status_code == 200
+    assert media_response.headers["Cache-Control"] == "private, no-store"
     assert _get(client, f"/api/media/{ids['media_b']}").status_code == 404
     show_pages = _get(client, "/api/show-pages").get_json()
     assert show_pages["pages"] == [{"session_id": ids["session_a"]}]
@@ -510,7 +512,12 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
             "metadata": {
                 "_web_push_authorization_contexts": [
                     {"user_key": "remote:spoofed", "email": "spoofed@example.com"}
-                ]
+                ],
+                "resource_user_context": {
+                    "sub": "spoofed",
+                    "vibe_instance_role": "owner",
+                    "vibe_instance_access_source": "owner",
+                },
             },
         },
     )
@@ -518,6 +525,7 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
     assert response.status_code == 201
     payload = response.get_json()
     assert not any(key.startswith("_web_push_") for key in payload["metadata"])
+    assert "resource_user_context" not in payload["metadata"]
 
     with engine.connect() as conn:
         metadata_json = conn.execute(
@@ -539,9 +547,17 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
             "vibe_instance_role": "editor",
         }
     ]
+    resource_context = persisted_metadata["resource_user_context"]
+    assert resource_context["sub"] == persisted_metadata["_web_push_user_key"].removeprefix(
+        "remote:"
+    )
+    assert resource_context["vibe_instance_role"] == "editor"
+    assert resource_context["vibe_instance_access_source"] == "owner"
+    assert resource_context["authorization_expires_at"] > resource_context["claims_issued_at"]
     transcript = _get(client, f"/api/sessions/{ids['session_a']}/messages").get_json()
     stored_payload = next(row for row in transcript["messages"] if row["id"] == payload["id"])
     assert not any(key.startswith("_web_push_") for key in stored_payload["metadata"])
+    assert "resource_user_context" not in stored_payload["metadata"]
 
 
 def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:

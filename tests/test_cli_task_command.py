@@ -754,6 +754,17 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys, monkey
         "AVIBE_CALLER_SOURCE": "agent_turn",
         "AVIBE_CALLER_BACKEND": "codex",
         "AVIBE_NATIVE_SESSION_ID": "native-codex-1",
+        "AVIBE_CALLER_REMOTE": "1",
+        "AVIBE_CALLER_RESOURCE_CONTEXT": json.dumps(
+            {
+                "sub": "remote-editor",
+                "vibe_instance_role": "editor",
+                "vibe_instance_access_source": "email",
+                "vibe_group_ids": [],
+                "claims_issued_at": 1_900_000_000,
+                "authorization_expires_at": 1_900_043_200,
+            }
+        ),
     }
 
     with (
@@ -780,6 +791,7 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys, monkey
     stored = cli.ScheduledTaskStore(store_path).get_task(payload["definition"]["id"])
     assert stored is not None
     assert stored.metadata["created_by"] == expected
+    assert stored.metadata["resource_user_context"]["sub"] == "remote-editor"
 
 
 def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -4058,6 +4070,8 @@ _CALLER_CONTEXT_ENV_VARS = (
     "AVIBE_CALLER_SESSION_KEY",
     "AVIBE_CALLER_MESSAGE_ID",
     "AVIBE_CALLER_WORKSPACE_ID",
+    "AVIBE_CALLER_REMOTE",
+    "AVIBE_CALLER_RESOURCE_CONTEXT",
 )
 
 

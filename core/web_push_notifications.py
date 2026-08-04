@@ -158,6 +158,7 @@ def web_push_authorization_context_record(
         "vibe_organization_member_id": context.organization_member_id,
         "vibe_organization_role": context.organization_role,
         "vibe_membership_version": context.membership_version,
+        "vibe_instance_authorization_revision": context.authorization_revision,
     }
     record.update({key: value for key, value in optional_claims.items() if value is not None})
     return record
@@ -169,6 +170,15 @@ def _metadata_authorization_contexts(metadata: dict[str, Any]) -> dict[str, Auth
     raw_contexts = metadata.get(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA)
     if not isinstance(raw_contexts, list):
         return {}
+    try:
+        from core.services import settings as settings_service
+
+        config = settings_service.load_config()
+    except FileNotFoundError:
+        config = None
+    except Exception:
+        logger.debug("web push: could not load authorization revision config", exc_info=True)
+        return {}
     contexts: dict[str, AuthorizationContext] = {}
     for raw_context in raw_contexts:
         if not isinstance(raw_context, dict):
@@ -177,6 +187,13 @@ def _metadata_authorization_contexts(metadata: dict[str, Any]) -> dict[str, Auth
         if not isinstance(user_key, str) or not user_key.startswith("remote:"):
             continue
         if remote_access.session_needs_authorization_refresh(raw_context):
+            continue
+        if config is not None:
+            if not remote_access.session_authorization_is_current(config, raw_context):
+                continue
+        elif raw_context.get("vibe_instance_authorization_revision") is not None:
+            # A signed revision cannot be validated without the paired-device
+            # configuration and fresh local watermark.
             continue
         context = context_from_session_payload(raw_context)
         if context.subject and user_key == f"remote:{context.subject}" and context.can_read_instance:

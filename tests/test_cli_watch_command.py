@@ -442,6 +442,17 @@ def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> No
         "AVIBE_CALLER_SOURCE": "agent_turn",
         "AVIBE_CALLER_BACKEND": "opencode",
         "AVIBE_NATIVE_SESSION_ID": "native-opencode-1",
+        "AVIBE_CALLER_REMOTE": "1",
+        "AVIBE_CALLER_RESOURCE_CONTEXT": json.dumps(
+            {
+                "sub": "remote-editor",
+                "vibe_instance_role": "editor",
+                "vibe_instance_access_source": "email",
+                "vibe_group_ids": [],
+                "claims_issued_at": 1_900_000_000,
+                "authorization_expires_at": 1_900_043_200,
+            }
+        ),
     }
 
     with (
@@ -469,6 +480,7 @@ def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> No
     stored = ManagedWatchStore(store_path).get_watch(payload["definition"]["id"])
     assert stored is not None
     assert stored.metadata["created_by"] == expected
+    assert stored.metadata["resource_user_context"]["sub"] == "remote-editor"
 
 
 def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -1850,6 +1862,8 @@ def _no_caller_context(monkeypatch) -> None:
     same test would exercise a different path locally than in CI.
     """
     monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    monkeypatch.delenv("AVIBE_CALLER_REMOTE", raising=False)
+    monkeypatch.delenv("AVIBE_CALLER_RESOURCE_CONTEXT", raising=False)
 
 
 def _reserved_session_cli_db(tmp_path: Path):

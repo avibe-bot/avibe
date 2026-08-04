@@ -1434,14 +1434,3 @@ def set_agent_status(conn: Connection, session_id: str, status: str) -> bool:
         update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_status=status)
     )
     return True
-
-
-def reset_running_agent_status(conn: Connection) -> int:
-    """Reset legacy ``running`` projections to ``idle`` during recovery."""
-
-    result = conn.execute(
-        update(agent_sessions)
-        .where(agent_sessions.c.agent_status == "running")
-        .values(agent_status="idle")
-    )
-    return result.rowcount or 0

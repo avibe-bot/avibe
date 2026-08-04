@@ -172,6 +172,21 @@ def _settle_reserved_delivery(payload: dict, *, state: str) -> dict:
         return settled
 
 
+def _accepted_dispatch(session_id: str):
+    async def dispatch(payload: dict) -> dict:
+        settled = _settle_reserved_delivery(payload, state="accepted")
+        return {
+            "status_code": 202,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "delivery_state": settled["state"],
+            },
+        }
+
+    return dispatch
+
+
 def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     """The web Chat POST persists the user row AND fire-and-forgets the turn via
     ``/internal/dispatch_async``. The reply arrives over the persistent
@@ -183,18 +198,7 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
 
     _, session_id = _make_session(tmp_path)
 
-    async def dispatch(payload):
-        settled = _settle_reserved_delivery(payload, state="accepted")
-        return {
-            "status_code": 202,
-            "body": {
-                "ok": True,
-                "session_id": session_id,
-                "delivery_state": settled["state"],
-            },
-        }
-
-    dispatch_mock = AsyncMock(side_effect=dispatch)
+    dispatch_mock = AsyncMock(side_effect=_accepted_dispatch(session_id))
     with (
         patch("vibe.internal_client.dispatch_async", dispatch_mock),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
@@ -238,9 +242,7 @@ def test_workbench_side_actions_are_not_marked_as_ordinary_memory_input(
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
-    dispatch = AsyncMock(
-        return_value={"status_code": 202, "body": {"ok": True, "session_id": session_id}}
-    )
+    dispatch = AsyncMock(side_effect=_accepted_dispatch(session_id))
     with patch("vibe.internal_client.dispatch_async", dispatch):
         client = app.test_client()
         response = client.post(
@@ -262,16 +264,11 @@ def test_workbench_memory_text_is_persisted_and_dispatched_as_ordinary_input(
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
-    dispatch = AsyncMock(
-        return_value={"status_code": 202, "body": {"ok": True, "session_id": session_id}}
-    )
+    dispatch = AsyncMock(side_effect=_accepted_dispatch(session_id))
     client = app.test_client()
     headers = csrf_headers(client, "http://127.0.0.1:15131")
 
-    with (
-        patch("vibe.internal_client.dispatch_async", dispatch),
-        patch.object(messages_service, "append", wraps=messages_service.append) as append,
-    ):
+    with patch("vibe.internal_client.dispatch_async", dispatch):
         response = client.post(
             f"/api/sessions/{session_id}/messages",
             json={"text": "/memory status"},
@@ -281,7 +278,10 @@ def test_workbench_memory_text_is_persisted_and_dispatched_as_ordinary_input(
         )
 
     assert response.status_code == 201
-    append.assert_called_once()
+    with create_sqlite_engine().connect() as conn:
+        persisted = messages_service.get_message(conn, response.get_json()["id"])
+    assert persisted is not None
+    assert persisted["text"] == "/memory status"
     payload = dispatch.await_args.args[0]
     assert payload["text"] == "/memory status"
     assert payload["user_id"] == "local"
@@ -319,9 +319,7 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
-    dispatch = AsyncMock(
-        return_value={"status_code": 202, "body": {"ok": True, "session_id": session_id}}
-    )
+    dispatch = AsyncMock(side_effect=_accepted_dispatch(session_id))
     client = app.test_client()
     headers = csrf_headers(client, "http://127.0.0.1:15131")
     upload = client.post(
@@ -824,7 +822,8 @@ def test_create_and_patch_session_canonicalize_agent_identity(isolated_state, tm
     cleared = cleared_response.get_json()
     assert cleared["agent_id"] is None
     assert cleared["agent_name"] is None
-    assert cleared["agent_backend"] == ""
+    # Clearing the Agent selector does not clear the durable backend pin.
+    assert cleared["agent_backend"] == "codex"
 
 
 def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):

@@ -371,7 +371,8 @@ def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
         payload["metadata"] = {
             key: value
             for key, value in metadata.items()
-            if not str(key).startswith(("_web_push_", "_memory_"))
+            if key != "resource_user_context"
+            and not str(key).startswith(("_web_push_", "_memory_"))
         }
     return payload
 
