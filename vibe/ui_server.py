@@ -4712,7 +4712,27 @@ async def config_post():
 def remote_access_status():
     from vibe import remote_access
 
-    return jsonify(remote_access.status())
+    config = _load_remote_access_config()
+    client_colo = None
+    remote_request = bool(
+        config is not None
+        and _is_remote_access_request(config)
+    )
+    if remote_request:
+        from vibe import cloudflare_network
+
+        # CF-Ray is diagnostic-only input. It never participates in access
+        # control or route recovery, so a locally spoofed value can at most
+        # change the caller's own displayed ingress location.
+        client_colo = cloudflare_network.parse_cf_ray_colo(request.headers.get("CF-Ray"))
+    return jsonify(
+        remote_access.status(
+            config,
+            client_colo=client_colo,
+            client_access="remote" if remote_request else "local",
+            include_network_path=True,
+        )
+    )
 
 
 @app.route("/api/remote-access/vibe-cloud/pair", methods=["POST"])

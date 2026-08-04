@@ -1,7 +1,19 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, Cloud, ExternalLink, Link2, RefreshCcw, Route } from 'lucide-react';
+import {
+  ArrowRight,
+  CheckCircle2,
+  ChevronDown,
+  Cloud,
+  ExternalLink,
+  Link2,
+  MapPin,
+  Network,
+  RefreshCcw,
+  Route,
+  Server,
+} from 'lucide-react';
 import { Trans, useTranslation } from 'react-i18next';
-import { type RemoteAccessStatus, useApi } from '../context/ApiContext';
+import { type CloudflareEdgeLocation, type RemoteAccessStatus, useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { CompactField } from './settings/SettingsPrimitives';
@@ -15,6 +27,10 @@ const formatLatency = (milliseconds: number) => (
   milliseconds >= 1000
     ? `${(milliseconds / 1000).toFixed(milliseconds >= 10_000 ? 0 : 1)} s`
     : `${Math.round(milliseconds)} ms`
+);
+
+const formatEdgeLocation = (location: CloudflareEdgeLocation) => (
+  location.location ? `${location.location} (${location.colo})` : location.colo
 );
 
 export const RemoteAccess: React.FC = () => {
@@ -134,6 +150,7 @@ export const RemoteAccess: React.FC = () => {
       const message = t('remoteAccess.startSuccess');
       setActionMessage({ type: 'success', text: message });
       showToast(message, 'success');
+      await refresh(true).catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : t('errors.remote_access_unknown');
       setActionMessage({ type: 'error', text: message });
@@ -149,6 +166,7 @@ export const RemoteAccess: React.FC = () => {
       const message = t('remoteAccess.optimizeStarted');
       setActionMessage({ type: 'success', text: message });
       showToast(message, 'success');
+      await refresh(true).catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : t('errors.remote_access_unknown');
       setActionMessage({ type: 'error', text: message });
@@ -195,6 +213,42 @@ export const RemoteAccess: React.FC = () => {
   const protocolDisplay = configuredProtocol === 'auto' && effectiveProtocol !== 'unknown'
     ? t('remoteAccess.protocolAutomatic', { protocol: protocolLabel })
     : protocolLabel;
+  const networkPath = status?.network_path;
+  const connectorLocations = networkPath?.connector.locations || [];
+  const connectorMetros = connectorLocations.filter((location, index) => (
+    connectorLocations.findIndex((candidate) => candidate.colo === location.colo) === index
+  ));
+  const primaryConnectorLocation = connectorMetros[0];
+  const connectorLocationSummary = primaryConnectorLocation
+    ? connectorMetros.length > 1
+      ? t('remoteAccess.networkAdditionalLocations', {
+          location: formatEdgeLocation(primaryConnectorLocation),
+          count: connectorMetros.length - 1,
+        })
+      : formatEdgeLocation(primaryConnectorLocation)
+    : t('remoteAccess.networkLocationUnavailable');
+  const clientLocationSummary = networkPath?.client_ingress
+    ? formatEdgeLocation(networkPath.client_ingress)
+    : networkPath?.client_access === 'remote'
+      ? t('remoteAccess.networkIngressUnavailable')
+      : t('remoteAccess.networkLocalBrowser');
+  const routeAssessment = networkPath?.route.assessment || 'unknown';
+  const routeVariant = routeAssessment === 'same_metro'
+    ? 'success'
+    : routeAssessment === 'same_country'
+      ? 'info'
+      : routeAssessment === 'cross_country'
+        ? 'warning'
+        : 'secondary';
+  const routeLabel = t(`remoteAccess.networkRoute${
+    routeAssessment === 'same_metro'
+      ? 'SameMetro'
+      : routeAssessment === 'same_country'
+        ? 'SameCountry'
+        : routeAssessment === 'cross_country'
+          ? 'CrossCountry'
+          : 'Unknown'
+  }`);
 
   return (
     <section
@@ -307,6 +361,73 @@ export const RemoteAccess: React.FC = () => {
           ) : null}
         </div>
       </div>
+
+      {running && networkPath && (
+        <div className="border-b border-border px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Network className="size-4 shrink-0 text-cyan" />
+              <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.networkPath')}</h3>
+            </div>
+            <Badge variant={routeVariant}>{routeLabel}</Badge>
+          </div>
+
+          <div className="mt-3 grid border-y border-border/70 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] md:items-stretch">
+            <div className="min-w-0 py-3 md:pr-4">
+              <div className="flex items-center gap-1.5 text-[11px] text-muted">
+                <MapPin className="size-3.5 shrink-0" />
+                {t('remoteAccess.networkBrowserIngress')}
+              </div>
+              <div className="mt-1 break-words text-[12px] font-medium text-foreground">{clientLocationSummary}</div>
+            </div>
+            <ArrowRight className="my-auto hidden size-4 text-muted md:block" />
+            <div className="min-w-0 border-t border-border/70 py-3 md:border-l-0 md:border-t-0 md:px-4">
+              <div className="flex items-center gap-1.5 text-[11px] text-muted">
+                <Cloud className="size-3.5 shrink-0" />
+                {t('remoteAccess.networkProvider')}
+              </div>
+              <div className="mt-1 text-[12px] font-medium text-foreground">
+                {networkPath.provider} <span className="font-mono text-[11px] text-muted">AS{networkPath.asn}</span>
+              </div>
+            </div>
+            <ArrowRight className="my-auto hidden size-4 text-muted md:block" />
+            <div className="min-w-0 border-t border-border/70 py-3 md:border-l-0 md:border-t-0 md:pl-4">
+              <div className="flex items-center gap-1.5 text-[11px] text-muted">
+                <Server className="size-3.5 shrink-0" />
+                {t('remoteAccess.networkConnectorEdges')}
+              </div>
+              <div className="mt-1 break-words text-[12px] font-medium text-foreground">{connectorLocationSummary}</div>
+            </div>
+          </div>
+
+          <details className="group mt-2 text-[11px]">
+            <summary className="flex w-fit cursor-pointer list-none items-center gap-1 py-1 text-muted hover:text-foreground">
+              <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+              {t('remoteAccess.networkTechnicalDetails')}
+            </summary>
+            <div className="mt-1 grid gap-3 border-t border-border/60 pt-3 sm:grid-cols-2">
+              <div className="min-w-0">
+                <div className="font-medium text-muted">{t('remoteAccess.networkEdgeNodes')}</div>
+                <div className="mt-1 space-y-1 font-mono text-foreground/85">
+                  {connectorLocations.length > 0 ? connectorLocations.map((location) => (
+                    <div key={location.id} className="break-all">
+                      {location.id} · {formatEdgeLocation(location)}
+                    </div>
+                  )) : <div>{t('remoteAccess.networkLocationUnavailable')}</div>}
+                </div>
+              </div>
+              <div className="min-w-0">
+                <div className="font-medium text-muted">{t('remoteAccess.networkAnycastIps')}</div>
+                <div className="mt-1 space-y-1 font-mono text-foreground/85">
+                  {networkPath.connector.edge_ips.length > 0 ? networkPath.connector.edge_ips.map((address) => (
+                    <div key={address} className="break-all">{address}</div>
+                  )) : <div>{t('remoteAccess.networkIpUnavailable')}</div>}
+                </div>
+              </div>
+            </div>
+          </details>
+        </div>
+      )}
 
       {showPairingForm ? (
         <div className="grid gap-3 px-5 py-4 md:grid-cols-[1fr_auto] md:items-end">

@@ -5,6 +5,7 @@ capability:
   canonical_tests:
     - tests/test_tunnel_quality.py
     - tests/test_tunnel_recovery.py
+    - tests/test_cloudflare_network.py
 status_legend:
   covered: automated scenario or contract coverage exists
   partial: focused coverage exists but a live network dependency remains
@@ -155,3 +156,15 @@ scenarios:
     kind: contract
     layer: scenario
     test: tests/test_tunnel_recovery.py::test_ra_tq_024_pinned_protocol_rejects_stale_tail_evidence
+  - id: RA-TQ-025
+    name: Local status exposes bounded live Cloudflare network-path diagnostics without uploading them
+    status: covered
+    kind: network_policy
+    layer: contract
+    test: tests/test_cloudflare_network.py::test_ra_tq_025_network_path_combines_nodes_ips_and_location
+  - id: RA-TQ-026
+    name: Only paired-public-host CF-Ray metadata participates in conservative route assessment
+    status: covered
+    kind: network_policy
+    layer: contract
+    test: tests/test_ui_remote_access_auth.py::test_ra_tq_026_remote_status_uses_cf_ray_on_paired_public_host
