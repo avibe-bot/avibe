@@ -194,10 +194,10 @@ task's.
 No change to `routesSomewhere`. Change order and labelling only.
 
 1. **Move `ON FAILURE` above the routing block** when `isCommand`. The
-   conditional should read before the fields it governs. `TIMEOUT` stays with
-   the command mechanics near the bottom — it applies to every run, not just
-   failures, and pairing it with `ON FAILURE` in one two-column grid is what
-   currently drags the qualifier down below the routing.
+   conditional should read before the fields it governs. `TIMEOUT` leaves that
+   grid and pairs with the new working-directory field instead — both are
+   process mechanics belonging with `COMMAND`, and pairing it with `ON FAILURE`
+   is what currently drags the qualifier down below the routing.
 2. **Group the five under a heading** — "On failure → escalation" — for command
    tasks with `on_failure === 'agent'`. Message tasks render exactly as today.
 3. **Relabel `MESSAGE` to "Triage prompt"** (new key `harness.detail.triagePrompt`)
@@ -236,3 +236,20 @@ Independent — either can land alone. Issue 1 touches CLI + core + docs + tests
 Issue 2 touches UI + i18n + tests. Suggested order is Issue 1 first, so
 `TaskDetail`'s new working-directory field arrives with something real to
 display and both panes get their layout reviewed once.
+
+---
+
+## Status
+
+Both implemented on this branch. Shipped shape differs from the sketch above in
+two places, neither material:
+
+- `TIMEOUT` moved *up* beside the new working-directory field rather than staying
+  at the bottom — both are command mechanics, and the pane reads better with the
+  process facts together.
+- `_command_definition_spawn_cwd` also grew `stored_cwd`. Without it, letting a
+  command task store a `cwd` created a new bug rather than fixing one: the update
+  path writes the Session answer with `update_cwd=True` on every edit, so
+  `vibe task update --name` would have erased the pin. Covered by SCT-051.
+
+Scenario catalogue: SCT-050, SCT-051, SCT-052.

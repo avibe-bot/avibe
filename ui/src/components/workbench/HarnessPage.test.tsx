@@ -549,6 +549,58 @@ describe('TaskDetail command task', () => {
     expect(message).toContain(`>${i18n.t('harness.detail.sessionPolicy')}<`);
   });
 
+  it('shows where the command runs, and names the source when it follows a session', () => {
+    // ``WatchDetail`` has shown the working directory since it shipped; the task pane
+    // never did, so a scheduled command's directory was unanswerable from the UI even
+    // once ``--cwd`` could store one.
+    const pinned = detail(task({ shell_command: 'make test', cwd: '/srv/app' }));
+    expect(pinned).toContain(`>${i18n.t('harness.detail.cwd')}<`);
+    expect(pinned).toContain('/srv/app');
+
+    // A null is not "nowhere": a bound definition follows its Session's workdir, read
+    // live at fire time, which is a different answer from a bare em-dash.
+    const inherited = detail(task({ shell_command: 'make test', session_id: 'ses1', cwd: null }));
+    expect(inherited).toContain(i18n.t('harness.detail.cwdFromSession'));
+  });
+
+  it('states the failure policy before the routing it governs, not after it', () => {
+    // The five routing fields describe a path that runs on no healthy day. Rendered
+    // above the ``On failure`` that qualifies them, the pane read top-down as "this
+    // job spends an Agent turn every morning" — the exact cost an agent-free command
+    // task is chosen to avoid.
+    const html = detail(task({ shell_command: 'make test', metadata: { on_failure: 'agent' } }));
+
+    const onFailure = html.indexOf(`>${i18n.t('harness.detail.onFailure')}<`);
+    const agent = html.indexOf(`>${i18n.t('harness.detail.agent')}<`);
+    expect(onFailure).toBeGreaterThan(-1);
+    expect(agent).toBeGreaterThan(-1);
+    expect(onFailure).toBeLessThan(agent);
+    expect(html).toContain(`>${i18n.t('harness.detail.escalation')}<`);
+  });
+
+  it('calls an escalating command task\'s message a triage prompt, not the job', () => {
+    // Same label as a message task's payload, entirely different meaning: this text is
+    // sent only when the command fails.
+    const html = detail(
+      task({ shell_command: 'make test', message: 'Diagnose it.', metadata: { on_failure: 'agent' } }),
+    );
+
+    expect(html).toContain(`>${i18n.t('harness.detail.triagePrompt')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.message')}<`);
+    expect(html).toContain('Diagnose it.');
+  });
+
+  it('leaves a message task reading as the job it is', () => {
+    // A message task routes EVERY run through those fields, so grouping them under a
+    // failure heading would be a lie in the other direction.
+    const html = detail(task({ prompt: 'Summarize #ops', message: 'Summarize #ops' }));
+
+    expect(html).toContain(`>${i18n.t('harness.detail.message')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.escalation')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.triagePrompt')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.onFailure')}<`);
+  });
+
   it('drops the Message field a command task has nothing to put in', () => {
     const html = detail(commandTask);
 

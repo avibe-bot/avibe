@@ -1216,6 +1216,50 @@ interface TaskDetailProps {
   pending: boolean;
 }
 
+/** Agent, Session, session mode, delivery and the message they carry.
+ *
+ * One component because they are one answer -- who runs this, where it lands -- and
+ * because a command task needs that answer said differently: it routes only a FAILURE,
+ * and its message is triage guidance rather than the payload of every run. Both
+ * differences are wording and framing, so they are props here instead of a second copy
+ * of the fields.
+ */
+const RoutingFields: React.FC<{
+  task: HarnessTask;
+  agent?: VibeAgentBrief;
+  group?: string;
+  messageLabel: string;
+  showMessage: boolean;
+}> = ({ task, agent, group, messageLabel, showMessage }) => {
+  const { t } = useTranslation();
+  const fields = (
+    <>
+      <DetailField label={t('harness.detail.agent')}>
+        <DetailAgent agentName={task.agent_name} agent={agent} />
+      </DetailField>
+      <DetailField label={t('harness.detail.session')}>
+        <DetailSession summary={task} sessionId={task.session_id} />
+      </DetailField>
+      <div className="grid grid-cols-2 gap-4">
+        <DetailField label={t('harness.detail.sessionPolicy')}>
+          <span className="text-[12px] text-foreground">{sessionPolicyLabel(task.session_policy, t)}</span>
+        </DetailField>
+        <DetailField label={t('harness.detail.delivery')}>
+          <span className="text-[12px] text-foreground">{deliveryLabel(task.post_to, t)}</span>
+        </DetailField>
+      </div>
+      {showMessage && (
+        <DetailField label={messageLabel}>
+          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+            {task.message || task.prompt || '—'}
+          </pre>
+        </DetailField>
+      )}
+    </>
+  );
+  return group ? <DetailGroup label={group}>{fields}</DetailGroup> : fields;
+};
+
 export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, pending }) => {
   const { t } = useTranslation();
   const isCommand = taskIsCommand(task);
@@ -1254,6 +1298,32 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           </pre>
         </DetailField>
       )}
+      {/* Where the command runs and how long it may take -- process mechanics, so they
+          sit with the command rather than with the failure lane below. ``WatchDetail``
+          has shown the working directory since it shipped; the task pane never did, so
+          a scheduled command's directory was unanswerable from the UI even once
+          ``--cwd`` stored one. A null is not "nowhere": a bound definition follows its
+          Session's workdir live at fire time, which is a different answer from the
+          em-dash a missing field would print. */}
+      {isCommand && (
+        <div className="grid grid-cols-2 gap-4">
+          <DetailField label={t('harness.detail.cwd')}>
+            <code className="font-mono text-[11px] text-muted">
+              {task.cwd || (task.session_id ? t('harness.detail.cwdFromSession') : '—')}
+            </code>
+          </DetailField>
+          <DetailField label={t('harness.detail.timeout')}>
+            {/* Always rendered, because a limit is always in force: a row with no
+                stored timeout is run under the six-hour default, and hiding the
+                field read as "no limit". A stored 0 IS "no limit" server-side, and
+                printing "0s" would read as an instant kill — the opposite. The
+                default is shown in duration words ("6h") because it is a policy
+                constant nobody typed; a stored value is echoed in the seconds the
+                user actually set. */}
+            <span className="font-mono text-[11px] text-muted">{formatTimeout(task, t)}</span>
+          </DetailField>
+        </div>
+      )}
       {/* The row humanizes the schedule; this is where the literal lives, so
           an operator can still read and copy the exact expression. */}
       <DetailField label={t('harness.detail.schedule')}>
@@ -1280,55 +1350,41 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           not have. Shown as soon as anything here is real: an escalation turn
           (``--on-failure agent``), a pinned Agent, or a conversation a failure
           notice is delivered to. */}
+      {/* BEFORE the routing it governs, not after it. "no Agent" is a deliberate
+          configuration rather than an omission, so it is stated rather than left
+          blank — and when it says the opposite, it is the sentence that makes the
+          block below mean "only when this fails". */}
+      {isCommand && (
+        <DetailField label={t('harness.detail.onFailure')}>
+          <span className="text-[12px] text-foreground">{t(`harness.onFailure.${taskOnFailure(task)}`)}</span>
+        </DetailField>
+      )}
       {routesSomewhere && (
-        <>
-          <DetailField label={t('harness.detail.agent')}>
-            <DetailAgent agentName={task.agent_name} agent={agent} />
-          </DetailField>
-          <DetailField label={t('harness.detail.session')}>
-            <DetailSession summary={task} sessionId={task.session_id} />
-          </DetailField>
-          <div className="grid grid-cols-2 gap-4">
-            <DetailField label={t('harness.detail.sessionPolicy')}>
-              <span className="text-[12px] text-foreground">{sessionPolicyLabel(task.session_policy, t)}</span>
-            </DetailField>
-            <DetailField label={t('harness.detail.delivery')}>
-              <span className="text-[12px] text-foreground">{deliveryLabel(task.post_to, t)}</span>
-            </DetailField>
-          </div>
-        </>
+        <RoutingFields
+          task={task}
+          agent={agent}
+          // Only an escalating command task is describing a path it does not take on a
+          // healthy day. A message task routes every run through these same fields, so
+          // grouping them under a failure heading there would be a lie in the other
+          // direction.
+          group={isCommand ? t('harness.detail.escalation') : undefined}
+          messageLabel={isCommand ? t('harness.detail.triagePrompt') : t('harness.detail.message')}
+          showMessage={Boolean(!isCommand || task.message || task.prompt)}
+        />
       )}
       {/* A command task's ``prompt`` is empty by construction, so this field
           would render a bare em-dash under the heading "Message" — a promise of
           a message the task does not have. A command task that *also* carries
-          one (``--on-failure agent``) still shows it. */}
-      {(!isCommand || task.message || task.prompt) && (
+          one (``--on-failure agent``) shows it above, inside the escalation
+          group, because that is the only thing it is. This is the leftover case:
+          a stored message with nothing to route it, which no current CLI path
+          creates and old rows still can. Shown rather than dropped. */}
+      {!routesSomewhere && (task.message || task.prompt) && (
         <DetailField label={t('harness.detail.message')}>
           <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
             {task.message || task.prompt || '—'}
           </pre>
         </DetailField>
-      )}
-      {/* What a failed run does, and how long it is allowed to take. Both are
-          command-task-only policy, and both are unanswerable from anything else
-          on this pane — "no Agent" is a deliberate configuration, not an
-          omission, so it is stated rather than left blank. */}
-      {isCommand && (
-        <div className="grid grid-cols-2 gap-4">
-          <DetailField label={t('harness.detail.onFailure')}>
-            <span className="text-[12px] text-foreground">{t(`harness.onFailure.${taskOnFailure(task)}`)}</span>
-          </DetailField>
-          <DetailField label={t('harness.detail.timeout')}>
-            {/* Always rendered, because a limit is always in force: a row with no
-                stored timeout is run under the six-hour default, and hiding the
-                field read as "no limit". A stored 0 IS "no limit" server-side, and
-                printing "0s" would read as an instant kill — the opposite. The
-                default is shown in duration words ("6h") because it is a policy
-                constant nobody typed; a stored value is echoed in the seconds the
-                user actually set. */}
-            <span className="font-mono text-[11px] text-muted">{formatTimeout(task, t)}</span>
-          </DetailField>
-        </div>
       )}
       {task.last_run_at && (
         <DetailField label={t('harness.detail.lastRun')}>
@@ -2005,6 +2061,21 @@ const DetailField: React.FC<DetailFieldProps> = ({ label, children }) => (
   <div className="flex flex-col gap-1.5">
     <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{label}</div>
     <div>{children}</div>
+  </div>
+);
+
+/** A named group of fields that answer one question, indented under that question.
+ *
+ * Written for the escalation lane: five fields describing a path that runs on no
+ * healthy day, rendered at the same weight as the command and the schedule, said the
+ * task's daily work was an Agent turn on Opus. The fields are right (see
+ * ``routesSomewhere``) and the fix is not to hide them -- it is to say what they
+ * belong to, above them rather than below.
+ */
+const DetailGroup: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div className="flex flex-col gap-4 border-l-2 border-border pl-3">
+    <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{label}</div>
+    {children}
   </div>
 );
 

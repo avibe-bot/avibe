@@ -1675,6 +1675,83 @@ def test_task_update_rejects_scope_without_session_creation(tmp_path: Path) -> N
     assert payload["code"] == "scope_without_session_creation"
 
 
+def test_task_update_repoints_an_escalating_command_tasks_cwd(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """The same flag the add path now accepts, on a task that already exists."""
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    old = tmp_path / "old"
+    old.mkdir()
+    new_dir = tmp_path / "new"
+    new_dir.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="sesCaller",
+        session_policy="existing",
+        cwd=str(old),
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--cwd", str(new_dir)])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["cwd"] == str(new_dir)
+    assert "session_workdir" not in (definition["metadata"] or {})
+
+
+def test_task_update_keeps_a_command_tasks_cwd_through_an_unrelated_edit(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """A rename must not silently un-pin the directory the command was given.
+
+    A bound definition resolves its SESSION question to ``None`` on every edit, and the
+    update path persists that with ``update_cwd=True``. Once a command task can store a
+    ``cwd`` of its own, that same write erases it -- and nothing about a ``--name`` edit
+    tells the user their job just went back to following its escalation Session.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="sesCaller",
+        session_policy="existing",
+        cwd=str(pinned),
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--name", "renamed"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["name"] == "renamed"
+    assert definition["cwd"] == str(pinned), (
+        "an unrelated edit dropped the command's working directory, so the next fire "
+        f"silently moved to the bound Session's: {definition['cwd']!r}"
+    )
+
+
 def test_task_update_rejects_cwd_for_already_reserved_create_once_task(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)
@@ -4344,6 +4421,132 @@ def test_task_add_escalating_command_task_binds_caller_session(
     assert definition["metadata"]["on_failure"] == "agent"
     assert definition["kind"] == "command"
     assert payload["session_default_notice"]["code"] == "session_defaulted_to_caller"
+
+
+def test_task_add_escalating_command_task_accepts_an_explicit_cwd(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """The command's directory is not the bound Session's question.
+
+    An escalating command task binds to an existing Session for one reason -- a failed
+    run needs somewhere to report -- and that binding made ``session_policy`` read
+    ``existing``, where ``--cwd`` was refused on the rule that a bound Session owns its
+    working directory. The rule is right about the SESSION and wrong about the command:
+    the flag was the only way to say where a subprocess with no Agent turn spawns, and
+    it came back ``cwd_with_existing_session``.
+
+    Stored on the definition, and NOT as the Session's workdir: the Session still owns
+    that, so ``session_workdir`` must stay out of the metadata.
+    """
+
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    args = _parse_task_add(
+        [
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--on-failure",
+            "agent",
+            "--message",
+            "The nightly sync failed. Diagnose it.",
+            "--cwd",
+            str(project),
+        ]
+    )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["session_policy"] == "existing"
+    assert definition["cwd"] == str(project), (
+        "the command has no way to say where it runs, so it falls back to whatever "
+        f"directory its escalation Session happens to have: {definition['cwd']!r}"
+    )
+    assert "session_workdir" not in (definition["metadata"] or {}), (
+        "the bound Session owns its own working directory; pinning it here is the "
+        "rule the refusal was protecting"
+    )
+
+
+def test_task_add_escalating_command_task_rejects_a_missing_cwd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Accepted does not mean unchecked -- and the error must name the real problem.
+
+    Every other policy resolves ``--cwd`` through the same existence check. Reporting a
+    typo'd directory as ``cwd_with_existing_session`` would send the user to look at
+    their Session binding.
+    """
+
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        [
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--on-failure",
+            "agent",
+            "--cwd",
+            str(tmp_path / "does-not-exist"),
+        ]
+    )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "cwd_not_found"
+
+
+def test_task_add_message_task_still_refuses_cwd_for_a_bound_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The softened refusal is softened for commands only.
+
+    A message task's Agent turn starts in its Session's workdir. There is no second
+    directory to name, so ``--cwd`` there is still a request to rewrite a Session's own
+    setting from a task definition.
+    """
+
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    args = _parse_task_add(
+        ["--cron", "0 3 * * *", "--message", "Share the summary.", "--cwd", str(project)]
+    )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "cwd_with_existing_session"
 
 
 def test_task_add_per_run_command_records_the_directory_it_was_described_in(

@@ -2885,7 +2885,10 @@
       "timeoutSeconds": "{{seconds}} 秒",
       "timeoutNone": "不限时",
       "timeoutDefault": "{{duration}}（默认）",
-      "lastExitCode": "最近退出码"
+      "lastExitCode": "最近退出码",
+      "escalation": "失败后 → 交给 Agent",
+      "triagePrompt": "排查提示词",
+      "cwdFromSession": "跟随会话工作目录"
     },
     "taskKind": {
       "command": "命令"

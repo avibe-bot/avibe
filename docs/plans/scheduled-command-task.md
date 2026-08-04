@@ -152,15 +152,22 @@ is where most of step 4's real work lives.
 `--cwd` keeps its current meaning and default (caller directory) and becomes
 the command's working directory for command tasks.
 
-One consequence needs naming, because it has no `--cwd` to fix it: a definition
-bound to an *existing* Session must not pass `--cwd` at all
-(`cwd_with_existing_session` — the Session owns its directory), so an escalating
-command task legitimately stores `cwd=None`. A message task loses nothing there,
-since the Agent turn starts in the Session's workdir; a command has no turn to
-inherit from. So the command reads that workdir itself at fire time
-(`_bound_session_workdir`) rather than falling through to `~/.avibe`. Read live,
-not copied at creation, so it follows a Session whose workdir later changes and
-reads as "no answer" for a per-run binding that does not exist yet.
+One consequence needs naming: a definition bound to an *existing* Session stores
+`cwd=None` unless its command names one, so the command reads the Session's
+workdir itself at fire time (`_bound_session_workdir`) rather than falling
+through to `~/.avibe`. Read live, not copied at creation, so it follows a
+Session whose workdir later changes and reads as "no answer" for a per-run
+binding that does not exist yet.
+
+> **Superseded in part.** This section originally said a bound definition "must
+> not pass `--cwd` at all" (`cwd_with_existing_session`), leaving an escalating
+> command task with no way to state where it runs. That refusal is a *Session*
+> rule, and a command task binds to a Session only so `--on-failure agent` has
+> somewhere to escalate — so it was refusing a question nobody asked it, and the
+> live inheritance above became the only answer available. It is now softened for
+> command tasks: see `command-task-cwd-and-escalation-pane.md`. A message task is
+> still refused, and a command task that omits the flag still inherits exactly as
+> described here.
 
 `vibe task update` accepts the same new fields. Switching a definition between
 message and command mode via update is rejected (`task_mode_immutable`) —

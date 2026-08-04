@@ -510,3 +510,50 @@ scenarios:
     # updates the row the metadata already lives on, which is why the gap was invisible
     # from there; the recovery writer already composed from the file, so the same backend's
     # two terminal writers disagreed about what a settled row remembers.
+  - id: SCT-050
+    name: an escalating command task can name the directory its command runs in
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_add_escalating_command_task_accepts_an_explicit_cwd
+    # SCT-008 made a bound definition supply the directory ``--cwd`` was refused, which
+    # stopped commands landing in ``~/.avibe`` without giving the user a way to say where
+    # they run. The refusal is a SESSION rule -- an existing Session owns its workdir --
+    # and a command task binds to one only so ``--on-failure agent`` has somewhere to
+    # escalate, so the rule was answering a question nobody asked it. Softened for
+    # commands only: the flag becomes the definition's ``cwd``, ``session_workdir`` stays
+    # unset so the Session still owns its own, and a message task is refused exactly as
+    # before. Omitting it keeps SCT-008 intact, which matters because the inherited
+    # directory is read live -- ``vibe session update --cwd`` on an unrelated conversation
+    # silently relocates every unpinned command, and nothing errors, because every
+    # fallback in the chain is ``isdir``-validated.
+  - id: SCT-051
+    name: an unrelated edit does not un-pin a command task's working directory
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_keeps_a_command_tasks_cwd_through_an_unrelated_edit
+    # A bound definition resolves its Session question to ``None`` on every edit, and the
+    # update path persists that with ``update_cwd=True``. Harmless while no command task
+    # could store a ``cwd``; the moment SCT-050 let one, ``vibe task update --name`` erased
+    # it and the next fire went back to following the escalation Session. Only the explicit
+    # flag replaces a stored directory.
+  - id: SCT-052
+    name: the task pane presents the escalation lane as the job it only runs instead of
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task states the failure policy before the routing it governs, not after it
+    # SCT-043 settled WHETHER to show Agent/Session/mode/delivery/message on a command
+    # task -- gated on the bindings, because an escalation turn is routed by exactly those
+    # fields. It did not settle what they mean once shown. Five fields describing a path
+    # that runs on no healthy day rendered at the same weight as the command and the
+    # schedule, with the ``On failure`` that qualifies them BELOW all five, so the pane
+    # read top-down as a daily Opus turn -- the cost an agent-free task is chosen to
+    # avoid. The qualifier moves above the block, the block gets a name, and the message
+    # is called a triage prompt rather than sharing a label with a message task's payload.
+    # The working directory is shown for the first time on this pane in the same pass: it
+    # was unanswerable from the UI even once SCT-050 could store one.

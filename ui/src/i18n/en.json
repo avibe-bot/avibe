@@ -2885,7 +2885,10 @@
       "timeoutSeconds": "{{seconds}}s",
       "timeoutNone": "No timeout",
       "timeoutDefault": "{{duration}} (default)",
-      "lastExitCode": "Last exit code"
+      "lastExitCode": "Last exit code",
+      "escalation": "On failure → escalation",
+      "triagePrompt": "Triage prompt",
+      "cwdFromSession": "Session working directory"
     },
     "taskKind": {
       "command": "Command"
