@@ -1,14 +1,15 @@
-# Add a forced sidecar restart action to Memory settings (rev15)
+# Add a forced sidecar restart action to Memory settings (rev16)
 
-> Rev15 keeps one public recovery action and a focused set of internal fixes:
+> Rev16 keeps one public recovery action and a focused set of internal fixes:
 > replayable configuration, config-wide write serialization, restart-specific
 > and lifecycle-intent admission, generation-fenced ready activation, complete
 > supervisor quiescing, bounded orphan recovery, disk/live replay convergence,
 > marker-free replay promotion, store-thread settlement, worker lease rotation,
 > locked clear-marker recovery, bounded readiness, supervisor callback rebinding,
 > authoritative controller/UI settings refresh, queued-operation exclusion, and
-> disabled/fail-closed replay handling, explicit worker activation, and retained
-> processing-probe/module-store ownership with cross-lifecycle admission.
+> disabled/fail-closed replay handling, explicit worker activation, post-lock
+> retained-owner admission, root/installer task retention, and disabled recovery
+> projection alongside processing-probe/module-store ownership.
 > Timed-out work remains owned until it is either joined or proven unable to
 > mutate state. It does not add a lifecycle coordinator, explicit state machine,
 > provider/store port, or frontend DOM test framework.
@@ -306,17 +307,31 @@ an abandoned restart, and a user retry can enqueue a second one.
   before lifecycle locks or `_explicit_restart_active` can be released. Clear,
   reconcile, artifact activation, search/profile and interrupted-clear recovery,
   and automatic ready activation check it before their first await and reject
-  without entering lifecycle queues or mutating state. Pure status projection
-  may report the retained error but cannot run recovery. `close()` joins retained
-  ownership; only an explicit restart retry may enter the locked settlement path
-  while the gate is set. That retry clears the sticky gate atomically only after
-  every retained registry is empty and before normal replacement continues.
+  without entering lifecycle queues or mutating state. Every operation that was
+  admitted while the gate was false must also recheck it after acquiring its
+  outermost Runtime/module lifecycle locks and before marker recovery, config or
+  store mutation, provider access, artifact activation, or worker/process action.
+  Thus a reconcile, installer, Clear, or read already queued behind restart
+  cannot resume beside an owner that restart retained before releasing its locks.
+  Pure status projection may report the retained error but cannot run recovery.
+  `close()` joins retained ownership; only an explicit restart retry may enter
+  the locked settlement path while the gate is set. That retry clears the sticky
+  gate atomically only after every retained registry is empty and before normal
+  replacement continues.
 - When both are free, acquire them in the established order in the same event
   loop turn, with no intervening await. After acquiring `_reconcile_lock`, check
   `_artifact_installing` while that lock is owned. If installation is active,
   release the lock and return `memory_restart_busy` before resolving an artifact
   or touching worker/process state. This check covers `install_artifact()`'s
   deliberate unlocked `ensure(force=True)` interval.
+- Replace artifact installation's bare `to_thread(ensure)` await with one named,
+  shielded task retained by Runtime. `_artifact_installing`, its reconcile intent,
+  and the exact task record remain owned until that thread actually terminates;
+  cancellation joins the same task under `shield()` before clearing them under
+  `_reconcile_lock` and re-raising `CancelledError`. A cancelled request therefore
+  cannot release restart admission while its installer still deletes or replaces
+  artifacts. Ordinary failure consumes the same task result before releasing the
+  intent, and no second installer may replace its record.
 - Track a narrow `_explicit_restart_active` boolean and
   `_clear_pending_count` in `MemoryRuntime`. Restart sets its boolean after
   acquiring both lifecycle locks, before the first lifecycle await, and clears
@@ -355,6 +370,14 @@ an abandoned restart, and a user retry can enqueue a second one.
   exact task still outlives that bound, retain it and set the cross-lifecycle gate
   before releasing locks. Include module-store settlement as its own restart
   deadline component.
+- Give the bare root verification and recreation `to_thread()` calls in
+  `_clear_provider_data_or_fail()` explicit shielded task records keyed by the
+  provider root. Keep them distinct from `_ROOT_CLEANUP_TASKS`, which owns the
+  provider cleanup callback. Clear and interrupted-clear recovery consume or
+  retain the exact verification/recreation tasks; restart settles all three root
+  owner classes under the root cleanup allowance. If any task outlives the bound,
+  set the cross-lifecycle gate before releasing locks and prevent a retry from
+  resolving or launching EverOS until that exact filesystem task terminates.
 - Bound settlement of processing-probe trees separately. Cancelling the drain
   task can make it terminal while probe termination is still incomplete; every
   retained probe owner must prove its process tree reaped before lease rotation
@@ -585,6 +608,11 @@ Every exit after claims are fenced must end in one of these states:
   A retry awaits the same task under another bounded interval. It cannot run
   recovery, rotate the lease, or touch process ownership until the thread has
   returned and its terminal result has been consumed.
+- **A module store or root filesystem task outlives settlement:** retain its exact
+  store, verification, cleanup-callback, or recreation record, keep claims and
+  the root lifecycle fenced, and return `memory_restart_failed`. A retry settles
+  those records before marker recovery or artifact/process resolution; a
+  terminal coroutine is not proof that its underlying filesystem thread ended.
 - **A processing-probe tree outlives cancellation or cleanup:** retain its exact
   probe/process-group/owned-process record and cleanup owner on the supervisor,
   retain the current lease, and keep claims fenced. Restart returns
@@ -609,6 +637,10 @@ Every exit after claims are fenced must end in one of these states:
   fenced, set the visible runtime error, and return `memory_restart_failed`.
   Do not claim that the old runtime was restored and do not start a second child.
   The user can retry the explicit restart, which first retries owned-tree stop.
+  If replay already committed disabled config, return
+  `restart_recovery_required=true` and expose the same fact through pure status
+  projection until the retained supervisor/child is reaped. This keeps explicit
+  cleanup retry reachable without making disabled Memory launch a replacement.
 - **The old child stopped but replacement startup failed:** retain the new
   supervisor, if one was created, and keep claims and the worker fenced. If its
   bounded supervisor later reaches ready, its generation-fenced activation task
@@ -664,8 +696,9 @@ exceptions use the transport-only `memory_restart_failed`.
 2. `core/memory/runtime.py`: add `_restart_config`,
    `_persisted_memory_snapshot`, `_explicit_restart_active`,
    `_clear_pending_count`, `_reconcile_pending_count`,
-   `_retained_ownership_active`, lifecycle generation and a retained ready
-   activation task, and fail-fast `restart()`; refresh the
+   `_retained_ownership_active`, a retained artifact-install task, lifecycle
+   generation and a retained ready activation task, and fail-fast `restart()`;
+   recheck retained ownership under acquired lifecycle locks; refresh the
    persisted snapshot after every successful runtime-owned V2 mutation and
    rebase a successfully reconciled
    live/replay candidate from marker settlement's exact return; conditionally
@@ -675,7 +708,9 @@ exceptions use the transport-only `memory_restart_failed`.
    restart admission fail fast. Make `restart()` return its transport
    result plus the exact applied replay config whenever convergence committed,
    including later lifecycle failure, and no config before convergence or on
-   busy. Add `reconcile_persisted()` to return the exact
+   busy. Project `restart_recovery_required` in restart/status results while a
+   disabled replay still owns failed cleanup. Add `reconcile_persisted()` to
+   return the exact
    successful candidate alongside the transport result while ordinary
    `reconcile()` preserves its dict contract.
    `Controller.reconcile_memory()` installs that returned candidate into
@@ -685,9 +720,11 @@ exceptions use the transport-only `memory_restart_failed`.
    wrapper and existing queued lifecycle-lock behavior for read/Clear paths. Add
    the synchronous lifecycle-intent scope and `lifecycle_busy` property covering
    active and queued search, profile, Clear, and recovery operations. Shield and
-   retain explicit module store tasks and expose their bounded settlement. A
-   narrow Runtime-supplied admission predicate prevents search/profile recovery
-   and Clear from entering while retained ownership is fenced.
+   retain explicit module store tasks plus root verification/recreation tasks and
+   expose their bounded settlement. A narrow Runtime-supplied admission predicate
+   prevents search/profile recovery and Clear from entering while retained
+   ownership is fenced and is rechecked after a queued caller acquires the module
+   lifecycle lock.
 4. `core/memory/worker.py`: retain and shield explicit store-thread tasks, expose
    bounded settlement, make activation return a generation-specific completion
    future, and rotate the lease owner only after prior ownership registries are
@@ -722,7 +759,8 @@ exceptions use the transport-only `memory_restart_failed`.
 1. `memoryRead.ts`: define and export `MemoryRuntimeRestartResult` and a pure
    normalizer near the current Memory response classifier. Accept `{ok:true}`;
    normalize `{ok:false,error}` and `{status:'failed',error}` as failures; fail
-   closed on malformed bodies, and preserve a strict boolean `config_committed`.
+   closed on malformed bodies, and preserve strict boolean `config_committed`
+   and `restart_recovery_required` fields.
 2. `ApiContext.tsx`: import that type and normalizer. `restartMemoryRuntime()`
    returns only the normalized result and does not create a reverse import.
 3. `useMemoryResource.ts`: expose a narrow `invalidate()` transition that drops
@@ -743,7 +781,13 @@ exceptions use the transport-only `memory_restart_failed`.
    settings reload. After a failed operation, show its localized reason plus
    literal error code only after the required reload settles; when no config was
    committed, keep the existing settings payload and use the generic fallback
-   when no code exists.
+   when no code exists. Also render the same single recovery action when either
+   the latest restart response or pure runtime status reports
+   `restart_recovery_required=true`, even if the authoritative settings reload
+   now says disabled. Retain that local flag across the required settings/status
+   refresh and clear it only when a successful retry or a later status proves no
+   retained cleanup owner remains; ordinary disabled Memory still has no restart
+   action.
 5. `MemoryStatusPanel.tsx`: remove the old engine-fault restart action and its
    props so the normal Status body cannot render a duplicate. Keep the credential
    fault's settings action.
@@ -767,12 +811,19 @@ exceptions use the transport-only `memory_restart_failed`.
     an unexpected Memory C2 fails before process mutation. If C0 is disabled,
     convergence stops any retained old child without invoking the process
     factory, start, activation, or worker; Runtime, Controller, disk, and the UI
-    reload all observe disabled. A post-Clear internal reconcile cannot
+    reload all observe disabled. If stopping the retained old child fails after
+    that commit, restart and status both report
+    `restart_recovery_required=true`; retry remains visible, settles the child,
+    and never launches while disabled. A post-Clear internal reconcile cannot
     overwrite the persisted snapshot contract.
   - Pre-held reconcile/module locks and concurrent restart calls immediately
     return `memory_restart_busy`, create no waiters, and change no ownership.
     An installer paused inside unlocked `ensure(force=True)` also returns busy
-    before artifact resolution, worker fencing, or process replacement.
+    before artifact resolution, worker fencing, or process replacement. Cancel
+    that installer while its real `ensure()` thread remains blocked and prove its
+    task record, `_artifact_installing`, and reconcile intent remain owned;
+    restart stays busy until the exact thread ends, after which cancellation is
+    re-raised and all three ownership signals clear.
     Hold one search/profile request in the module lock and queue a second; across
     the owner's release/waiter-wakeup gap, `lifecycle_busy` remains true and
     restart returns busy without joining the read queue. After both reads finish,
@@ -794,6 +845,11 @@ exceptions use the transport-only `memory_restart_failed`.
     activation, and automatic ready activation must reject before their first
     lifecycle await. An explicit restart retry may enter, joins the exact owners,
     and clears the gate only after every registry is empty.
+    Also admit reconcile, artifact activation, Clear, and search/profile while
+    the gate is false but restart owns their lifecycle locks; after restart sets
+    the gate and releases the locks, each queued operation must fail its
+    under-lock recheck before marker recovery, config/store/provider mutation, or
+    installation.
   - Hung add and flush cases use shortened bounds; add can be reclaimed by the
     new owner, while flush becomes `unknown` and opens the fault.
   - A worker task that ignores its first cancellation is retained with the old
@@ -804,6 +860,12 @@ exceptions use the transport-only `memory_restart_failed`.
     registered. Restart retains the old lease and process without running
     recovery; after the thread is released, retry joins it and only then rotates
     and recovers.
+  - Block the actual root verification and recreation `to_thread()` calls during
+    Clear and interrupted-clear recovery. Cancellation or reporting timeout must
+    leave the exact root task registered and the retained-owner gate set; restart
+    retry cannot resolve an artifact or launch a child until that thread exits
+    and the root-task registry is consumed. Cover the cleanup callback registry
+    in the same settlement assertion without conflating the three owners.
   - Cancel a drain task inside a real supervised processing probe and make its
     first termination round fail. The terminal worker task is insufficient for
     restart admission: the exact probe-tree record remains on the supervisor,
@@ -930,7 +992,8 @@ exceptions use the transport-only `memory_restart_failed`.
 ### TypeScript
 
 - Table-test the pure normalizer with `ok:true`, `ok:false`, `status:'failed'`,
-  strict `config_committed` values, and malformed responses.
+  strict `config_committed` / `restart_recovery_required` values, and malformed
+  responses.
 - Reuse React SSR / `renderToStaticMarkup`, without a new DOM framework. Inject
   enabled plus runtime-missing state into `SettingsMemoryPage` and assert that
   the setup prompt and exactly one restart action coexist. Also cover status
@@ -941,7 +1004,11 @@ exceptions use the transport-only `memory_restart_failed`.
   with C0, and expose only C0 to the form. The reload-failure case keeps no
   editable C1 payload. Add the equivalent `config_committed=true` failure
   transition: reload C0 before displaying the lifecycle error. A false flag
-  preserves C1. Keep click/toast behavior in the single manual scenario below.
+  preserves C1. When that C0 is disabled but cleanup is retained, prove the one
+  recovery action remains after settings/status reload and disappears only after
+  a successful retry or status clears the recovery flag. Ordinary disabled state
+  still renders no action. Keep click/toast behavior in the single manual
+  scenario below.
 
 ## Validation
 
@@ -974,8 +1041,10 @@ runtime-owned mutation refreshes the exact persisted snapshot and successful
 settlement propagates the same exact block into controller shared config;
 explicit restart cannot queue behind or leapfrog any active or queued module
 lifecycle operation, while reads and destructive Clear retain their existing
-serialization; artifact installation excludes launch; orphan recovery has one
-complete cap; every active process lifecycle
+serialization and recheck retained ownership after acquiring their locks;
+artifact installation and root verification/recreation threads remain explicitly
+owned through cancellation; artifact installation excludes launch; orphan
+recovery has one complete cap; every active process lifecycle
 owner is settled and budgeted before stop; readiness, including the final health
 request, has one hard cap; delayed automatic activation and re-armed supervision
 are bound to the current lifecycle generation and both runtime locks; pending
@@ -985,7 +1054,8 @@ shielded worker/module store thread exit; activation success is observable and
 its shared future is shielded from reporting timeout; post-convergence failure
 still propagates the committed block to Controller and UI; retained ownership
 excludes every other mutating lifecycle; replacement cleanup fences supervision
-before awaiting; and clear markers serialize with root/child lifecycle. The
+before awaiting; disabled retained cleanup keeps its explicit recovery action;
+and clear markers serialize with root/child lifecycle. The
 implementation adds two private snapshots, focused intent counters, one narrow
 retained-owner gate, focused helpers, and two precise transport-only error codes
 while reusing existing locks, guards, recovery SQL, supervision, and UI
@@ -1008,9 +1078,12 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] Retained worker cancellation fail-closed state and retry
 - [ ] Shielded store-thread registry, bounded settlement, and retry
 - [ ] Module clear/recovery store-task retention and cross-lifecycle owner gate
+- [ ] Root verification/recreation task retention and retry settlement
 - [ ] Locked clear recovery and race regression
 - [ ] Restart/Clear intent admission, queued-Clear handoff, artifact admission
 - [ ] Queued read intent admission and waiter-handoff regression
+- [ ] Under-lock retained-owner recheck for every queued lifecycle operation
+- [ ] Cancelled artifact installer ownership and restart exclusion
 - [ ] Supervisor handoff/rebind, lifecycle-owner settlement, readiness/deadline contract
 - [ ] Lifecycle-generation ready activation and Clear/reconcile race regression
 - [ ] Complete orphan/start budgets, explicit activation, failed-start cleanup
@@ -1018,4 +1091,5 @@ implementation appears to require one, revise this plan before expanding scope.
 - [ ] Internal server/client, closed/busy errors, bounded timeout tests
 - [ ] UI route and response normalizer
 - [ ] Page action, deduplicated banner, success/failure settings reload, toast/i18n
+- [ ] Disabled retained-cleanup recovery projection and persistent retry action
 - [ ] Focused Python/TypeScript validation and Incus `SIGSTOP` scenario
