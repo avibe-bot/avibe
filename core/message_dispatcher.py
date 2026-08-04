@@ -68,14 +68,24 @@ HARNESS_PROMPT_ECHO_TRIGGER_KINDS = HARNESS_TRIGGER_KINDS - {"activity_recovery"
 # Workbench transcript still renders the full prompt for the operator.
 HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS = frozenset({"watch", "webhook", "hook"})
 # Mention neutralizers for the echoed prompt. The echo repeats text an operator wrote
-# for an agent, into a channel: quoting it does not stop Slack/Discord from resolving
-# a broadcast or an id mention, and the Discord adapter sends without
+# for an agent, into a channel: quoting it does not stop a renderer from resolving a
+# broadcast, a username, or an id mention, and the Discord adapter sends without
 # ``allowed_mentions``, so an echoed ``@everyone`` would really ping the channel
 # (Codex P2). A zero-width space after the sigil keeps the text readable while
-# leaving nothing for either renderer to resolve.
-_HARNESS_ECHO_BROADCAST_PATTERN = re.compile(r"@(?=(?:everyone|here|channel|all)\b)", re.IGNORECASE)
+# leaving nothing for any renderer to resolve. Deliberately platform-agnostic: every
+# adapter renders the same body, so ``@`` before a word character covers the
+# Slack/Discord broadcasts AND a bare Telegram ``@username`` (which
+# ``TelegramFormatter.render`` HTML-escapes without defusing), and a new adapter
+# inherits the guard instead of needing its own.
+_HARNESS_ECHO_MENTION_SIGIL_PATTERN = re.compile(r"@(?=\w)")
 _HARNESS_ECHO_ID_MENTION_PATTERN = re.compile(r"<(?=[@!#&])")
 _HARNESS_ECHO_MENTION_BREAK = "\u200b"
+# Cap for the definition name in the echo label. The prompt has its own cap, but the
+# label is appended after it and task/watch names are never length-validated at
+# creation, so an unbounded name could push the body past Discord's 2,000-char or
+# Telegram's 4,096-char limit \u2014 the adapter would then reject the echo and the channel
+# would see no prompt at all (Codex P2).
+HARNESS_PROMPT_ECHO_MAX_NAME_CHARS = 80
 _HARNESS_PROMPT_ECHO_I18N_KEYS = {
     "scheduled": "harness.promptEcho.scheduled",
     "watch": "harness.promptEcho.watch",
@@ -89,12 +99,15 @@ def _neutralize_mentions(text: str) -> str:
     """Make every mention in *text* inert without changing how it reads.
 
     Used for the Harness prompt echo, which republishes text an operator wrote for an
-    agent into a shared channel. Covers the broadcast words (``@everyone`` / ``@here``
-    / ``@channel``) and the bracketed id forms both Slack (``<@U…>``, ``<!here>``,
-    ``<#C…>``) and Discord (``<@id>``, ``<@&role>``) resolve.
+    agent into a shared channel. Covers every ``@`` sigil — the broadcast words
+    (``@everyone`` / ``@here`` / ``@channel``) and a bare ``@username``, which Telegram
+    resolves into a real notification — plus the bracketed id forms both Slack
+    (``<@U…>``, ``<!here>``, ``<#C…>``) and Discord (``<@id>``, ``<@&role>``) resolve.
     """
 
-    neutralized = _HARNESS_ECHO_BROADCAST_PATTERN.sub("@" + _HARNESS_ECHO_MENTION_BREAK, text or "")
+    neutralized = _HARNESS_ECHO_MENTION_SIGIL_PATTERN.sub(
+        "@" + _HARNESS_ECHO_MENTION_BREAK, text or ""
+    )
     return _HARNESS_ECHO_ID_MENTION_PATTERN.sub("<" + _HARNESS_ECHO_MENTION_BREAK, neutralized)
 
 
@@ -1659,10 +1672,14 @@ class ConsolidatedMessageDispatcher:
             return None
         if trigger_kind in HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS:
             # Composed, agent-facing prompt: echo the stored instruction alone, never
-            # the appended waiter output / failure report / webhook payload. No
-            # resolvable instruction means no echo — a run whose definition was
-            # deleted cannot prove which part of its prompt a person wrote.
-            prompt = str(spec.get("harness_display_prompt") or "").strip()
+            # the appended waiter output / failure report / webhook payload. Read
+            # per-delivery, because an instruction EDITED between two firings leaves a
+            # merged batch dispatching two different instructions. No resolvable
+            # instruction means no echo — a run whose definition was deleted cannot
+            # prove which part of its prompt a person wrote.
+            prompt = self._harness_echo_merged_prompt(
+                spec, "harness_display_prompts", "harness_display_prompt"
+            )
             if not prompt:
                 return None
         else:
@@ -1670,7 +1687,10 @@ class ConsolidatedMessageDispatcher:
             # ``SessionTurnGate`` prepends internal instructions to ``dispatch_text``
             # (the ``[Avibe recovery: ...]`` guard on an ambiguous-start replay), and
             # the channel must see the stored prompt, not a backend-only directive.
-            prompt = self._harness_echo_snapshot_prompt(spec) or text
+            prompt = (
+                self._harness_echo_merged_prompt(spec, "display_texts", "display_text")
+                or text
+            )
         body = self._harness_prompt_body(trigger_kind, spec.get("task_definition_name"), prompt)
         if not body:
             return None
@@ -1714,27 +1734,29 @@ class ConsolidatedMessageDispatcher:
         return message_id
 
     @staticmethod
-    def _harness_echo_snapshot_prompt(spec: dict) -> str:
-        """Every prompt this turn actually dispatched, from the Delivery snapshots.
+    def _harness_echo_merged_prompt(spec: dict, batch_key: str, single_key: str) -> str:
+        """Every prompt this turn is about to answer, one entry per merged Delivery.
 
         A busy session merges the queued Harness deliveries of one definition into a
         single Turn (``core/session_turns.py::_collect_delivery_segment``) and sends
-        *all* of their prompts to the backend, so echoing the singular ``display_text``
-        — the first snapshot only — would show one instruction for a result answering
-        several. Two firings of one scheduled task carry the same stored prompt, hence
-        the de-dup: a merged batch reads as one echo unless the instructions really
-        differ (two ``vibe agent run`` calls do). Falls back to the singular key for
-        the legacy mirror path, which has no batch.
+        *all* of their prompts to the backend, so reading the singular key — the first
+        Delivery only — would announce one instruction for a result answering several.
+        Two ``vibe agent run`` calls merge under the shared ``agent_run`` definition id
+        with different prompts; a watch/webhook/hook definition whose instruction was
+        EDITED between two firings merges with different stored instructions.
+
+        Repeat firings of an unchanged definition carry the same text, hence the
+        de-dup: a merged batch reads as one echo unless the instructions really differ.
+        ``batch_key`` is stamped by the durable batch hydration only, so the singular
+        key still serves the legacy mirror path, which has no batch.
         """
-        raw = spec.get("display_texts")
-        snapshots = (
+        raw = spec.get(batch_key)
+        entries = (
             [str(item or "") for item in raw] if isinstance(raw, (list, tuple)) else []
         )
-        if not any(snapshot.strip() for snapshot in snapshots):
-            snapshots = [str(spec.get("display_text") or "")]
-        unique = dict.fromkeys(
-            snapshot.strip() for snapshot in snapshots if snapshot.strip()
-        )
+        if not any(entry.strip() for entry in entries):
+            entries = [str(spec.get(single_key) or "")]
+        unique = dict.fromkeys(entry.strip() for entry in entries if entry.strip())
         return "\n\n".join(unique)
 
     def _harness_prompt_body(
@@ -1746,14 +1768,19 @@ class ConsolidatedMessageDispatcher:
         prompt = strip_silent_blocks(text or "").strip()
         if not prompt:
             return None
+        truncated = self._t("harness.promptEcho.truncated")
         if len(prompt) > HARNESS_PROMPT_ECHO_MAX_CHARS:
-            prompt = prompt[:HARNESS_PROMPT_ECHO_MAX_CHARS].rstrip() + self._t(
-                "harness.promptEcho.truncated"
-            )
+            prompt = prompt[:HARNESS_PROMPT_ECHO_MAX_CHARS].rstrip() + truncated
         label = self._t(
             _HARNESS_PROMPT_ECHO_I18N_KEYS.get(trigger_kind, "harness.promptEcho.generic")
         )
         name = str(definition_name or "").strip()
+        if len(name) > HARNESS_PROMPT_ECHO_MAX_NAME_CHARS:
+            # The name is appended AFTER the prompt cap and is never length-validated
+            # when a task/watch is created, so leaving it unbounded could push the body
+            # past a platform message limit — the adapter would reject the echo and the
+            # channel would see no prompt at all.
+            name = name[:HARNESS_PROMPT_ECHO_MAX_NAME_CHARS].rstrip() + truncated
         if name:
             label = self._t("harness.promptEcho.named", label=label, name=name)
         # Quoted body: plain-text platforms still read it as a quote, and the

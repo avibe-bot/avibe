@@ -3876,6 +3876,27 @@ class HarnessPromptEchoTests(unittest.IsolatedAsyncioTestCase):
         # Only a zero-width break was inserted, so the prompt still reads the same.
         self.assertIn("ping @everyone plus <@U123>, <@&456> and <!channel>", text.replace("\u200b", ""))
 
+    async def test_echoed_username_mention_cannot_notify_on_telegram(self):
+        """A bare ``@username`` is a real mention on Telegram (Codex P2).
+
+        ``TelegramFormatter.render`` HTML-escapes the body but leaves the sigil intact,
+        so an echoed handle would notify that account. Neutralized for every adapter
+        rather than in the Telegram formatter: one body is rendered by all of them, and
+        a new adapter inherits the guard.
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(platform="telegram", task_definition_name="@release_bot nightly"),
+            "ask @alice_dev to review, cc @team_lead",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        for mention in ("@alice_dev", "@team_lead", "@release_bot"):
+            self.assertNotIn(mention, text)
+        self.assertIn("ask @alice_dev to review, cc @team_lead", text.replace("\u200b", ""))
+
     async def test_echo_is_sent_as_markdown_so_the_quote_renders(self):
         # Slack builds a plain_text block for anything but markdown and would show
         # the ``> `` markers literally (Codex P3). Telegram resolves either value to
@@ -4013,6 +4034,86 @@ class HarnessPromptEchoTests(unittest.IsolatedAsyncioTestCase):
 
         _channel_id, _thread_id, text = controller.im_client.sent[0]
         self.assertIn("> summarize open PRs", text)
+
+    async def test_merged_composed_batch_echoes_each_stored_instruction(self):
+        """Scenario: MESSAGE-DELIVERY-018
+
+        The composed kinds echo the definition's stored instruction, and that
+        instruction can be EDITED between two firings — so a merged batch dispatches
+        two different ones and the singular key would announce only the first
+        (Codex P2). Each Delivery's own stamped instruction, and still none of the
+        generated evidence.
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                task_trigger_kind="watch",
+                harness_display_prompt="check the deploy",
+                harness_display_prompts=["check the deploy", "check the deploy and page me"],
+            ),
+            "check the deploy\n\ntoken=ghp_SECRET",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertIn("> check the deploy", text)
+        self.assertIn("> check the deploy and page me", text)
+        self.assertNotIn("ghp_SECRET", text)
+
+    async def test_merged_composed_batch_of_one_instruction_echoes_it_once(self):
+        # Repeat firings of an UNCHANGED watch carry the same stored instruction; the
+        # merged batch must not read as it having been given twice.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                task_trigger_kind="watch",
+                harness_display_prompt="check the deploy",
+                harness_display_prompts=["check the deploy", "check the deploy"],
+            ),
+            "check the deploy\n\ntoken=ghp_SECRET",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertEqual(text.count("> check the deploy"), 1)
+
+    async def test_merged_composed_batch_without_instructions_stays_silent(self):
+        # An empty batch falls back to the singular key, and when that is absent too
+        # the composed kinds still refuse to publish the generated evidence.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(
+            self._context(task_trigger_kind="watch", harness_display_prompts=["", "  "]),
+            "waiter said: token=ghp_SECRET",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_long_definition_name_is_bounded_before_sending(self):
+        """A task/watch name is never length-validated at creation (Codex P2).
+
+        The label is appended AFTER the prompt cap, so an unbounded name could push the
+        body past Discord's 2,000-char limit — the adapter would reject the echo and the
+        channel would see no prompt at all.
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        limit = message_dispatcher_module.HARNESS_PROMPT_ECHO_MAX_NAME_CHARS
+
+        await dispatcher.emit_harness_prompt(
+            self._context(task_definition_name="n" * (limit * 40)),
+            "do the thing",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertNotIn("n" * (limit + 1), text)
+        self.assertIn("n" * limit, text)
+        self.assertIn("truncated", text)
+        self.assertIn("> do the thing", text)
 
     async def test_runtime_switch_is_reloaded_before_the_gate(self):
         """A Harness turn reaches no IM inbound handler, so nothing else reloads

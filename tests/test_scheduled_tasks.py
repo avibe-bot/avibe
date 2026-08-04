@@ -8379,6 +8379,7 @@ def test_drain_requests_reserves_watch_create_per_run_before_session_validation(
             "task_id": "watch-1",
             "trigger_kind": "watch",
             "agent_name": "release-reviewer",
+            "metadata": {},
             "_capture_dispatch_result": True,
         }
     ]
@@ -8602,6 +8603,7 @@ def test_claimed_request_keeps_agent_identity_when_archive_lands_after_refresh(
                 "task_id": None,
                 "trigger_kind": "hook",
                 "agent_name": "pm",
+                "metadata": {},
                 "_capture_dispatch_result": True,
                 "agent_id": agent.id,
             }
@@ -9539,6 +9541,88 @@ def test_execute_request_im_watch_steers_through_delivery_owner(
     assert error is None
     assert submitted == [(session_id, "send digest", "steer")]
     assert handler_calls == []
+
+
+def test_execute_request_forwards_request_metadata_into_the_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A composed hook/watch/webhook/escalation prompt carries its user-authored part
+    in the request metadata, and ``_build_context`` is the only reader — so
+    ``_execute_request`` has to hand it over, exactly as the ``agent_run`` path already
+    does. Without the forward the IM echo has no instruction to show and stays silent
+    for every enqueued composed request (Codex P2)."""
+    session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        platform="slack",
+        scope_type="channel",
+        scope_native_id="C123",
+    )
+    contexts: list = []
+
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="steer"):
+        contexts.append(ctx)
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_k: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+        session_turn_gate=SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={}),
+        message_handler=SimpleNamespace(),
+    )
+    service = ScheduledTaskService(
+        controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
+    )
+
+    error = asyncio.run(
+        service._execute_request(
+            session_key="slack::channel::C123",
+            post_to=None,
+            deliver_key=None,
+            prompt="check the deploy\n\nwaiter said: token=ghp_SECRET",
+            execution_id="exec-metadata-1",
+            trigger_kind="watch",
+            session_id=session_id,
+            metadata={"harness_display_prompt": "check the deploy"},
+        )
+    )
+
+    assert error is None
+    assert contexts[0].platform_specific["harness_display_prompt"] == "check the deploy"
+
+
+def test_claimed_request_hands_its_metadata_to_the_execution(monkeypatch, tmp_path: Path) -> None:
+    """The enqueued-request lane is where hook / watch / webhook / escalation runs are
+    executed, so the request's own metadata must reach ``_execute_request`` there."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="check the deploy\n\nwaiter said: rows=42",
+        metadata={"harness_display_prompt": "check the deploy"},
+    )
+    calls: list[dict[str, Any]] = []
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=ScheduledTaskStore(),
+        request_store=request_store,
+    )
+    claimed = request_store.claim(request.id)
+    assert claimed is not None
+
+    async def _execute_request(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    service._execute_request = _execute_request  # type: ignore[method-assign]
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert len(calls) == 1
+    assert calls[0]["metadata"] == {"harness_display_prompt": "check the deploy"}
 
 
 def test_execute_request_avibe_falls_back_when_no_gate(monkeypatch, tmp_path) -> None:

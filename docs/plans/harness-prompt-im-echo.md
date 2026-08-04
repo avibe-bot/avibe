@@ -79,7 +79,9 @@ the dispatcher.
        for `HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS` the echo shows **only** the
        definition's stored instruction (`harness_display_prompt`) and stays silent
        when none resolves. The Workbench transcript still renders the full prompt for
-       the operator;
+       the operator. Read per-Delivery like the snapshots below
+       (`harness_display_prompts`), because an instruction *edited* between two firings
+       leaves a merged batch dispatching two different ones;
      - otherwise the Delivery display snapshots when present, else the staged prompt:
        `SessionTurnGate` prepends internal instructions to `dispatch_text` (the
        `[Avibe recovery: ...]` guard on an ambiguous-start replay) that must stay
@@ -89,36 +91,49 @@ the dispatcher.
        (`_segment_dispatch_text`), so the singular first snapshot would announce one
        instruction for a result answering several — two `vibe agent run` calls merge
        under the shared `agent_run` definition id. Repeat firings of one scheduled task
-       carry the same stored prompt, hence the de-dup. The instruction-only kinds are
-       unaffected: a merged batch shares its definition, so its stored instruction is
-       already single;
+       carry the same stored prompt, hence the de-dup. Both branches share
+       `_harness_echo_merged_prompt(spec, batch_key, single_key)`;
    - mentions are neutralized in the whole body, label included: quoting does not stop
-     a renderer from resolving `@everyone` / `<@U…>` / `<@&role>` / `<!channel>`, and
-     the Discord adapter sends without `allowed_mentions`, so an echoed broadcast
-     would really ping the channel. A zero-width space after the sigil keeps the text
-     reading the same;
+     a renderer from resolving `@everyone` / a bare Telegram `@username` (which
+     `TelegramFormatter.render` HTML-escapes without defusing) / `<@U…>` / `<@&role>` /
+     `<!channel>`, and the Discord adapter sends without `allowed_mentions`, so an
+     echoed broadcast would really ping the channel. The `@` guard is every sigil
+     followed by a word character, deliberately platform-agnostic — one body is
+     rendered by every adapter, so a new adapter inherits it. A zero-width space after
+     the sigil keeps the text reading the same;
    - sent with `parse_mode="markdown"` so the `> ` quote renders: Slack builds a
      `plain_text` block for anything else and would show the markers literally;
      Telegram resolves either value to its own HTML default;
    - body: an i18n label per trigger kind, optionally `label · name`, then the
      prompt with every line `> `-quoted (readable on plain-text platforms too),
-     truncated at `HARNESS_PROMPT_ECHO_MAX_CHARS = 800`;
+     truncated at `HARNESS_PROMPT_ECHO_MAX_CHARS = 800`. The name is capped too
+     (`HARNESS_PROMPT_ECHO_MAX_NAME_CHARS = 80`): it is appended *after* the prompt cap
+     and task/watch names are never length-validated at creation, so an unbounded one
+     could push the body past Discord's 2,000-char limit and the adapter would reject
+     the echo, leaving the channel with no prompt at all;
    - dedupe: bounded per-process FIFO keyed on target + native/delivery id
      (`HARNESS_PROMPT_ECHO_MEMORY = 256`), so an in-process re-dispatch of one
      delivery cannot read as the task having fired twice. A cross-restart replay is
      not covered on purpose: it writes a new Delivery anyway, a duplicate echo is
      cosmetic, and a missing echo defeats the feature.
-4. `core/session_turns.py::_hydrate_delivery_batch_context` stamps `display_texts`,
-   every merged Delivery's snapshot in FIFO order, next to the existing
-   `delivery_ids` — `_hydrate_delivery_context` set the singular `display_text` from the
-   first Delivery only. Read from the snapshots, never `dispatch_text`, so the replay
-   guards prepended there stay internal.
+4. `core/session_turns.py::_hydrate_delivery_batch_context` stamps `display_texts` and
+   `harness_display_prompts`, one entry per merged Delivery in FIFO order, next to the
+   existing `delivery_ids` — `_hydrate_delivery_context` set only the singular
+   `display_text`, from the first Delivery. Snapshots are read from the stored text,
+   never `dispatch_text`, so the replay guards prepended there stay internal;
+   instructions come from each Delivery's own captured provenance
+   (`_scheduled_provenance(payload)["platform_specific"]["harness_display_prompt"]`).
 5. `core/scheduled_tasks.py::_build_context` stamps `task_definition_name` and
    `harness_display_prompt` next to the existing `task_definition_id`, both resolved
    in one best-effort lookup (`_definition_display_fields`: task row, else watch
    definition), so the label names the task instead of an id and the echo has the
    user-authored instruction to fall back on. A producer that composed the prompt
-   itself can override the instruction through `metadata["harness_display_prompt"]`.
+   itself can override the instruction through `metadata["harness_display_prompt"]`,
+   which `_execute_request` forwards from `TaskExecutionRequest.metadata` — the
+   `agent_run` path already did, so without that forward the override was unreachable
+   for exactly the enqueued hook / watch / webhook / escalation requests whose echo
+   depends on it. The two scheduled call sites stay unchanged on purpose: a definition's
+   `session_fork` metadata must not be re-applied on every fire.
    `agent_run` has no definition. Both survive a cross-restart replay: the flush
    restores every provenance key that is not execution routing
    (`_EXECUTION_ROUTING_KEYS` is a blocklist).
@@ -143,11 +158,13 @@ the dispatcher.
   truncation/quoting, silent-only prompt, send failure, hot-toggle reload, a failing
   reload, display-snapshot precedence over internal dispatch text, instruction-only
   echo for the composed kinds — with the waiter output absent from the body and no
-  echo at all when no instruction resolves — mention neutralization, markdown parse
-  mode, a merged batch echoing every distinct prompt while repeat firings of one task
-  collapse to one, blank snapshots falling back to the singular key);
+  echo at all when no instruction resolves — mention neutralization for the broadcast,
+  id, and bare-`@username` forms, markdown parse mode, a merged batch echoing every
+  distinct prompt while repeat firings of one task collapse to one, the same for a
+  merged batch of edited instructions, blank snapshots falling back to the singular
+  key, a long definition name bounded before the send);
   `tests/test_internal_server.py::test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn`
-  (the merged context carries both snapshots);
+  (the merged context carries both snapshots and both stamped instructions);
   `tests/test_api_save_config_merge.py::test_save_config_preserves_harness_runtime_knobs_on_partial_save`;
   `tests/test_message_handler_harness_echo.py` (pipeline staging: raw prompt,
   subagent-prefixed prompt staged unstripped, human turn stages nothing, blank prompt
@@ -157,8 +174,11 @@ the dispatcher.
   it owns the runtime gate, the key is popped, no staged prompt echoes nothing, a
   failing echo never breaks turn start, a hanging echo cannot hold the gate);
   `tests/test_scheduled_tasks.py::test_build_context_carries_the_definition_name_for_display`,
-  `::test_build_context_prefers_an_explicit_display_prompt_from_the_request` and
-  `::test_build_context_survives_a_store_that_cannot_name_the_definition`.
+  `::test_build_context_prefers_an_explicit_display_prompt_from_the_request`,
+  `::test_build_context_survives_a_store_that_cannot_name_the_definition`,
+  `::test_execute_request_forwards_request_metadata_into_the_context` and
+  `::test_claimed_request_hands_its_metadata_to_the_execution` (the metadata reaches
+  the context through both hops of the enqueued-request lane).
 - scenario — `MESSAGE-DELIVERY-018` (prompt precedes result; the result still owns
   the anchor) and `MESSAGE-DELIVERY-019` (background-visibility turn echoes nothing)
   in `tests/scenarios/message_delivery/`.

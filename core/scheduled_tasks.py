@@ -6680,6 +6680,10 @@ class ScheduledTaskService:
                         else request.request_type
                     ),
                     agent_name=request.agent_name,
+                    # A composed hook / watch / webhook / escalation prompt is the one
+                    # case where the request itself knows which part a person wrote, so
+                    # its metadata must reach ``_build_context``.
+                    metadata=request.metadata if isinstance(request.metadata, dict) else None,
                     _capture_dispatch_result=True,
                     **({"agent_id": request.agent_id} if request.agent_id else {}),
                 )
@@ -8924,6 +8928,7 @@ class ScheduledTaskService:
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
         _capture_dispatch_result: bool = False,
     ) -> Optional[str] | TaskDispatchResult:
         target_info = resolve_session_id_target(session_id) if session_id else None
@@ -8943,6 +8948,12 @@ class ScheduledTaskService:
             agent_name=agent_name,
             agent_id=agent_id,
             target_info=target_info,
+            # Forwarded like the ``agent_run`` path already does. Without it every
+            # metadata field ``_build_context`` reads — the display-prompt override, the
+            # source/parent provenance — is unreachable for an enqueued hook, watch,
+            # webhook, or escalation request, which are exactly the composed kinds whose
+            # echo depends on being handed the user-authored instruction.
+            metadata=metadata,
         )
         # A scheduled avibe turn drives the sidebar dot through the SAME two
         # chokepoints as any other turn — inbound AgentService.handle_message

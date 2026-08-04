@@ -1460,6 +1460,28 @@ class SessionTurnManager:
                     for payload in payloads
                     if str(payload.get("text") or "").strip()
                 ],
+                # Same reason, one layer in: for the kinds whose prompt Avibe COMPOSES
+                # (watch / webhook / hook) the snapshot above holds the generated
+                # evidence too, so the echo shows the definition's stored instruction
+                # instead — and an instruction edited between two firings leaves a
+                # merged batch dispatching two different ones. Each Delivery's own
+                # stamped instruction, from its captured provenance.
+                "harness_display_prompts": [
+                    instruction
+                    for instruction in (
+                        str(
+                            (
+                                (_scheduled_provenance(payload) or {}).get(
+                                    "platform_specific"
+                                )
+                                or {}
+                            ).get("harness_display_prompt")
+                            or ""
+                        ).strip()
+                        for payload in payloads
+                    )
+                    if instruction
+                ],
                 "message_content": {
                     "text": "\n".join(
                         str(payload.get("text") or "")
