@@ -111,7 +111,7 @@ async def test_hfr_170_guarded_noop_uses_partition_backoff() -> None:
     release_backoff = asyncio.Event()
 
     async def controlled_backoff(delay: float) -> None:
-        assert delay == 0.1
+        assert delay == pytest.approx(0.1, abs=0.01)
         backoff_entered.set()
         await release_backoff.wait()
 
@@ -193,6 +193,132 @@ async def test_hfr_162_backoff_partitions_release_capacity_and_rewind_for_retry(
 
 
 @pytest.mark.anyio
+async def test_hfr_162_partition_backoff_state_is_lane_bounded() -> None:
+    retry_entered = asyncio.Event()
+    release_retry = asyncio.Event()
+    later_partition_started = asyncio.Event()
+    overflow_partition_retried = asyncio.Event()
+    attempted: list[str] = []
+    attempt_counts: dict[str, int] = {}
+
+    async def controlled_retry(_delay: float) -> None:
+        retry_entered.set()
+        await release_retry.wait()
+
+    class _UnavailablePartitions(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            rows = [
+                RuntimeWorkItem(
+                    f"partition-{index:02d}",
+                    {},
+                    cursor_key=f"{index:02d}",
+                )
+                for index in range(9)
+                if f"partition-{index:02d}" not in occupied
+                and (cursor is None or f"{index:02d}" > cursor)
+            ]
+            return rows[:limit], len(rows) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> bool:
+            attempted.append(item.partition_key)
+            attempt_counts[item.partition_key] = (
+                attempt_counts.get(item.partition_key, 0) + 1
+            )
+            if item.partition_key == "partition-08":
+                later_partition_started.set()
+                return True
+            if attempt_counts[item.partition_key] == 1:
+                return False
+            if item.partition_key == "partition-06":
+                overflow_partition_retried.set()
+            return True
+
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=2,
+        scan_page_size=2,
+        scan_continuation_pages=3,
+        retry_wait=controlled_retry,
+    )
+    supervisor.register(RuntimeWorkLane.REQUESTS, _UnavailablePartitions())
+    await supervisor.activate()
+
+    await asyncio.wait_for(retry_entered.wait(), 1)
+    await asyncio.wait_for(later_partition_started.wait(), 1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    registration = supervisor._registrations[RuntimeWorkLane.REQUESTS]
+    assert attempted == [f"partition-{index:02d}" for index in range(9)]
+    assert len(registration.backoff_deadlines) == 6
+    assert registration.backoff_overflow_deadline is not None
+    assert registration.backoff_task is not None
+    assert not registration.backoff_task.done()
+
+    release_retry.set()
+    await asyncio.wait_for(overflow_partition_retried.wait(), 1)
+    assert attempt_counts["partition-06"] == 2
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_162_overflow_never_postpones_an_earlier_retry() -> None:
+    now = 0.0
+    loop = asyncio.get_running_loop()
+    retry_releases = [asyncio.Event(), asyncio.Event()]
+    retry_delays: list[float] = []
+    scans: asyncio.Queue[None] = asyncio.Queue()
+
+    async def controlled_retry(delay: float) -> None:
+        index = len(retry_delays)
+        retry_delays.append(delay)
+        await retry_releases[index].wait()
+
+    class _Idle(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            loop.call_soon_threadsafe(scans.put_nowait, None)
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            raise AssertionError(item)
+
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=1,
+        scan_page_size=1,
+        scan_continuation_pages=1,
+        retry_backoff=10,
+        retry_wait=controlled_retry,
+        monotonic=lambda: now,
+    )
+    supervisor.register(RuntimeWorkLane.REQUESTS, _Idle())
+    await supervisor.activate()
+    await asyncio.wait_for(scans.get(), 1)
+    registration = supervisor._registrations[RuntimeWorkLane.REQUESTS]
+    try:
+        supervisor._start_partition_backoff(registration, "exact")
+        await asyncio.sleep(0)
+        assert retry_delays == [10.0]
+
+        now = 5.0
+        supervisor._start_partition_backoff(registration, "overflow-a")
+        now = 8.0
+        supervisor._start_partition_backoff(registration, "overflow-b")
+        assert registration.backoff_overflow_deadline == 15.0
+
+        retry_releases[0].set()
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if len(retry_delays) == 2:
+                break
+        await asyncio.wait_for(scans.get(), 1)
+        assert retry_delays == [10.0, 7.0]
+        assert registration.backoff_overflow_deadline == 15.0
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.anyio
 async def test_hfr_170_live_partition_admission_is_rejected_after_shutdown_starts() -> None:
     invoked = False
 
@@ -251,6 +377,58 @@ async def test_hfr_170_quiesce_keeps_executor_for_service_finalization() -> None
 
 
 @pytest.mark.anyio
+async def test_hfr_170_waiter_cannot_reacquire_after_quiesce() -> None:
+    owner_entered = asyncio.Event()
+    release_owner = asyncio.Event()
+    waiter_invoked = False
+
+    class _Idle(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            raise AssertionError(item)
+
+    async def owner() -> None:
+        owner_entered.set()
+        await release_owner.wait()
+
+    async def waiter_operation() -> None:
+        nonlocal waiter_invoked
+        waiter_invoked = True
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    supervisor.register(RuntimeWorkLane.ACTIVITY_OUTPUTS, _Idle())
+    await supervisor.activate()
+    first = asyncio.create_task(
+        supervisor.run_in_partition(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            "claude\x1fruntime-a",
+            owner,
+        )
+    )
+    await asyncio.wait_for(owner_entered.wait(), 1)
+    waiter = asyncio.create_task(
+        supervisor.run_in_partition(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            "claude\x1fruntime-a",
+            waiter_operation,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    supervisor.quiesce()
+    release_owner.set()
+    await first
+    with pytest.raises(RuntimeError, match="partition is stopping"):
+        await waiter
+    assert waiter_invoked is False
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
 async def test_hfr_175_lease_loss_quiesces_before_controller_callback() -> None:
     callbacks: list[str] = []
     invoked = False
@@ -284,6 +462,72 @@ async def test_hfr_175_lease_loss_quiesces_before_controller_callback() -> None:
             operation,
         )
     assert invoked is False
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_175_waiter_rechecks_service_lease_before_reacquiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owns_lease = True
+    owner_entered = asyncio.Event()
+    release_owner = asyncio.Event()
+    callbacks: list[str] = []
+    waiter_invoked = False
+
+    class _Idle(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            raise AssertionError(item)
+
+    async def owner() -> None:
+        owner_entered.set()
+        await release_owner.wait()
+
+    async def waiter_operation() -> None:
+        nonlocal waiter_invoked
+        waiter_invoked = True
+
+    monkeypatch.setattr(
+        "core.runtime_work.runtime.current_process_owns_service_instance",
+        lambda: owns_lease,
+    )
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        on_lease_lost=lambda: callbacks.append("lost"),
+    )
+    supervisor._requires_service_lease = True
+    supervisor.register(RuntimeWorkLane.ACTIVITY_OUTPUTS, _Idle())
+    await supervisor.activate()
+    first = asyncio.create_task(
+        supervisor.run_in_partition(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            "claude\x1fruntime-a",
+            owner,
+        )
+    )
+    await asyncio.wait_for(owner_entered.wait(), 1)
+    waiter = asyncio.create_task(
+        supervisor.run_in_partition(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            "claude\x1fruntime-a",
+            waiter_operation,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    owns_lease = False
+    release_owner.set()
+    await first
+    with pytest.raises(RuntimeError, match="partition is stopping"):
+        await waiter
+    assert callbacks == ["lost"]
+    assert supervisor._quiescing is True
+    assert waiter_invoked is False
     await supervisor.stop()
 
 

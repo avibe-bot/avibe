@@ -86,7 +86,9 @@ class _Registration:
     coordinator: asyncio.Task[None] | None = None
     workers: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
     worker_started_at: dict[str, float] = field(default_factory=dict)
-    backoff_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    backoff_deadlines: dict[str, float] = field(default_factory=dict)
+    backoff_overflow_deadline: float | None = None
+    backoff_task: asyncio.Task[None] | None = None
     scan_continuation_task: asyncio.Task[None] | None = None
     rewind_after_partitions: set[str] = field(default_factory=set)
     scan_started_at: float | None = None
@@ -133,6 +135,10 @@ class RuntimeWorkSupervisor:
         self._lane_capacity = max(1, int(lane_capacity))
         self._scan_page_size = max(1, int(scan_page_size))
         self._scan_continuation_pages = max(1, int(scan_continuation_pages))
+        self._backoff_partition_limit = (
+            min(self._lane_capacity, self._scan_page_size)
+            * self._scan_continuation_pages
+        )
         self._retry_backoff = max(0.001, float(retry_backoff))
         self._retry_wait = retry_wait or asyncio.sleep
         self._reconcile_wait = reconcile_wait or asyncio.sleep
@@ -217,11 +223,12 @@ class RuntimeWorkSupervisor:
         workers = tuple(registration.workers.values())
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
-        backoffs = tuple(registration.backoff_tasks.values())
-        for backoff in backoffs:
+        backoff = registration.backoff_task
+        if backoff is not None:
             backoff.cancel()
-        if backoffs:
-            await asyncio.gather(*backoffs, return_exceptions=True)
+            await asyncio.gather(backoff, return_exceptions=True)
+        registration.backoff_deadlines.clear()
+        registration.backoff_overflow_deadline = None
         continuation = registration.scan_continuation_task
         if continuation is not None:
             continuation.cancel()
@@ -395,6 +402,7 @@ class RuntimeWorkSupervisor:
         assert current is not None
         owner_task: asyncio.Task[_T] | None = None
         while True:
+            self._require_live_partition_admission(registration)
             owner = registration.workers.get(partition)
             if owner is current:
                 return await operation()
@@ -414,8 +422,6 @@ class RuntimeWorkSupervisor:
                 )
                 break
             await asyncio.gather(asyncio.shield(owner), return_exceptions=True)
-            if not registration.live or self._stopping:
-                raise RuntimeError("runtime work partition is stopping")
             if owner.done() and registration.workers.get(partition) is owner:
                 registration.workers.pop(partition, None)
                 registration.worker_started_at.pop(partition, None)
@@ -423,6 +429,21 @@ class RuntimeWorkSupervisor:
 
         assert owner_task is not None
         return await asyncio.shield(owner_task)
+
+    def _require_live_partition_admission(
+        self,
+        registration: _Registration,
+    ) -> None:
+        if (
+            not registration.live
+            or not self._active
+            or self._quiescing
+            or self._stopping
+        ):
+            raise RuntimeError("runtime work partition is stopping")
+        if not self._owns_service_instance():
+            self._stop_for_lost_lease()
+            raise RuntimeError("runtime work partition is stopping")
 
     def _release_live_partition(
         self,
@@ -602,7 +623,7 @@ class RuntimeWorkSupervisor:
                 if capacity <= 0:
                     break
                 occupied = frozenset(
-                    (*registration.workers, *registration.backoff_tasks)
+                    (*registration.workers, *registration.backoff_deadlines)
                 )
                 scan_cursor = (
                     None if registration.rewind_requested else registration.scan_cursor
@@ -645,7 +666,11 @@ class RuntimeWorkSupervisor:
                     if last_cursor:
                         page_advanced = last_cursor != scan_cursor
                         registration.scan_cursor = last_cursor
-                elif registration.scan_cursor is not None and not has_more:
+                elif (
+                    registration.scan_cursor is not None
+                    and not has_more
+                    and registration.backoff_overflow_deadline is None
+                ):
                     # Reset for the next real wake. Immediately scanning from the
                     # beginning would spin on occupied rows until their owner exits.
                     registration.scan_cursor = None
@@ -659,7 +684,7 @@ class RuntimeWorkSupervisor:
                         # without polling its still-live owner.
                         registration.rewind_after_partitions.add(partition)
                         continue
-                    if partition in registration.backoff_tasks:
+                    if partition in registration.backoff_deadlines:
                         continue
                     task = asyncio.create_task(
                         self._run_item(registration, item),
@@ -759,32 +784,82 @@ class RuntimeWorkSupervisor:
         registration: _Registration,
         partition: str,
     ) -> None:
-        existing = registration.backoff_tasks.get(partition)
+        deadline = self._monotonic() + self._retry_backoff
+        if (
+            partition in registration.backoff_deadlines
+            or len(registration.backoff_deadlines) < self._backoff_partition_limit
+        ):
+            registration.backoff_deadlines[partition] = deadline
+        else:
+            # Exact retry identities are bounded. Overflow coalesces at the
+            # earliest retry point so later failures can never postpone work
+            # whose own backoff already elapsed.
+            registration.backoff_overflow_deadline = min(
+                registration.backoff_overflow_deadline or deadline,
+                deadline,
+            )
+        existing = registration.backoff_task
         if existing is not None and not existing.done():
             return
-        task = asyncio.create_task(
-            self._finish_partition_backoff(registration, partition),
-            name=(
-                f"runtime-work-backoff:{registration.token.lane.value}:"
-                f"{partition}"
-            ),
+        self._start_next_partition_backoff(registration)
+
+    def _start_next_partition_backoff(
+        self,
+        registration: _Registration,
+    ) -> None:
+        deadlines = list(registration.backoff_deadlines.values())
+        if registration.backoff_overflow_deadline is not None:
+            deadlines.append(registration.backoff_overflow_deadline)
+        if not deadlines:
+            registration.backoff_task = None
+            return
+        deadline = min(deadlines)
+        registration.backoff_task = asyncio.create_task(
+            self._finish_partition_backoff(registration, deadline),
+            name=f"runtime-work-backoff:{registration.token.lane.value}",
         )
-        registration.backoff_tasks[partition] = task
 
     async def _finish_partition_backoff(
         self,
         registration: _Registration,
-        partition: str,
+        deadline: float,
     ) -> None:
+        completed = False
         try:
-            await self._retry_wait(self._retry_backoff)
+            await self._retry_wait(max(0.0, deadline - self._monotonic()))
+            completed = True
         finally:
-            current = registration.backoff_tasks.get(partition)
-            if current is asyncio.current_task():
-                registration.backoff_tasks.pop(partition, None)
-            if registration.live and self._active and not self._stopping:
+            if registration.backoff_task is not asyncio.current_task():
+                return
+            registration.backoff_task = None
+            if completed:
+                registration.backoff_deadlines = {
+                    partition: partition_deadline
+                    for partition, partition_deadline in (
+                        registration.backoff_deadlines.items()
+                    )
+                    if partition_deadline > deadline
+                }
+                overflow_deadline = registration.backoff_overflow_deadline
+                overflow_completed = (
+                    overflow_deadline is not None
+                    and overflow_deadline <= deadline
+                )
+                if overflow_completed:
+                    registration.backoff_overflow_deadline = None
+            if (
+                completed
+                and registration.live
+                and self._active
+                and not self._stopping
+            ):
                 registration.rewind_requested = True
                 registration.event.set()
+            if registration.live and (
+                registration.backoff_deadlines
+                or registration.backoff_overflow_deadline is not None
+            ):
+                self._start_next_partition_backoff(registration)
 
     async def _reconcile_loop(self) -> None:
         try:
