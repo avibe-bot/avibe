@@ -4155,13 +4155,7 @@ class SQLiteBackgroundTaskStore:
 
         page_limit = max(1, int(limit))
         query = (
-            select(
-                agent_runs.c.id,
-                agent_runs.c.status,
-                agent_runs.c.updated_at,
-                agent_runs.c.delivery_id,
-                agent_runs.c.pid,
-            )
+            select(agent_runs)
             .where(agent_runs.c.status.in_(_status_query_values("running")))
             .where(agent_runs.c.pid.is_(None))
             .where(agent_runs.c.delivery_id.is_(None))
@@ -4174,7 +4168,10 @@ class SQLiteBackgroundTaskStore:
         if occupied:
             query = query.where(~agent_runs.c.id.in_(occupied))
         with self.engine.connect() as conn:
-            rows = [dict(row) for row in conn.execute(query).mappings()]
+            rows = [
+                self._run_from_row(row)
+                for row in conn.execute(query).mappings()
+            ]
         return rows[:page_limit], len(rows) > page_limit
 
     def recover_claimed_pre_execution_run(

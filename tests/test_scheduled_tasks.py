@@ -1423,6 +1423,10 @@ def test_hfr_161_scheduler_only_enqueues_one_successor_behind_active_work(
         assert len(first) == 1
         claimed = request_store.claim(first[0].id)
         assert claimed is not None
+
+        await service._run_task(task.id)
+        assert request_store.list_pending() == []
+
         assert request_store.mark_execution_started(claimed.id)
 
         await asyncio.gather(
@@ -1440,6 +1444,51 @@ def test_hfr_161_scheduler_only_enqueues_one_successor_behind_active_work(
     assert all(lanes == (RuntimeWorkLane.REQUESTS,) for lanes in notifications)
 
 
+def test_hfr_161_file_scheduler_fence_includes_claimed_pre_execution_run(
+    tmp_path: Path,
+) -> None:
+    task_store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = task_store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+
+    first = request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        suppress_scheduler_successor=True,
+    )
+    assert first is not None
+    assert request_store.claim(first.id) is not None
+
+    assert request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        suppress_scheduler_successor=True,
+    ) is None
+
+    assert request_store.mark_execution_started(first.id)
+    successor = request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        suppress_scheduler_successor=True,
+    )
+    assert successor is not None
+    assert request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        suppress_scheduler_successor=True,
+    ) is None
+
+
 def test_hfr_158_request_scan_fills_page_across_recovery_and_queued_work(
     tmp_path: Path,
     monkeypatch,
@@ -1452,7 +1501,7 @@ def test_hfr_158_request_scan_fills_page_across_recovery_and_queued_work(
     )
     assert request_store.claim(recovering.id) is not None
     queued = request_store.enqueue_hook_send(
-        session_key="slack::channel::queued",
+        session_key="slack::channel::recovering",
         prompt="queued",
     )
     service = ScheduledTaskService(
@@ -1471,7 +1520,8 @@ def test_hfr_158_request_scan_fills_page_across_recovery_and_queued_work(
     )
 
     assert [item.observation[0] for item in items] == ["fallback", "queued"]
-    assert items[0].partition_key == recovering.id
+    assert items[0].partition_key == "key:slack::channel::recovering"
+    assert items[1].partition_key == items[0].partition_key
     assert items[1].observation[1].id == queued.id
 
 
@@ -9687,12 +9737,14 @@ def test_hfr_177_transport_ready_wakes_requests_and_resumes_skipped_run(
         workbench = store.enqueue_hook_send(session_key="avibe::project::proj_test", prompt="local")
         discord = store.enqueue_hook_send(session_key="discord::channel::C123", prompt="remote")
         ready_platforms = {"avibe"}
-        notifications: list[tuple[RuntimeWorkLane, ...]] = []
+        notifications: list[tuple[tuple[RuntimeWorkLane, ...], bool]] = []
         controller = SimpleNamespace(
             platform_settings_managers={},
             is_im_transport_ready=lambda platform: platform in ready_platforms,
             runtime_work_supervisor=SimpleNamespace(
-                notify=lambda *lanes: notifications.append(lanes)
+                notify=lambda *lanes, reset_cursor=False: notifications.append(
+                    (lanes, reset_cursor)
+                )
             ),
         )
         service = ScheduledTaskService(
@@ -9716,7 +9768,7 @@ def test_hfr_177_transport_ready_wakes_requests_and_resumes_skipped_run(
 
         ready_platforms.add("discord")
         service.notify_transport_ready("discord")
-        assert notifications == [(RuntimeWorkLane.REQUESTS,)]
+        assert notifications == [((RuntimeWorkLane.REQUESTS,), True)]
         await service._drain_requests()
         await asyncio.sleep(0)
 

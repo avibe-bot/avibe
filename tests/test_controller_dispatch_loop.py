@@ -334,7 +334,13 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     controller = Controller.__new__(Controller)
     loop = asyncio.new_event_loop()
     controller._loop = loop
-    stopped: dict[str, bool] = {"watch": False, "tasks": False, "runtime": False}
+    stopped: dict[str, bool] = {
+        "watch": False,
+        "tasks": False,
+        "supervisor": False,
+        "runtime": False,
+    }
+    stop_order: list[str] = []
 
     class _Stopper:
         def __init__(self, key: str) -> None:
@@ -342,9 +348,24 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
 
         async def stop(self) -> None:
             stopped[self.key] = True
+            stop_order.append(self.key)
+
+    class _Supervisor(_Stopper):
+        def quiesce(self) -> None:
+            stop_order.append("quiesce")
+
+        async def run_sync(self, operation):  # noqa: ANN001, ANN202
+            assert not stopped["supervisor"]
+            return operation()
+
+    class _WatchStopper(_Stopper):
+        async def stop(self) -> None:
+            await controller.runtime_work_supervisor.run_sync(lambda: None)
+            await super().stop()
 
     controller.scheduled_task_service = _Stopper("tasks")
-    controller.watch_service = _Stopper("watch")
+    controller.runtime_work_supervisor = _Supervisor("supervisor")
+    controller.watch_service = _WatchStopper("watch")
     controller.runtime_command_watcher = _Stopper("runtime")
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
     controller.receiver_tasks = {}
@@ -358,7 +379,11 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
 
     assert stopped["tasks"] is True
     assert stopped["watch"] is True
+    assert stopped["supervisor"] is True
     assert stopped["runtime"] is True
+    assert stop_order[0] == "quiesce"
+    assert set(stop_order[1:3]) == {"tasks", "watch"}
+    assert stop_order[3] == "supervisor"
 
 
 def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:

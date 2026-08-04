@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.runtime_work import RuntimeWorkItem
 
@@ -48,9 +48,13 @@ class FallbackRequestRecoveryHandler:
         store: "SQLiteBackgroundTaskStore",
         *,
         live_claims: Callable[[], frozenset[str]] | None = None,
+        partition_key: Callable[[dict[str, Any]], str] | None = None,
     ) -> None:
         self.store = store
         self._live_claims = live_claims or frozenset
+        self._partition_key = partition_key or (
+            lambda row: str(row["id"])
+        )
 
     def scan(
         self,
@@ -62,11 +66,17 @@ class FallbackRequestRecoveryHandler:
         live_claims = self._live_claims()
         rows, has_more = self.store.scan_claimed_pre_execution_runs(
             limit=limit,
-            occupied=occupied | live_claims,
+            # Store exclusion is by Run id. Supervisor occupancy is by the
+            # canonical execution partition and is applied after mapping below.
+            occupied=live_claims,
             cursor=cursor,
         )
         return [
-            RuntimeWorkItem(str(row["id"]), row)
+            RuntimeWorkItem(
+                self._partition_key(row),
+                row,
+                cursor_key=str(row["id"]),
+            )
             for row in rows
         ], has_more
 

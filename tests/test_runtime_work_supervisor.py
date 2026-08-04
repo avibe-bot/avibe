@@ -134,6 +134,160 @@ async def test_hfr_170_guarded_noop_uses_partition_backoff() -> None:
 
 
 @pytest.mark.anyio
+async def test_hfr_162_backoff_partitions_release_capacity_and_rewind_for_retry() -> None:
+    backoff_entered = asyncio.Event()
+    release_backoff = asyncio.Event()
+    later_started = asyncio.Event()
+    retried_head = asyncio.Event()
+
+    async def controlled_backoff(_delay: float) -> None:
+        backoff_entered.set()
+        await release_backoff.wait()
+
+    class _BackoffHead(RuntimeWorkHandler):
+        def __init__(self) -> None:
+            self.attempts: dict[str, int] = {}
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            rows = [
+                RuntimeWorkItem(
+                    f"partition-{index}",
+                    {},
+                    cursor_key=str(index),
+                )
+                for index in range(5)
+                if f"partition-{index}" not in occupied
+                and (cursor is None or str(index) > cursor)
+            ]
+            return rows[:limit], len(rows) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> bool:
+            count = self.attempts.get(item.partition_key, 0) + 1
+            self.attempts[item.partition_key] = count
+            if item.partition_key == "partition-4":
+                later_started.set()
+                return True
+            if count == 1:
+                return False
+            if item.partition_key == "partition-0":
+                retried_head.set()
+            return True
+
+    handler = _BackoffHead()
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=4,
+        scan_page_size=4,
+        retry_wait=controlled_backoff,
+    )
+    supervisor.register(RuntimeWorkLane.REQUESTS, handler)
+    await supervisor.activate()
+
+    await asyncio.wait_for(backoff_entered.wait(), 1)
+    await asyncio.wait_for(later_started.wait(), 1)
+    assert handler.attempts["partition-4"] == 1
+
+    release_backoff.set()
+    await asyncio.wait_for(retried_head.wait(), 1)
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_170_live_partition_admission_is_rejected_after_shutdown_starts() -> None:
+    invoked = False
+
+    class _Idle(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            raise AssertionError(item)
+
+    async def operation() -> None:
+        nonlocal invoked
+        invoked = True
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    supervisor.register(RuntimeWorkLane.ACTIVITY_OUTPUTS, _Idle())
+    await supervisor.activate()
+    stopping = asyncio.create_task(supervisor.stop())
+    while not supervisor._stopping:
+        await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="partition is stopping"):
+        await supervisor.run_in_partition(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            "claude\x1fruntime-a",
+            operation,
+        )
+    await stopping
+    assert invoked is False
+
+
+@pytest.mark.anyio
+async def test_hfr_170_quiesce_keeps_executor_for_service_finalization() -> None:
+    class _Idle(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            raise AssertionError(item)
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    supervisor.register(RuntimeWorkLane.ACTIVITY_OUTPUTS, _Idle())
+    await supervisor.activate()
+    supervisor.quiesce()
+
+    assert await supervisor.run_sync(lambda: "persisted") == "persisted"
+    with pytest.raises(RuntimeError, match="partition is stopping"):
+        await supervisor.run_in_partition(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            "claude\x1fruntime-a",
+            lambda: asyncio.sleep(0),
+        )
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_175_lease_loss_quiesces_before_controller_callback() -> None:
+    callbacks: list[str] = []
+    invoked = False
+
+    class _Idle(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            raise AssertionError(item)
+
+    async def operation() -> None:
+        nonlocal invoked
+        invoked = True
+
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        on_lease_lost=lambda: callbacks.append("lost"),
+    )
+    supervisor.register(RuntimeWorkLane.ACTIVITY_OUTPUTS, _Idle())
+    await supervisor.activate()
+    supervisor._stop_for_lost_lease()
+
+    assert callbacks == ["lost"]
+    assert supervisor._quiescing is True
+    with pytest.raises(RuntimeError, match="partition is stopping"):
+        await supervisor.run_in_partition(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            "claude\x1fruntime-a",
+            operation,
+        )
+    assert invoked is False
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
 async def test_completed_maintenance_item_does_not_self_rearm() -> None:
     scans = 0
     processed = asyncio.Event()

@@ -85,8 +85,10 @@ class _Registration:
     coordinator: asyncio.Task[None] | None = None
     workers: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
     worker_started_at: dict[str, float] = field(default_factory=dict)
+    backoff_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     scan_started_at: float | None = None
     scan_cursor: str | None = None
+    rewind_requested: bool = False
     unregister_task: asyncio.Task[None] | None = None
     live: bool = True
 
@@ -121,6 +123,7 @@ class RuntimeWorkSupervisor:
         reconcile_wait: Callable[[float], Awaitable[None]] | None = None,
         overdue_seconds: float = _DEFAULT_OVERDUE_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
+        on_lease_lost: Callable[[], None] | None = None,
     ) -> None:
         self._reconcile_interval = max(0.001, float(reconcile_interval))
         self._lane_capacity = max(1, int(lane_capacity))
@@ -130,10 +133,12 @@ class RuntimeWorkSupervisor:
         self._reconcile_wait = reconcile_wait or asyncio.sleep
         self._overdue_seconds = max(0.001, float(overdue_seconds))
         self._monotonic = monotonic
+        self._on_lease_lost = on_lease_lost
         self._registrations: dict[RuntimeWorkLane, _Registration] = {}
         self._generations: dict[RuntimeWorkLane, int] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._active = False
+        self._quiescing = False
         self._stopping = False
         self._subscription_id: int | None = None
         self._reconcile_task: asyncio.Task[None] | None = None
@@ -144,6 +149,7 @@ class RuntimeWorkSupervisor:
         ] = {}
         self._pending_lock = threading.Lock()
         self._pending_lanes: set[RuntimeWorkLane] = set()
+        self._pending_rewinds: set[RuntimeWorkLane] = set()
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self._sync_executor = ThreadPoolExecutor(
             max_workers=max(8, self._lane_capacity * len(RuntimeWorkLane)),
@@ -157,6 +163,8 @@ class RuntimeWorkSupervisor:
         lane: RuntimeWorkLane,
         handler: RuntimeWorkHandler,
     ) -> RuntimeWorkRegistrationToken:
+        if self._quiescing or self._stopping:
+            raise RuntimeError("runtime work supervisor is stopping")
         existing = self._registrations.get(lane)
         if existing is not None:
             raise RuntimeError(f"runtime work lane already registered: {lane.value}")
@@ -204,6 +212,11 @@ class RuntimeWorkSupervisor:
         workers = tuple(registration.workers.values())
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
+        backoffs = tuple(registration.backoff_tasks.values())
+        for backoff in backoffs:
+            backoff.cancel()
+        if backoffs:
+            await asyncio.gather(*backoffs, return_exceptions=True)
         if self._registrations.get(registration.token.lane) is registration:
             self._registrations.pop(registration.token.lane, None)
 
@@ -212,6 +225,8 @@ class RuntimeWorkSupervisor:
             return
         if self._stopping:
             raise RuntimeError("runtime work supervisor is stopping")
+        if self._quiescing:
+            raise RuntimeError("runtime work supervisor is quiescing")
         self._loop = asyncio.get_running_loop()
         self._active = True
         self._subscription_id = bus.subscribe_callback(self._on_bus_event)
@@ -220,30 +235,45 @@ class RuntimeWorkSupervisor:
             registration.event.set()
         with self._pending_lock:
             pending = tuple(self._pending_lanes)
+            rewinds = tuple(self._pending_rewinds)
             self._pending_lanes.clear()
+            self._pending_rewinds.clear()
         self._notify_on_loop(pending)
+        self._notify_on_loop(rewinds, True)
         self._reconcile_task = asyncio.create_task(
             self._reconcile_loop(),
             name="runtime-work-reconcile",
         )
 
-    def notify(self, *lanes: RuntimeWorkLane) -> None:
+    def notify(
+        self,
+        *lanes: RuntimeWorkLane,
+        reset_cursor: bool = False,
+    ) -> None:
         if not lanes:
+            return
+        if self._quiescing or self._stopping:
             return
         loop = self._loop
         if not self._active or loop is None or loop.is_closed():
             with self._pending_lock:
                 self._pending_lanes.update(lanes)
+                if reset_cursor:
+                    self._pending_rewinds.update(lanes)
             return
         try:
             current = asyncio.get_running_loop()
         except RuntimeError:
             current = None
         if current is loop:
-            self._notify_on_loop(lanes)
+            self._notify_on_loop(lanes, reset_cursor)
             return
         try:
-            loop.call_soon_threadsafe(self._notify_on_loop, tuple(lanes))
+            loop.call_soon_threadsafe(
+                self._notify_on_loop,
+                tuple(lanes),
+                reset_cursor,
+            )
         except RuntimeError:
             # A closing generation may lose a hint; the next controller's
             # startup reconciliation is the durable recovery boundary.
@@ -318,6 +348,7 @@ class RuntimeWorkSupervisor:
             and self._active
             and not self._stopping
         ):
+            registration.rewind_requested = True
             registration.event.set()
 
     async def run_in_partition(
@@ -336,14 +367,17 @@ class RuntimeWorkSupervisor:
         partition = str(partition_key or "").strip()
         registration = self._registrations.get(lane)
         loop = self._loop
-        if (
-            not partition
-            or registration is None
-            or not registration.live
-            or not self._active
-            or self._stopping
-            or loop is None
-        ):
+        if not partition:
+            return await operation()
+        if self._quiescing or self._stopping:
+            raise RuntimeError("runtime work partition is stopping")
+        if registration is None:
+            if self._active:
+                raise RuntimeError("runtime work partition is unavailable")
+            return await operation()
+        if not registration.live:
+            raise RuntimeError("runtime work partition is stopping")
+        if not self._active or loop is None:
             return await operation()
         if asyncio.get_running_loop() is not loop:
             raise RuntimeError("runtime work partitions belong to the controller loop")
@@ -422,6 +456,16 @@ class RuntimeWorkSupervisor:
         stop_task = self._begin_stop()
         await asyncio.shield(stop_task)
 
+    def quiesce(self) -> None:
+        """Stop new admission while retaining executor-backed finalization."""
+
+        if self._quiescing or self._stopping:
+            return
+        self._quiescing = True
+        self._active = False
+        for registration in self._registrations.values():
+            registration.event.set()
+
     def _begin_stop(self) -> asyncio.Task[None]:
         if self._stop_task is None:
             self._stop_task = asyncio.create_task(
@@ -431,19 +475,23 @@ class RuntimeWorkSupervisor:
         return self._stop_task
 
     def _stop_for_lost_lease(self) -> None:
-        if self._stopping or self._stop_task is not None:
+        if self._quiescing or self._stopping or self._stop_task is not None:
             return
         logger.error(
             "Runtime work supervisor stopping because this process no longer "
             "owns the service lock"
         )
+        self.quiesce()
+        if self._on_lease_lost is not None:
+            self._on_lease_lost()
+            return
         self._begin_stop()
 
     async def _stop_and_join(self) -> None:
         if self._stopping:
             return
+        self.quiesce()
         self._stopping = True
-        self._active = False
         for handle in self._delayed_wakes.values():
             handle.cancel()
         self._delayed_wakes.clear()
@@ -492,12 +540,18 @@ class RuntimeWorkSupervisor:
         except RuntimeError:
             pass
 
-    def _notify_on_loop(self, lanes: tuple[RuntimeWorkLane, ...] | list[RuntimeWorkLane]) -> None:
+    def _notify_on_loop(
+        self,
+        lanes: tuple[RuntimeWorkLane, ...] | list[RuntimeWorkLane],
+        reset_cursor: bool = False,
+    ) -> None:
         if not self._active or self._stopping:
             return
         for lane in lanes:
             registration = self._registrations.get(lane)
             if registration is not None and registration.live:
+                if reset_cursor:
+                    registration.rewind_requested = True
                 registration.event.set()
 
     def _owns_service_instance(self) -> bool:
@@ -522,7 +576,13 @@ class RuntimeWorkSupervisor:
             capacity = self._lane_capacity - len(registration.workers)
             if capacity <= 0:
                 continue
-            occupied = frozenset(registration.workers)
+            occupied = frozenset(
+                (*registration.workers, *registration.backoff_tasks)
+            )
+            scan_cursor = (
+                None if registration.rewind_requested else registration.scan_cursor
+            )
+            registration.rewind_requested = False
             try:
                 registration.scan_started_at = self._monotonic()
                 try:
@@ -531,7 +591,7 @@ class RuntimeWorkSupervisor:
                             registration.handler.scan,
                             limit=min(capacity, self._scan_page_size),
                             occupied=occupied,
-                            cursor=registration.scan_cursor,
+                            cursor=scan_cursor,
                         )
                     )
                 finally:
@@ -565,7 +625,11 @@ class RuntimeWorkSupervisor:
                 registration.event.set()
             for item in items:
                 partition = str(item.partition_key or "").strip()
-                if not partition or partition in registration.workers:
+                if (
+                    not partition
+                    or partition in registration.workers
+                    or partition in registration.backoff_tasks
+                ):
                     continue
                 task = asyncio.create_task(
                     self._run_item(registration, item),
@@ -603,21 +667,51 @@ class RuntimeWorkSupervisor:
                 registration.token.generation,
             )
         finally:
-            try:
-                if should_backoff and registration.live and not self._stopping:
-                    await self._retry_wait(self._retry_backoff)
-            finally:
-                current = registration.workers.get(partition)
-                if current is asyncio.current_task():
-                    registration.workers.pop(partition, None)
-                    registration.worker_started_at.pop(partition, None)
-                if (
-                    registration.live
-                    and self._active
-                    and not self._stopping
-                    and (should_backoff or item.rearm_after_process)
-                ):
-                    registration.event.set()
+            current = registration.workers.get(partition)
+            if current is asyncio.current_task():
+                registration.workers.pop(partition, None)
+                registration.worker_started_at.pop(partition, None)
+            if should_backoff and registration.live and not self._stopping:
+                self._start_partition_backoff(registration, partition)
+            if (
+                registration.live
+                and self._active
+                and not self._stopping
+                and (should_backoff or item.rearm_after_process)
+            ):
+                registration.event.set()
+
+    def _start_partition_backoff(
+        self,
+        registration: _Registration,
+        partition: str,
+    ) -> None:
+        existing = registration.backoff_tasks.get(partition)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._finish_partition_backoff(registration, partition),
+            name=(
+                f"runtime-work-backoff:{registration.token.lane.value}:"
+                f"{partition}"
+            ),
+        )
+        registration.backoff_tasks[partition] = task
+
+    async def _finish_partition_backoff(
+        self,
+        registration: _Registration,
+        partition: str,
+    ) -> None:
+        try:
+            await self._retry_wait(self._retry_backoff)
+        finally:
+            current = registration.backoff_tasks.get(partition)
+            if current is asyncio.current_task():
+                registration.backoff_tasks.pop(partition, None)
+            if registration.live and self._active and not self._stopping:
+                registration.rewind_requested = True
+                registration.event.set()
 
     async def _reconcile_loop(self) -> None:
         try:
@@ -627,7 +721,7 @@ class RuntimeWorkSupervisor:
                     self._stop_for_lost_lease()
                     return
                 self._report_overdue_workers()
-                self._notify_on_loop(tuple(self._registrations))
+                self._notify_on_loop(tuple(self._registrations), True)
         except asyncio.CancelledError:
             raise
 

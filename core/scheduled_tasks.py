@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -1851,6 +1852,7 @@ class TaskExecutionStore:
         self.pending_dir = self.root / "pending"
         self.processing_dir = self.root / "processing"
         self.completed_dir = self.root / "completed"
+        self._file_enqueue_lock = threading.Lock()
         self._ensure_dirs()
         self._signature = self._state_signature()
 
@@ -2253,19 +2255,27 @@ class TaskExecutionStore:
         suppress_scheduler_successor: bool = False,
     ) -> Optional[TaskExecutionRequest]:
         if task is None:
-            if suppress_scheduler_successor and any(
-                request.task_id == task_id and request.source_kind == "scheduler"
-                for request in self.list_pending()
-            ):
-                return None
-            return self.enqueue(
-                TaskExecutionRequest(
-                    id=uuid4().hex[:12],
-                    request_type="scheduled",
-                    task_id=task_id,
-                    source_kind=source_kind,
-                )
+            request = TaskExecutionRequest(
+                id=uuid4().hex[:12],
+                request_type="scheduled",
+                task_id=task_id,
+                source_kind=source_kind,
             )
+            if self._sqlite is not None:
+                if suppress_scheduler_successor and any(
+                    pending.task_id == task_id
+                    and pending.source_kind == "scheduler"
+                    for pending in self.list_pending()
+                ):
+                    return None
+                return self.enqueue(request)
+            with self._file_enqueue_lock:
+                if (
+                    suppress_scheduler_successor
+                    and self._file_has_unstarted_scheduler_run(task_id)
+                ):
+                    return None
+                return self.enqueue(request)
         metadata = dict(task.metadata or {})
         snapshot = command_snapshot(task)
         if snapshot is not None:
@@ -2324,13 +2334,13 @@ class TaskExecutionStore:
             metadata=dict(metadata or {}),
         )
         if self._sqlite is None:
-            if suppress_scheduler_successor and any(
-                pending.task_id == definition_id
-                and pending.source_kind == "scheduler"
-                for pending in self.list_pending()
-            ):
-                return None
-            return self.enqueue(request)
+            with self._file_enqueue_lock:
+                if (
+                    suppress_scheduler_successor
+                    and self._file_has_unstarted_scheduler_run(definition_id)
+                ):
+                    return None
+                return self.enqueue(request)
         snapshot = self._sqlite.enqueue_definition_run(
             self.queued_run_payload(request),
             suppress_scheduler_successor=suppress_scheduler_successor,
@@ -2536,6 +2546,21 @@ class TaskExecutionStore:
                 if (item.created_at, item.id) > (str(after[0]), str(after[1]))
             ]
         return ordered if limit is None else ordered[: max(0, int(limit))]
+
+    def _file_has_unstarted_scheduler_run(self, definition_id: str) -> bool:
+        """Match SQLite's queued-or-claimed scheduler successor fence."""
+
+        for run in self._list_file_runs():
+            if (
+                str(run.get("task_id") or run.get("definition_id") or "")
+                != str(definition_id)
+                or run.get("source_kind") != "scheduler"
+            ):
+                continue
+            status = _normalize_requested_run_status(run.get("status"))
+            if status == "queued" or (status == "running" and not run.get("pid")):
+                return True
+        return False
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         if self._sqlite is not None:
@@ -3303,6 +3328,7 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
             FallbackRequestRecoveryHandler(
                 service.request_store.sqlite_backend,
                 live_claims=lambda: service._live_claimed_run_ids,
+                partition_key=service._fallback_request_partition_key,
             )
             if lane is RuntimeWorkLane.REQUESTS
             and service.request_store.sqlite_backend is not None
@@ -4456,6 +4482,7 @@ class ScheduledTaskService:
             FallbackRequestRecoveryHandler(
                 sqlite_store,
                 live_claims=lambda: self._live_claimed_run_ids,
+                partition_key=self._fallback_request_partition_key,
             ),
         )
 
@@ -5185,6 +5212,9 @@ class ScheduledTaskService:
         if lock_key:
             return lock_key
         return f"run:{request.id}"
+
+    def _fallback_request_partition_key(self, row: dict[str, Any]) -> str:
+        return self._request_partition_key(TaskExecutionRequest.from_dict(row))
 
     async def _process_pending_request(
         self,
@@ -7113,7 +7143,12 @@ class ScheduledTaskService:
 
     def notify_transport_ready(self, platform: str) -> None:
         logger.info("Transport %s ready; scheduled Run queue will be drained", platform)
-        self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        notify = getattr(supervisor, "notify", None)
+        if callable(notify):
+            notify(RuntimeWorkLane.REQUESTS, reset_cursor=True)
+            return
+        self._drain_dirty = True
 
     def _canonical_session_lock(self, session_id: str, session_key: Optional[str]) -> str:
         cached = self._session_lock_cache.get(session_id)
