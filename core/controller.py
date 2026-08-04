@@ -649,6 +649,7 @@ class Controller:
                 self.config.agent_status_heartbeat_ms = v2_config.agent_status_heartbeat_ms
                 self.config.agent_status_no_output_ms = v2_config.agent_status_no_output_ms
                 self.config.resource_governance = v2_config.runtime.resource_governance
+                self.config.harness_prompt_echo = v2_config.runtime.harness_prompt_echo
                 governor = getattr(self, "_agent_resource_governor", None)
                 if governor is not None:
                     governor.update_config(self.config.resource_governance)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -44,6 +45,70 @@ from storage.background import SQLiteBackgroundTaskStore
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+# Harness prompt echo (``emit_harness_prompt``). The echo is context for the reply
+# that follows, not the payload, so a long generated prompt is cut rather than split
+# across messages the way a result is.
+HARNESS_PROMPT_ECHO_MAX_CHARS = 800
+# Bounded per-process memory of already-echoed Harness deliveries, so an in-process
+# re-dispatch of one delivery cannot read as the task having fired twice.
+HARNESS_PROMPT_ECHO_MEMORY = 256
+# Harness kinds whose prompt is a user-authored instruction worth showing. Excludes
+# ``activity_recovery``: that turn is a runtime re-injection describing a resumed
+# Activity, so echoing it would explain internals nobody asked about.
+HARNESS_PROMPT_ECHO_TRIGGER_KINDS = HARNESS_TRIGGER_KINDS - {"activity_recovery"}
+# The subset whose dispatch text is COMPOSED by Avibe instead of written by a person:
+# a watch appends the waiter's raw stdout, an ``--on-failure agent`` escalation (a
+# ``hook`` run) appends the generated failure report, and a webhook appends its
+# payload. That text exists for the AGENT to read, so echoing it verbatim would
+# publish raw command output — tokens, stack traces, customer data — into a shared
+# conversation before the agent can summarize or redact it (Codex P1). For these
+# kinds the echo shows ONLY the definition's stored instruction
+# (``harness_display_prompt``) and stays silent when none can be resolved; the
+# Workbench transcript still renders the full prompt for the operator.
+HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS = frozenset({"watch", "webhook", "hook"})
+# Mention neutralizers for the echoed prompt. The echo repeats text an operator wrote
+# for an agent, into a channel: quoting it does not stop a renderer from resolving a
+# broadcast, a username, or an id mention, and the Discord adapter sends without
+# ``allowed_mentions``, so an echoed ``@everyone`` would really ping the channel
+# (Codex P2). A zero-width space after the sigil keeps the text readable while
+# leaving nothing for any renderer to resolve. Deliberately platform-agnostic: every
+# adapter renders the same body, so ``@`` before a word character covers the
+# Slack/Discord broadcasts AND a bare Telegram ``@username`` (which
+# ``TelegramFormatter.render`` HTML-escapes without defusing), and a new adapter
+# inherits the guard instead of needing its own.
+_HARNESS_ECHO_MENTION_SIGIL_PATTERN = re.compile(r"@(?=\w)")
+_HARNESS_ECHO_ID_MENTION_PATTERN = re.compile(r"<(?=[@!#&])")
+_HARNESS_ECHO_MENTION_BREAK = "\u200b"
+# Cap for the definition name in the echo label. The prompt has its own cap, but the
+# label is appended after it and task/watch names are never length-validated at
+# creation, so an unbounded name could push the body past Discord's 2,000-char or
+# Telegram's 4,096-char limit \u2014 the adapter would then reject the echo and the channel
+# would see no prompt at all (Codex P2).
+HARNESS_PROMPT_ECHO_MAX_NAME_CHARS = 80
+_HARNESS_PROMPT_ECHO_I18N_KEYS = {
+    "scheduled": "harness.promptEcho.scheduled",
+    "watch": "harness.promptEcho.watch",
+    "webhook": "harness.promptEcho.webhook",
+    "hook": "harness.promptEcho.hook",
+    "agent_run": "harness.promptEcho.agentRun",
+}
+
+
+def _neutralize_mentions(text: str) -> str:
+    """Make every mention in *text* inert without changing how it reads.
+
+    Used for the Harness prompt echo, which republishes text an operator wrote for an
+    agent into a shared channel. Covers every ``@`` sigil — the broadcast words
+    (``@everyone`` / ``@here`` / ``@channel``) and a bare ``@username``, which Telegram
+    resolves into a real notification — plus the bracketed id forms both Slack
+    (``<@U…>``, ``<!here>``, ``<#C…>``) and Discord (``<@id>``, ``<@&role>``) resolve.
+    """
+
+    neutralized = _HARNESS_ECHO_MENTION_SIGIL_PATTERN.sub(
+        "@" + _HARNESS_ECHO_MENTION_BREAK, text or ""
+    )
+    return _HARNESS_ECHO_ID_MENTION_PATTERN.sub("<" + _HARNESS_ECHO_MENTION_BREAK, neutralized)
 
 
 class ActivityOutputDeliveryError(RuntimeError):
@@ -235,6 +300,12 @@ class ConsolidatedMessageDispatcher:
         # first use per turn (see ``_concise_progress_style``), dropped in
         # ``_drop_status_keys``.
         self._turn_progress_style: dict[str, str] = {}
+        # Harness deliveries whose prompt has already been echoed to IM, kept as a
+        # bounded FIFO (see ``emit_harness_prompt``). Per-process only: a restart
+        # replay writes a new Delivery anyway, and a duplicated echo is cosmetic
+        # while a missing one defeats the feature.
+        self._harness_prompt_echo_keys: set[str] = set()
+        self._harness_prompt_echo_order: list[str] = []
         # Injectable monotonic-ish clock (wall time) so tests get deterministic
         # elapsed/stale values without sleeping.
         self._now = time.time
@@ -1554,6 +1625,191 @@ class ConsolidatedMessageDispatcher:
                 first_message_id = message_id
 
         return first_message_id
+
+    async def emit_harness_prompt(
+        self,
+        context: MessageContext,
+        text: str,
+    ) -> Optional[str]:
+        """Echo a Harness-originated prompt into its IM conversation.
+
+        A scheduled task / watch / webhook / hook / ``vibe agent run`` turn writes a
+        ``harness`` Message row (``mirror_harness_inbound`` and the durable Delivery
+        snapshot), which the Workbench transcript renders as the turn that asked the
+        question. An IM channel has no such view: it only ever received the agent's
+        reply, so a scheduled result read as an answer to a question nobody could see.
+        This posts that question once, at the real start of the turn (called from
+        ``AgentService._begin_turn_status``, i.e. after the runtime gate is acquired).
+
+        Deliberately NOT routed through ``emit_agent_message``: this is neither an
+        agent output nor a lifecycle event. It must not consolidate into the status
+        bubble, settle a turn, touch an ``agent_runs`` row, or persist a second row on
+        top of the ``harness`` one that already exists. Best-effort — a failed echo
+        never blocks the turn.
+
+        Skipped for:
+        * ``avibe`` — the Workbench Chat already renders the ``harness`` row.
+        * ``suppress_delivery`` — a background Session delivers nothing outward.
+        * a trigger kind that is not a Harness run (a human turn is the IM message).
+        * ``runtime.harness_prompt_echo = false``.
+        """
+
+        spec = context.platform_specific or {}
+        if context.platform == "avibe":
+            return None
+        if spec.get("suppress_delivery"):
+            return None
+        trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
+        if trigger_kind not in HARNESS_PROMPT_ECHO_TRIGGER_KINDS:
+            return None
+        # A Harness turn never passes through an IM inbound handler, so nothing else
+        # has reloaded ``controller.config`` for this turn: without this mtime-guarded
+        # refresh the config-only switch would be read from the process-start snapshot
+        # (a true->false toggle would still send one prompt, a false->true one would
+        # skip the first). Same reason as ``_refresh_status_bubble_config``.
+        self._refresh_runtime_config()
+        if not getattr(self.controller.config, "harness_prompt_echo", True):
+            return None
+        if trigger_kind in HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS:
+            # Composed, agent-facing prompt: echo the stored instruction alone, never
+            # the appended waiter output / failure report / webhook payload. Read
+            # per-delivery, because an instruction EDITED between two firings leaves a
+            # merged batch dispatching two different instructions. No resolvable
+            # instruction means no echo — a run whose definition was deleted cannot
+            # prove which part of its prompt a person wrote.
+            prompt = self._harness_echo_merged_prompt(
+                spec, "harness_display_prompts", "harness_display_prompt"
+            )
+            if not prompt:
+                return None
+        else:
+            # The Delivery's display snapshots win over the dispatch text when present:
+            # ``SessionTurnGate`` prepends internal instructions to ``dispatch_text``
+            # (the ``[Avibe recovery: ...]`` guard on an ambiguous-start replay), and
+            # the channel must see the stored prompt, not a backend-only directive.
+            prompt = (
+                self._harness_echo_merged_prompt(spec, "display_texts", "display_text")
+                or text
+            )
+        body = self._harness_prompt_body(trigger_kind, spec.get("task_definition_name"), prompt)
+        if not body:
+            return None
+        # The prompt is delivered to the SAME target as the run's result (post_to /
+        # deliver_key overrides included), so the question and its answer cannot land
+        # in different conversations.
+        target_context = self._get_target_context(context)
+        echo_key = "|".join(
+            [
+                str(target_context.platform or ""),
+                str(target_context.channel_id or ""),
+                str(target_context.thread_id or ""),
+                str(spec.get("native_message_id") or context.message_id or ""),
+            ]
+        )
+        if echo_key in self._harness_prompt_echo_keys:
+            # One echo per Harness delivery. A queue flush or a fallback re-dispatch
+            # can reach this turn twice in one process; the prompt text is identical,
+            # so the second post would only read as the task having fired twice.
+            return None
+        try:
+            message_id = await self._get_im_client(context).send_message(
+                target_context,
+                body,
+                # Markdown so the ``> `` prefix renders as a real quote: Slack builds a
+                # plain_text block for anything else and would show the markers
+                # literally (Codex P3). Telegram is unaffected — it resolves ``None``
+                # to its own HTML default anyway.
+                parse_mode="markdown",
+            )
+        except Exception as err:
+            logger.warning(
+                "Failed to echo harness prompt (%s) to %s: %s",
+                trigger_kind,
+                target_context.channel_id,
+                err,
+                exc_info=True,
+            )
+            return None
+        self._remember_harness_prompt_echo(echo_key)
+        return message_id
+
+    @staticmethod
+    def _harness_echo_merged_prompt(spec: dict, batch_key: str, single_key: str) -> str:
+        """Every prompt this turn is about to answer, one entry per merged Delivery.
+
+        A busy session merges the queued Harness deliveries of one definition into a
+        single Turn (``core/session_turns.py::_collect_delivery_segment``) and sends
+        *all* of their prompts to the backend, so reading the singular key — the first
+        Delivery only — would announce one instruction for a result answering several.
+        Two ``vibe agent run`` calls merge under the shared ``agent_run`` definition id
+        with different prompts; a watch/webhook/hook definition whose instruction was
+        EDITED between two firings merges with different stored instructions.
+
+        Repeat firings of an unchanged definition carry the same text, hence the
+        de-dup: a merged batch reads as one echo unless the instructions really differ.
+        ``batch_key`` is stamped by the durable batch hydration only, so the singular
+        key still serves the legacy mirror path, which has no batch.
+        """
+        raw = spec.get(batch_key)
+        entries = (
+            [str(item or "") for item in raw] if isinstance(raw, (list, tuple)) else []
+        )
+        if not any(entry.strip() for entry in entries):
+            entries = [str(spec.get(single_key) or "")]
+        unique = dict.fromkeys(entry.strip() for entry in entries if entry.strip())
+        return "\n\n".join(unique)
+
+    def _harness_prompt_body(
+        self,
+        trigger_kind: str,
+        definition_name: Any,
+        text: str,
+    ) -> Optional[str]:
+        prompt = strip_silent_blocks(text or "").strip()
+        if not prompt:
+            return None
+        truncated = self._t("harness.promptEcho.truncated")
+        if len(prompt) > HARNESS_PROMPT_ECHO_MAX_CHARS:
+            prompt = prompt[:HARNESS_PROMPT_ECHO_MAX_CHARS].rstrip() + truncated
+        label = self._t(
+            _HARNESS_PROMPT_ECHO_I18N_KEYS.get(trigger_kind, "harness.promptEcho.generic")
+        )
+        name = str(definition_name or "").strip()
+        if len(name) > HARNESS_PROMPT_ECHO_MAX_NAME_CHARS:
+            # The name is appended AFTER the prompt cap and is never length-validated
+            # when a task/watch is created, so leaving it unbounded could push the body
+            # past a platform message limit — the adapter would reject the echo and the
+            # channel would see no prompt at all.
+            name = name[:HARNESS_PROMPT_ECHO_MAX_NAME_CHARS].rstrip() + truncated
+        if name:
+            label = self._t("harness.promptEcho.named", label=label, name=name)
+        # Quoted body: plain-text platforms still read it as a quote, and the
+        # markdown platforms render it de-emphasized, so the echo never competes
+        # with the agent's own reply.
+        quoted = "\n".join(f"> {line}" for line in prompt.splitlines())
+        # Both halves are neutralized: the label carries the definition NAME, which a
+        # user typed too and can hold a mention just as easily as the prompt.
+        return _neutralize_mentions(f"{label}\n{quoted}")
+
+    def _refresh_runtime_config(self) -> None:
+        """Best-effort, mtime-guarded reload of ``controller.config`` from disk.
+
+        Resolved through ``getattr`` so the lightweight controller stubs used by the
+        dispatcher tests simply skip it instead of raising.
+        """
+        refresh = getattr(self.controller, "_refresh_config_from_disk", None)
+        if not callable(refresh):
+            return
+        try:
+            refresh()
+        except Exception:
+            logger.debug("runtime config refresh failed; using cached config", exc_info=True)
+
+    def _remember_harness_prompt_echo(self, echo_key: str) -> None:
+        self._harness_prompt_echo_keys.add(echo_key)
+        self._harness_prompt_echo_order.append(echo_key)
+        while len(self._harness_prompt_echo_order) > HARNESS_PROMPT_ECHO_MEMORY:
+            self._harness_prompt_echo_keys.discard(self._harness_prompt_echo_order.pop(0))
 
     async def emit_agent_message(
         self,

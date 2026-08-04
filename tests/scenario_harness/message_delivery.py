@@ -72,6 +72,9 @@ class MessageDeliveryHarness(BaseScenarioHarness):
         self.context.platform = platform
         self.dispatcher = ConsolidatedMessageDispatcher(self.controller)
 
+    async def emit_harness_prompt(self, text: str):
+        return await self.dispatcher.emit_harness_prompt(self.context, text)
+
     async def emit_result(self, text: str):
         return await self.dispatcher.emit_agent_message(self.context, "result", text)
 

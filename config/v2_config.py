@@ -283,6 +283,13 @@ class RuntimeConfig:
     harness_run_orphan_grace_seconds: int = DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS
     harness_run_queued_ttl_seconds: int = DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS
     harness_run_hold_ttl_seconds: int = DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS
+    # Echo the Harness-originated prompt into the IM conversation when a background
+    # task (scheduled task, watch, webhook, hook, ``vibe agent run``) starts an agent
+    # turn there. The Workbench transcript already renders that prompt from the
+    # ``harness`` Message row; an IM channel had no equivalent, so a scheduled reply
+    # arrived as an answer to a question nobody in the channel could see. Off means
+    # today's behavior (result only).
+    harness_prompt_echo: bool = True
 
 
 @dataclass
@@ -1350,6 +1357,7 @@ class V2Config:
                 "harness_run_orphan_grace_seconds": self.runtime.harness_run_orphan_grace_seconds,
                 "harness_run_queued_ttl_seconds": self.runtime.harness_run_queued_ttl_seconds,
                 "harness_run_hold_ttl_seconds": self.runtime.harness_run_hold_ttl_seconds,
+                "harness_prompt_echo": self.runtime.harness_prompt_echo,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,
