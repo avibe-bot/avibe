@@ -2247,7 +2247,21 @@ def _is_remote_local_execution_request(method: str, path: str) -> bool:
         return True
     if normalized_method == "POST" and path == "/api/running-agents/end":
         return True
-    if normalized_method == "DELETE" and re.fullmatch(r"/api/sessions/[^/]+", path):
+    if normalized_method == "POST" and path in {
+        "/api/skills",
+        "/api/skills/update",
+        "/api/skills/upload",
+    }:
+        return True
+    if normalized_method == "PUT" and (
+        path == "/api/global-prompts"
+        or re.fullmatch(r"/api/projects/[^/]+/agents-md", path)
+    ):
+        return True
+    if normalized_method == "DELETE" and (
+        re.fullmatch(r"/api/skills/[^/]+", path)
+        or re.fullmatch(r"/api/sessions/[^/]+(?:/queue/[^/]+)?", path)
+    ):
         return True
     return normalized_method == "POST" and bool(
         re.fullmatch(

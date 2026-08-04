@@ -960,6 +960,173 @@ def test_remote_session_archive_is_blocked_before_store_access(
     assert response.get_json()["code"] == "remote_execution_disabled"
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "json_body", "api_method"),
+    [
+        ("POST", "/api/skills", {"source": "gh:owner/repo"}, "add_skill"),
+        ("POST", "/api/skills/update", {"name": "demo"}, "update_skill"),
+        ("POST", "/api/skills/upload", {"content_base64": ""}, "upload_skill_zip"),
+        ("DELETE", "/api/skills/demo", None, "remove_skill"),
+    ],
+)
+def test_remote_skill_mutations_are_blocked_before_api_calls(
+    monkeypatch,
+    tmp_path,
+    method,
+    path,
+    json_body,
+    api_method,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    async def unexpected_skill_call(*args, **kwargs):
+        raise AssertionError("remote skill mutation reached the local Skills API")
+
+    monkeypatch.setattr(api, api_method, unexpected_skill_call)
+    response = client.request(
+        method,
+        path,
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
+    ("path", "json_body", "write_target"),
+    [
+        (
+            "/api/projects/proj-local/agents-md",
+            {"content": "remote instructions"},
+            "vibe.project_agents_md.save_agents_md",
+        ),
+        (
+            "/api/global-prompts",
+            {"content": "remote instructions", "backends": ["codex"]},
+            "vibe.global_agents_md.write_many_global_agents_md",
+        ),
+    ],
+)
+def test_remote_agent_instruction_writes_are_blocked_before_filesystem_access(
+    monkeypatch,
+    tmp_path,
+    path,
+    json_body,
+    write_target,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_instruction_write(*args, **kwargs):
+        raise AssertionError("remote instruction mutation reached the local filesystem")
+
+    monkeypatch.setattr(write_target, unexpected_instruction_write)
+    response = client.put(
+        path,
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_queue_deletion_is_blocked_before_store_access(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_queue_retirement(*args, **kwargs):
+        raise AssertionError("remote queue deletion reached the local delivery store")
+
+    monkeypatch.setattr(
+        "storage.message_deliveries.retire_queued_with_run",
+        unexpected_queue_retirement,
+    )
+    response = client.delete(
+        "/api/sessions/ses-local/queue/del-local",
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_owner_can_still_read_agent_instructions_and_queue(
+    monkeypatch,
+    tmp_path,
+):
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    monkeypatch.setattr(ui_server, "_resolve_project_dir", lambda project_id: str(tmp_path))
+    monkeypatch.setattr(
+        "vibe.global_agents_md.read_all_global_agents_md",
+        lambda: [],
+    )
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    project_response = client.get(
+        "/api/projects/proj-local/agents-md",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    global_response = client.get(
+        "/api/global-prompts",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    queue_response = client.get(
+        "/api/sessions/ses-local/queue",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert project_response.status_code == 200
+    assert project_response.get_json()["source"] == "none"
+    assert global_response.status_code == 200
+    assert global_response.get_json() == {"backends": []}
+    assert queue_response.status_code == 200
+    assert queue_response.get_json() == {"queued": []}
+    assert not ui_server._is_remote_local_execution_request("POST", "/api/skills/preview")
+
+
 def test_remote_show_dispatch_is_rejected_before_event_reservation(
     monkeypatch,
     tmp_path,
