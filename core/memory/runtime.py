@@ -1054,6 +1054,8 @@ class MemoryRuntime:
                     return
                 if reason is not None:
                     self._recorder_health = {"state": "degraded", "reason": reason}
+                    if reason == "call_log_corrupt":
+                        return
                 elif self._recorder_health.get("reason") != "call_log_corrupt":
                     self._recorder_health = dict(_RECORDER_DISABLED)
                 await asyncio.sleep(_CALL_LOG_RETENTION_INTERVAL_SECONDS)

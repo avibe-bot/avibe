@@ -2623,9 +2623,12 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
     db_path.parent.mkdir(parents=True, mode=0o700)
     initialize_call_log(db_path)
     maintained = threading.Event()
+    maintenance_calls = 0
 
     def maintain(path: Path) -> str:
+        nonlocal maintenance_calls
         assert path == db_path
+        maintenance_calls += 1
         maintained.set()
         return "call_log_corrupt"
 
@@ -2649,6 +2652,9 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
             "state": "degraded",
             "reason": "call_log_corrupt",
         }
+        await asyncio.wait_for(asyncio.shield(task), timeout=1)
+        assert maintenance_calls == 1
+        assert runtime._call_log_retention_task is None
         await runtime.close()
         assert task.done()
 

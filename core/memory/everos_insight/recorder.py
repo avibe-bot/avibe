@@ -340,7 +340,6 @@ class RecorderHandle:
             self._batches_since_maintenance += 1
             if (
                 not self._closing
-                and self._queue_is_empty()
                 and self._maintenance_due()
                 and not self._perform_maintenance(conn)
             ):
@@ -477,10 +476,6 @@ class RecorderHandle:
 
     def _past_close_deadline_locked(self) -> bool:
         return self._closing and self._close_deadline is not None and time.monotonic() >= self._close_deadline
-
-    def _queue_is_empty(self) -> bool:
-        with self._condition:
-            return not self._queue
 
     def _set_health_locked(self, state: str, reason: str | None) -> None:
         self._health_state = state

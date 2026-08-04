@@ -932,6 +932,7 @@ async def test_writer_throttles_maintenance_after_immediate_startup(tmp_path, mo
     entered = threading.Event()
     release = threading.Event()
     maintenance_calls = 0
+    queued_during_maintenance: list[int] = []
     maintenance_finished = threading.Condition()
     original_connection = recorder._database_connection
     original_maintenance = recorder._maintain_storage
@@ -948,6 +949,8 @@ async def test_writer_throttles_maintenance_after_immediate_startup(tmp_path, mo
         result = original_maintenance(*args, **kwargs)
         with maintenance_finished:
             maintenance_calls += 1
+            with handle._condition:
+                queued_during_maintenance.append(len(handle._queue))
             maintenance_finished.notify_all()
         return result
 
@@ -967,6 +970,7 @@ async def test_writer_throttles_maintenance_after_immediate_startup(tmp_path, mo
         assert maintenance_finished.wait_for(lambda: maintenance_calls >= 2, timeout=2)
     await handle.close()
     assert maintenance_calls == 2
+    assert queued_during_maintenance[1] > 0
 
 
 async def test_idle_writer_wakes_for_time_based_maintenance(tmp_path, monkeypatch) -> None:
