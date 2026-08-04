@@ -253,3 +253,34 @@ two places, neither material:
   `vibe task update --name` would have erased the pin. Covered by SCT-051.
 
 Scenario catalogue: SCT-050, SCT-051, SCT-052.
+
+### Review pass
+
+Three P2 findings, all taken. Each is the same shape as the bugs above — a field
+whose second meaning was not carried all the way through.
+
+- **A policy change promoted the command's directory onto a new Session.**
+  Retargeting at `--create-session*` without `--cwd` carries the stored directory
+  forward from `task.cwd`, which is correct while `cwd` has one meaning and wrong
+  the moment Issue 1 let it have two. The Session half now reads
+  `metadata["session_workdir"]` for a command task (`_stored_session_workdir`),
+  which a bound definition never had and a per-run definition leaves unset on
+  purpose (SCT-047), while the command half survives on `stored_cwd`. That also
+  stops a policy change re-stamping the directory the *update* ran from —
+  SCT-051's rule in the lane the explicit flag does not cover. **SCT-053.**
+- **The escalation heading was keyed on the kind.** A command task with
+  `on_failure: none` and a real delivery target keeps the routing fields
+  legitimately (that is SCT-043's whole rule), so the heading made the pane say
+  "Notice only (no Agent)" and "escalation" about one task, one field apart.
+  Keyed on `taskOnFailure(task) === 'agent'` — the same value the field above it
+  prints. **SCT-054.**
+- **"Session working directory" named an outcome the pane cannot verify.**
+  `_bound_session_workdir` answers `None` for a deleted row, a NULL workdir or a
+  failed read, and every fallback is `isdir`-validated, so the command can land on
+  the runtime default while the pane points at a Session — beside the "Session
+  deleted" the Session field prints two rows up. The field names the *chain* the
+  fire walks and drops the Session term where the binding is visibly gone.
+  Resolving it exactly would need the backend to publish the source; the pane
+  stops making a claim it cannot support instead. **SCT-055.**
+
+Scenario catalogue: SCT-050 – SCT-055.

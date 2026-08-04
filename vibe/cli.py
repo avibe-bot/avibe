@@ -3964,7 +3964,7 @@ def cmd_task_update(args):
         elif getattr(args, "create_session", False) or getattr(args, "create_session_per_run", False):
             cwd = _resolve_definition_session_cwd(
                 explicit_cwd=None,
-                existing_cwd=task.cwd,
+                existing_cwd=_stored_session_workdir(task, metadata),
                 session_policy=session_policy,
                 scoped_session=_has_modern_scope_target(args) or bool(str(metadata.get("session_scope_id") or "").strip()),
                 help_command="vibe task update --help",
@@ -5177,19 +5177,50 @@ def _command_definition_spawn_cwd(
     Session question to ``None`` on every edit, and the update path persists that with
     ``update_cwd=True`` -- so without this, renaming an escalating command task would
     silently un-pin the directory it was created with, and the next fire would go back
-    to following the Session. Only the explicit flag replaces it.
+    to following the Session. Only the explicit flag replaces it, and it outranks the
+    invocation directory for every policy rather than only for ``existing``: a policy
+    change is not a request to move the command, and re-stamping the directory the
+    UPDATE happened to run from is the same silent relocation in a different lane.
+    ``stored_cwd`` defaults to ``None``, so ``task add`` -- which has nothing stored
+    yet -- resolves exactly as it did before.
     """
 
     if not has_command:
         return session_cwd
     raw = (explicit_cwd or "").strip()
-    if session_policy == "existing":
-        if raw:
-            return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
-        return session_cwd or stored_cwd
-    if session_cwd or session_policy != "create_per_run":
+    if session_policy == "existing" and raw:
+        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+    if session_cwd:
         return session_cwd
-    return os.getcwd()
+    if stored_cwd:
+        return stored_cwd
+    if session_policy == "create_per_run":
+        return os.getcwd()
+    return None
+
+
+def _stored_session_workdir(task, metadata: Optional[dict]) -> Optional[str]:
+    """The SESSION half of what a definition already stores, for a policy change.
+
+    Retargeting at ``--create-session``/``--create-session-per-run`` without naming a
+    directory carries forward the one the definition already had. For a message task
+    ``task.cwd`` IS that directory: the Session question and the run question are the
+    same question, answered once at ``task add``.
+
+    For a command task they can differ, and since the ``existing`` refusal was softened
+    they routinely do -- ``task.cwd`` is where the COMMAND runs. The Session half lives
+    in ``metadata["session_workdir"]``, or is deliberately absent: a bound definition
+    never had one, and a per-run definition leaves it unset on purpose so an
+    escalation's Session follows its Scope (SCT-047). Reading ``task.cwd`` for it
+    promotes a directory the user picked for a subprocess into a Session placement they
+    never asked for, and the newly created Session stops inheriting from its Scope with
+    nothing in the edit saying so. ``_command_definition_spawn_cwd`` keeps the command
+    half from its own ``stored_cwd``, so the two survive the retarget separately.
+    """
+
+    if not task.has_command:
+        return task.cwd
+    return str((metadata or {}).get("session_workdir") or "").strip() or None
 
 
 def _has_modern_scope_target(args) -> bool:

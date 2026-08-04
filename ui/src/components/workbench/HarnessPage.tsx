@@ -1209,6 +1209,26 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
   );
 };
 
+/** What to print for a command task that stores no working directory of its own.
+ *
+ * Names the CHAIN the fire actually walks (``_execute_command_task``) -- the bound
+ * Session's workdir, read live, then the runtime default -- rather than an outcome the
+ * pane cannot verify. "Session working directory" was the wrong promise:
+ * ``_bound_session_workdir`` answers ``None`` for a deleted row, a NULL workdir or a
+ * failed read, and every fallback is ``isdir``-validated besides, so the command can
+ * land on the runtime default while the pane names a Session.
+ *
+ * Where the pane can already see the first term is impossible -- no binding at all, or
+ * one whose Session row is gone (the same ``deleted`` state the Session field prints
+ * two rows up) -- it drops that term instead of contradicting itself.
+ */
+function commandCwdFallbackKey(task: HarnessTask): string {
+  const state = harnessSessionState(task, task.session_id);
+  return state === 'none' || state === 'deleted'
+    ? 'harness.detail.cwdRuntimeDefault'
+    : 'harness.detail.cwdFromSession';
+}
+
 interface TaskDetailProps {
   task: HarnessTask;
   agent?: VibeAgentBrief;
@@ -1264,6 +1284,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
   const { t } = useTranslation();
   const isCommand = taskIsCommand(task);
   const commandPreview = isCommand ? taskCommandPreview(task) : '';
+  const escalates = isCommand && taskOnFailure(task) === 'agent';
   const routesSomewhere =
     !isCommand ||
     taskOnFailure(task) === 'agent' ||
@@ -1302,14 +1323,14 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           sit with the command rather than with the failure lane below. ``WatchDetail``
           has shown the working directory since it shipped; the task pane never did, so
           a scheduled command's directory was unanswerable from the UI even once
-          ``--cwd`` stored one. A null is not "nowhere": a bound definition follows its
-          Session's workdir live at fire time, which is a different answer from the
-          em-dash a missing field would print. */}
+          ``--cwd`` stored one. A null is not "nowhere": the fire walks a chain, so the
+          field names the chain rather than printing the em-dash a missing field would.
+          */}
       {isCommand && (
         <div className="grid grid-cols-2 gap-4">
           <DetailField label={t('harness.detail.cwd')}>
             <code className="font-mono text-[11px] text-muted">
-              {task.cwd || (task.session_id ? t('harness.detail.cwdFromSession') : '—')}
+              {task.cwd || t(commandCwdFallbackKey(task))}
             </code>
           </DetailField>
           <DetailField label={t('harness.detail.timeout')}>
@@ -1363,12 +1384,16 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
         <RoutingFields
           task={task}
           agent={agent}
-          // Only an escalating command task is describing a path it does not take on a
+          // Only an ESCALATING command task is describing a path it does not take on a
           // healthy day. A message task routes every run through these same fields, so
           // grouping them under a failure heading there would be a lie in the other
-          // direction.
-          group={isCommand ? t('harness.detail.escalation') : undefined}
-          messageLabel={isCommand ? t('harness.detail.triagePrompt') : t('harness.detail.message')}
+          // direction -- and so would grouping them for a command task whose
+          // ``on_failure`` is ``none``. That row is exactly what SCT-043's gate keeps:
+          // no Agent turn, but a real Session or delivery target carrying the failure
+          // notice. Keyed on the same value the field above prints, so the pane cannot
+          // say "Notice only (no Agent)" and "escalation" about one task.
+          group={escalates ? t('harness.detail.escalation') : undefined}
+          messageLabel={escalates ? t('harness.detail.triagePrompt') : t('harness.detail.message')}
           showMessage={Boolean(!isCommand || task.message || task.prompt)}
         />
       )}

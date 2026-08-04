@@ -1752,6 +1752,55 @@ def test_task_update_keeps_a_command_tasks_cwd_through_an_unrelated_edit(
     )
 
 
+def test_task_update_retarget_does_not_promote_a_command_cwd_onto_a_new_session(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """The two halves of ``cwd`` survive a policy change separately.
+
+    Retargeting at ``--create-session-per-run`` without naming a directory carries
+    forward the one the definition already has. For a message task that is right --
+    ``cwd`` IS its Session's directory. For an escalating command task it is where the
+    COMMAND runs, and carrying it across pins the newly created escalation Session to a
+    directory the user chose for a subprocess, instead of letting it inherit from its
+    Scope. The command must keep it; the Session must not receive it.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="sesCaller",
+        session_policy="existing",
+        cwd=str(pinned),
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--create-session-per-run"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+        patch("os.getcwd", return_value=str(tmp_path)),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["session_policy"] == "create_per_run"
+    assert definition["cwd"] == str(pinned), (
+        "the policy change moved the command, which nothing in the edit asked for: "
+        f"{definition['cwd']!r}"
+    )
+    assert "session_workdir" not in (definition["metadata"] or {}), (
+        "the command's directory was promoted into the created Session's placement, so "
+        "the escalation Session stopped following its Scope"
+    )
+
+
 def test_task_update_rejects_cwd_for_already_reserved_create_once_task(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)

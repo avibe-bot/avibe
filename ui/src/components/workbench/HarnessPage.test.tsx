@@ -557,10 +557,28 @@ describe('TaskDetail command task', () => {
     expect(pinned).toContain(`>${i18n.t('harness.detail.cwd')}<`);
     expect(pinned).toContain('/srv/app');
 
-    // A null is not "nowhere": a bound definition follows its Session's workdir, read
-    // live at fire time, which is a different answer from a bare em-dash.
-    const inherited = detail(task({ shell_command: 'make test', session_id: 'ses1', cwd: null }));
+    // A null is not "nowhere": the fire walks a chain, which is a different answer
+    // from the bare em-dash a missing field would print. Stated as the chain rather
+    // than as an outcome — ``_bound_session_workdir`` answers None for a NULL workdir
+    // or a failed read too, so "Session working directory" was a promise the pane
+    // cannot keep.
+    const inherited = detail(
+      task({ shell_command: 'make test', session_id: 'ses1', session_platform: 'slack', cwd: null }),
+    );
     expect(inherited).toContain(i18n.t('harness.detail.cwdFromSession'));
+  });
+
+  it('does not name a session the command cannot inherit a directory from', () => {
+    // A binding whose Session row is gone resolves to None at fire time and falls
+    // through to the runtime default — so naming the Session here would contradict the
+    // "Session deleted" the Session field prints two rows up, and misstate where the
+    // command runs.
+    const deleted = detail(task({ shell_command: 'make test', session_id: 'ses-gone', cwd: null }));
+    expect(deleted).toContain(i18n.t('harness.detail.cwdRuntimeDefault'));
+    expect(deleted).not.toContain(i18n.t('harness.detail.cwdFromSession'));
+
+    const unbound = detail(task({ shell_command: 'make test', session_id: null, cwd: null }));
+    expect(unbound).toContain(i18n.t('harness.detail.cwdRuntimeDefault'));
   });
 
   it('states the failure policy before the routing it governs, not after it', () => {
@@ -588,6 +606,29 @@ describe('TaskDetail command task', () => {
     expect(html).toContain(`>${i18n.t('harness.detail.triagePrompt')}<`);
     expect(html).not.toContain(`>${i18n.t('harness.detail.message')}<`);
     expect(html).toContain('Diagnose it.');
+  });
+
+  it('calls nothing an escalation on a command task that escalates to no one', () => {
+    // The routing gate is SCT-043's: bindings, not kind. A command task with
+    // ``--on-failure none`` delivered to a real conversation keeps these fields
+    // legitimately — and heading them "On failure → escalation" would have the pane
+    // say "Notice only (no Agent)" and "escalation" about the same task, one field
+    // apart.
+    const html = detail(
+      task({
+        shell_command: 'make test',
+        session_key: 'slack::channel::C123',
+        post_to: 'thread',
+        message: 'Left over from an older edit.',
+        metadata: { on_failure: 'none' },
+      }),
+    );
+
+    expect(html).toContain(`>${i18n.t('harness.onFailure.none')}<`);
+    expect(html).toContain(`>${i18n.t('harness.detail.delivery')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.escalation')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.triagePrompt')}<`);
+    expect(html).toContain(`>${i18n.t('harness.detail.message')}<`);
   });
 
   it('leaves a message task reading as the job it is', () => {

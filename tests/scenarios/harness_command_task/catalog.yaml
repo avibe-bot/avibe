@@ -557,3 +557,48 @@ scenarios:
     # is called a triage prompt rather than sharing a label with a message task's payload.
     # The working directory is shown for the first time on this pane in the same pass: it
     # was unanswerable from the UI even once SCT-050 could store one.
+  - id: SCT-053
+    name: a command task's directory and its Session's survive a policy change separately
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_retarget_does_not_promote_a_command_cwd_onto_a_new_session
+    # Retargeting at ``--create-session``/``--create-session-per-run`` without naming a
+    # directory carries forward the stored one, reading it off ``task.cwd``. That is the
+    # right source while ``cwd`` has one meaning -- for a message task it IS the Session's
+    # directory -- and the wrong one the moment SCT-050 let the two differ: the command's
+    # directory was promoted into the new Session's placement, so an escalation Session
+    # stopped inheriting from its Scope with nothing in the edit saying so. The Session
+    # half now comes from ``metadata["session_workdir"]``, which a bound definition never
+    # had and a per-run definition leaves unset on purpose (SCT-047). The command half
+    # comes from its own stored value, which also stops a policy change from re-stamping
+    # the directory the UPDATE happened to run from -- SCT-051's rule in the lane the
+    # explicit flag does not cover.
+  - id: SCT-054
+    name: nothing is called an escalation on a command task that escalates to no one
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task calls nothing an escalation on a command task that escalates to no one
+    # SCT-052's heading was keyed on the KIND, which is the same mistake SCT-043 rejected
+    # one level down: a command task with ``--on-failure none`` delivered to a real
+    # conversation keeps the routing fields legitimately, and heading them "On failure ->
+    # escalation" made the pane say "Notice only (no Agent)" and "escalation" about one
+    # task, one field apart. Keyed on ``on_failure`` instead -- the same value the field
+    # above it prints -- so the two cannot contradict each other.
+  - id: SCT-055
+    name: the pane does not name a Session the command cannot inherit a directory from
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task does not name a session the command cannot inherit a directory from
+    # "Session working directory" named an OUTCOME the pane cannot verify.
+    # ``_bound_session_workdir`` answers ``None`` for a deleted row, a NULL workdir or a
+    # failed read, and every fallback is ``isdir``-validated besides, so the command lands
+    # on the runtime default while the pane points at a Session -- next to the "Session
+    # deleted" the Session field prints two rows up, in the case the UI can already see.
+    # The field names the CHAIN the fire walks instead, and drops the Session term where
+    # the binding is visibly gone or absent.
