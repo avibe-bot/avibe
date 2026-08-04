@@ -550,6 +550,18 @@ def tunnel_quality_snapshot() -> dict[str, Any] | None:
     return None
 
 
+def _live_network_edge_locations(active: dict[str, Any], pid: int | None) -> list[str]:
+    metrics_url = active.get("metrics_url")
+    if active.get("pid") != pid or not isinstance(metrics_url, str) or not metrics_url:
+        return []
+    try:
+        sample = tunnel_quality.scrape_metrics(metrics_url)
+    except Exception:
+        logger.debug("Could not obtain live Tunnel edge locations", exc_info=True)
+        return []
+    return list(sample.edge_locations)
+
+
 def status(
     config: V2Config | None = None,
     *,
@@ -594,9 +606,8 @@ def status(
         result["tunnel_quality"] = quality
     if running and include_network_path:
         active = _state_connector("active") or {}
-        edge_locations = quality.get("edge_locations") if isinstance(quality, dict) else None
         result["network_path"] = cloudflare_network.network_path_snapshot(
-            edge_locations if isinstance(edge_locations, list) else [],
+            _live_network_edge_locations(active, pid),
             active.get("metrics_url") if isinstance(active.get("metrics_url"), str) else None,
             client_colo=client_colo,
             client_access=client_access,

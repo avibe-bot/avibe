@@ -197,8 +197,9 @@ verified observations:
 
 - cloudflared's loopback-only `/diag/tunnel` endpoint supplies the Anycast edge
   IP addresses for the active Connector's live connections;
-- the existing `edge_locations` metric supplies node identifiers such as
-  `sin09`; and
+- a fresh scrape of the active Connector's existing `edge_locations` metric
+  supplies node identifiers such as `sin09`; persisted locations are not reused
+  when that live scrape fails; and
 - a remote request's `CF-Ray` suffix supplies the browser ingress colo. Avibe
   ignores `CF-Ray` unless the request matches the paired public hostname. This
   header is diagnostic-only input and never participates in access control or

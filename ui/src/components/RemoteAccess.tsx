@@ -150,6 +150,7 @@ export const RemoteAccess: React.FC = () => {
       const message = t('remoteAccess.startSuccess');
       setActionMessage({ type: 'success', text: message });
       showToast(message, 'success');
+      await refresh(true).catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : t('errors.remote_access_unknown');
       setActionMessage({ type: 'error', text: message });
@@ -165,6 +166,7 @@ export const RemoteAccess: React.FC = () => {
       const message = t('remoteAccess.optimizeStarted');
       setActionMessage({ type: 'success', text: message });
       showToast(message, 'success');
+      await refresh(true).catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : t('errors.remote_access_unknown');
       setActionMessage({ type: 'error', text: message });

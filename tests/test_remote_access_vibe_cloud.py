@@ -4,6 +4,7 @@ import ipaddress
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -1379,6 +1380,11 @@ def test_ra_tq_025_status_computes_network_path_only_for_local_api(monkeypatch, 
     monkeypatch.setattr(runtime, "pid_alive", lambda candidate: candidate == pid)
     monkeypatch.setattr(runtime, "get_process_command", lambda candidate: "cloudflared tunnel run")
     monkeypatch.setattr(remote_access, "_resolve_binary", lambda cfg: "/usr/local/bin/cloudflared")
+    monkeypatch.setattr(
+        remote_access.tunnel_quality,
+        "scrape_metrics",
+        lambda metrics_url: SimpleNamespace(edge_locations=("sin09", "sin12")),
+    )
     calls = []
     monkeypatch.setattr(
         remote_access.cloudflare_network,
@@ -1400,6 +1406,45 @@ def test_ra_tq_025_status_computes_network_path_only_for_local_api(monkeypatch, 
     assert "network_path" not in internal_status
     assert local_status["network_path"] == {"schema_version": 1}
     assert calls == [(["sin09", "sin12"], "http://127.0.0.1:29001", "SIN", "remote")]
+
+
+def test_ra_tq_025_status_rejects_edge_locations_when_live_scrape_fails(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    pid = 123
+    remote_access._pid_path().parent.mkdir(parents=True, exist_ok=True)
+    remote_access._pid_path().write_text(str(pid), encoding="utf-8")
+    runtime.write_json(
+        remote_access._state_path(),
+        {
+            "pid": pid,
+            "active": {"pid": pid, "metrics_url": "http://127.0.0.1:29001"},
+        },
+    )
+    runtime.write_json(
+        remote_access._quality_state_path(),
+        {"schema_version": 2, "edge_locations": ["nrt01"]},
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda candidate: candidate == pid)
+    monkeypatch.setattr(runtime, "get_process_command", lambda candidate: "cloudflared tunnel run")
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda cfg: "/usr/local/bin/cloudflared")
+
+    def unavailable_metrics(_metrics_url):
+        raise OSError("metrics unavailable")
+
+    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", unavailable_metrics)
+    observed_locations = []
+    monkeypatch.setattr(
+        remote_access.cloudflare_network,
+        "network_path_snapshot",
+        lambda locations, metrics_url, **kwargs: observed_locations.append(locations)
+        or {"schema_version": 1},
+    )
+
+    result = remote_access.status(config, include_network_path=True)
+
+    assert result["network_path"] == {"schema_version": 1}
+    assert observed_locations == [[]]
 
 
 def test_start_refuses_duplicate_connector_when_process_command_is_unknown(monkeypatch, tmp_path) -> None:
