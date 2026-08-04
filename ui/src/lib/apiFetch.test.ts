@@ -4,9 +4,7 @@ const deferRemoteAuthRedirect = vi.hoisted(() => vi.fn());
 
 vi.mock('./remoteAuth', () => ({ deferRemoteAuthRedirect }));
 
-import {
-  apiFetch,
-} from './apiFetch';
+import { apiFetch, recoverRemoteAuthFromSessionProbe } from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
   beforeEach(() => {
@@ -22,20 +20,24 @@ describe('apiFetch remote auth recovery', () => {
     vi.clearAllMocks();
   });
 
-  it('hands an expired remote session to the PWA auth gate', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        Response.json({ error: 'remote_access_login_required' }, { status: 401 }),
-      ),
-    );
+  it.each([
+    'remote_access_login_required',
+    'remote_access_authorization_refresh_required',
+  ])(
+    'hands remote auth recovery error %s to the PWA auth gate',
+    async (error) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => Response.json({ error }, { status: 401 })),
+      );
 
-    const response = await apiFetch('/api/inbox');
+      const response = await apiFetch('/api/inbox');
 
-    expect(response.status).toBe(401);
-    await vi.waitFor(() => expect(deferRemoteAuthRedirect).toHaveBeenCalledOnce());
-    expect(window.location.assign).not.toHaveBeenCalled();
-  });
+      expect(response.status).toBe(401);
+      await vi.waitFor(() => expect(deferRemoteAuthRedirect).toHaveBeenCalledOnce());
+      expect(window.location.assign).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not start remote auth for an unrelated 401', async () => {
     vi.stubGlobal(
@@ -116,5 +118,16 @@ describe('apiFetch remote auth recovery', () => {
       status: 200,
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('recovers from a successful session probe that requires authorization refresh', async () => {
+    await recoverRemoteAuthFromSessionProbe(Response.json({
+      remote: true,
+      authenticated: false,
+      authorization_refresh_required: true,
+    }));
+
+    expect(deferRemoteAuthRedirect).toHaveBeenCalledOnce();
+    expect(window.location.assign).not.toHaveBeenCalled();
   });
 });

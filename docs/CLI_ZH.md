@@ -6,6 +6,7 @@
 vibe              # vibe start 的别名
 vibe start        # 按需启动 Avibe（打开 Web UI）
 vibe status       # 查看服务状态
+vibe memory status # 通过运行中的控制器查看本地记忆状态
 vibe remote       # 引导式配置 Avibe Cloud 远程访问
 vibe screenshot   # 截取本机桌面截图
 vibe stop         # 停止所有服务
@@ -61,6 +62,14 @@ vibe start
 - 打开设置向导 `http://127.0.0.1:5123`
 - **保留已运行的进程** — 需要明确重启时请使用 `vibe restart`
 
+**已知限制 —— 部分重启后的记忆设置页。** Web UI 与主服务之间通过一个每次启动
+现生成的凭据来校验本地记忆读取。该凭据只经 stdin 传给子进程，不会落盘，因此
+`vibe start` 只能让它自己拉起的进程保持一致。当主服务已在运行、只有 Web UI 是
+新启动的时候，两侧没有共享凭据，记忆设置页会显示记忆不可用，直到两个进程一起
+重启为止；CLI 会打印恢复步骤 —— 先执行 `vibe stop`，再执行 `vibe`。反过来的情况
+无需处理：主服务如果是新启动的，会顺带重启仍在运行的 Web UI，使新的一对共享同一
+凭据。`vibe memory ...` 走的是另一套会话级授权，不受影响。
+
 ### `vibe stop`
 
 完全停止所有 Avibe 服务。
@@ -89,6 +98,19 @@ vibe status
   "running": true,
   "pid": 12345
 }
+```
+
+### `vibe memory`
+
+通过现有 mode-0600 控制器 socket 读取当前范围内的本地记忆，或明确提交需要记住的内容。该命令不会启动服务，也没有清空、配置、导出或删除子命令。
+
+`status` 可在普通终端中使用。`profile`、`search` 和 `remember` 必须在 Avibe 已注入当前 Session 上下文的合规 Agent shell 中运行；从普通终端运行会返回 `memory_access_denied`。
+
+```bash
+vibe memory status [--json]
+vibe memory profile [--json]
+vibe memory search <查询> [--limit 1..20] [--json]
+vibe memory remember <文本> [--json]
 ```
 
 ### `vibe doctor`

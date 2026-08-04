@@ -34,7 +34,7 @@ from core.terminal_service import (
     _tmux_socket_name,
     sanitize_session_id,
 )
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access
 from vibe import ui_server
 from vibe.ui_server import app
@@ -1428,6 +1428,39 @@ def test_terminal_websocket_unsupported_accepts_before_policy_close(monkeypatch)
     assert websocket.calls == [("accept", None), ("close", 1008)]
 
 
+def test_terminal_websocket_closes_at_authorization_refresh_deadline(monkeypatch):
+    from vibe import remote_access
+
+    class BlockingTerminalService:
+        def start_reaper(self) -> None:
+            pass
+
+        async def handle_websocket(self, websocket, session_id, *, initial_cwd=None):
+            await asyncio.Event().wait()
+
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
+    monkeypatch.setattr(ui_server, "_terminal_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_remote_access_websocket_session_claims",
+        lambda websocket, config: {"sub": "remote-owner", "claims_issued_at": 1},
+    )
+    monkeypatch.setattr(remote_access, "session_authorization_refresh_deadline", lambda payload: 0)
+    monkeypatch.setattr(ui_server, "get_terminal_service", lambda: BlockingTerminalService())
+    websocket = _RecordingWebSocket()
+    websocket.client = None
+    websocket.query_params = {}
+
+    asyncio.run(ui_server.terminal_websocket(websocket, "test"))
+
+    assert websocket.calls == [
+        ("accept", None),
+        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+    ]
+
+
 def test_terminal_websocket_rejects_forwarded_request(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1629,7 +1662,7 @@ def test_terminal_delete_scopes_remote_subject_and_rejects_cross_subject(monkeyp
     user_two_client = app.test_client()
     user_two_client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "user-2@example.com", "user-2"),
+        remote_session_cookie(config, "user-2@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
     headers = csrf_headers(user_two_client, "https://alex.avibe.bot")

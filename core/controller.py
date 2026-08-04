@@ -5,10 +5,16 @@ import concurrent.futures
 import json
 import logging
 import threading
+import time
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
-from config.v2_config import DEFAULT_AGENT_BACKEND, DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS, DEFAULT_AGENT_PROGRESS_STYLE
+from config.v2_config import (
+    DEFAULT_AGENT_BACKEND,
+    DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_AGENT_PROGRESS_STYLE,
+    MemoryConfig,
+)
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
@@ -35,9 +41,27 @@ from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
+from core.memory import CaptureRequest
+from core.memory.admission import CaptureAdmission, InboundTurnFacts
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+
+class _SettingsUserBindings:
+    """Answer Memory's binding question from the per-platform settings stores."""
+
+    def __init__(self, managers: object) -> None:
+        self._managers = managers if isinstance(managers, dict) else {}
+
+    def is_enabled_user(self, platform: str, user_id: str) -> bool:
+        manager = self._managers.get(platform)
+        if manager is None:
+            return False
+        store = manager.get_store()
+        store.maybe_reload()
+        user = store.get_user(user_id, platform=platform)
+        return bool(user is not None and user.enabled)
 
 
 class RemovedPlatformIMClient(BaseIMClient):
@@ -191,6 +215,7 @@ class Controller:
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
         self._reconcile_lock: Optional[asyncio.Lock] = None
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
+        self._memory_principals_by_session: Dict[str, str] = {}
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -264,6 +289,7 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        self._memory_reconcile_task: Optional[asyncio.Task] = None
 
         # Initialize update checker (use default config if not present)
         from config.v2_config import UpdateConfig
@@ -356,6 +382,15 @@ class Controller:
         self.native_session_service = None
         self.processing_indicator = ProcessingIndicatorService(self)
         self.audio_asr_service = AudioAsrService(self.config)
+        # The runtime serves controller UDS reads/capture and the shared
+        # private-IM Memory admission path.
+        from core.memory.runtime import create_memory_runtime
+
+        self.memory_runtime = create_memory_runtime(
+            getattr(self.config, "memory", None) or MemoryConfig(),
+            processing_event=self._send_memory_processing_event,
+        )
+        self.memory_module = self.memory_runtime.module
         self._migrate_discord_guild_scope_from_config()
 
         # Migrate legacy per-channel language into global config
@@ -552,6 +587,15 @@ class Controller:
             "backends": requested,
             "states": states,
         }
+
+    async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
+        """Hot-apply persisted Memory settings without restarting Avibe."""
+
+        result = await self.memory_runtime.reconcile(memory_config)
+        self.memory_module = self.memory_runtime.module
+        if result.get("ok") is True:
+            self.config.memory = memory_config
+        return result
 
     def _migrate_discord_guild_scope_from_config(self) -> None:
         if "discord" not in self.platform_settings_managers:
@@ -1237,6 +1281,125 @@ class Controller:
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.primary_platform
         return self.platform_settings_managers.get(platform, self.platform_settings_managers[self.primary_platform])
 
+    # ----- Direct Memory entry admission ---------------------------------
+    #
+    # The policy lives in ``core.memory.admission``. The controller only
+    # collects the facts one turn carries and acts on the verdict.
+
+    def _memory_admission(self) -> CaptureAdmission:
+        # ``getattr`` keeps a controller assembled without a Memory runtime
+        # failing closed inside the admission module rather than raising here.
+        return CaptureAdmission(
+            principals=getattr(self, "memory_runtime", None),
+            bindings=_SettingsUserBindings(getattr(self, "platform_settings_managers", None)),
+        )
+
+    def _memory_turn_facts(
+        self,
+        context: MessageContext,
+        *,
+        text: object = None,
+        session_id: object = None,
+    ) -> InboundTurnFacts:
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        return InboundTurnFacts(
+            platform=context.platform or payload.get("platform"),
+            user_id=getattr(context, "user_id", None),
+            message_id=getattr(context, "message_id", None),
+            session_id=session_id,
+            text=text,
+            files=getattr(context, "files", None),
+            is_dm=payload.get("is_dm") is True,
+            is_ordinary_text=context.is_ordinary_text,
+            memory_enabled=bool(
+                getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
+            ),
+        )
+
+    def memory_capture_admitted(self, context: MessageContext) -> bool:
+        return self._memory_admission().admits(self._memory_turn_facts(context))
+
+    def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
+        return self._memory_admission().principal_for(self._memory_turn_facts(context))
+
+    def configure_memory_cli_session(self, context: MessageContext, *, admitted: bool) -> bool:
+        """Associate an admitted Agent session with its Memory principal."""
+
+        from core.caller_context import caller_context_from_platform_payload
+
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        caller = caller_context_from_platform_payload(payload)
+        if caller is None:
+            return False
+        principal_id = self.memory_principal_for_context(context) if admitted else None
+        if principal_id is None:
+            self._memory_principals_by_session.pop(caller.session_id, None)
+            return False
+        self._memory_principals_by_session[caller.session_id] = principal_id
+        return True
+
+    def memory_principal_for_cli_session(self, session_id: str) -> Optional[str]:
+        """Return the principal associated with an admitted Agent session."""
+
+        from core.memory.store import is_principal_id
+
+        principal_id = self._memory_principals_by_session.get(str(session_id or "").strip())
+        return principal_id if is_principal_id(principal_id) else None
+
+    async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
+        """Submit one eligible attributed human turn after session resolution.
+
+        This is deliberately best effort. It is scheduled by ``MessageHandler``
+        and never participates in an agent turn's completion path.
+        """
+
+        facts = self._memory_turn_facts(context, text=text, session_id=session_id)
+        request = self._memory_admission().decide(facts)
+        if not isinstance(request, CaptureRequest):
+            return
+
+        platform = CaptureAdmission.platform_of(facts)
+        started_at = time.monotonic()
+        try:
+            await self.memory_runtime.module.capture(request)
+            logger.info(
+                "Memory capture platform=%s latency_ms=%d",
+                platform,
+                int((time.monotonic() - started_at) * 1000),
+            )
+        except Exception:
+            logger.warning(
+                "Memory capture failed platform=%s latency_ms=%d",
+                platform,
+                int((time.monotonic() - started_at) * 1000),
+            )
+
+    async def _send_memory_processing_event(
+        self,
+        event: str,
+        kind: str | None,
+        occurred_at: str,
+        queued: int,
+    ) -> bool:
+        from core.handlers.admin_notifications import send_admin_text
+
+        store = self.settings_manager.get_store()
+        admin_ids = list(store.get_admins().keys()) if store else []
+        if not admin_ids:
+            return True
+        if event == "recovered":
+            key = "memory.alert.recovered"
+        else:
+            key = "memory.alert.credential" if kind == "credential" else "memory.alert.engine"
+        text = self._t(key, occurred_at=occurred_at, queued=queued)
+        delivered = await send_admin_text(
+            self,
+            admin_ids,
+            text,
+            log_label="Memory processing notification",
+        )
+        return bool(delivered)
+
     def update_thread_message_id(self, context: MessageContext) -> None:
         """Run real-turn-start hooks after the runtime gate is acquired."""
         self.message_dispatcher.update_thread_message_id(context)
@@ -1464,6 +1627,12 @@ class Controller:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            memory_config = getattr(self.config, "memory", None)
+            if memory_config is not None:
+                self._memory_reconcile_task = self._loop.create_task(
+                    self.reconcile_memory(memory_config),
+                    name="memory-runtime-reconcile",
+                )
             self.show_git_checkpoint_service.start()
             self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
             self._im_thread.start()
@@ -1604,10 +1773,52 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _cancel_internal_server_task() -> None:
+            task = getattr(self, "_internal_server_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self._internal_server_task = None
+
+        async def _cancel_memory_reconcile_task() -> None:
+            task = getattr(self, "_memory_reconcile_task", None)
+            try:
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as error:
+                        logger.debug("Memory startup reconciliation already failed: %s", error)
+            finally:
+                self._memory_reconcile_task = None
+
+        # Without this the task is never settled, so the done callback that
+        # records "stopped" never runs and internal-server.json keeps saying
+        # "ready" after the service exits.
+        _stop_loop_coroutine(_cancel_internal_server_task(), "Internal dispatch server")
+        try:
+            from core import internal_server as _internal_server
+
+            _internal_server.note_stopped()
+        except Exception as e:
+            logger.debug(f"Internal dispatch server status write skipped: {e}")
+
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
+        # Reconciliation can start the sidecar, so settle it before closing the
+        # runtime or it could race shutdown and leave a process behind.
+        _stop_loop_coroutine(_cancel_memory_reconcile_task(), "Memory startup reconciliation")
+        memory_runtime = getattr(self, "memory_runtime", None)
+        if memory_runtime is not None:
+            _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")
         model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)
         if model_hub_turn_gateway is not None:
             _stop_loop_coroutine(model_hub_turn_gateway.close(), "Model Hub turn gateway")

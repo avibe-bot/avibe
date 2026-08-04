@@ -21,6 +21,7 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
+from .message_facts import is_ordinary_slack_text
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
 from .formatters import SlackFormatter
@@ -1991,9 +1992,11 @@ class SlackBot(BaseIMClient):
             context = MessageContext(
                 user_id=user_id,
                 channel_id=channel_id,
+                platform="slack",
                 thread_id=thread_id,  # Always have a thread_id
                 message_id=event.get("ts"),
                 platform_specific={
+                    "platform": "slack",
                     "team_id": payload.get("team_id"),
                     "event": event,
                     "is_dm": is_dm,
@@ -2003,6 +2006,7 @@ class SlackBot(BaseIMClient):
                     "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
+                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not has_shared_content,
             )
 
             if handled_bot_mention_in_message_event and self.settings_manager and thread_id:
@@ -2088,9 +2092,11 @@ class SlackBot(BaseIMClient):
             context = MessageContext(
                 user_id=event.get("user"),
                 channel_id=channel_id,
+                platform="slack",
                 thread_id=thread_id,  # Always have a thread_id
                 message_id=event.get("ts"),
                 platform_specific={
+                    "platform": "slack",
                     "team_id": payload.get("team_id"),
                     "event": event,
                     "is_dm": channel_id.startswith("D"),
@@ -2100,6 +2106,7 @@ class SlackBot(BaseIMClient):
                     "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
+                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not bool(shared_text),
             )
 
             # Mark thread as active only when the mention carries actionable content.
@@ -2155,8 +2162,7 @@ class SlackBot(BaseIMClient):
             await self._send_auth_denial(channel_id, user_id, auth, response_url=response_url)
             return
 
-        # Map Slack slash commands to internal commands
-        # Only /start and /stop commands are exposed to users
+        # Map native Slack slash commands to the shared command handlers.
         command_mapping = {"start": "start", "stop": "stop"}
 
         # Get the actual command name
@@ -2166,7 +2172,10 @@ class SlackBot(BaseIMClient):
         context = MessageContext(
             user_id=payload.get("user_id"),
             channel_id=payload.get("channel_id"),
+            platform="slack",
+            message_id=payload.get("trigger_id"),
             platform_specific={
+                "platform": "slack",
                 "trigger_id": payload.get("trigger_id"),
                 "response_url": payload.get("response_url"),
                 "command": command,
@@ -2174,6 +2183,7 @@ class SlackBot(BaseIMClient):
                 "payload": payload,
                 "is_dm": is_dm,
             },
+            is_ordinary_text=True,
         )
 
         # Send immediate acknowledgment to Slack
@@ -2189,6 +2199,7 @@ class SlackBot(BaseIMClient):
                 "clear",
                 "cwd",
                 "queue",
+                "memory",
             ]:
                 await self.send_slash_response(
                     response_url, f"⏳ {self._t('common.processing', channel_id, command=command)}"

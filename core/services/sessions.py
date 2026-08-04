@@ -37,6 +37,7 @@ from typing import Optional
 
 from config import paths
 from storage.workbench_sessions_service import (
+    ProjectAccessDeniedError,
     ReservedSessionError,
     SessionArchivedError,
     SessionBackendLockedError,
@@ -50,6 +51,7 @@ from storage.workbench_sessions_service import (
     is_session_archived,
     list_sessions,
     list_sessions_page,
+    reset_running_agent_status,
     require_enabled_agent_backend,
     require_enabled_agent_identity,
     set_agent_status,
@@ -59,6 +61,7 @@ from storage.workbench_sessions_service import (
 from vibe.i18n import t as i18n_t
 
 __all__ = [
+    "ProjectAccessDeniedError",
     "SESSION_ARCHIVED_I18N_KEY",
     "ReservedSessionError",
     "SessionArchivedError",
@@ -73,6 +76,7 @@ __all__ = [
     "is_session_archived",
     "list_sessions",
     "list_sessions_page",
+    "reset_running_agent_status",
     "set_agent_status",
     "session_archived_message",
     "touch_session",

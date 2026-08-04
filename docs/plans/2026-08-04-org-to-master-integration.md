@@ -32,10 +32,15 @@ current `master` architecture or weakening Organization authorization.
 ## Verification
 
 - Conflict markers and unmerged index entries are absent.
-- Changed Python files pass Ruff.
-- Focused authorization, session, remote-access, storage, watches, and CLI
-  tests pass.
-- Frontend tests, lint, theme validation, and production build pass.
+- All 145 changed Python files pass Ruff; `uv lock --check` passes.
+- Focused authorization, session, remote-access, storage, watches, CLI, Memory,
+  Show Pages, Web Push, and scenario tests pass. The largest final groups were
+  237 Show Pages, 329 Organization/Memory, 326 Harness/CLI/scenario, and 170
+  remote HTTP/Project ACL tests.
+- Frontend lint, theme validation, and production build pass. Vitest passes
+  1476 of 1477 tests locally; the remaining macOS-only symlink cleanup failure
+  in `scripts/lintPolicy.test.mjs` is unchanged from `origin/master` and remains
+  covered by Linux CI.
 - Parser-backed scenario coverage remains aligned with auth/setup CLI examples.
 - GitHub PR CI passes on the integrated head and the current Codex review has
   zero unresolved threads.
@@ -43,8 +48,8 @@ current `master` architecture or weakening Organization authorization.
 ## Todo
 
 - [x] Refresh `origin/master` and `origin/org` and record the live divergence.
-- [ ] Merge `origin/org` into the integration branch.
-- [ ] Resolve conflicts according to the resolution contract.
-- [ ] Run focused and broad validation.
+- [x] Merge `origin/org` into the integration branch.
+- [x] Resolve conflicts according to the resolution contract.
+- [x] Run focused and broad validation.
 - [ ] Push a ready PR targeting `master`.
 - [ ] Close CI and Codex review findings on the current PR head.

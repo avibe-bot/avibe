@@ -167,7 +167,50 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
             context,
             "auth-code#oauth-state",
         )
-        self.assertEqual(controller.settings_manager.sessions.recorded, [("C1", "m1", "m1")])
+        self.assertEqual(controller.settings_manager.sessions.recorded, [("im:slack:C1", "im:slack:m1", "im:slack:m1")])
+
+    async def test_platform_qualified_dedup_keeps_colliding_native_ids_distinct(self):
+        controller = _StubController()
+        controller.agent_auth_service.maybe_consume_setup_reply = AsyncMock(return_value=True)
+        handler = MessageHandler(controller)
+
+        slack = MessageContext(user_id="U1", channel_id="C1", platform="slack", message_id="m1")
+        duplicate_slack = MessageContext(user_id="U1", channel_id="C1", platform="slack", message_id="m1")
+        discord = MessageContext(user_id="U1", channel_id="C1", platform="discord", message_id="m1")
+
+        await handler.handle_user_message(slack, "first")
+        await handler.handle_user_message(duplicate_slack, "duplicate")
+        await handler.handle_user_message(discord, "second platform")
+
+        self.assertEqual(
+            controller.settings_manager.sessions.recorded,
+            [
+                ("im:slack:C1", "im:slack:m1", "im:slack:m1"),
+                ("im:discord:C1", "im:discord:m1", "im:discord:m1"),
+            ],
+        )
+        self.assertEqual(controller.agent_auth_service.maybe_consume_setup_reply.await_count, 2)
+
+    async def test_legacy_unprefixed_dedup_row_blocks_post_upgrade_redelivery(self):
+        controller = _StubController()
+        controller.agent_auth_service.maybe_consume_setup_reply = AsyncMock(return_value=True)
+        handler = MessageHandler(controller)
+        sessions = controller.settings_manager.sessions
+        # A previous version claimed this Slack event with raw native ids.
+        sessions.seed_legacy_claim("C1", "m1", "m1")
+
+        redelivered = MessageContext(user_id="U1", channel_id="C1", platform="slack", message_id="m1")
+        await handler.handle_user_message(redelivered, "redelivered after upgrade")
+
+        self.assertEqual(sessions.recorded, [])
+        controller.agent_auth_service.maybe_consume_setup_reply.assert_not_awaited()
+
+        # The legacy row must not suppress any other event in the same channel.
+        fresh = MessageContext(user_id="U1", channel_id="C1", platform="slack", message_id="m2")
+        await handler.handle_user_message(fresh, "a new message")
+
+        self.assertEqual(sessions.recorded, [("im:slack:C1", "im:slack:m2", "im:slack:m2")])
+        controller.agent_auth_service.maybe_consume_setup_reply.assert_awaited_once()
 
     async def test_durable_setup_reply_claims_native_event_before_consuming(self):
         controller = _StubController()

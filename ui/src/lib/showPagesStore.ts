@@ -229,6 +229,7 @@ export class ShowPagesInventoryStore {
         // Normal session/user-message events do not change this inventory.
         if (data.event === 'show_event') this.invalidateAndReload();
       },
+      onAuthorizationChanged: () => this.invalidateAndReload(),
     });
   }
 }

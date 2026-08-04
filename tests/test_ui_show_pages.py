@@ -33,8 +33,9 @@ from core.show_runtime import (
     _safe_extract_tar,
     set_show_runtime_manager_for_tests,
 )
+from storage import resource_access_service
 from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _save_config
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access, ui_server
 from vibe.ui_server import app
 from storage import message_deliveries
@@ -1077,7 +1078,7 @@ def test_public_show_page_injects_auth_aware_annotation_config(monkeypatch, tmp_
     if authenticated:
         client.set_cookie(
             remote_access.SESSION_COOKIE_NAME,
-            remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+            remote_session_cookie(config, "alex@example.com", "user-1"),
             domain="alex.avibe.bot",
         )
     try:
@@ -1950,6 +1951,65 @@ def test_private_show_me_is_always_available(monkeypatch, tmp_path):
     assert response.headers["cache-control"] == "no-store, private"
 
 
+def test_private_show_page_treats_remote_viewer_as_read_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    store = ShowPageStore()
+    try:
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id="ses123",
+                organization_id=None,
+                owner_user_id="user-viewer",
+                access_level="private",
+            )
+    finally:
+        store.close()
+    manager = _FakeShowRuntimeManager(
+        body=b'<!doctype html><html><body><script type="module" src="/src/main.tsx"></script></body></html>'
+    )
+    set_show_runtime_manager_for_tests(manager)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+    try:
+        me_response = client.get(
+            "/show/ses123/__show/me",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        page_response = client.get(
+            "/show/ses123/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert me_response.status_code == 200
+    assert me_response.get_json() == {"authenticated": False, "canAnnotate": False}
+    assert page_response.status_code == 200
+    body = page_response.content.decode("utf-8")
+    assert '"authenticated":false' in body
+    assert '"writeToken"' not in body
+    cookies = "\n".join(page_response.headers.getlist("set-cookie"))
+    assert "vibe_show_event_token=" in cookies
+    assert "Max-Age=0" in cookies
+
+
 def test_public_show_me_is_anonymous_without_oauth_session(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -1972,7 +2032,7 @@ def test_public_show_me_accepts_valid_workbench_session(monkeypatch, tmp_path):
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -1989,6 +2049,32 @@ def test_public_show_me_accepts_valid_workbench_session(monkeypatch, tmp_path):
         "writeToken": show_public_event_write_token(share_id, "ses123"),
     }
     assert response.get_json()["writeToken"] != show_event_write_token("ses123")
+
+
+def test_public_show_me_treats_viewer_as_read_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        f"/p/{share_id}/__show/me",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"authenticated": False, "canAnnotate": False}
 
 
 def test_public_show_me_treats_no_oauth_local_access_as_authenticated(monkeypatch, tmp_path):
@@ -2823,7 +2909,7 @@ def test_private_show_page_records_remote_oauth_author(monkeypatch, tmp_path):
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -2873,7 +2959,7 @@ def test_private_show_page_accepts_mark_read_receipt_and_records_reader(monkeypa
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "reader@example.com", "user-1"),
+        remote_session_cookie(config, "reader@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     response = client.post(
@@ -2996,6 +3082,243 @@ def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch,
     assert "id: show_evt_500" in body
     assert '"id": "show_evt_000"' in body
     assert '"id": "show_evt_500"' in body
+
+
+def test_show_events_stream_forwards_live_dispatch_events(monkeypatch, tmp_path):
+    from vibe.sse_broker import broker
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+
+    async def _collect_live_dispatch() -> str:
+        response = await _show_events_stream("ses123")
+        iterator = response.body_iterator.__aiter__()
+        chunks = []
+        try:
+            chunks.append(await iterator.__anext__())
+            broker.publish(
+                "show.dispatch",
+                {
+                    "session_id": "ses123",
+                    "scope_id": "scope123",
+                    "show_event_id": "show_evt_1",
+                    "event": "turn.chunk",
+                    "data": {"text": "hello"},
+                },
+            )
+            chunks.append(await asyncio.wait_for(iterator.__anext__(), timeout=1))
+        finally:
+            await iterator.aclose()
+        return "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
+
+    body = asyncio.run(_collect_live_dispatch())
+
+    assert "event: show.dispatch" in body
+    assert '"show_event_id": "show_evt_1"' in body
+
+
+def test_private_show_events_stream_ends_at_authorization_refresh_deadline(monkeypatch, tmp_path):
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+
+    async def _collect_until_expired() -> list[str | bytes]:
+        response = await _show_events_stream(
+            "ses123",
+            authorization_refresh_at=ui_server.time.time(),
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            chunks = [await iterator.__anext__()]
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+        finally:
+            await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(_collect_until_expired())) == 1
+
+
+def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypatch, tmp_path):
+    from storage import project_access_service
+    from storage.db import create_sqlite_engine
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    context = AuthorizationContext(
+        instance_role="editor",
+        subject="remote-editor",
+        email="alice@example.com",
+        instance_access_source="email",
+        is_remote=True,
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="show_page",
+            resource_id="ses123",
+            organization_id=None,
+            owner_user_id="remote-editor",
+            access_level="private",
+        )
+    engine.dispose()
+
+    async def _collect_until_revoked() -> list[str | bytes]:
+        response = await _show_events_stream(
+            "ses123",
+            authorization_context=context,
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            chunks = [await iterator.__anext__()]
+            engine = create_sqlite_engine()
+            with engine.begin() as conn:
+                result = project_access_service.apply_project_access_intent(
+                    conn,
+                    {
+                        "project_id": "proj_show",
+                        "revision": 1,
+                        "mode": "restricted",
+                        "bindings": [],
+                    },
+                )
+            assert result.changed is True
+            broker.publish("authorization.changed", {"project_ids": ["proj_show"]})
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+        finally:
+            await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(_collect_until_revoked())) == 1
+
+
+def test_private_show_events_stream_ends_when_resource_access_is_revoked(monkeypatch, tmp_path):
+    from storage.db import create_sqlite_engine
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    context = AuthorizationContext(
+        instance_role="editor",
+        subject="remote-editor",
+        email="alice@example.com",
+        organization_id="org-1",
+        organization_member_id="member-remote-editor",
+        organization_role="member",
+        group_ids=frozenset({"group-engineering"}),
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="show_page",
+            resource_id="ses123",
+            organization_id="org-1",
+            owner_user_id="owner-1",
+            access_level="public",
+        )
+    engine.dispose()
+
+    async def _collect_until_revoked() -> list[str | bytes]:
+        response = await _show_events_stream(
+            "ses123",
+            authorization_context=context,
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            chunks = [await iterator.__anext__()]
+            revoke_engine = create_sqlite_engine()
+            with revoke_engine.begin() as conn:
+                resource_access_service.apply_control_plane_intent(
+                    conn,
+                    organization_id="org-1",
+                    resource_kind="show_page",
+                    resource_id="ses123",
+                    revision=1,
+                    access_level="private",
+                    group_ids=[],
+                )
+            revoke_engine.dispose()
+            broker.publish(
+                "authorization.changed",
+                {"project_ids": [], "resource_kinds": ["show_page"]},
+            )
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+        finally:
+            await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(_collect_until_revoked())) == 1
+
+
+def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_path):
+    from vibe.sse_broker import broker
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    share_id = _create_show_page("ses123", "public")
+
+    async def _collect_live_dispatch() -> str:
+        response = await _show_events_stream(
+            "ses123",
+            public=True,
+            public_share_id=share_id,
+        )
+        iterator = response.body_iterator.__aiter__()
+        chunks = []
+        try:
+            chunks.append(await iterator.__anext__())
+            broker.publish(
+                "show.dispatch",
+                {
+                    "session_id": "ses123",
+                    "scope_id": "scope123",
+                    "show_event_id": "show_evt_1",
+                    "event": "turn.chunk",
+                    "data": {
+                        "text": "hello",
+                        "session_id": "ses123",
+                        "message_id": "msg123",
+                        "nested": {"scope_id": "scope123", "user_message_id": "msg123"},
+                    },
+                },
+            )
+            chunks.append(await asyncio.wait_for(iterator.__anext__(), timeout=1))
+        finally:
+            await iterator.aclose()
+        return "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
+
+    body = asyncio.run(_collect_live_dispatch())
+
+    assert "event: show.dispatch" in body
+    assert '"show_event_id": "show_evt_1"' in body
+    assert '"text": "hello"' in body
+    assert '"session_id"' not in body
+    assert '"scope_id"' not in body
+    assert '"message_id"' not in body
+    assert '"user_message_id"' not in body
 
 
 def test_public_show_page_events_redact_internal_ids(monkeypatch, tmp_path):
@@ -3378,7 +3701,7 @@ def test_public_show_page_events_require_share_token(monkeypatch, tmp_path):
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -3413,7 +3736,7 @@ def test_public_show_page_events_require_matching_share_referer(monkeypatch, tmp
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     headers = _public_show_write_headers(share_id)
@@ -3442,7 +3765,7 @@ def test_public_show_page_events_reject_cross_share_token(monkeypatch, tmp_path)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -3466,7 +3789,7 @@ def test_public_show_page_events_reject_token_from_previous_share_owner(monkeypa
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -3492,7 +3815,7 @@ def test_public_show_page_events_accept_oauth_user_and_record_author(monkeypatch
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3541,7 +3864,7 @@ def test_public_show_page_redacts_materialized_screenshot_path(monkeypatch, tmp_
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3645,7 +3968,7 @@ def test_public_show_page_accepts_mark_read_receipt_and_records_reader(monkeypat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "reader@example.com", "user-2"),
+        remote_session_cookie(config, "reader@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
     response = client.post(
@@ -3690,7 +4013,7 @@ def test_public_show_page_rejects_resolution_for_unknown_mark(monkeypatch, tmp_p
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "reader@example.com", "user-2"),
+        remote_session_cookie(config, "reader@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3725,7 +4048,7 @@ def test_public_show_page_events_accept_injected_share_session_id(monkeypatch, t
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3754,7 +4077,7 @@ def test_public_show_page_intent_fallback_does_not_expose_author_email(monkeypat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3786,7 +4109,7 @@ def test_public_show_page_events_ignore_client_event_id_and_dispatch(monkeypatch
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -3819,7 +4142,7 @@ def test_public_show_page_events_reject_non_human_types(monkeypatch, tmp_path, e
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "member@example.com", "user-2"),
+        remote_session_cookie(config, "member@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
 
@@ -5259,7 +5582,7 @@ def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     try:
@@ -5273,6 +5596,170 @@ def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp
         assert getattr(exc, "code", None) == 1011
     finally:
         set_show_runtime_manager_for_tests(None)
+
+
+def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadline(monkeypatch, tmp_path):
+    class RecordingWebSocket:
+        def __init__(self):
+            self.calls = []
+
+        async def accept(self, *, subprotocol=None):
+            self.calls.append(("accept", subprotocol))
+
+        async def close(self, code=1000):
+            self.calls.append(("close", code))
+
+    proxy_calls = []
+
+    async def blocking_proxy(websocket, session_id):
+        proxy_calls.append(("started", session_id))
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            proxy_calls.append(("cancelled", session_id))
+            raise
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_show_runtime_websocket_resource_context",
+        lambda websocket: resource_access_service.ResourceUserContext(is_trusted_local=True),
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_remote_access_websocket_session_claims",
+        lambda websocket, config: {
+            "sub": "remote-owner",
+            "vibe_instance_role": "owner",
+            "vibe_instance_access_source": "owner",
+            "claims_issued_at": 1,
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "session_authorization_refresh_deadline",
+        lambda payload: ui_server.time.time() + 0.01,
+    )
+    monkeypatch.setattr(ui_server, "_proxy_show_runtime_websocket", blocking_proxy)
+    websocket = RecordingWebSocket()
+
+    asyncio.run(ui_server.show_runtime_hmr_websocket(websocket, "ses123"))
+
+    assert websocket.calls == [
+        ("accept", "vite-hmr"),
+        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+    ]
+    assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
+
+
+def test_private_show_page_hmr_websocket_closes_when_resource_access_is_revoked(monkeypatch, tmp_path):
+    from storage.db import create_sqlite_engine
+    from vibe.sse_broker import broker
+
+    class RecordingWebSocket:
+        def __init__(self):
+            self.calls = []
+
+        async def accept(self, *, subprotocol=None):
+            self.calls.append(("accept", subprotocol))
+
+        async def close(self, code=1000):
+            self.calls.append(("close", code))
+
+    proxy_started = asyncio.Event()
+    proxy_calls = []
+
+    async def blocking_proxy(websocket, session_id):
+        proxy_calls.append(("started", session_id))
+        proxy_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            proxy_calls.append(("cancelled", session_id))
+            raise
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="show_page",
+            resource_id="ses123",
+            organization_id="org-1",
+            owner_user_id="owner-1",
+            access_level="public",
+        )
+    engine.dispose()
+    monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_remote_access_websocket_session_claims",
+        lambda websocket, config: {
+            "sub": "remote-editor",
+            "email": "alice@example.com",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-remote-editor",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["group-engineering"],
+        },
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_show_runtime_websocket_resource_context",
+        lambda websocket: resource_access_service.ResourceUserContext(
+            subject="remote-editor",
+            email="alice@example.com",
+            organization_id="org-1",
+            organization_member_id="member-remote-editor",
+            organization_role="member",
+            group_ids=frozenset({"group-engineering"}),
+            instance_role="editor",
+            instance_access_source="organization_group",
+            is_remote=True,
+        ),
+    )
+    monkeypatch.setattr(ui_server, "_proxy_show_runtime_websocket", blocking_proxy)
+    websocket = RecordingWebSocket()
+
+    async def _run_until_revoked() -> None:
+        task = asyncio.create_task(ui_server.show_runtime_hmr_websocket(websocket, "ses123"))
+        await asyncio.wait_for(proxy_started.wait(), timeout=1)
+        revoke_engine = create_sqlite_engine()
+        with revoke_engine.begin() as conn:
+            result = resource_access_service.apply_control_plane_intent(
+                conn,
+                organization_id="org-1",
+                resource_kind="show_page",
+                resource_id="ses123",
+                revision=1,
+                access_level="private",
+                group_ids=[],
+            )
+        revoke_engine.dispose()
+        assert result["status"] == "applied"
+        broker.publish(
+            "authorization.changed",
+            {"project_ids": [], "resource_kinds": ["show_page"]},
+        )
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(_run_until_revoked())
+
+    assert websocket.calls == [
+        ("accept", "vite-hmr"),
+        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+    ]
+    assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
 
 def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypatch, tmp_path):
@@ -6009,3 +6496,14 @@ def test_public_show_page_passes_runtime_importmap_through_unmodified(monkeypatc
     # Public pages receive read/auth config but never the private write token.
     assert "globalThis.__AVIBE_SHOW__=Object.assign" in text
     assert '"writeToken"' not in text
+
+
+def test_show_runtime_manager_defaults_to_manifest_when_package_manifest_exists(monkeypatch, tmp_path):
+    monkeypatch.setattr("core.show_runtime._packaged_runtime_manifest_exists", lambda: True)
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    assert manager.runtime_source == "manifest-cache"

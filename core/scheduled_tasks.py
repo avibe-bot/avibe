@@ -1502,7 +1502,12 @@ class ScheduledTaskStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        user_context: Any = None,
     ) -> ScheduledTask:
+        from core.vibe_agents import ensure_agent_name_access
+        from storage.resource_access_service import metadata_with_resource_user_context
+
+        ensure_agent_name_access(agent_name, user_context=user_context)
         task = ScheduledTask(
             id=uuid4().hex[:12],
             name=name,
@@ -1518,7 +1523,7 @@ class ScheduledTaskStore:
             cron=cron,
             run_at=run_at,
             timezone=timezone_name,
-            metadata=dict(metadata or {}),
+            metadata=metadata_with_resource_user_context(metadata, user_context),
             shell_command=shell_command,
             command=command,
             timeout_seconds=timeout_seconds,
@@ -1588,7 +1593,12 @@ class ScheduledTaskStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        user_context: Any = None,
     ) -> ScheduledTask:
+        from core.vibe_agents import ensure_agent_name_access
+        from storage.resource_access_service import metadata_with_resource_user_context
+
+        ensure_agent_name_access(agent_name, user_context=user_context)
         task = self._tasks[task_id]
         # Captured before the first mutation: this is the state the CALLER read
         # (``vibe task update`` resolved Agents and Sessions from this very object),
@@ -1616,8 +1626,10 @@ class ScheduledTaskStore:
             task.shell_command = shell_command
             task.command = command
             task.timeout_seconds = timeout_seconds
-        if metadata is not None:
-            task.metadata = dict(metadata)
+        task.metadata = metadata_with_resource_user_context(
+            metadata if metadata is not None else task.metadata,
+            user_context,
+        )
         task.updated_at = _utc_now_iso()
         if not self._write_task(
             task,
@@ -6351,6 +6363,7 @@ class ScheduledTaskService:
             }:
                 if not request.prompt:
                     raise ValueError("hook request requires prompt")
+                user_context = self._resource_user_context(request.metadata)
                 if request.session_policy == "create_per_run":
                     session_id = self._reserve_runtime_session(
                         agent_name=request.agent_name,
@@ -6358,6 +6371,7 @@ class ScheduledTaskService:
                         deliver_key=request.deliver_key,
                         metadata=request.metadata,
                         workdir=request.metadata.get("session_workdir") if isinstance(request.metadata, dict) else None,
+                        user_context=user_context,
                     )
                     session_key = ""
                 elif not (request.session_id or request.session_key):
@@ -6382,6 +6396,8 @@ class ScheduledTaskService:
                         else request.request_type
                     ),
                     agent_name=request.agent_name,
+                    metadata=request.metadata,
+                    user_context=user_context,
                     _capture_dispatch_result=True,
                     **({"agent_id": request.agent_id} if request.agent_id else {}),
                 )
@@ -6978,6 +6994,7 @@ class ScheduledTaskService:
         failure_code: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
+        user_context = self._resource_user_context(task.metadata)
         binding_change: Optional[SessionBindingChange] = None
         # HFR-276: an earlier fire of THIS definition may have reserved a replacement
         # session it could not give back. The id is recorded on the definition, so the
@@ -7002,6 +7019,7 @@ class ScheduledTaskService:
                     deliver_key=task.deliver_key,
                     metadata=task.metadata,
                     workdir=task.cwd,
+                    user_context=user_context,
                 )
                 session_key = ""
             dispatch_result = await self._execute_request(
@@ -7014,6 +7032,8 @@ class ScheduledTaskService:
                 task_id=task.id,
                 trigger_kind="scheduled",
                 agent_name=task.agent_name,
+                metadata=task.metadata,
+                user_context=user_context,
                 _capture_dispatch_result=True,
                 **({"agent_id": agent_id} if agent_id else {}),
             )
@@ -7050,6 +7070,8 @@ class ScheduledTaskService:
                         task_id=task.id,
                         trigger_kind="scheduled",
                         agent_name=task.agent_name,
+                        metadata=task.metadata,
+                        user_context=user_context,
                         _capture_dispatch_result=True,
                         **(
                             {"agent_id": agent_id}
@@ -7916,6 +7938,7 @@ class ScheduledTaskService:
                     deliver_key=task.deliver_key,
                     metadata=task.metadata,
                     definition_id=task.id,
+                    user_context=self._resource_user_context(task.metadata),
                     **overrides,
                 )
             except AgentUnavailableError as exc:
@@ -8157,6 +8180,7 @@ class ScheduledTaskService:
         model: Any = _UNSET,
         reasoning_effort: Any = _UNSET,
         definition_id: Optional[str] = None,
+        user_context: Any = None,
     ) -> str:
         """Reserve a background session for a run.
 
@@ -8220,6 +8244,12 @@ class ScheduledTaskService:
                 agent = agent_store.require_reference(resolved_agent_name)
             else:
                 agent = agent_store.get_default_agent()
+            if agent is not None and user_context is not None:
+                agent = agent_store.require_accessible(
+                    agent.name,
+                    user_context=user_context,
+                    enabled_only=True,
+                )
         finally:
             agent_store.close()
         if agent is None:
@@ -8626,9 +8656,16 @@ class ScheduledTaskService:
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        user_context: Any = None,
         _capture_dispatch_result: bool = False,
     ) -> Optional[str] | TaskDispatchResult:
         target_info = resolve_session_id_target(session_id) if session_id else None
+        self._require_execution_agent_access(
+            agent_name=agent_name,
+            target_info=target_info,
+            user_context=user_context,
+        )
         target = target_info.session_key if target_info else parse_session_key(session_key or "")
         delivery_target = self._resolve_delivery_target(
             session_target=target,
@@ -8645,6 +8682,7 @@ class ScheduledTaskService:
             agent_name=agent_name,
             agent_id=agent_id,
             target_info=target_info,
+            metadata=metadata,
         )
         # A scheduled avibe turn drives the sidebar dot through the SAME two
         # chokepoints as any other turn — inbound AgentService.handle_message
@@ -8684,6 +8722,45 @@ class ScheduledTaskService:
         )
         result = TaskDispatchResult(error=error)
         return result if _capture_dispatch_result else result.error
+
+    @staticmethod
+    def _resource_user_context(metadata: Optional[dict[str, Any]]) -> Any:
+        from storage.resource_access_service import resource_user_context_from_metadata
+
+        return resource_user_context_from_metadata(metadata)
+
+    @staticmethod
+    def _require_execution_agent_access(
+        *,
+        agent_name: Optional[str],
+        target_info: Optional[ResolvedSessionIdTarget],
+        user_context: Any,
+    ) -> None:
+        if user_context is None:
+            return
+
+        from core.vibe_agents import VibeAgentAccessError, VibeAgentStore, ensure_agent_selection_access
+
+        selected_name = str(agent_name or "").strip() or None
+        selected_id = None
+        if selected_name is None and target_info is not None:
+            selected_name = str(target_info.agent_name or "").strip() or None
+            selected_id = str(target_info.agent_id or "").strip() or None
+        if selected_name is None and selected_id is None:
+            raise VibeAgentAccessError("Agent access is not permitted.")
+
+        store = VibeAgentStore()
+        try:
+            with store.engine.connect() as connection:
+                ensure_agent_selection_access(
+                    connection,
+                    agent_name=selected_name,
+                    agent_id=selected_id,
+                    user_context=user_context,
+                    missing_is_error=True,
+                )
+        finally:
+            store.close()
 
     async def _build_context(
         self,

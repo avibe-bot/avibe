@@ -21,6 +21,7 @@ from modules.agents.opencode.utils import format_claude_model_label
 
 from .base import BaseIMClient, FileAttachment, MessageContext, InlineButton, InlineKeyboard
 from .formatters import TelegramFormatter
+from .message_facts import is_ordinary_telegram_text
 from . import telegram_api
 
 logger = logging.getLogger(__name__)
@@ -612,6 +613,7 @@ class TelegramBot(BaseIMClient):
             message_id=context.message_id,
             platform="telegram",
             files=context.files,
+            is_ordinary_text=context.is_ordinary_text,
             platform_specific={
                 **payload,
                 "is_topic_message": True,
@@ -741,6 +743,7 @@ class TelegramBot(BaseIMClient):
             thread_id=str(thread_id) if thread_id is not None else None,
             message_id=str(message.get("message_id")),
             files=files,
+            is_ordinary_text=is_ordinary_telegram_text(message, files),
             platform="telegram",
             platform_specific={
                 "is_dm": chat.get("type") == "private",
@@ -931,6 +934,7 @@ class TelegramBot(BaseIMClient):
             "set_cwd",
             "bind",
             "stop",
+            "memory",
         }
         parsed_command = self.parse_text_command(stripped, allow_plain_bind=True)
         if parsed_command and parsed_command[0] in known_commands:

@@ -25,6 +25,8 @@ import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { SessionPinAction } from './SessionPinAction';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import { useApi } from '../../context/ApiContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
@@ -84,6 +86,7 @@ const MobileProjectRow: React.FC<{
 }> = ({ project, open, state, onToggle }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { capabilities } = useInstanceAuthorization();
   const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsTree();
   const [menuOpen, setMenuOpen] = useState(false);
   // Guards against a double-tap creating two sessions before navigation unmounts.
@@ -96,6 +99,7 @@ const MobileProjectRow: React.FC<{
   // Enter (or blur) commits, then the input unmounts and its blur fires again;
   // Escape cancels and must not let that trailing blur commit the stale draft.
   const handledRef = useRef(false);
+  const canChat = capabilities.can_chat && project.capabilities.can_chat;
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -160,7 +164,7 @@ const MobileProjectRow: React.FC<{
           )}
           {open ? <ChevronDown className="size-4 shrink-0 text-muted" /> : <ChevronRight className="size-4 shrink-0 text-muted" />}
         </button>
-        <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+        {(canChat || capabilities.can_manage_projects) && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
             <Button
               type="button"
@@ -176,7 +180,7 @@ const MobileProjectRow: React.FC<{
             {/* New session — first item, mobile only. Desktop surfaces this as
                 the per-project "+" button in the sidebar, so it stays out of the
                 desktop project menu; here the "+" doesn't fit, so it lives here. */}
-            <MenuItem
+            {canChat && <MenuItem
               icon={Plus}
               onClick={async () => {
                 setMenuOpen(false);
@@ -191,7 +195,8 @@ const MobileProjectRow: React.FC<{
               }}
             >
               {t('newSession.title')}
-            </MenuItem>
+            </MenuItem>}
+            {capabilities.can_manage_projects && <>
             <MenuItem
               icon={Pencil}
               onClick={() => {
@@ -235,11 +240,16 @@ const MobileProjectRow: React.FC<{
             >
               {t('workbench.projectArchive')}
             </MenuItem>
+            </>}
           </PopoverContent>
-        </Popover>
+        </Popover>}
       </div>
-      <ProjectSettingsDialog project={project} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <ProjectAgentsMdDialog project={project} open={agentsOpen} onClose={() => setAgentsOpen(false)} />
+      {capabilities.can_manage_projects && (
+        <>
+          <ProjectSettingsDialog project={project} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          <ProjectAgentsMdDialog project={project} open={agentsOpen} onClose={() => setAgentsOpen(false)} />
+        </>
+      )}
     </>
   );
 };
@@ -250,8 +260,9 @@ const MobileSessionRow: React.FC<{
   projectId: string;
   session: WorkbenchSession;
   unread: number;
+  canChat: boolean;
   onOpen: () => void;
-}> = ({ projectId, session, unread, onOpen }) => {
+}> = ({ projectId, session, unread, canChat, onOpen }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -260,6 +271,7 @@ const MobileSessionRow: React.FC<{
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [pinning, setPinning] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
   const handledRef = useRef(false);
@@ -291,12 +303,14 @@ const MobileSessionRow: React.FC<{
   const togglePinned = async () => {
     if (pinningRef.current) return;
     pinningRef.current = true;
+    setPinning(true);
     try {
       await setSessionPinned(projectId, session.id, !session.pinned);
     } catch {
       // apiFetch already surfaced the error toast.
     } finally {
       pinningRef.current = false;
+      setPinning(false);
     }
   };
 
@@ -342,7 +356,14 @@ const MobileSessionRow: React.FC<{
           </span>
         )}
       </button>
-      <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+      {canChat && <SessionPinAction
+        pinned={session.pinned}
+        pending={pinning}
+        pinLabel={t('workbench.sessionPin')}
+        unpinLabel={t('workbench.sessionUnpin')}
+        onToggle={() => void togglePinned()}
+      />}
+      {canChat && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
           <Button
             type="button"
@@ -423,14 +444,14 @@ const MobileSessionRow: React.FC<{
             {t('workbench.sessionArchive')}
           </MenuItem>
         </PopoverContent>
-      </Popover>
-      <ArchiveSessionDialog
+      </Popover>}
+      {canChat && <ArchiveSessionDialog
         sessionId={archiveOpen ? session.id : null}
         sessionTitle={session.title}
         open={archiveOpen}
         onOpenChange={setArchiveOpen}
         onConfirm={() => archiveSession(projectId, session.id)}
-      />
+      />}
     </div>
   );
 };
@@ -443,6 +464,7 @@ const MobileSessionRow: React.FC<{
 export const ProjectsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { capabilities } = useInstanceAuthorization();
   const { unreadBySession } = useWorkbenchInbox();
   const {
     projects,
@@ -477,7 +499,7 @@ export const ProjectsPage: React.FC = () => {
     <div className="mx-auto flex max-w-xl flex-col gap-3">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">{t('projects.title')}</h1>
-        <Button
+        {capabilities.can_manage_projects && <Button
           type="button"
           variant="outline"
           size="icon"
@@ -486,7 +508,7 @@ export const ProjectsPage: React.FC = () => {
           className="border-mint/35 bg-mint/[0.08] text-mint hover:bg-mint/[0.14]"
         >
           <FolderPlus className="size-4" />
-        </Button>
+        </Button>}
       </div>
 
       {/* The provider often has projects cached already (it's mounted app-wide),
@@ -552,6 +574,7 @@ export const ProjectsPage: React.FC = () => {
                     projectId={project.id}
                     session={session}
                     unread={unreadBySession[session.id] ?? 0}
+                    canChat={capabilities.can_chat && project.capabilities.can_chat}
                     onOpen={() => openSession(session.id)}
                   />
                 ))}
@@ -572,7 +595,7 @@ export const ProjectsPage: React.FC = () => {
         );
       })}
 
-      {showNewProject && (
+      {showNewProject && capabilities.can_manage_projects && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
           onCreated={(project) => {

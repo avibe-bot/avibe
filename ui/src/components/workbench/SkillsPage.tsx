@@ -18,6 +18,7 @@ import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
 import { errorMessage } from '@/lib/errorMessage';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
 const skillKey = (s: SkillBrief) => `${s.scope}:${s.name}`;
 
@@ -25,6 +26,8 @@ export const SkillsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
+  const { capabilities } = useInstanceAuthorization();
+  const canManage = capabilities.can_manage_instance;
 
   const [scope, setScope] = useState<SkillScope>('global');
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
@@ -104,10 +107,12 @@ export const SkillsPage: React.FC = () => {
     refresh();
   }, [refresh]);
 
+  useEffect(() => api.connectWorkbenchEvents({ onAuthorizationChanged: () => refresh() }), [api, refresh]);
+
   // Fetch update status (askill check) once the list loads so rows can show an
   // "update available" badge. Best-effort; failures just clear it.
   useEffect(() => {
-    if (notInstalled || (scope === 'project' && !projectId)) {
+    if (!canManage || notInstalled || (scope === 'project' && !projectId)) {
       setCheckMap({});
       return;
     }
@@ -134,7 +139,7 @@ export const SkillsPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [api, scope, projectId, skills, notInstalled]);
+  }, [api, scope, projectId, skills, notInstalled, canManage]);
 
   const matches = useCallback(
     (skill: SkillBrief) => {
@@ -279,14 +284,14 @@ export const SkillsPage: React.FC = () => {
 
         <BackendFilter value={backendFilter} onChange={setBackendFilter} />
 
-        <Button type="button" variant="outline" size="xs" onClick={() => setShowBrowse(true)}>
+        {canManage ? <Button type="button" variant="outline" size="xs" onClick={() => setShowBrowse(true)}>
           <Compass className="size-3.5 text-cyan" />
           {t('skills.browseRegistry')}
-        </Button>
-        <Button type="button" variant="brand" size="xs" onClick={() => setShowAdd(true)}>
+        </Button> : null}
+        {canManage ? <Button type="button" variant="brand" size="xs" onClick={() => setShowAdd(true)}>
           <Plus />
           {t('skills.addSkill')}
-        </Button>
+        </Button> : null}
       </div>
 
       {scope === 'project' && activeProject?.folder_path ? (
@@ -307,7 +312,7 @@ export const SkillsPage: React.FC = () => {
           <Terminal className="size-7 text-muted" />
           <div className="text-[14px] font-semibold text-foreground">{t('skills.notInstalled')}</div>
           <div className="max-w-md font-mono text-[11.5px] text-muted">{t('skills.notInstalledHint')}</div>
-          <Button
+          {canManage ? <Button
             variant="brand"
             size="sm"
             className="mt-1"
@@ -331,7 +336,7 @@ export const SkillsPage: React.FC = () => {
           >
             {installingAskill ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
             {installingAskill ? t('skills.installing') : t('skills.installAskill')}
-          </Button>
+          </Button> : null}
         </div>
       ) : (
         // `minmax(0,1fr)` (not bare `1fr`) lets the list column shrink below its
@@ -394,12 +399,13 @@ export const SkillsPage: React.FC = () => {
               onToggleBackend={onToggleBackend}
               onUpdate={onUpdate}
               onRemove={onRemove}
+              canManage={canManage}
             />
           ) : null}
         </div>
       )}
 
-      {showAdd ? (
+      {canManage && showAdd ? (
         <AddSkillDialog
           defaultScope={scope}
           projectId={addDialogProjectId}
@@ -408,7 +414,7 @@ export const SkillsPage: React.FC = () => {
           onInstalled={afterDialog}
         />
       ) : null}
-      {showBrowse ? (
+      {canManage && showBrowse ? (
         <BrowseRegistryDialog
           scope={browseScope}
           projectId={browseProjectId}

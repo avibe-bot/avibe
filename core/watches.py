@@ -478,7 +478,12 @@ class ManagedWatchStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        user_context: Any = None,
     ) -> ManagedWatch:
+        from core.vibe_agents import ensure_agent_name_access
+        from storage.resource_access_service import metadata_with_resource_user_context
+
+        ensure_agent_name_access(agent_name, user_context=user_context)
         watch = ManagedWatch(
             id=uuid4().hex[:12],
             name=name,
@@ -498,7 +503,7 @@ class ManagedWatchStore:
             retry_delay_seconds=retry_delay_seconds,
             post_to=post_to,
             deliver_key=deliver_key,
-            metadata=dict(metadata or {}),
+            metadata=metadata_with_resource_user_context(metadata, user_context),
         )
         return self.upsert_watch(
             watch,
@@ -571,7 +576,12 @@ class ManagedWatchStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        user_context: Any = None,
     ) -> ManagedWatch:
+        from core.vibe_agents import ensure_agent_name_access
+        from storage.resource_access_service import metadata_with_resource_user_context
+
+        ensure_agent_name_access(agent_name, user_context=user_context)
         watch = self._watches[watch_id]
         # Captured before the first mutation: the state ``vibe watch update`` read and
         # resolved its payload from.
@@ -600,8 +610,10 @@ class ManagedWatchStore:
         watch.retry_delay_seconds = retry_delay_seconds
         watch.post_to = post_to
         watch.deliver_key = deliver_key
-        if metadata is not None:
-            watch.metadata = dict(metadata)
+        watch.metadata = metadata_with_resource_user_context(
+            metadata if metadata is not None else watch.metadata,
+            user_context,
+        )
         watch.updated_at = _utc_now_iso()
         if not self._write_watch(
             watch,
