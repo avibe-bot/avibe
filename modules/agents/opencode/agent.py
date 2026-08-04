@@ -517,6 +517,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         identity = self._server_activation_identity(server)
         if registry is None or identity is None:
             return True
+        if not registry.is_current(identity):
+            return True
 
         def final_predicate() -> bool:
             if force:
@@ -534,7 +536,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         request: Any,
     ) -> RuntimeActivationIdentity | None:
         del request
-        return self._server_activation_identity(self._client_manager._server_manager)
+        server = self._client_manager._server_manager
+        return self._attach_server_activation(server) if server is not None else None
 
     def runtime_activation_identity_for_session_binding(
         self,
@@ -549,7 +552,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         active = self._session_manager.get_request_session(normalized_anchor)
         if active is not None and str(active[1] or "").strip() != normalized_workdir:
             raise ValueError("OpenCode Session binding changed workdir")
-        return self._server_activation_identity(self._client_manager._server_manager)
+        server = self._client_manager._server_manager
+        return self._attach_server_activation(server) if server is not None else None
 
     def _idle_reconciliation_message(
         self,

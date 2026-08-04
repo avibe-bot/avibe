@@ -350,6 +350,56 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._restart_for_auth_refresh_locked.assert_not_awaited()
         manager._start_server.assert_not_awaited()
 
+    async def test_ensure_running_retires_generation_before_process_replacement(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        events = []
+        manager._runtime_generation_token = (111, 1.0)
+        manager.set_runtime_activation_retire(
+            lambda force: events.append(("retire", force)) or True
+        )
+        manager._is_healthy = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._is_port_available = lambda: True  # type: ignore[method-assign]
+        manager._start_server = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda: events.append(("start", True))
+        )
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            await manager.ensure_running()
+
+        self.assertEqual(events, [("retire", True), ("start", True)])
+
+    async def test_ensure_running_retires_generation_when_adopted_pid_changes(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        retired = []
+        manager._runtime_generation_token = (111, 1.0)
+        manager.set_runtime_activation_retire(
+            lambda force: retired.append(force) or True
+        )
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 222,
+            "port": 4096,
+            "started_at": 2.0,
+            "caller_context_path": manager._caller_context_path(),
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            await manager.ensure_running()
+
+        self.assertEqual(retired, [True])
+        self.assertEqual(manager._runtime_generation_token, (222, 2.0))
+
     async def test_prompt_async_percent_encodes_directory_header(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()

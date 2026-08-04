@@ -273,7 +273,7 @@ def test_opencode_binding_resolver_returns_pre_prompt_shared_generation() -> Non
         )
 
     assert server.retire_activation(True)
-    replacement = opencode._attach_server_activation(server)
+    replacement = opencode.runtime_activation_identity_for_request(SimpleNamespace())
     late_prompt_commit = registry.commit_if_current(identity, lambda: "accepted")
 
     assert replacement is not None and replacement != identity
