@@ -1,13 +1,14 @@
-# Add a forced sidecar restart action to Memory settings (rev13)
+# Add a forced sidecar restart action to Memory settings (rev14)
 
-> Rev13 keeps one public recovery action and a focused set of internal fixes:
+> Rev14 keeps one public recovery action and a focused set of internal fixes:
 > replayable configuration, config-wide write serialization, restart-specific
 > and lifecycle-intent admission, generation-fenced ready activation, complete
 > supervisor quiescing, bounded orphan recovery, disk/live replay convergence,
 > marker-free replay promotion, store-thread settlement, worker lease rotation,
 > locked clear-marker recovery, bounded readiness, supervisor callback rebinding,
 > authoritative controller/UI settings refresh, queued-operation exclusion, and
-> disabled/fail-closed replay handling.
+> disabled/fail-closed replay handling, explicit worker activation, and retained
+> processing-probe ownership.
 > Timed-out work remains owned until it is either joined or proven unable to
 > mutate state. It does not add a lifecycle coordinator, explicit state machine,
 > provider/store port, or frontend DOM test framework.
@@ -323,6 +324,10 @@ an abandoned restart, and a user retry can enqueue a second one.
 - Bound worker store-task settlement separately. Cancelling an asyncio drain
   owner does not stop a write-capable `asyncio.to_thread()` call, so worker-task
   completion alone is not proof that lease ownership is quiescent.
+- Bound settlement of processing-probe trees separately. Cancelling the drain
+  task can make it terminal while probe termination is still incomplete; every
+  retained probe owner must prove its process tree reaped before lease rotation
+  or sidecar replacement.
 - Bound settlement of any automatic supervisor restart already in progress by
   the same all-inclusive process-start budget. The client deadline includes this
   predecessor explicitly. A generation fence, described below, prevents its
@@ -356,12 +361,16 @@ an abandoned restart, and a user retry can enqueue a second one.
   cancellation joins and one complete TERM/KILL cleanup round. Set
   `MEMORY_RESTART_TIMEOUT_SECONDS` strictly above the sum of two clear cleanup
   bounds, automatic-supervisor start settlement, process-owner settlement,
-  worker grace, worker cancellation cleanup, worker store-task settlement, a
-  separate old-process stop retry, and the all-inclusive replacement-start
-  budget. The contract test imports the source constants/helpers instead of
-  copying numbers from comments. A deadline cannot release either transaction
-  while a non-cancellable config or store write is still live; its mandatory
-  join is an ownership cleanup tail rather than detached restart work.
+  worker grace, worker cancellation cleanup, worker store-task settlement,
+  processing-probe settlement, a separate old-process stop retry, and the
+  all-inclusive replacement-start budget. Add a worker-activation bound after
+  replacement health plus a distinct replacement-activation cleanup allowance
+  containing another worker cancellation, store-task settlement, probe
+  settlement, and complete TERM/KILL stop round. The contract test imports the
+  source constants/helpers instead of copying numbers from comments. A deadline
+  cannot release either transaction while a non-cancellable config/store write
+  or owned probe tree is still live; its mandatory join is an ownership cleanup
+  tail rather than detached restart work.
 - A busy result is a completed, retryable business response. It is not
   `memory_restart_failed`, starts no background task, ends the UI spinner, and
   displays a localized reason.
@@ -382,6 +391,20 @@ Add a private semantic helper such as `begin_replacement_activation()` that
 creates a new UUID lease owner and then reuses `begin_activation()`. Do not
 change MemoryStore or its recovery SQL.
 
+Make `begin_activation()` create and return a generation-specific completion
+future. `_recover_activation()` resolves that exact future only after
+`recover_after_boot()`, interrupted-flush handling, metadata reads, and fault
+classification all finish. Before the drain loop retries a failed activation,
+it rejects the failed generation's future with the original exception and then
+creates the next generation; cancellation rejects it as well. A done callback
+consumes every terminal exception so an ordinary retry generation with no waiter
+cannot emit an unobserved-future warning. `_ensure_worker()` accepts and reuses a
+prepared activation future, creating one only for ordinary callers, and returns
+the exact future associated with the worker task instead of using task existence
+or liveness as success evidence. Explicit restart and automatic ready activation
+keep claims paused, await their exact future under the worker activation bound,
+and resume claims only after it resolves successfully.
+
 Make `_store_call()` create an explicit task for `asyncio.to_thread()` and await
 it under `shield()`. Keep every unfinished task in a private worker registry;
 task cancellation must leave the underlying store task live and discoverable.
@@ -397,7 +420,7 @@ The locked sequence is fixed:
 1. Snapshot the last-good `_restart_config` and recover an interrupted clear.
    Validate store and artifact availability only when that replay is enabled.
    Do not reject solely because the persisted candidate is enabled while the
-   replay is disabled; the replay state is authoritative after step 8
+   replay is disabled; the replay state is authoritative after step 9
    convergence and needs no launch prerequisites.
 2. Before touching the worker, call a non-awaiting, idempotent supervisor handoff
    fence on the old `EverOSProcess`. It sets `_desired_running=false`, marks ready
@@ -410,7 +433,7 @@ The locked sequence is fixed:
    process-owner settlement bound: cancel and join idle watcher/monitor tasks,
    or retain and join the one already performing child cleanup. An active start
    may finish launching a transient child, but generation-fenced activation
-   cannot resume claims and step 9 will stop it. If either retained start or
+   cannot resume claims and step 10 will stop it. If either retained start or
    lifecycle owner outlives its bound, keep its exact references and claims
    fenced, then return fail-closed without rotating the lease or invoking
    `stop()` beside it. A retry rejoins those same tasks first.
@@ -426,10 +449,19 @@ The locked sequence is fixed:
    entry, the old lease, and every existing process reference; keep claims
    fenced and return fail-closed. A retry rejoins the same store task before it
    can proceed.
-7. Rotate the lease owner only after the supervisor, process owners, drain task,
-   and store-task registry are all confirmed quiescent, and before any new
-   activation.
-8. Run config convergence while claims are fenced and the old worker is stopped.
+7. Ask the old supervisor to settle every retained processing-probe tree under
+   the probe-settlement bound. `processing_healthy()` registers the exact probe,
+   process group, and owned-process snapshot immediately after spawn returns and
+   before awaiting probe completion; any cleanup task is recorded before its
+   first cleanup await. It removes that record only after complete reap.
+   Cancellation or failed cleanup keeps the record on the supervisor. If
+   settlement cannot prove every tree reaped, retain those records and the old
+   supervisor, keep claims fenced, and return fail-closed. A retry settles the
+   same owners first.
+8. Rotate the lease owner only after the supervisor, process owners, drain task,
+   store-task registry, and probe registry are all confirmed quiescent, and
+   before any new activation.
+9. Run config convergence while claims are fenced and the old worker is stopped.
    When `_restart_config` has `embedding_change_pending`, run the root guard
    first and clear the marker in the replay block. The transaction must replace
    only the expected persisted Memory block with replay C0, preserving every
@@ -446,18 +478,21 @@ The locked sequence is fixed:
    `Controller.config.memory`, and the UI's mandatory success reload switches to
    the authoritative disabled settings. A stop error remains fail-closed and
    cannot report disabled success.
-9. Stop the old process. Do not discard its supervisor or start another child
+10. Stop the old process. Do not discard its supervisor or start another child
    until its process tree is confirmed reaped.
-10. If the converged replay is disabled, return the recorded disabled state
+11. If the converged replay is disabled, return the recorded disabled state
    without creating a replacement child, activation task, or worker. Otherwise,
    create a process from `_restart_config` bound to the lifecycle generation
    captured when restart entered its critical section. Its explicit initial
-   `start()` suppresses the automatic ready callback: while restart still owns
-   `_reconcile_lock -> module._lifecycle_lock`, runtime itself resumes claims,
-   starts the worker, and verifies `_worker_task` exists and is not done. An
-   activation exception runs bounded replacement cleanup, keeps claims fenced,
-   and cannot report ready. Return `{ok: true, state: 'ready'}` only after this
-   explicit activation succeeds.
+   `start()` suppresses the automatic ready callback. While restart still owns
+   `_reconcile_lock -> module._lifecycle_lock`, keep claims paused, call
+   `begin_replacement_activation()`, start the worker, and await that exact
+   activation-generation future under the worker-activation bound. Only after
+   it resolves may runtime resume claims. Rejection or timeout cancels and joins
+   the new worker, settles its store calls and processing probes, then stops the
+   replacement under the distinct replacement-activation cleanup allowance.
+   Any cleanup owner that outlives its bound is retained fail-closed. Return
+   `{ok: true, state: 'ready'}` only after real activation succeeds.
 
 Automatic retries use a separate nonblocking ready notification. The callback
 captures process identity and lifecycle generation, schedules one retained
@@ -465,7 +500,9 @@ runtime activation task, and returns without taking runtime locks, so it cannot
 deadlock `_start_locked()` with a caller already holding them. The activation
 task acquires `_reconcile_lock -> module._lifecycle_lock`, then verifies that the
 runtime is enabled, the process is still current and ready, the generation is
-unchanged, and no explicit restart or artifact installation owns admission.
+unchanged, and no explicit restart or artifact installation owns admission. It
+then keeps claims paused and awaits the worker's exact activation-generation
+future under the same worker-activation bound before resuming them.
 Every Clear, reconcile, artifact activation, restart, and close operation bumps
 the generation at its serialized lifecycle entry, before its first lifecycle
 await, and uses that value for any process it creates. Consequently an
@@ -508,6 +545,12 @@ Every exit after claims are fenced must end in one of these states:
   A retry awaits the same task under another bounded interval. It cannot run
   recovery, rotate the lease, or touch process ownership until the thread has
   returned and its terminal result has been consumed.
+- **A processing-probe tree outlives cancellation or cleanup:** retain its exact
+  probe/process-group/owned-process record and cleanup owner on the supervisor,
+  retain the current lease, and keep claims fenced. Restart returns
+  `memory_restart_failed` without stopping or replacing the supervised child
+  beside that credential-bearing tree. A retry reapplies the bounded settlement
+  to the same record and cannot proceed until the registry is empty.
 - **Failure before `old_process.stop()` is invoked:** the old supervisor still
   owns its child but is quiesced. A live PID is not evidence that the UDS health
   endpoint is ready, so never resume claims or the worker from `running` alone.
@@ -532,10 +575,13 @@ Every exit after claims are fenced must end in one of these states:
   may resume them only after coordinating with both lifecycle locks and proving
   it is still current. With no supervisor, the user can click restart again.
 - **The replacement reaches health but explicit activation fails:** treat this
-  as startup failure. Restart directly observes the exception, runs the same
-  bounded child cleanup, keeps claims fenced, and cannot report `ready`. A later
-  automatic ready activation that fails records the visible runtime error and
-  likewise leaves claims fenced.
+  as startup failure. Restart directly observes rejection of the exact
+  activation-generation future, keeps claims fenced, cancels and joins the new
+  worker, settles its store calls and probe trees, then stops the replacement
+  under the separate replacement-activation cleanup allowance. Retain any owner
+  that outlives its bound and never report `ready`. A later automatic ready
+  activation that fails records the visible runtime error and likewise leaves
+  claims fenced.
 
 `CancelledError` is re-raised after ownership and claims cleanup; it is never
 reported as a business failure. Fix `_stop_worker()` so it swallows only the
@@ -544,7 +590,9 @@ task itself propagates. Restart uses shielded cleanup to settle the worker store
 registry and reach one of the states above. If cancellation lands after a new
 child is spawned but before its watcher or monitor exists, shield
 `new_process.stop()`: clear `_process` only after successful reap; otherwise
-retain the supervisor reference and keep claims fenced.
+retain the supervisor reference and keep claims fenced. The same shielded cleanup
+retains incomplete processing-probe owners rather than dropping their local
+references when cancellation is re-raised.
 
 `start()` returning `False` keeps the specific
 `memory_sidecar_unavailable`. Stop, factory, and other restart orchestration
@@ -580,9 +628,10 @@ exceptions use the transport-only `memory_restart_failed`.
    persisted snapshot after every successful runtime-owned V2 mutation and
    rebase a successfully reconciled
    live/replay candidate from marker settlement's exact return; conditionally
-   converge disk to replay before launch; retain worker/store tasks that outlive
-   cancellation; reject restart while artifact installation is active; make only
-   explicit restart admission fail fast. Make `restart()` return its transport
+   converge disk to replay before launch; await the exact worker-activation
+   generation and retain worker/store/probe owners that outlive cancellation;
+   reject restart while artifact installation is active; make only explicit
+   restart admission fail fast. Make `restart()` return its transport
    result plus the exact applied replay config on ready/disabled success and no
    config on busy/failure. Add `reconcile_persisted()` to return the exact
    successful candidate alongside the transport result while ordinary
@@ -595,14 +644,17 @@ exceptions use the transport-only `memory_restart_failed`.
    the synchronous lifecycle-intent scope and `lifecycle_busy` property covering
    active and queued search, profile, Clear, and recovery operations.
 4. `core/memory/worker.py`: retain and shield explicit store-thread tasks, expose
-   bounded settlement, and rotate the lease owner only after their registry is
+   bounded settlement, make activation return a generation-specific completion
+   future, and rotate the lease owner only after prior ownership registries are
    empty.
 5. `core/memory/process.py`: expose complete stop/start and process-owner
    settlement budget helpers, put one cap around all orphan-reap rounds, add the
    explicit-handoff supervisor fence, distinguish idle watcher/monitor tasks
    from active cleanup owners with narrow phase flags, hard-cap the complete
-   readiness operation, rebind re-armed ready callbacks to the current
-   generation, and support callback-suppressed explicit start.
+   readiness operation, retain processing-probe trees and cleanup owners until
+   reaped, expose their settlement and the separate replacement-activation
+   cleanup budget, rebind re-armed ready callbacks to the current generation,
+   and support callback-suppressed explicit start.
 6. `core/controller.py` / `core/internal_server.py`: add a controller-owned
    restart wrapper and `POST /internal/memory/restart`. On ready or disabled
    success, install a deep copy of the exact applied config returned by Runtime
@@ -657,6 +709,9 @@ exceptions use the transport-only `memory_restart_failed`.
 
 - `tests/test_memory_runtime.py`
   - Successful restart confirms old stop, new ready child, and worker recovery.
+    Pause real `recover_after_boot()` after worker task creation and prove restart
+    retains both lifecycle locks, keeps claims paused, and cannot report ready
+    until the exact activation-generation future resolves.
   - After failed C1 reconcile and failed rollback, restart replays last-good C0;
     the uncontended operation remains inside both lifecycle locks and
     conditionally replaces the expected persisted C1 Memory block with C0 while
@@ -695,6 +750,11 @@ exceptions use the transport-only `memory_restart_failed`.
     registered. Restart retains the old lease and process without running
     recovery; after the thread is released, retry joins it and only then rotates
     and recovers.
+  - Cancel a drain task inside a real supervised processing probe and make its
+    first termination round fail. The terminal worker task is insufficient for
+    restart admission: the exact probe-tree record remains on the supervisor,
+    claims and lease stay fenced, and no process replacement occurs. A retry
+    reaps that same record before continuing.
   - If the old child exits during the five-second drain grace, its supervisor is
     already quiesced: no automatic restart can schedule ready activation, resume
     claims, or replace `_worker_task`. Pre-stop failure beside an alive but
@@ -728,9 +788,11 @@ exceptions use the transport-only `memory_restart_failed`.
   - Disabled, `start() is False`, factory exception, explicit activation
     exception, automatic activation exception, failed-start cleanup, and stop
     exception cases assert error codes, supervisor ownership, claims/worker
-    fencing, and no double child. An activation exception cannot report ready; a
-    stop exception followed by child exit must not auto-restart or report
-    restored claims.
+    fencing, and no double child. Drive explicit activation failure through real
+    worker recovery after task creation; its rejected future cannot report ready,
+    and replacement worker/store/probe settlement plus a complete process stop
+    fit the distinct cleanup allowance. A stop exception followed by child exit
+    must not auto-restart or report restored claims.
   - Cancellation while stopping the worker and after a new child is spawned
     reaches the documented cleanup state and re-raises `CancelledError`.
 - `tests/test_memory_slice3.py`: a successful persisted reconcile that settles
@@ -743,10 +805,11 @@ exceptions use the transport-only `memory_restart_failed`.
 - `tests/test_internal_client.py` / `tests/test_internal_client_timeouts.py`:
   POST and busy response passthrough; deadline computed from both clear phases,
   automatic-supervisor start settlement, watcher/monitor owner settlement,
-  worker and store-task bounds, a distinct old stop retry, the outer all-round
-  orphan-reap cap, readiness, and failed-start cleanup. On reporting timeout or
-  caller cancellation, the retained request is joined before its caller can
-  release transaction ownership.
+  worker, store-task, and processing-probe bounds, a distinct old stop retry, the
+  outer all-round orphan-reap cap, readiness, failed-start cleanup, explicit
+  worker activation, and a separate complete replacement-activation cleanup
+  allowance. On reporting timeout or caller cancellation, the retained request
+  is joined before its caller can release transaction ownership.
 - `tests/test_ui_memory_routes.py`: new client path, internal unavailable,
   cross-origin rejection, restart/settings serialization, timed-out settlement
   ownership, unrelated-field retention, and failed-Memory-C1 convergence to C0.
@@ -770,12 +833,17 @@ exceptions use the transport-only `memory_restart_failed`.
 - `tests/test_memory_worker.py`: `_store_call()` shields and retains its explicit
   thread task across drain cancellation. `settle_store_calls()` times out without
   cancelling the thread, retains it for retry, consumes its terminal result, and
-  reports quiescence only after the registry is empty.
+  reports quiescence only after the registry is empty. Activation generations
+  resolve only after full recovery, reject with the real recovery error before
+  retry creates a new generation, and reject on cancellation.
 - `tests/test_memory_process.py`: stale recorded leader plus late helper and
   multiple unusable-record anchors share one outer reap deadline. Timeout keeps
   the record and prevents child launch. Idle watcher/monitor tasks cancel and
   join during handoff; active cleanup owners are retained and settle under the
-  exported owner budget. Explicit start suppresses automatic ready notification.
+  exported owner budget. A cancelled processing probe whose termination fails
+  retains its exact tree and cleanup owner; settlement retries that record and
+  reports quiescence only after reap. Explicit start suppresses automatic ready
+  notification.
   A socket that appears just before the readiness deadline with a stalled health
   response cannot extend `_wait_for_ready()` beyond its outer cap, and the
   separately budgeted failed-start cleanup still runs.
