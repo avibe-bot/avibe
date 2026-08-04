@@ -1081,9 +1081,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           mediaEnabled ? 'pl-1.5' : 'pl-3.5',
         )}
       >
-        {/* Voice owns the first control slot so starting, finishing, processing,
-            retrying, and recovering all happen at the same left edge. Once a
-            voice flow starts, unrelated attachment controls withdraw. */}
+        {/* Attach stays in the first idle slot and voice starts in the second.
+            Once a voice flow starts, the unrelated attachment control withdraws
+            and the active voice action takes the left edge. */}
         {mediaEnabled && (
           <div className="flex items-end">
             <input
@@ -1097,6 +1097,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 e.target.value = '';
               }}
             />
+            {!voiceFlowActive && (
+              /* Attach uses a generic plus rather than a paperclip so it reads
+                 as the general "add anything" entry point. */
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={disabled}
+                aria-label={t('chat.compose.attach')}
+                className="h-9 w-7 shrink-0"
+              >
+                <Plus className="size-4" />
+              </Button>
+            )}
             {voiceControlMode === 'record' && (
               <Button
                 type="button"
@@ -1172,21 +1187,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 className="size-9 shrink-0"
               >
                 <Copy className="size-4" />
-              </Button>
-            )}
-            {!voiceFlowActive && (
-              /* Attach uses a generic plus rather than a paperclip: it reads as
-                 "add anything" while remaining secondary to voice input. */
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={disabled}
-                aria-label={t('chat.compose.attach')}
-                className="h-9 w-7 shrink-0"
-              >
-                <Plus className="size-4" />
               </Button>
             )}
             {recording && (
