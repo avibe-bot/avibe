@@ -563,6 +563,55 @@ def test_processing_health_uses_owned_child_callback_when_present() -> None:
     assert calls == [None]
 
 
+@pytest.mark.parametrize(
+    ("recorder", "expected"),
+    [
+        ({"state": "active", "reason": None}, {"state": "active", "reason": None}),
+        (
+            {"state": "degraded", "reason": "call_log_corrupt"},
+            {"state": "degraded", "reason": "call_log_corrupt"},
+        ),
+        (
+            {"state": "disabled", "reason": "writer_failures"},
+            {"state": "disabled", "reason": "writer_failures"},
+        ),
+        (
+            {"state": "future", "reason": "new_reason"},
+            {"state": "degraded", "reason": "writer_failures"},
+        ),
+        (None, {"state": "degraded", "reason": "writer_failures"}),
+    ],
+)
+def test_recorder_health_validates_the_closed_sidecar_projection(recorder, expected) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "ok", "recorder": recorder})
+
+    with _sidecar_transport(handler):
+        health = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).recorder_health())
+
+    assert health == expected
+
+
+def test_recorder_health_degrades_transport_and_invalid_json() -> None:
+    responses = iter(
+        [
+            httpx.Response(200, content=b"not-json"),
+            httpx.Response(503, content=b"unavailable"),
+        ]
+    )
+
+    with _sidecar_transport(lambda _request: next(responses)):
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        assert asyncio.run(provider.recorder_health()) == {
+            "state": "degraded",
+            "reason": "writer_failures",
+        }
+        assert asyncio.run(provider.recorder_health()) == {
+            "state": "degraded",
+            "reason": "writer_failures",
+        }
+
+
 def test_sidecar_failure_logs_never_contain_capture_or_response_canaries(caplog) -> None:
     capture_canary = "capture-canary-7d5d6b"
     response_canary = "response-canary-477ebd"
