@@ -110,7 +110,7 @@ class CodexTransport:
                 "initialize",
                 {
                     "clientInfo": {
-                        "name": "vibe-remote",
+                        "name": "avibe",
                         "version": "1.0.0",
                     },
                 },
