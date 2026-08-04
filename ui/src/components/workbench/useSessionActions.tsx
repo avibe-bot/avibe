@@ -9,6 +9,7 @@ import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useToast } from '../../context/ToastContext';
 import { hideSessionToBackground } from '../../lib/sessionVisibilityActions';
+import type { UnsavedChangesActionAuthorization } from '../../lib/unsavedChangesRegistry';
 import { isSessionReadOnly } from './sessionArchived';
 import { ArchiveSessionDialog } from './ArchiveSessionDialog';
 import type { SessionActionDescriptor } from './sessionActions';
@@ -26,19 +27,26 @@ export interface SessionActionsOptions {
   /** ``null`` (no session yet, or a read-only one) yields no actions and an inert
    *  archive request, so callers can invoke the hook unconditionally. */
   session: WorkbenchSession | null;
-  /** Project that owns the session — the provider's cache patching is per project.
-   *  Defaults to ``session.project_id`` (what the chat surface has). */
-  projectId?: string;
+  /** Project whose cached list holds the row — a CACHE address, not a permission.
+   *  Defaults to ``session.project_id``, which is ``null`` for a standalone session
+   *  (no project-bound scope); the writes run either way. */
+  projectId?: string | null;
   /** Start the surface's own rename editor (inline input / chat header title). */
   onRenameStart: () => void;
-  /** Navigate to a session (the fork target). The sidebar routes this through its
-   *  unsaved-changes guard; other surfaces navigate plainly. */
+  /** Navigate to a session (the fork target). Runs inside ``authorizeNavigation``'s
+   *  runner when one is supplied. */
   onOpenSession: (sessionId: string) => void;
+  /** Pre-flight for the actions that end in a route change (fork). The sidebar's
+   *  unsaved-changes guard prompts SYNCHRONOUSLY, so it has to run BEFORE the fork
+   *  request — asking afterwards and bailing out would leave an orphan session
+   *  behind (Codex). ``null`` = the user cancelled: nothing is written at all. */
+  authorizeNavigation?: () => UnsavedChangesActionAuthorization | null;
   /** After a successful archive — the chat leaves the dead session, rows just drop. */
   onArchived?: () => void;
   /** Mirror a write into a surface-local copy of the session (the chat page holds
-   *  its own ``session`` state, which the provider cache doesn't feed). */
-  onSessionPatched?: (changes: Partial<WorkbenchSession>) => void;
+   *  its own ``session`` state, which the provider cache doesn't feed). The session
+   *  id is passed back so a surface that has since moved on can ignore it. */
+  onSessionPatched?: (changes: Partial<WorkbenchSession>, sessionId: string) => void;
   /** Keyboard hint for the archive row (see chatShortcuts). */
   archiveHint?: string;
 }
@@ -49,6 +57,10 @@ export interface SessionActionsHandle {
   archiveDialog: React.ReactNode;
   /** Open the archive confirm dialog (menu row, or the ⌘⇧D shortcut). */
   requestArchive: () => void;
+  /** ``requestArchive`` can actually do something — i.e. there is a writable
+   *  session. The keyboard shortcut binds only while this is true, so it never
+   *  swallows the browser's own ⌘⇧D on a read-only or still-loading chat. */
+  canArchive: boolean;
 }
 
 export const useSessionActions = ({
@@ -56,6 +68,7 @@ export const useSessionActions = ({
   projectId,
   onRenameStart,
   onOpenSession,
+  authorizeNavigation,
   onArchived,
   onSessionPatched,
   archiveHint,
@@ -86,13 +99,16 @@ export const useSessionActions = ({
   }, [target]);
 
   const togglePinned = useCallback(async () => {
-    if (!target || !ownerProjectId || pinningRef.current) return;
+    if (!target || pinningRef.current) return;
     pinningRef.current = true;
     setPinning(true);
     const next = !target.pinned;
+    const pinnedId = target.id;
     try {
-      await setSessionPinned(ownerProjectId, target.id, next);
-      onSessionPatched?.({ pinned: next });
+      await setSessionPinned(ownerProjectId, pinnedId, next);
+      // Carry the id: this resolves after an await, and the surface may have moved
+      // to another session by then (patching it would flip the wrong row).
+      onSessionPatched?.({ pinned: next }, pinnedId);
     } catch {
       // apiFetch already surfaced the error toast.
     } finally {
@@ -102,17 +118,26 @@ export const useSessionActions = ({
   }, [target, ownerProjectId, setSessionPinned, onSessionPatched]);
 
   const fork = useCallback(async () => {
-    if (!target || !ownerProjectId || forkingRef.current) return;
+    if (!target || forkingRef.current) return;
+    // Ask FIRST (the prompt is synchronous), write second: a cancelled
+    // unsaved-changes prompt must not leave a forked session nobody navigated to.
+    const authorization = authorizeNavigation?.() ?? null;
+    if (authorizeNavigation && !authorization) return;
     forkingRef.current = true;
     setForking(true);
     try {
       const forked = await forkSession(ownerProjectId, target.id);
-      if (forked) onOpenSession(forked.id);
+      if (!forked) return;
+      const open = () => onOpenSession(forked.id);
+      // runNavigation carries the already-granted authorization into the route
+      // change, so the guard doesn't prompt a second time for the same action.
+      if (authorization) authorization.runNavigation(open);
+      else open();
     } finally {
       forkingRef.current = false;
       setForking(false);
     }
-  }, [target, ownerProjectId, forkSession, onOpenSession]);
+  }, [target, ownerProjectId, forkSession, onOpenSession, authorizeNavigation]);
 
   const hide = useCallback(() => {
     if (!target) return;
@@ -212,12 +237,11 @@ export const useSessionActions = ({
       open={archiveOpen}
       onOpenChange={setArchiveOpen}
       onConfirm={async () => {
-        if (!ownerProjectId) return;
         await archiveSession(ownerProjectId, target.id);
         onArchived?.();
       }}
     />
   ) : null;
 
-  return { actions, archiveDialog, requestArchive };
+  return { actions, archiveDialog, requestArchive, canArchive: target != null };
 };

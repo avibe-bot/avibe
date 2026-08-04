@@ -66,11 +66,19 @@ Surface-specific behavior stays in callbacks, not in copies of the list:
 `session: null` (or a read-only session) yields `actions: []`, no dialog, and a no-op
 `requestArchive()` — so the hook can be called unconditionally at the top of `ChatPage`.
 
-`<SessionActionMenu actions={...} />` renders `role="menu"` items with a hairline divider
-between groups, danger styling for archive, `hint` right-aligned in mono (the ⌘⇧D badge),
-`title` for the disabled-fork explanation, and roving arrow-key focus.
-`<SessionActionsTrigger>` is the shared ⋯ button (hover-revealed in rows, always visible on
-coarse pointers and while the menu is open).
+`<SessionActionMenu actions={...} />` renders a labelled `role="group"` of buttons with a
+hairline divider between groups, danger styling for archive, `hint` right-aligned in mono (the
+⌘⇧D badge), the disabled-fork explanation as an on-screen second line (not `title` alone), and
+arrow-key/Home/End roving focus. `<SessionActionMenu…Content>` wraps it in the `PopoverContent`
+every surface shares, so the popover's width, alignment and close-focus handling are also
+written once. `<SessionActionsTrigger>` is the shared ⋯ button (hover-revealed in rows, always
+visible on coarse pointers and while the menu is open).
+
+Semantics are the popover's, not a fake menu's: the container is a Radix `Popover`, which
+injects `aria-haspopup="dialog"` + `aria-expanded` into the trigger and owns focus containment.
+Claiming `role="menu"` / `role="menuitem"` on top of that would promise AT behavior (type-ahead, single
+tab stop, `aria-haspopup="menu"`) that the popover does not implement — see the review round
+below.
 
 Harmonized semantics (drift fixed while unifying):
 
@@ -123,14 +131,24 @@ the same reasoning `showPageControlActions` already applies to Visualize/Share/a
   `isApplePlatform()` joins `lib/platform.ts` (a third local copy of the UA sniff would be the
   same drift this plan removes).
 
+- `inForegroundSurface(target)` / `isArchiveSessionKeydown(event, target)` — the ownership half
+  of the decision: the chat stays *mounted* under app windows and dialogs, so "ChatPage is
+  rendered" is not "chat owns the keyboard".
+
 Registered by `ChatPage` on `window` (same shape as the shell's ⌘K):
 
 - It **opens the confirm dialog**, never archives directly — a destructive keystroke needs a
   guard, and the dialog already exists.
-- `preventDefault()` so Chrome/Firefox's own ⌘⇧D (bookmark-all-tabs) doesn't fire.
-- Deliberately wins from inside the composer, like ⌘K — it's a command, not text entry.
-- Inert on a read-only session (`requestArchive` is a no-op) and while the dialog is already
-  open.
+- Bound **only while `canArchive`** — a read-only or still-loading chat never attaches the
+  listener, so it can't `preventDefault()` a chord it won't act on.
+- `preventDefault()` (once the chord is ours) so Chrome/Firefox's own ⌘⇧D (bookmark-all-tabs)
+  doesn't fire.
+- Deliberately wins from inside the composer, like ⌘K — it's a command, not text entry — but
+  yields to any app window (`[data-window-id]`, `[data-window-owner-id]`) or dialog stacked over
+  the chat.
+- Also bound **inside the Show Page iframe** via `bindFrameChord`: an iframe keydown never
+  reaches the parent window, so without it the chord silently dies whenever focus is in the
+  visualized page.
 
 ## Files
 
@@ -141,22 +159,57 @@ Registered by `ChatPage` on `window` (same shape as the shell's ⌘K):
 - `SessionPinAction.tsx` → `SessionPinIndicator.tsx` (interactive pin deleted, indicator kept)
 - `WorkbenchSidebar.tsx`, `ProjectsPage.tsx`, `ChatPage.tsx` — consume the shared model
 - `lib/platform.ts` — `isApplePlatform()`
+- `context/WorkbenchProjectsContext.ts` + `Provider.tsx` — pin/fork/archive take a **nullable**
+  project id (review round, finding 1)
+- `components/apps/windowChords.ts` — `bindFrameChord()` generalized out of
+  `bindShowPageFrameCloseShortcut()` (review round, finding 6)
 - `i18n/en.json` + `zh.json` — reuse existing `workbench.session*` keys; new keys only for the
   chat menu's aria-label if needed
 
 ## Tests
 
-- `sessionActions.test.tsx` — menu markup (grouping/divider, danger archive, disabled fork with
-  tooltip, hint badge, `role="menu"`/`menuitem`, empty list) and the ⋯ trigger's
-  `aria-haspopup`/`aria-expanded` + reveal classes per variant.
+- `sessionActions.test.tsx` — menu markup (labelled `role="group"`, grouping/divider, danger
+  archive, focusable disabled fork with its visible reason, hint badge, empty list) and the ⋯
+  trigger: rendered *inside* a `Popover` it must expose `aria-haspopup="dialog"` +
+  `aria-expanded`, and rendered bare it must write neither (asserting them on a bare trigger is
+  what made the first version of this test pass while the shipped markup said something else).
+- `useSessionActions.test.tsx` — the writes, with the contexts mocked: a project-less session
+  reaches `setSessionPinned(null, …)` / `forkSession(null, …)` / `archiveSession(null, …)`, an
+  explicit `projectId` overrides the row's own, cancelling the unsaved-changes prompt forks
+  **nothing**, a granted authorization wraps the navigation in `runNavigation`, a double click
+  forks once, `onSessionPatched` names the initiating session, and a read-only session yields no
+  actions, no dialog and `canArchive: false`.
 - `SessionPinIndicator.test.tsx` — the passive pin glyph and `sessionRowActionPaddingClass`;
   together with the above it replaces `SessionPinAction.test.tsx`.
-- `chatShortcuts.test.ts` — exact chord matching (rejects plain ⌘D, ⌥⌘⇧D, KeyD alone) + both
-  platform labels.
+- `chatShortcuts.test.ts` — exact chord matching (rejects plain ⌘D, ⌥⌘⇧D, KeyD alone), the
+  foreground-surface ownership check, and both platform labels.
+- `windowChords.test.ts` — `bindFrameChord` runs an arbitrary chord with the *frame's*
+  `activeElement`, steals nothing on a non-match, and detaches on cleanup.
 - `ChatArchivedReadOnly.test.tsx` — new case: a read-only header passed a non-empty
   `sessionActions` still renders no ⋯ (`ChatHeaderBar` re-states the withdrawal itself, so the
   guarantee doesn't rest on the hook alone).
 - `npm run build` in `ui/`; `ruff check` is a no-op here (frontend-only change).
+
+## Review round — Codex (`gpt-5.6-sol`) on the full diff
+
+Nine findings, all fixed in place. The three blockers were all "the happy path was the only
+path":
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | **BLOCKER** `project_id` is `null` for every session outside a project (the server derives it from `scope_id`), so pin and fork no-oped and **archive confirmed without archiving** on standalone sessions | provider mutations take `projectId: string \| null`; the API call always runs, only the *cache placement* is skipped. The project id is a cache address, not a permission. |
+| 2 | **BLOCKER** fork ran before the unsaved-changes prompt (the guard lived in `onOpenSession`), so cancelling left an **orphan forked session** | `authorizeNavigation()` is a pre-flight — the prompt is synchronous, so it runs before `forkSession`, and the returned authorization is carried into the post-await navigation via `runNavigation`. |
+| 3 | **BLOCKER** the window-level ⌘⇧D was scoped to "ChatPage mounted", so it fired for keystrokes owned by app windows/dialogs and `preventDefault()`ed the browser chord even on read-only chats | listener attached only while `canArchive`; `isArchiveSessionKeydown` yields to `[data-window-id]` / `[data-window-owner-id]` / `[role=dialog\|alertdialog]`. |
+| 4 | async completions weren't tied to the initiating session | `onSessionPatched(changes, sessionId)`; `ChatPage` patches only if `session.id` still matches. |
+| 5 | closing the popover *before* rename/reference let Radix's close-autofocus overwrite the focus the action had just requested | `onCloseAutoFocus` is prevented for the two focus-transferring actions only. |
+| 6 | the chord died while focus was inside the Show Page iframe | `bindFrameChord()` generalized out of the ⌥W bridge and bound on the frame too. |
+| 7 | the trigger's hand-written `aria-haspopup="menu"` was silently overridden by Radix's `"dialog"` (`asChild` spreads its props last) — and the test asserted the *unwrapped* markup, so it passed | trigger stops writing popover state it doesn't own; the test renders it inside a `Popover` and separately pins the bare-render contract. |
+| 8 | `End` focused the wrong item | `Home`/`End` → `focusItem(0)` / `focusItem(actions.length - 1)`. |
+| 9 | disabled fork used `disabled`, so it couldn't be focused and its explanation was unreachable by keyboard | `aria-disabled` + `tabIndex` kept, with the reason rendered on screen under the label. |
+
+Deliberately not changed: no `@radix-ui/react-dropdown-menu` dependency (not installed; a true
+menu role would be the honest fix for #7's *other* half, but the popover semantics are now
+truthful about what they are).
 
 ## Todo
 
@@ -168,3 +221,4 @@ Registered by `ChatPage` on `window` (same shape as the shell's ⌘K):
 6. [x] `chatShortcuts.ts` + ⌘⇧D wiring in `ChatPage`
 7. [x] i18n en/zh
 8. [x] tests + `npm run build`
+9. [x] Codex review round — 9 findings fixed + `useSessionActions.test.tsx`

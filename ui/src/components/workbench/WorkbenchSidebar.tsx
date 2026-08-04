@@ -33,7 +33,7 @@ import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesAct
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { SessionPinIndicator } from './SessionPinIndicator';
 import { sessionRowActionPaddingClass } from './sessionRowLayout';
-import { SessionActionMenu, SessionActionsTrigger } from './sessionActions';
+import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -231,12 +231,10 @@ const SessionRow: React.FC<{
       setRenaming(true);
     },
     // Forking navigates, so it goes through the unsaved-changes guard like every
-    // other route change this sidebar can trigger.
-    onOpenSession: (sessionId) => {
-      const authorization = authorizeRouteAction();
-      if (!authorization) return;
-      authorization.runNavigation(() => navigate(`/chat/${encodeURIComponent(sessionId)}`));
-    },
+    // other route change this sidebar can trigger. The guard runs BEFORE the fork
+    // request (see authorizeNavigation) so a cancelled prompt writes nothing.
+    authorizeNavigation: authorizeRouteAction,
+    onOpenSession: (sessionId) => navigate(`/chat/${encodeURIComponent(sessionId)}`),
     // Archiving the chat we are currently viewing leaves it directly — don't rely
     // solely on the replay-less SSE 'archived' event to navigate away.
     onArchived: () => {
@@ -347,13 +345,12 @@ const SessionRow: React.FC<{
           </span>
         </div>
       </PopoverAnchor>
-      <PopoverContent align="start" className="w-[188px] p-1">
-        <SessionActionMenu
-          actions={actions}
-          label={t('workbench.sessionActions')}
-          onAction={() => setMenuOpen(false)}
-        />
-      </PopoverContent>
+      <SessionActionMenuContent
+        actions={actions}
+        label={t('workbench.sessionActions')}
+        align="start"
+        onClose={() => setMenuOpen(false)}
+      />
     </Popover>
     {archiveDialog}
     </>

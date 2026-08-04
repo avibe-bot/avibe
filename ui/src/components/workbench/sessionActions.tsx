@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import { PopoverContent } from '../ui/popover';
 
 // Presentation half of the shared session action menu: the ⋯ trigger and the menu
 // body, used by the desktop sidebar row, the mobile projects row and the chat
@@ -23,7 +24,8 @@ export interface SessionActionDescriptor {
   label: string;
   /** Keyboard hint badge (e.g. ``⇧⌘D``), right-aligned in the menu row. */
   hint?: string;
-  /** Native tooltip — used to explain a disabled action (fork without a native session). */
+  /** Why this action is unavailable. Rendered as VISIBLE text under the label (a
+   *  touch user never sees a ``title`` tooltip) as well as the native tooltip. */
   title?: string;
   disabled?: boolean;
   /** A write is in flight: the icon becomes a spinner and the row stops accepting clicks. */
@@ -36,6 +38,12 @@ export interface SessionActionDescriptor {
 // coarse pointers (touch has no hover) and while its menu is open; the chat
 // header always shows it. forwardRef + prop spread so <PopoverTrigger asChild>
 // can attach its own ref and handlers.
+//
+// It deliberately writes NO aria-haspopup / aria-expanded of its own: <PopoverTrigger
+// asChild> injects both (as `dialog`, which is what a Popover actually opens), and
+// because those injected props are spread last they would override ours anyway —
+// a hand-written `aria-haspopup="menu"` was a lie that only the direct-render test
+// could see (Codex). `open` still drives the reveal styling.
 interface SessionActionsTriggerProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   label: string;
   open: boolean;
@@ -51,8 +59,6 @@ export const SessionActionsTrigger = React.forwardRef<HTMLButtonElement, Session
       variant="ghost"
       size="icon"
       aria-label={label}
-      aria-haspopup="menu"
-      aria-expanded={open}
       title={label}
       className={clsx(
         'shrink-0 text-muted transition hover:text-foreground',
@@ -76,6 +82,17 @@ const GROUP_ORDER: SessionActionGroup[] = ['organize', 'continue', 'lifecycle'];
 
 // The menu body. Shared by all trigger sites so the rows, the divider between
 // groups and the danger styling can't drift again.
+//
+// A labelled GROUP of buttons, not role="menu": the surrounding Radix Popover is a
+// dialog, and a menu role inside it promises a keyboard contract (single tab stop,
+// type-ahead, aria-activedescendant) that a popover does not implement — the two
+// together announced a menu whose items tabbed like dialog buttons (Codex). Tabbing
+// through the buttons inside the popover's focus scope is now the honest model;
+// arrow keys / Home / End are kept as a convenience on top.
+//
+// Unavailable rows use `aria-disabled` instead of `disabled` so they stay focusable
+// and their reason is reachable by keyboard and screen reader; the click handler is
+// what actually inhibits them.
 export const SessionActionMenu: React.FC<{
   actions: SessionActionDescriptor[];
   /** Close the surface's popover — called after any row fires. */
@@ -84,26 +101,20 @@ export const SessionActionMenu: React.FC<{
 }> = ({ actions, onAction, label }) => {
   const itemsRef = useRef<Array<HTMLButtonElement | null>>([]);
 
-  // Roving arrow-key focus: PopoverContent is generic content, so the menu owns
-  // its own keyboard model (Home/End included). Esc + focus trapping stay with
-  // the popover primitive.
+  const focusItem = (index: number) => itemsRef.current[index]?.focus();
   const moveFocus = (from: number, delta: number) => {
-    const enabled = actions
-      .map((action, index) => ({ action, index }))
-      .filter(({ action }) => !action.disabled);
-    if (enabled.length === 0) return;
-    const current = enabled.findIndex(({ index }) => index === from);
-    const nextPos = current === -1 ? 0 : (current + delta + enabled.length) % enabled.length;
-    itemsRef.current[enabled[nextPos].index]?.focus();
+    if (actions.length === 0) return;
+    focusItem((from + delta + actions.length) % actions.length);
   };
 
   return (
-    <div role="menu" aria-label={label} className="flex flex-col">
+    <div role="group" aria-label={label} className="flex flex-col">
       {actions.map((action, index) => {
         const Icon = action.icon;
         const previous = actions[index - 1];
         const newGroup =
           previous != null && GROUP_ORDER.indexOf(previous.group) !== GROUP_ORDER.indexOf(action.group);
+        const reason = action.disabled ? action.title : undefined;
         return (
           <div key={action.id} className={clsx(newGroup && 'mt-1 border-t border-border pt-1')}>
             <button
@@ -111,8 +122,7 @@ export const SessionActionMenu: React.FC<{
                 itemsRef.current[index] = node;
               }}
               type="button"
-              role="menuitem"
-              disabled={action.disabled}
+              aria-disabled={action.disabled || undefined}
               title={action.title}
               onClick={() => {
                 if (action.disabled) return;
@@ -128,30 +138,34 @@ export const SessionActionMenu: React.FC<{
                   moveFocus(index, -1);
                 } else if (event.key === 'Home') {
                   event.preventDefault();
-                  moveFocus(-1, 0);
+                  focusItem(0);
                 } else if (event.key === 'End') {
                   event.preventDefault();
-                  moveFocus(-1, -1);
+                  focusItem(actions.length - 1);
                 }
               }}
               className={clsx(
                 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
                 'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60',
-                'disabled:cursor-not-allowed disabled:text-muted disabled:hover:bg-transparent',
-                action.danger
-                  ? 'text-pink hover:bg-pink/[0.08]'
-                  : 'text-foreground hover:bg-foreground/[0.04]',
+                action.disabled
+                  ? 'cursor-not-allowed text-muted hover:bg-transparent'
+                  : action.danger
+                    ? 'text-pink hover:bg-pink/[0.08]'
+                    : 'text-foreground hover:bg-foreground/[0.04]',
               )}
             >
               {action.pending ? (
                 <Loader2 className="size-3 shrink-0 animate-spin text-muted" aria-hidden="true" />
               ) : (
                 <Icon
-                  className={clsx('size-3 shrink-0', action.danger ? '' : 'text-muted')}
+                  className={clsx('size-3 shrink-0', action.danger && !action.disabled ? '' : 'text-muted')}
                   aria-hidden="true"
                 />
               )}
-              <span className="flex-1 truncate">{action.label}</span>
+              <span className="flex flex-1 flex-col gap-0.5 overflow-hidden">
+                <span className="truncate">{action.label}</span>
+                {reason && <span className="text-[10.5px] leading-tight text-muted">{reason}</span>}
+              </span>
               {action.hint && (
                 <span className="shrink-0 font-mono text-[10px] text-muted" aria-hidden="true">
                   {action.hint}
@@ -162,5 +176,45 @@ export const SessionActionMenu: React.FC<{
         );
       })}
     </div>
+  );
+};
+
+// Actions that hand focus to an editor elsewhere (an inline rename <Input>, the
+// chat header title, another chat's composer). Radix restores focus to the trigger
+// on close — asynchronously, so it lands AFTER the editor focused itself and the
+// caret (and, on touch, the on-screen keyboard) is lost (Codex).
+const FOCUS_TRANSFER_ACTIONS: readonly SessionActionId[] = ['rename', 'reference'];
+
+// One popover body for every surface: same width, padding, close-on-select and
+// close-autofocus policy, so the three trigger sites can't drift on any of them.
+export const SessionActionMenuContent: React.FC<{
+  actions: SessionActionDescriptor[];
+  label: string;
+  align?: 'start' | 'center' | 'end';
+  className?: string;
+  /** Close the surface's popover (it owns the open state). */
+  onClose: () => void;
+}> = ({ actions, label, align = 'start', className, onClose }) => {
+  const transferredFocus = useRef(false);
+
+  return (
+    <PopoverContent
+      align={align}
+      className={clsx('w-[196px] p-1', className)}
+      onCloseAutoFocus={(event) => {
+        if (!transferredFocus.current) return;
+        transferredFocus.current = false;
+        event.preventDefault(); // leave focus where the action put it
+      }}
+    >
+      <SessionActionMenu
+        actions={actions}
+        label={label}
+        onAction={(id) => {
+          transferredFocus.current = FOCUS_TRANSFER_ACTIONS.includes(id);
+          onClose();
+        }}
+      />
+    </PopoverContent>
   );
 };

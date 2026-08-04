@@ -45,8 +45,17 @@ import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
-import { archiveSessionShortcutLabel, isArchiveSessionChord } from './chatShortcuts';
-import { SessionActionMenu, SessionActionsTrigger, type SessionActionDescriptor } from './sessionActions';
+import {
+  archiveSessionShortcutLabel,
+  isArchiveSessionChord,
+  isArchiveSessionKeydown,
+} from './chatShortcuts';
+import { bindFrameChord } from '../apps/windowChords';
+import {
+  SessionActionMenuContent,
+  SessionActionsTrigger,
+  type SessionActionDescriptor,
+} from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
@@ -263,6 +272,19 @@ export const ChatPage: React.FC = () => {
   // show the stale enabled/mode and could send control messages to the freshly
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
   const annotation = useShowPageAnnotation(showPageActive ? showPageUrl : null);
+  // The mounted Show Page frame, so parent-level chords can also be bound inside
+  // its document (see the ⌘⇧D effect). Stable callback + ref, never state: a ref
+  // callback that set state would re-create itself on every commit and re-attach
+  // forever. Effects run after refs are attached, so the frame is here in time.
+  const showPageFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const annotationSetIframe = annotation.setIframe;
+  const setShowPageIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
+    (node) => {
+      showPageFrameRef.current = node;
+      annotationSetIframe(node);
+    },
+    [annotationSetIframe],
+  );
   useEffect(() => {
     // ChatPage is reused across :sessionId. Clear the previous frame immediately;
     // once the new session row loads, the restore effect below applies its own
@@ -1877,6 +1899,7 @@ export const ChatPage: React.FC = () => {
     actions: sessionActions,
     archiveDialog: sessionArchiveDialog,
     requestArchive,
+    canArchive,
   } = useSessionActions({
     session: readOnly ? null : session,
     // Rename focuses the header's existing click-to-edit title instead of adding
@@ -1884,25 +1907,43 @@ export const ChatPage: React.FC = () => {
     onRenameStart: () => titleFieldRef.current?.startEditing(),
     onOpenSession: (id) => navigate(`/chat/${encodeURIComponent(id)}`),
     onArchived: () => navigate('/inbox'),
-    // The provider cache feeds the sidebar, not this page's own session copy.
-    onSessionPatched: (changes) => setSession((prev) => (prev ? { ...prev, ...changes } : prev)),
+    // The provider cache feeds the sidebar, not this page's own session copy. The
+    // write resolves after an await, so only patch if we're still on that session.
+    onSessionPatched: (changes, sessionId) =>
+      setSession((prev) => (prev && prev.id === sessionId ? { ...prev, ...changes } : prev)),
     archiveHint: ARCHIVE_SHORTCUT_LABEL,
   });
 
   // ⌘⇧D / Ctrl+Shift+D archives the session being read. It OPENS THE CONFIRM
   // DIALOG — a destructive action never fires straight off a keystroke — and like
   // the shell's ⌘K it wins from inside the composer, because it's a command, not
-  // text. preventDefault keeps the browser's own ⌘⇧D (bookmark all tabs) out of
-  // it. Inert on a read-only session (requestArchive is a no-op there).
+  // text.
+  //
+  // Bound only while there IS something to archive: preventDefault on a read-only
+  // or still-loading chat would swallow the browser's own ⌘⇧D (bookmark all tabs)
+  // and do nothing in return. And "ChatPage is mounted" is not "chat owns the
+  // keyboard" — it stays mounted under app windows and dialogs — so a keystroke
+  // belonging to a foreground surface is left to that surface (Codex).
   useEffect(() => {
+    if (!canArchive) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!isArchiveSessionChord(e)) return;
+      if (!isArchiveSessionKeydown(e, e.target as Element | null)) return;
       e.preventDefault();
       requestArchive();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [requestArchive]);
+  }, [canArchive, requestArchive]);
+
+  // A keydown inside the Show Page iframe never reaches this window, so the same
+  // chord is bound to the frame's own document while it is mounted — otherwise the
+  // shortcut silently dies as soon as the user clicks into the page they asked for.
+  useEffect(() => {
+    if (!canArchive) return;
+    const frame = showPageFrameRef.current;
+    if (!frame) return;
+    return bindFrameChord(frame, (event) => isArchiveSessionChord(event), requestArchive);
+  }, [canArchive, requestArchive, showPageActive, showPageUrl]);
 
   // Ordered media-proxy image URLs across the whole session — feeds the lightbox
   // so it pages left/right through every image, in render order (each message's
@@ -2113,7 +2154,7 @@ export const ChatPage: React.FC = () => {
         // isolation isn't the security boundary anyway. We still drop the exotic
         // capabilities the page never needs (top navigation, pointer lock, etc.).
         <iframe
-          ref={annotation.setIframe}
+          ref={setShowPageIframe}
           onLoad={annotation.handleIframeLoad}
           title={t('chat.showPage.title')}
           src={showPageUrl}
@@ -2848,13 +2889,12 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                     variant="bar"
                   />
                 </PopoverTrigger>
-                <PopoverContent align="end" className="w-[196px] p-1">
-                  <SessionActionMenu
-                    actions={sessionActions ?? []}
-                    label={t('workbench.sessionActions')}
-                    onAction={() => setActionsOpen(false)}
-                  />
-                </PopoverContent>
+                <SessionActionMenuContent
+                  actions={sessionActions ?? []}
+                  label={t('workbench.sessionActions')}
+                  align="end"
+                  onClose={() => setActionsOpen(false)}
+                />
               </Popover>
             )}
           </div>
