@@ -1090,6 +1090,8 @@ async def test_hfr_158_live_owner_release_rewinds_skipped_partition_rows() -> No
     release_live = asyncio.Event()
     recovered: list[int] = []
     both_recovered = asyncio.Event()
+    active_recoveries = 0
+    peak_recoveries = 0
 
     class _HiddenRecoveryRows(RuntimeWorkHandler):
         ready = False
@@ -1112,7 +1114,12 @@ async def test_hfr_158_live_owner_release_rewinds_skipped_partition_rows() -> No
             return rows[:limit], len(rows) > limit
 
         async def process(self, item: RuntimeWorkItem) -> None:
+            nonlocal active_recoveries, peak_recoveries
+            active_recoveries += 1
+            peak_recoveries = max(peak_recoveries, active_recoveries)
+            await asyncio.sleep(0)
             recovered.append(int(item.observation))
+            active_recoveries -= 1
             if len(recovered) == 2:
                 both_recovered.set()
 
@@ -1145,7 +1152,8 @@ async def test_hfr_158_live_owner_release_rewinds_skipped_partition_rows() -> No
     release_live.set()
     await live
     await asyncio.wait_for(both_recovered.wait(), 1)
-    assert recovered == [1, 2]
+    assert sorted(recovered) == [1, 2]
+    assert peak_recoveries == 1
     await supervisor.stop()
 
 
