@@ -9025,6 +9025,8 @@ class ScheduledTaskService:
         if native_session_fork is None and target_info and not str(target_info.native_session_id or "").strip():
             native_session_fork = fork_metadata_from_session_metadata(getattr(target_info, "metadata", None))
 
+        definition_name, definition_prompt = self._definition_display_fields(task_id)
+
         return MessageContext(
             user_id=session_target_context["user_id"],
             channel_id=channel_id,
@@ -9059,7 +9061,15 @@ class ScheduledTaskService:
                 "task_definition_id": task_id,
                 # Human label for the same definition, so an outward echo of the
                 # injected prompt can name what fired instead of an opaque id.
-                "task_definition_name": self._definition_display_name(task_id),
+                "task_definition_name": definition_name,
+                # The definition's STORED instruction, i.e. the part of this run's
+                # prompt a person actually wrote. A watch / hook / webhook prompt is
+                # composed for the agent to read and appends machine-generated
+                # evidence (waiter stdout, a failure report, a webhook payload); an
+                # outward echo may show only this segment, never the composed text.
+                "harness_display_prompt": (
+                    str((metadata or {}).get("harness_display_prompt") or "").strip() or definition_prompt
+                ),
                 "vibe_agent_name": agent_name,
                 "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
@@ -9089,27 +9099,41 @@ class ScheduledTaskService:
             },
         )
 
-    def _definition_display_name(self, definition_id: Optional[str]) -> Optional[str]:
-        """The task/watch name for *definition_id*, or ``None`` when unnamed.
+    def _definition_display_fields(
+        self, definition_id: Optional[str]
+    ) -> tuple[Optional[str], Optional[str]]:
+        """``(name, stored instruction)`` for *definition_id*, either one ``None``.
 
         Resolved the same way the failure notice does it (``get_task`` mirrors
-        scheduled tasks only, so a watch needs the definition row), and best-effort:
-        this only feeds display copy, so a store that cannot answer must not break
-        the run it is describing. ``agent_run`` has no definition and passes ``None``.
+        scheduled tasks only, so a watch needs the definition row), in ONE lookup
+        because both fields feed the same display copy, and best-effort: a store that
+        cannot answer must not break the run it is describing. ``agent_run`` has no
+        definition and passes ``None``.
+
+        The stored instruction is the definition's own prompt — a task's ``prompt``,
+        a watch's ``message`` (which the row already falls back to ``prefix`` for) —
+        so it is the user-authored text with none of the evidence a composed run
+        prompt appends.
         """
 
         identifier = str(definition_id or "").strip()
         if not identifier:
-            return None
+            return None, None
         try:
             task = self.store.get_task(identifier)
             if task is not None:
-                return str(getattr(task, "name", "") or "").strip() or None
-            watch = self.store.get_watch_definition(identifier)
+                return (
+                    str(getattr(task, "name", "") or "").strip() or None,
+                    str(getattr(task, "prompt", "") or "").strip() or None,
+                )
+            watch = self.store.get_watch_definition(identifier) or {}
         except Exception:
-            logger.debug("failed to resolve definition name for %s", identifier, exc_info=True)
-            return None
-        return str((watch or {}).get("name") or "").strip() or None
+            logger.debug("failed to resolve definition display fields for %s", identifier, exc_info=True)
+            return None, None
+        return (
+            str(watch.get("name") or "").strip() or None,
+            str(watch.get("message") or watch.get("prefix") or "").strip() or None,
+        )
 
     def _resolve_target_context(self, target: ParsedSessionKey) -> Dict[str, Any]:
         platform = target.platform

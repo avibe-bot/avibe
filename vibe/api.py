@@ -1016,6 +1016,17 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
             "default_cwd": config.runtime.default_cwd,
             "log_level": config.runtime.log_level,
             "resource_governance": config.runtime.resource_governance,
+            # The config-only Harness knobs have no UI, but this payload IS the
+            # deep-merge base every ``/api/config`` save builds on: a key omitted here
+            # is absent from the merged payload, so ``from_payload`` rebuilds
+            # ``RuntimeConfig`` with the dataclass default and silently reverts the
+            # on-disk value (a ``harness_prompt_echo: false`` opt-out would come back
+            # enabled after any unrelated settings save — Codex P1).
+            "harness_prompt_echo": config.runtime.harness_prompt_echo,
+            "harness_run_sweep_interval_seconds": config.runtime.harness_run_sweep_interval_seconds,
+            "harness_run_orphan_grace_seconds": config.runtime.harness_run_orphan_grace_seconds,
+            "harness_run_queued_ttl_seconds": config.runtime.harness_run_queued_ttl_seconds,
+            "harness_run_hold_ttl_seconds": config.runtime.harness_run_hold_ttl_seconds,
         },
         "agents": {
             "opencode": config.agents.opencode.__dict__,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -56,6 +57,25 @@ HARNESS_PROMPT_ECHO_MEMORY = 256
 # ``activity_recovery``: that turn is a runtime re-injection describing a resumed
 # Activity, so echoing it would explain internals nobody asked about.
 HARNESS_PROMPT_ECHO_TRIGGER_KINDS = HARNESS_TRIGGER_KINDS - {"activity_recovery"}
+# The subset whose dispatch text is COMPOSED by Avibe instead of written by a person:
+# a watch appends the waiter's raw stdout, an ``--on-failure agent`` escalation (a
+# ``hook`` run) appends the generated failure report, and a webhook appends its
+# payload. That text exists for the AGENT to read, so echoing it verbatim would
+# publish raw command output — tokens, stack traces, customer data — into a shared
+# conversation before the agent can summarize or redact it (Codex P1). For these
+# kinds the echo shows ONLY the definition's stored instruction
+# (``harness_display_prompt``) and stays silent when none can be resolved; the
+# Workbench transcript still renders the full prompt for the operator.
+HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS = frozenset({"watch", "webhook", "hook"})
+# Mention neutralizers for the echoed prompt. The echo repeats text an operator wrote
+# for an agent, into a channel: quoting it does not stop Slack/Discord from resolving
+# a broadcast or an id mention, and the Discord adapter sends without
+# ``allowed_mentions``, so an echoed ``@everyone`` would really ping the channel
+# (Codex P2). A zero-width space after the sigil keeps the text readable while
+# leaving nothing for either renderer to resolve.
+_HARNESS_ECHO_BROADCAST_PATTERN = re.compile(r"@(?=(?:everyone|here|channel|all)\b)", re.IGNORECASE)
+_HARNESS_ECHO_ID_MENTION_PATTERN = re.compile(r"<(?=[@!#&])")
+_HARNESS_ECHO_MENTION_BREAK = "\u200b"
 _HARNESS_PROMPT_ECHO_I18N_KEYS = {
     "scheduled": "harness.promptEcho.scheduled",
     "watch": "harness.promptEcho.watch",
@@ -63,6 +83,19 @@ _HARNESS_PROMPT_ECHO_I18N_KEYS = {
     "hook": "harness.promptEcho.hook",
     "agent_run": "harness.promptEcho.agentRun",
 }
+
+
+def _neutralize_mentions(text: str) -> str:
+    """Make every mention in *text* inert without changing how it reads.
+
+    Used for the Harness prompt echo, which republishes text an operator wrote for an
+    agent into a shared channel. Covers the broadcast words (``@everyone`` / ``@here``
+    / ``@channel``) and the bracketed id forms both Slack (``<@U…>``, ``<!here>``,
+    ``<#C…>``) and Discord (``<@id>``, ``<@&role>``) resolve.
+    """
+
+    neutralized = _HARNESS_ECHO_BROADCAST_PATTERN.sub("@" + _HARNESS_ECHO_MENTION_BREAK, text or "")
+    return _HARNESS_ECHO_ID_MENTION_PATTERN.sub("<" + _HARNESS_ECHO_MENTION_BREAK, neutralized)
 
 
 class ActivityOutputDeliveryError(RuntimeError):
@@ -1624,11 +1657,20 @@ class ConsolidatedMessageDispatcher:
         self._refresh_runtime_config()
         if not getattr(self.controller.config, "harness_prompt_echo", True):
             return None
-        # The Delivery's display snapshot wins over the dispatch text when present:
-        # ``SessionTurnGate`` prepends internal instructions to ``dispatch_text`` (the
-        # ``[Avibe recovery: ...]`` guard on an ambiguous-start replay), and the channel
-        # must see the stored prompt, not a backend-only directive.
-        prompt = str(spec.get("display_text") or "").strip() or text
+        if trigger_kind in HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS:
+            # Composed, agent-facing prompt: echo the stored instruction alone, never
+            # the appended waiter output / failure report / webhook payload. No
+            # resolvable instruction means no echo — a run whose definition was
+            # deleted cannot prove which part of its prompt a person wrote.
+            prompt = str(spec.get("harness_display_prompt") or "").strip()
+            if not prompt:
+                return None
+        else:
+            # The Delivery's display snapshot wins over the dispatch text when present:
+            # ``SessionTurnGate`` prepends internal instructions to ``dispatch_text``
+            # (the ``[Avibe recovery: ...]`` guard on an ambiguous-start replay), and
+            # the channel must see the stored prompt, not a backend-only directive.
+            prompt = str(spec.get("display_text") or "").strip() or text
         body = self._harness_prompt_body(trigger_kind, spec.get("task_definition_name"), prompt)
         if not body:
             return None
@@ -1653,6 +1695,11 @@ class ConsolidatedMessageDispatcher:
             message_id = await self._get_im_client(context).send_message(
                 target_context,
                 body,
+                # Markdown so the ``> `` prefix renders as a real quote: Slack builds a
+                # plain_text block for anything else and would show the markers
+                # literally (Codex P3). Telegram is unaffected — it resolves ``None``
+                # to its own HTML default anyway.
+                parse_mode="markdown",
             )
         except Exception as err:
             logger.warning(
@@ -1689,7 +1736,9 @@ class ConsolidatedMessageDispatcher:
         # markdown platforms render it de-emphasized, so the echo never competes
         # with the agent's own reply.
         quoted = "\n".join(f"> {line}" for line in prompt.splitlines())
-        return f"{label}\n{quoted}"
+        # Both halves are neutralized: the label carries the definition NAME, which a
+        # user typed too and can hold a mention just as easily as the prompt.
+        return _neutralize_mentions(f"{label}\n{quoted}")
 
     def _refresh_runtime_config(self) -> None:
         """Best-effort, mtime-guarded reload of ``controller.config`` from disk.

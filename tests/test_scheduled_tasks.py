@@ -1025,8 +1025,16 @@ def test_build_context_carries_the_definition_name_for_display() -> None:
     service = ScheduledTaskService(controller=controller, store=store)
     target = parse_session_key("slack::channel::C123")
 
-    store.get_task = lambda task_id: SimpleNamespace(name="Daily digest") if task_id == "task-1" else None
-    store.get_watch_definition = lambda definition_id: {"name": "Deploy watch"} if definition_id == "watch-1" else None
+    store.get_task = (
+        lambda task_id: SimpleNamespace(name="Daily digest", prompt="summarize open PRs")
+        if task_id == "task-1"
+        else None
+    )
+    store.get_watch_definition = (
+        lambda definition_id: {"name": "Deploy watch", "message": "check the deploy"}
+        if definition_id == "watch-1"
+        else None
+    )
 
     task_context = asyncio.run(service._build_context(target, execution_id="exec-1", task_id="task-1"))
     watch_context = asyncio.run(
@@ -1039,6 +1047,48 @@ def test_build_context_carries_the_definition_name_for_display() -> None:
     assert watch_context.platform_specific["task_definition_name"] == "Deploy watch"
     assert unknown_context.platform_specific["task_definition_name"] is None
     assert anonymous_context.platform_specific["task_definition_name"] is None
+
+    # The definition's STORED instruction travels next to the name: a watch / hook /
+    # webhook prompt appends machine-generated evidence (waiter stdout, a failure
+    # report) that the outward echo must never publish, so it echoes this instead.
+    assert task_context.platform_specific["harness_display_prompt"] == "summarize open PRs"
+    assert watch_context.platform_specific["harness_display_prompt"] == "check the deploy"
+    assert unknown_context.platform_specific["harness_display_prompt"] is None
+    assert anonymous_context.platform_specific["harness_display_prompt"] is None
+
+
+def test_build_context_prefers_an_explicit_display_prompt_from_the_request() -> None:
+    """A producer that composes the prompt itself can stamp the user-authored part.
+
+    The definition lookup covers task/watch rows; a request whose prompt was composed
+    somewhere else (a hook send with no definition row) can pass the instruction
+    through its metadata instead, and that wins over the stored value.
+    """
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    store = ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
+    service = ScheduledTaskService(controller=controller, store=store)
+    store.get_task = lambda task_id: SimpleNamespace(name="Deploy watch", prompt="stored instruction")
+    target = parse_session_key("slack::channel::C123")
+
+    context = asyncio.run(
+        service._build_context(
+            target,
+            execution_id="exec-1",
+            task_id="task-1",
+            trigger_kind="hook",
+            metadata={"harness_display_prompt": "explicit instruction"},
+        )
+    )
+
+    assert context.platform_specific["harness_display_prompt"] == "explicit instruction"
 
 
 def test_build_context_survives_a_store_that_cannot_name_the_definition() -> None:
@@ -1063,6 +1113,7 @@ def test_build_context_survives_a_store_that_cannot_name_the_definition() -> Non
 
     # Display copy must never be able to fail the run it describes.
     assert context.platform_specific["task_definition_name"] is None
+    assert context.platform_specific["harness_display_prompt"] is None
     assert context.platform_specific["task_definition_id"] == "task-1"
 
 

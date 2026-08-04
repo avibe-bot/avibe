@@ -63,10 +63,29 @@ the dispatcher.
      re-injection, not a user instruction), and `harness_prompt_echo = false`;
    - target is `_get_target_context(context)`, so the question lands where the
      answer lands (`post_to` / deliver-key overrides included);
-   - text is the Delivery's `display_text` snapshot when present, else the staged
-     prompt: `SessionTurnGate` prepends internal instructions to `dispatch_text` (the
-     `[Avibe recovery: ...]` guard on an ambiguous-start replay) that must stay
-     backend-only;
+   - text depends on who wrote the prompt:
+     - `watch` / `webhook` / `hook` compose it **for the agent** — a watch appends the
+       waiter's raw stdout (`core/watches.py::_build_prompt`), an `--on-failure agent`
+       escalation appends the generated failure report
+       (`core/scheduled_tasks.py::_escalation_prompt`, "read by an AGENT, not shown to
+       a user"), a webhook its payload. Publishing that into a shared channel would
+       leak command output (tokens, stack traces) before the agent can redact it, so
+       for `HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS` the echo shows **only** the
+       definition's stored instruction (`harness_display_prompt`) and stays silent
+       when none resolves. The Workbench transcript still renders the full prompt for
+       the operator;
+     - otherwise the Delivery's `display_text` snapshot when present, else the staged
+       prompt: `SessionTurnGate` prepends internal instructions to `dispatch_text` (the
+       `[Avibe recovery: ...]` guard on an ambiguous-start replay) that must stay
+       backend-only;
+   - mentions are neutralized in the whole body, label included: quoting does not stop
+     a renderer from resolving `@everyone` / `<@U…>` / `<@&role>` / `<!channel>`, and
+     the Discord adapter sends without `allowed_mentions`, so an echoed broadcast
+     would really ping the channel. A zero-width space after the sigil keeps the text
+     reading the same;
+   - sent with `parse_mode="markdown"` so the `> ` quote renders: Slack builds a
+     `plain_text` block for anything else and would show the markers literally;
+     Telegram resolves either value to its own HTML default;
    - body: an i18n label per trigger kind, optionally `label · name`, then the
      prompt with every line `> `-quoted (readable on plain-text platforms too),
      truncated at `HARNESS_PROMPT_ECHO_MAX_CHARS = 800`;
@@ -75,17 +94,27 @@ the dispatcher.
      delivery cannot read as the task having fired twice. A cross-restart replay is
      not covered on purpose: it writes a new Delivery anyway, a duplicate echo is
      cosmetic, and a missing echo defeats the feature.
-4. `core/scheduled_tasks.py::_build_context` stamps `task_definition_name` next to
-   the existing `task_definition_id`, resolved through
-   `_definition_display_name` (task row, else watch definition, best-effort), so
-   the label names the task instead of an id. `agent_run` has no definition.
+4. `core/scheduled_tasks.py::_build_context` stamps `task_definition_name` and
+   `harness_display_prompt` next to the existing `task_definition_id`, both resolved
+   in one best-effort lookup (`_definition_display_fields`: task row, else watch
+   definition), so the label names the task instead of an id and the echo has the
+   user-authored instruction to fall back on. A producer that composed the prompt
+   itself can override the instruction through `metadata["harness_display_prompt"]`.
+   `agent_run` has no definition. Both survive a cross-restart replay: the flush
+   restores every provenance key that is not execution routing
+   (`_EXECUTION_ROUTING_KEYS` is a blocklist).
 5. Config: `V2Config.runtime.harness_prompt_echo` (default `true`), mirrored onto
    `AppCompatConfig` + `to_app_config` (the turn path reads `controller.config`,
    which is the compat object) and hot-reloaded in
    `Controller._refresh_config_from_disk`. The gate calls that mtime-guarded reload
    itself (`_refresh_runtime_config`), because a Harness turn passes through no IM
    inbound handler and would otherwise read the process-start snapshot. No UI,
-   matching `harness_run_*`.
+   matching `harness_run_*` — but it *is* projected in
+   `vibe/api.py::config_to_payload`, which is the deep-merge base of every
+   `/api/config` save: a runtime key missing there is rebuilt from the dataclass
+   default, so an opt-out would silently revert on any unrelated settings save. The
+   four `harness_run_*` knobs are projected for the same reason (same latent bug,
+   fixed here rather than left next to the new field).
 6. Copy: `harness.promptEcho.*` in `vibe/i18n/en.json` and `zh.json`.
 
 ## Evidence
@@ -93,7 +122,11 @@ the dispatcher.
 - unit — `tests/test_message_dispatcher_scheduled.py::HarnessPromptEchoTests`
   (per-kind coverage, every gate, delivery override, dedupe, memory bound,
   truncation/quoting, silent-only prompt, send failure, hot-toggle reload, a failing
-  reload, display-snapshot precedence over internal dispatch text);
+  reload, display-snapshot precedence over internal dispatch text, instruction-only
+  echo for the composed kinds — with the waiter output absent from the body and no
+  echo at all when no instruction resolves — mention neutralization, markdown parse
+  mode);
+  `tests/test_api_save_config_merge.py::test_save_config_preserves_harness_runtime_knobs_on_partial_save`;
   `tests/test_message_handler_harness_echo.py` (pipeline staging: raw prompt,
   subagent-prefixed prompt staged unstripped, human turn stages nothing, blank prompt
   stages nothing, backgrounded thread resolution visible to the echo, and no send from
@@ -101,8 +134,9 @@ the dispatcher.
   `tests/test_agent_service.py` (turn-start emission: a queued turn stays quiet until
   it owns the runtime gate, the key is popped, no staged prompt echoes nothing, a
   failing echo never breaks turn start);
-  `tests/test_scheduled_tasks.py::test_build_context_carries_the_definition_name_for_display`
-  and `::test_build_context_survives_a_store_that_cannot_name_the_definition`.
+  `tests/test_scheduled_tasks.py::test_build_context_carries_the_definition_name_for_display`,
+  `::test_build_context_prefers_an_explicit_display_prompt_from_the_request` and
+  `::test_build_context_survives_a_store_that_cannot_name_the_definition`.
 - scenario — `MESSAGE-DELIVERY-018` (prompt precedes result; the result still owns
   the anchor) and `MESSAGE-DELIVERY-019` (background-visibility turn echoes nothing)
   in `tests/scenarios/message_delivery/`.

@@ -3803,10 +3803,96 @@ class HarnessPromptEchoTests(unittest.IsolatedAsyncioTestCase):
                 controller = _StubController()
                 dispatcher = ConsolidatedMessageDispatcher(controller)
                 await dispatcher.emit_harness_prompt(
-                    self._context(task_trigger_kind=kind),
+                    # ``watch`` / ``webhook`` / ``hook`` echo their definition's stored
+                    # instruction; the other two echo the dispatch text itself.
+                    self._context(task_trigger_kind=kind, harness_display_prompt="do the thing"),
                     "do the thing",
                 )
                 self.assertEqual(len(controller.im_client.sent), 1)
+
+    async def test_composed_prompt_echoes_the_instruction_not_the_generated_evidence(self):
+        """Scenario: MESSAGE-DELIVERY-018
+
+        A watch prompt is composed FOR THE AGENT: the stored instruction plus the
+        waiter's raw stdout (``core/watches.py::_build_prompt``); an
+        ``--on-failure agent`` escalation appends a generated failure report the same
+        way. Echoing that verbatim would publish raw command output — tokens
+        included — into a shared channel before the agent can redact it (Codex P1).
+        """
+        for kind in ("watch", "webhook", "hook"):
+            with self.subTest(kind=kind):
+                controller = _StubController()
+                dispatcher = ConsolidatedMessageDispatcher(controller)
+                composed = "check the deploy and report\n\ntoken=ghp_SECRET\nrows=42"
+
+                await dispatcher.emit_harness_prompt(
+                    self._context(
+                        task_trigger_kind=kind,
+                        harness_display_prompt="check the deploy and report",
+                        display_text=composed,
+                    ),
+                    composed,
+                )
+
+                _channel_id, _thread_id, text = controller.im_client.sent[0]
+                self.assertIn("> check the deploy and report", text)
+                self.assertNotIn("ghp_SECRET", text)
+                self.assertNotIn("rows=42", text)
+
+    async def test_composed_prompt_without_a_stored_instruction_echoes_nothing(self):
+        # A deleted / unresolvable definition means nothing here can tell the
+        # user-authored instruction from the generated evidence, so the echo stays
+        # silent rather than guessing (the Workbench row still has the full prompt).
+        for kind in ("watch", "webhook", "hook"):
+            with self.subTest(kind=kind):
+                controller = _StubController()
+                dispatcher = ConsolidatedMessageDispatcher(controller)
+
+                result = await dispatcher.emit_harness_prompt(
+                    self._context(task_trigger_kind=kind),
+                    "waiter said: token=ghp_SECRET",
+                )
+
+                self.assertIsNone(result)
+                self.assertEqual(controller.im_client.sent, [])
+
+    async def test_echoed_mentions_cannot_ping_the_channel(self):
+        """Quoting does not stop a renderer from resolving a mention (Codex P2).
+
+        Discord sends without ``allowed_mentions``, so an echoed ``@everyone`` would
+        really broadcast; Slack resolves ``<@U…>`` / ``<!channel>`` the same way.
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(task_definition_name="@here nightly"),
+            "ping @everyone plus <@U123>, <@&456> and <!channel>",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        for mention in ("@everyone", "@here", "<@U123>", "<@&456>", "<!channel>"):
+            self.assertNotIn(mention, text)
+        # Only a zero-width break was inserted, so the prompt still reads the same.
+        self.assertIn("ping @everyone plus <@U123>, <@&456> and <!channel>", text.replace("\u200b", ""))
+
+    async def test_echo_is_sent_as_markdown_so_the_quote_renders(self):
+        # Slack builds a plain_text block for anything but markdown and would show
+        # the ``> `` markers literally (Codex P3). Telegram resolves either value to
+        # its own HTML default, so this changes nothing there.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        recorded: dict = {}
+
+        async def _send(context, text, parse_mode=None, reply_to=None):
+            recorded["parse_mode"] = parse_mode
+            return "bot-msg-1"
+
+        controller.im_client.send_message = _send
+
+        await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertEqual(recorded["parse_mode"], "markdown")
 
     async def test_activity_recovery_and_human_turns_are_not_echoed(self):
         # ``activity_recovery`` is a runtime re-injection, not a user-authored
