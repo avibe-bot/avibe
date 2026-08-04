@@ -32,7 +32,7 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
-from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.dispatch import (
     SOURCE_HUMAN,
     SOURCE_SCHEDULED,
@@ -2370,6 +2370,68 @@ def test_cancel_releases_stale_turn_when_backend_not_active(tmp_path, monkeypatc
         ).scalar_one()
     assert status == "idle"
     assert notices == [True]
+
+
+def test_cancel_accepts_terminal_settlement_that_races_the_stop_receipt(
+    tmp_path,
+    monkeypatch,
+):
+    """HFR-431: a successful Stop may emit terminal proof before its receipt lands."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_terminal_stop_race",
+    )
+    session_id = session["id"]
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        task = asyncio.create_task(asyncio.sleep(60))
+        context = MessageContext(
+            user_id="U",
+            channel_id="C",
+            platform="avibe",
+            platform_specific={"agent_session_id": session_id},
+        )
+        app.state.in_flight_dispatches[session_id] = session_turns.Turn(
+            task=task,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+
+        async def _stop_and_settle(_context):
+            terminal = controller.session_turns._terminalize_durable_turn(
+                turn_id,
+                "canceled",
+                settled_by=SETTLED_BY_STOPPED,
+                evidence_kind="test_stop_terminal",
+            )
+            assert terminal["changed"] is True
+            return True
+
+        controller.command_handler.handle_stop = AsyncMock(
+            side_effect=_stop_and_settle
+        )
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(f"/internal/cancel/{session_id}")
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return response
+
+    response = asyncio.run(_go())
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "stale_released",
+        "reason": "already_terminal",
+    }
 
 
 def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monkeypatch):
