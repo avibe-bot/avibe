@@ -3,12 +3,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Loopback-only on purpose. A request from the host arrives inside the container
+    # from the Docker bridge gateway, not from 127.0.0.1, so the remote-access guard
+    # only trusts it when the published binding really is loopback — which is what
+    # VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST below asserts. Publishing on 0.0.0.0 and
+    # declaring loopback anyway would hand that trust to the whole LAN.
     ports:
-      - "${VIBE_E2E_PORT:-15123}:5123"
+      - "127.0.0.1:${VIBE_E2E_PORT:-15123}:5123"
     environment:
       - AVIBE_HOME=/data/avibe
       - VIBE_DEPLOYMENT_ENV=e2e
       - VIBE_UI_PORT=5123
+      - VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS=1
+      - VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST=127.0.0.1
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5123/health', timeout=3)"]
       interval: 3s

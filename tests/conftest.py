@@ -43,11 +43,54 @@ write to ``~/.avibe/`` or legacy ``~/.vibe_remote/``).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
+from core import caller_context as _caller_context
+
 REAL_USER_HOME = Path.home()
+
+# Avibe injects the caller-context contract into every Agent subprocess, so a suite
+# run from inside an Avibe Agent shell inherits a real conversation's platform,
+# channel, and session key. Tests that exercise caller context patch ``os.environ``
+# with ``clear=False`` — they have to, since the isolated home above lives in the
+# same environment — and would otherwise pick the ambient origin up and assert
+# against whichever conversation happened to launch pytest. The names are derived
+# from the contract module rather than listed here so a new field cannot quietly
+# reintroduce the leak.
+CALLER_CONTEXT_ENV_NAMES = tuple(
+    sorted(
+        value
+        for name, value in vars(_caller_context).items()
+        if name.startswith("AVIBE_") and name.endswith("_ENV") and isinstance(value, str)
+    )
+)
+
+
+# A running `vibe` service exports its Show Runtime configuration — source, manifest
+# path/url, archive path/url, node/bin overrides — to everything it spawns, and
+# ``ShowRuntimeManager`` treats each of those as a default for the matching
+# constructor argument. A test that constructs a manager to assert how it resolves a
+# source is then measuring the developer's service, not the code. Scrub by prefix so
+# the whole family is covered; tests that need one set it with ``monkeypatch``, which
+# runs after this fixture.
+SHOW_RUNTIME_ENV_PREFIX = "VIBE_SHOW_RUNTIME_"
+
+
+@pytest.fixture(autouse=True)
+def _scrub_avibe_caller_env(monkeypatch):
+    """Hide the launching Agent's caller context from every test."""
+    for name in CALLER_CONTEXT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_show_runtime_env(monkeypatch):
+    """Hide the local service's Show Runtime overrides from every test."""
+    for name in [name for name in os.environ if name.startswith(SHOW_RUNTIME_ENV_PREFIX)]:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)

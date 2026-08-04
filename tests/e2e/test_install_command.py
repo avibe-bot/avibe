@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from tests.e2e.wheel_build import build_wheel
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -23,18 +24,7 @@ def _resolve_install_wheel(fixtures_dir: Path) -> Path:
         assert wheel_path.exists(), f"Expected install test wheel at {wheel_path}"
         return wheel_path
 
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "--wheel-dir", str(fixtures_dir)],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-
-    wheels = sorted(fixtures_dir.glob("avibe_os-*.whl"))
-    assert wheels, "Expected a built wheel for install test"
-    return wheels[-1]
+    return build_wheel(fixtures_dir)
 
 
 def _docker_available() -> bool:

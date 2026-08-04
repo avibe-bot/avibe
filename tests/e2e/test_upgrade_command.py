@@ -6,11 +6,12 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from tests.e2e.wheel_build import build_wheel
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -30,22 +31,7 @@ def _docker_available() -> bool:
 
 
 def _build_test_wheel(fixtures_dir: Path, version: str) -> Path:
-    env = os.environ.copy()
-    env["SETUPTOOLS_SCM_PRETEND_VERSION"] = version
-
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "--wheel-dir", str(fixtures_dir)],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-
-    wheel_path = fixtures_dir / f"avibe_os-{version}-py3-none-any.whl"
-    assert wheel_path.exists(), f"Expected built wheel at {wheel_path}"
-    return wheel_path
+    return build_wheel(fixtures_dir, version=version)
 
 
 @pytest.mark.integration

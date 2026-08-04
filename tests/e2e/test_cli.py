@@ -26,7 +26,8 @@ class TestCLIVersion:
     def test_version_output(self, vibe_container):
         result = _docker_exec("vibe version")
         assert result.returncode == 0
-        assert "vibe-remote" in result.stdout
+        # The distribution name `vibe version` prints; `vibe-remote` predates the rename.
+        assert "avibe-os" in result.stdout
 
 
 class TestCLIDoctor:
