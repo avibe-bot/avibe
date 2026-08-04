@@ -7,6 +7,7 @@ whose prompt is already the IM message on screen.
 """
 
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -79,6 +80,44 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
         # before ``_prepend_message_metadata`` decorates the text sent to the backend.
         self.assertEqual(order, [("echo", "summarize open PRs"), ("dispatch", "summarize open PRs")])
         self.assertEqual(len(controller.agent_service.requests), 1)
+
+    async def test_subagent_prefixed_prompt_is_echoed_unstripped(self):
+        """Scenario: MESSAGE-DELIVERY-018
+
+        Subagent routing rewrites ``message`` to the prefix-stripped body before
+        dispatch. The echo must still show the stored prompt — the prefix names which
+        subagent was asked, and dropping it makes the visible trigger differ from the
+        Workbench row (Codex P2).
+        """
+        controller, handler = _build_handler()
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            agents_dir = project / ".codex" / "agents"
+            agents_dir.mkdir(parents=True)
+            (agents_dir / "echo-probe.toml").write_text(
+                "\n".join(
+                    [
+                        'name = "echo-probe"',
+                        'description = "probe agent"',
+                        'developer_instructions = "probe"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            handler.session_handler.get_session_info = (
+                lambda context, source="human": ("base-session", str(project), f"base-session:{project}")
+            )
+
+            await handler.handle_scheduled_message(
+                _scheduled_context(), "echo-probe: audit the queue"
+            )
+
+        emit = controller.message_dispatcher.emit_harness_prompt
+        emit.assert_awaited_once()
+        self.assertEqual(emit.await_args.args[1], "echo-probe: audit the queue")
+        agent_name, request = controller.agent_service.requests[0]
+        self.assertEqual(request.subagent_name, "echo-probe")
+        self.assertEqual(request.message, "audit the queue")
 
     async def test_human_turn_never_echoes(self):
         controller, handler = _build_handler()

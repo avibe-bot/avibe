@@ -645,8 +645,12 @@ class MessageHandler(BaseHandler):
             # admission happens upstream, and ``_handle_turn`` is entered only when the
             # turn actually runs. It covers the durable Delivery path too, which skips
             # the mirror branch above.
+            # ``control_message`` rather than ``message``: subagent routing above
+            # strips a matched ``name:`` prefix off ``message``, and the echo must show
+            # the prompt as it was stored (which is what the Workbench row shows too),
+            # including the prefix that names the requested subagent.
             if source != self.TURN_SOURCE_HUMAN:
-                await self._echo_harness_prompt(context, message)
+                await self._echo_harness_prompt(context, control_message)
 
             user_message = self._get_user_message(context, message)
             audio_transcripts = await self._transcribe_audio_attachments(context, processed_files or [])

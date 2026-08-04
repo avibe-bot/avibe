@@ -43,6 +43,9 @@ dispatcher.
      when the turn actually runs;
    - **before** `_prepend_message_metadata` and dispatch, so the echo is the raw
      prompt and lands ahead of the status bubble and the result;
+   - echoing `control_message`, the pre-routing prompt: subagent routing rewrites
+     `message` to the prefix-stripped body, and the echo must match what the
+     Workbench row shows, prefix included;
    - outside the mirror `if`, so the durable Delivery path is covered too.
    The helper is best-effort and resolves the dispatcher through `getattr`.
 2. `core/message_dispatcher.py::emit_harness_prompt` — owns the gates and the send.
@@ -70,17 +73,22 @@ dispatcher.
 4. Config: `V2Config.runtime.harness_prompt_echo` (default `true`), mirrored onto
    `AppCompatConfig` + `to_app_config` (the turn path reads `controller.config`,
    which is the compat object) and hot-reloaded in
-   `Controller._refresh_config_from_disk`. No UI, matching `harness_run_*`.
+   `Controller._refresh_config_from_disk`. The gate calls that mtime-guarded reload
+   itself (`_refresh_runtime_config`), because a Harness turn passes through no IM
+   inbound handler and would otherwise read the process-start snapshot. No UI,
+   matching `harness_run_*`.
 5. Copy: `harness.promptEcho.*` in `vibe/i18n/en.json` and `zh.json`.
 
 ## Evidence
 
 - unit — `tests/test_message_dispatcher_scheduled.py::HarnessPromptEchoTests`
   (per-kind coverage, every gate, delivery override, dedupe, memory bound,
-  truncation/quoting, silent-only prompt, send failure);
+  truncation/quoting, silent-only prompt, send failure, hot-toggle reload and a
+  failing reload);
   `tests/test_message_handler_harness_echo.py` (pipeline wiring: echo-before-dispatch
-  ordering, raw prompt, human turn silent, backgrounded thread resolution visible to
-  the echo, missing hook and failing echo never block the turn);
+  ordering, raw prompt, subagent-prefixed prompt echoed unstripped, human turn silent,
+  backgrounded thread resolution visible to the echo, missing hook and failing echo
+  never block the turn);
   `tests/test_scheduled_tasks.py::test_build_context_carries_the_definition_name_for_display`
   and `::test_build_context_survives_a_store_that_cannot_name_the_definition`.
 - scenario — `MESSAGE-DELIVERY-018` (prompt precedes result; the result still owns

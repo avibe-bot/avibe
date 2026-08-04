@@ -1615,6 +1615,12 @@ class ConsolidatedMessageDispatcher:
         trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
         if trigger_kind not in HARNESS_PROMPT_ECHO_TRIGGER_KINDS:
             return None
+        # A Harness turn never passes through an IM inbound handler, so nothing else
+        # has reloaded ``controller.config`` for this turn: without this mtime-guarded
+        # refresh the config-only switch would be read from the process-start snapshot
+        # (a true->false toggle would still send one prompt, a false->true one would
+        # skip the first). Same reason as ``_refresh_status_bubble_config``.
+        self._refresh_runtime_config()
         if not getattr(self.controller.config, "harness_prompt_echo", True):
             return None
         body = self._harness_prompt_body(trigger_kind, spec.get("task_definition_name"), text)
@@ -1678,6 +1684,20 @@ class ConsolidatedMessageDispatcher:
         # with the agent's own reply.
         quoted = "\n".join(f"> {line}" for line in prompt.splitlines())
         return f"{label}\n{quoted}"
+
+    def _refresh_runtime_config(self) -> None:
+        """Best-effort, mtime-guarded reload of ``controller.config`` from disk.
+
+        Resolved through ``getattr`` so the lightweight controller stubs used by the
+        dispatcher tests simply skip it instead of raising.
+        """
+        refresh = getattr(self.controller, "_refresh_config_from_disk", None)
+        if not callable(refresh):
+            return
+        try:
+            refresh()
+        except Exception:
+            logger.debug("runtime config refresh failed; using cached config", exc_info=True)
 
     def _remember_harness_prompt_echo(self, echo_key: str) -> None:
         self._harness_prompt_echo_keys.add(echo_key)

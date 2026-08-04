@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -3856,6 +3856,36 @@ class HarnessPromptEchoTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         self.assertEqual(controller.im_client.sent, [])
+
+    async def test_runtime_switch_is_reloaded_before_the_gate(self):
+        """A Harness turn reaches no IM inbound handler, so nothing else reloads
+        ``controller.config``: the config-only toggle must be re-read here, or a
+        true->false change would still send one more prompt (Codex P2)."""
+        controller = _StubController()
+        refreshed = []
+
+        def _refresh_config_from_disk():
+            refreshed.append(True)
+            controller.config.harness_prompt_echo = False
+
+        controller._refresh_config_from_disk = _refresh_config_from_disk
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertTrue(refreshed)
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_failed_config_reload_still_echoes(self):
+        controller = _StubController()
+        controller._refresh_config_from_disk = Mock(side_effect=RuntimeError("disk gone"))
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertEqual(result, "bot-msg-1")
+        self.assertEqual(len(controller.im_client.sent), 1)
 
     async def test_echo_follows_the_delivery_override_target(self):
         # The question must land where the answer lands (``post_to`` / deliver key).
