@@ -2614,6 +2614,79 @@ def test_stale_recorder_supervisor_cannot_release_host_ownership(
     asyncio.run(run())
 
 
+def test_same_config_reconcile_restarts_failed_host_retention(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
+    first_maintained = threading.Event()
+    second_maintained = threading.Event()
+    maintenance_lock = threading.Lock()
+    maintenance_calls = 0
+    active_maintenance = 0
+    max_active_maintenance = 0
+
+    def maintain(path: Path) -> str | None:
+        nonlocal maintenance_calls, active_maintenance, max_active_maintenance
+        assert path == db_path
+        with maintenance_lock:
+            maintenance_calls += 1
+            call = maintenance_calls
+            active_maintenance += 1
+            max_active_maintenance = max(max_active_maintenance, active_maintenance)
+        try:
+            if call == 1:
+                first_maintained.set()
+                return "writer_failures"
+            second_maintained.set()
+            return None
+        finally:
+            with maintenance_lock:
+                active_maintenance -= 1
+
+    monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
+    config = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        diagnostics=MemoryDiagnosticsConfig(log_provider_calls=False),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=FakeEverOSProcessFactory(),
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+        db_path.parent.mkdir(parents=True, mode=0o700)
+        initialize_call_log(db_path)
+        runtime._ensure_call_log_retention()
+        assert await asyncio.to_thread(first_maintained.wait, 1)
+        for _ in range(20):
+            if runtime._recorder_health["reason"] == "writer_failures":
+                break
+            await asyncio.sleep(0)
+        assert runtime._recorder_health["reason"] == "writer_failures"
+        old_task = runtime._call_log_retention_task
+        assert old_task is not None
+        assert not old_task.done()
+
+        assert (await asyncio.wait_for(runtime.reconcile(config), timeout=1))["ok"] is True
+        assert await asyncio.to_thread(second_maintained.wait, 1)
+        new_task = runtime._call_log_retention_task
+        assert old_task.done()
+        assert new_task is not None
+        assert new_task is not old_task
+        assert not new_task.done()
+        assert maintenance_calls == 2
+        assert max_active_maintenance == 1
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

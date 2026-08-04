@@ -490,8 +490,7 @@ class MemoryRuntime:
             return {"ok": False, "error": self._runtime_error}
 
         records_calls = config.diagnostics.log_provider_calls
-        if records_calls:
-            await self._stop_call_log_retention()
+        await self._stop_call_log_retention()
         sidecar: EverOSProcessPort | None = None
 
         async def before_recorder_start() -> None:

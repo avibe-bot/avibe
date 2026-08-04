@@ -3585,7 +3585,6 @@
       "noPreview": "No text preview available.",
       "loggingOff": "Provider payload logging is off. The normal processing timeline and retained diagnostic rows remain available.",
       "recorderDegraded": "New provider calls aren't being recorded. Existing rows remain readable.",
-      "recorderRetentionDegraded": "Provider call retention failed. Existing rows may remain longer than configured; Avibe will retry automatically.",
       "recorderCorrupt": "The provider call log is corrupt. Clear all Memory data to remove it before recording can resume.",
       "restartAction": "Restart Memory engine",
       "clearAction": "Open Clear all",
