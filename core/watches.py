@@ -809,7 +809,17 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
     ) -> tuple[list[RuntimeWorkItem], bool]:
         del limit, cursor
         if "managed-watches" in occupied:
-            return [], False
+            # Return the partition observation without touching storage. The
+            # supervisor records it as deferred against the live owner and
+            # rewinds once that owner releases, preserving wakes received while
+            # reconciliation is in progress.
+            return [
+                RuntimeWorkItem(
+                    "managed-watches",
+                    None,
+                    rearm_after_process=False,
+                )
+            ], False
         with self.service._store_worker_lock:
             recovery = _StaleWorkerRecovery(True)
             if self.service._recovery_pending:
@@ -828,12 +838,18 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                 else ()
             )
             changed = False
-            if recovery.recovered and not self.service._store_error_fused:
-                changed = self.service.store.maybe_reload()
-            watches = tuple(
-                ManagedWatch.from_dict(watch.to_dict())
-                for watch in self.service.store.list_watches()
-            )
+            watches: tuple[ManagedWatch, ...] = ()
+            store_error: Exception | None = None
+            fused = self.service._store_error_fused
+            if recovery.recovered and not fused:
+                try:
+                    changed = self.service.store.maybe_reload()
+                    watches = tuple(
+                        ManagedWatch.from_dict(watch.to_dict())
+                        for watch in self.service.store.list_watches()
+                    )
+                except Exception as exc:
+                    store_error = exc
         return [
             RuntimeWorkItem(
                 "managed-watches",
@@ -842,6 +858,8 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                     "unblocked": unblocked,
                     "changed": changed,
                     "watches": watches,
+                    "store_error": store_error,
+                    "fused": fused,
                 },
                 rearm_after_process=False,
             )
@@ -853,13 +871,28 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
         self.service._apply_stale_worker_recovery(recovery)
         self.service._apply_recovery_unblocked(observation["unblocked"])
         if not recovery.recovered:
-            return False
+            self.service._schedule_runtime_work_wake(
+                WATCH_RECONCILE_INTERVAL_SECONDS
+            )
+            return True
+        if self.service._recovery_blocked_watch_ids:
+            self.service._schedule_runtime_work_wake(
+                WATCH_RECONCILE_INTERVAL_SECONDS
+            )
         self.service._recovery_pending = False
         if observation["unblocked"]:
             self.service._reconcile_dirty = True
             self.service._runtime_state_dirty = True
-        if self.service._store_error_fused:
-            return False
+        store_error = observation.get("store_error")
+        if store_error is not None:
+            self.service._reconcile_dirty = True
+            self.service._handle_reconcile_store_error(store_error)
+            return self.service._store_error_fused
+        if observation.get("fused") or self.service._store_error_fused:
+            if self.service._runtime_state_dirty:
+                await self.service._persist_runtime_state()
+                return not self.service._runtime_state_dirty
+            return True
         try:
             if observation["changed"] or self.service._reconcile_dirty:
                 if self.service.reconcile_watches(observation["watches"]):
@@ -874,7 +907,7 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
         except Exception as exc:
             self.service._reconcile_dirty = True
             self.service._handle_reconcile_store_error(exc)
-            return False
+            return self.service._store_error_fused
 
 
 class ManagedWatchService:
@@ -979,6 +1012,13 @@ class ManagedWatchService:
             notify(RuntimeWorkLane.WATCH_DEFINITIONS)
         else:
             self._reconcile_dirty = True
+
+    def _schedule_runtime_work_wake(self, delay: float) -> None:
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        notify_after = getattr(supervisor, "notify_after", None)
+        token = self._runtime_work_token
+        if callable(notify_after) and token is not None:
+            notify_after(token, delay)
 
     async def _legacy_runtime_work_probe(self) -> None:
         try:
