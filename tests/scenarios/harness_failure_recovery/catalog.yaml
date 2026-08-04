@@ -3796,6 +3796,44 @@ scenarios:
     # generation lanes are invalidated and joined while the executor remains available,
     # before ScheduledTaskService takes its final durable owner snapshot.
     test: tests/test_controller_dispatch_loop.py::test_hfr_284_runtime_work_stack_joins_controller_lanes_before_service_teardown
+  - id: HFR-285
+    name: deferred Activity recovery scans bounded raw pages with indexed eligibility
+    status: covered
+    kind: liveness
+    layer: contract
+    backend: shared
+    # A page limit bounds inspected runtime rows, not only due outputs. Deferred grace
+    # entries advance the keyset cursor while a per-backend index supplies the earliest
+    # future deadline without walking every recovered runtime under the Registry lock.
+    test: tests/test_session_activities.py::test_hfr_285_deferred_runtime_scan_bounds_raw_rows_and_indexes_deadline
+  - id: HFR-286
+    name: Run cancellation hints bypass stale sweep eligibility
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # runs.updated always admits the cancellation observer as its own item. The periodic
+    # stale sweep keeps its configured cadence and cannot delay an in-flight command Stop.
+    test: tests/test_scheduled_tasks.py::test_hfr_286_cancellation_wake_is_not_gated_by_stale_sweep_cadence
+  - id: HFR-287
+    name: new-session teardown publishes committed Run cancellations
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Every SessionMappingStore teardown uses the Run event transaction. Raw SQL changes
+    # remain invisible before commit and wake cancellation/callback consumers afterward.
+    test: tests/test_session_archive.py::test_hfr_287_new_session_teardown_publishes_run_updates_after_commit
+  - id: HFR-288
+    name: expired partition backoff preserves forward scan before retry rewind
+    status: covered
+    kind: liveness
+    layer: contract
+    backend: shared
+    # An expired bounded retry frees admission capacity without rewinding over the same
+    # unavailable prefix. The lane reaches later partitions, then coalesces expired retry
+    # work into one tail-boundary rewind while the durable store retains the inventory.
+    test: tests/test_runtime_work_supervisor.py::test_hfr_288_expired_backoff_preserves_forward_scan_before_retry
   - id: HFR-430
     name: an Agent Run can apply the Workbench send-now transition to a busy Session
     status: covered

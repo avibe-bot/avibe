@@ -3414,7 +3414,7 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
             registry = self.service._activity_registry()
             if registry is None:
                 return [], False
-            runtimes, has_more, retry_after = (
+            runtimes, has_more, retry_after, scanned_cursor = (
                 registry.scan_recovered_output_runtimes(
                     limit=limit,
                     cursor=cursor,
@@ -3426,13 +3426,27 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
                     RuntimeWorkLane.ACTIVITY_OUTPUTS,
                     retry_after,
                 )
-            return [
+            items = [
                 RuntimeWorkItem(
                     f"{backend}\x1f{runtime_key}",
                     (backend, runtime_key),
+                    cursor_key=f"{backend}\x1f{runtime_key}",
                 )
                 for backend, runtime_key in runtimes
-            ], has_more
+            ]
+            if scanned_cursor and (
+                not items or items[-1].cursor_key != scanned_cursor
+            ):
+                items.append(
+                    RuntimeWorkItem(
+                        "",
+                        None,
+                        cursor_key=scanned_cursor,
+                        rearm_after_process=False,
+                        cursor_only=True,
+                    )
+                )
+            return items, has_more
         if self.lane is RuntimeWorkLane.FAILURE_NOTICES:
             return self._scan_failure_notices(
                 limit=limit,
@@ -3442,13 +3456,25 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
         if self.lane is RuntimeWorkLane.STALE_RUNS:
             retry_after = self.service._stale_run_sweep_delay_seconds()
             if retry_after is None:
-                return [], False
+                return [
+                    RuntimeWorkItem(
+                        "run-cancellations",
+                        None,
+                        rearm_after_process=False,
+                    )
+                ], False
             if retry_after > 0:
                 self.service._schedule_runtime_work_wake(
                     RuntimeWorkLane.STALE_RUNS,
                     retry_after,
                 )
-                return [], False
+                return [
+                    RuntimeWorkItem(
+                        "run-cancellations",
+                        None,
+                        rearm_after_process=False,
+                    )
+                ], False
             return [
                 RuntimeWorkItem(
                     "stale-runs",
@@ -3662,6 +3688,9 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
                 await self.service._deliver_one_failure_notice(store, item.observation)
             return True
         if self.lane is RuntimeWorkLane.STALE_RUNS:
+            if item.partition_key == "run-cancellations":
+                await self.service._propagate_requested_cancellations_async()
+                return True
             await self.service._propagate_requested_cancellations_async()
             await self.service._run_runtime_sync(
                 self.service._sweep_stale_runs,

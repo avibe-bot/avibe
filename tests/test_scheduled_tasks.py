@@ -1649,7 +1649,7 @@ def test_hfr_166_activity_scan_never_sleeps_ahead_of_due_runtime() -> None:
         ):  # noqa: ANN001, ANN202
             del limit, cursor
             assert grace_seconds("claude") == 10.0
-            return [("claude", "b-due")], False, 30.0
+            return [("claude", "b-due")], False, 30.0, "claude\x1fb-due"
 
     service = SimpleNamespace(
         _activity_registry=lambda: _Registry(),
@@ -1732,7 +1732,9 @@ def test_hfr_168_stale_lane_arms_its_configured_remaining_interval() -> None:
         RuntimeWorkLane.STALE_RUNS,
     )
 
-    assert handler.scan(limit=1, occupied=frozenset(), cursor=None) == ([], False)
+    items, has_more = handler.scan(limit=1, occupied=frozenset(), cursor=None)
+    assert [item.partition_key for item in items] == ["run-cancellations"]
+    assert has_more is False
     assert scheduled == [(RuntimeWorkLane.STALE_RUNS, 5.0)]
 
 
@@ -9756,6 +9758,36 @@ def test_stale_lane_applies_leaked_lock_cleanup_on_the_controller_loop(
     assert sweep_threads and sweep_threads[0] != loop_thread
     assert cleanup_threads == [loop_thread]
     scheduled.assert_called_once_with(RuntimeWorkLane.STALE_RUNS, 7.0)
+
+
+def test_hfr_286_cancellation_wake_is_not_gated_by_stale_sweep_cadence(
+    tmp_path: Path,
+) -> None:
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=ScheduledTaskStore(tmp_path / "tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "requests"),
+    )
+    cancellations = AsyncMock()
+    sweep = Mock()
+    scheduled = Mock()
+    service._propagate_requested_cancellations_async = cancellations  # type: ignore[method-assign]
+    service._sweep_stale_runs = sweep  # type: ignore[method-assign]
+    service._stale_run_sweep_delay_seconds = lambda: 29.0  # type: ignore[method-assign]
+    service._schedule_runtime_work_wake = scheduled  # type: ignore[method-assign]
+    handler = scheduled_tasks._ScheduledRuntimeWorkHandler(
+        service,
+        RuntimeWorkLane.STALE_RUNS,
+    )
+
+    items, has_more = handler.scan(limit=4, occupied=frozenset(), cursor=None)
+
+    assert [item.partition_key for item in items] == ["run-cancellations"]
+    assert has_more is False
+    scheduled.assert_called_once_with(RuntimeWorkLane.STALE_RUNS, 29.0)
+    asyncio.run(handler.process(items[0]))
+    cancellations.assert_awaited_once_with()
+    sweep.assert_not_called()
 
 
 @pytest.mark.parametrize("stop_entrypoint", ["stop", "lease_loss"])

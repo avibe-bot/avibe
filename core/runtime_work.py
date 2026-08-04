@@ -53,6 +53,7 @@ class RuntimeWorkItem:
     cursor_key: str | None = None
     rearm_after_process: bool = True
     defer_until_partition_release: bool = False
+    cursor_only: bool = False
 
 
 class RuntimeWorkHandler(Protocol):
@@ -89,6 +90,7 @@ class _Registration:
     worker_started_at: dict[str, float] = field(default_factory=dict)
     backoff_deadlines: dict[str, float] = field(default_factory=dict)
     backoff_task: asyncio.Task[None] | None = None
+    expired_backoff_rewind_pending: bool = False
     scan_continuation_task: asyncio.Task[None] | None = None
     rewind_after_partitions: set[str] = field(default_factory=set)
     scan_started_at: float | None = None
@@ -679,6 +681,8 @@ class RuntimeWorkSupervisor:
                     # beginning would spin on occupied rows until their owner exits.
                     registration.scan_cursor = None
                 for item in items:
+                    if item.cursor_only:
+                        continue
                     partition = str(item.partition_key or "").strip()
                     if not partition:
                         continue
@@ -711,6 +715,15 @@ class RuntimeWorkSupervisor:
                     )
                     registration.workers[partition] = task
                     registration.worker_started_at[partition] = self._monotonic()
+                if not has_more and registration.expired_backoff_rewind_pending:
+                    # A retry deadline releases admission capacity but must not pull
+                    # the forward cursor back over the same unavailable prefix. Finish
+                    # the current durable scan first, then coalesce all expired retries
+                    # into one bounded rewind. The store remains the retry inventory.
+                    registration.expired_backoff_rewind_pending = False
+                    registration.rewind_requested = True
+                    if not registration.workers:
+                        registration.event.set()
                 if not has_more or len(registration.workers) >= self._lane_capacity:
                     break
                 if not page_advanced:
@@ -791,7 +804,11 @@ class RuntimeWorkSupervisor:
                 registration.live
                 and self._active
                 and not self._stopping
-                and (should_backoff or item.rearm_after_process)
+                and (
+                    should_backoff
+                    or item.rearm_after_process
+                    or registration.rewind_requested
+                )
             ):
                 registration.event.set()
 
@@ -848,13 +865,13 @@ class RuntimeWorkSupervisor:
                     )
                     if partition_deadline > deadline
                 }
+                registration.expired_backoff_rewind_pending = True
             if (
                 completed
                 and registration.live
                 and self._active
                 and not self._stopping
             ):
-                registration.rewind_requested = True
                 registration.event.set()
             if registration.live and registration.backoff_deadlines:
                 self._start_next_partition_backoff(registration)

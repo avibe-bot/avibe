@@ -268,6 +268,61 @@ async def test_hfr_162_partition_backoff_state_is_lane_bounded() -> None:
 
 
 @pytest.mark.anyio
+async def test_hfr_288_expired_backoff_preserves_forward_scan_before_retry() -> None:
+    retry_entered = asyncio.Event()
+    release_retry = asyncio.Event()
+    first_window_attempted = asyncio.Event()
+    later_partition_started = asyncio.Event()
+    attempts: list[str] = []
+
+    async def controlled_retry(_delay: float) -> None:
+        retry_entered.set()
+        await release_retry.wait()
+
+    class _UnavailablePrefix(RuntimeWorkHandler):
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            rows = [
+                RuntimeWorkItem(
+                    f"partition-{index:02d}",
+                    {},
+                    cursor_key=f"{index:02d}",
+                )
+                for index in range(7)
+                if f"partition-{index:02d}" not in occupied
+                and (cursor is None or f"{index:02d}" > cursor)
+            ]
+            return rows[:limit], len(rows) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> bool:
+            attempts.append(item.partition_key)
+            if len(attempts) == 6:
+                first_window_attempted.set()
+            if item.partition_key == "partition-06":
+                later_partition_started.set()
+                return True
+            return later_partition_started.is_set()
+
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=2,
+        scan_page_size=2,
+        scan_continuation_pages=3,
+        retry_wait=controlled_retry,
+    )
+    supervisor.register(RuntimeWorkLane.REQUESTS, _UnavailablePrefix())
+    await supervisor.activate()
+
+    await asyncio.wait_for(retry_entered.wait(), 1)
+    await asyncio.wait_for(first_window_attempted.wait(), 1)
+    assert attempts == [f"partition-{index:02d}" for index in range(6)]
+
+    release_retry.set()
+    await asyncio.wait_for(later_partition_started.wait(), 1)
+    assert attempts[6] == "partition-06"
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
 async def test_hfr_162_backoff_budget_preserves_exact_partition_deadline() -> None:
     now = 0.0
     release_retry = asyncio.Event()

@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 TERMINAL_ACTIVITY_STATUSES = frozenset({"completed", "failed", "stopped", "killed", "disconnected"})
 CONNECTION_STATES = frozenset({"connected", "reconnecting", "disconnected", "unknown"})
 TERMINAL_SNAPSHOT_PHASE = "terminal"
+_IMMEDIATE_RECOVERY_ELIGIBILITY = datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _now_iso() -> str:
@@ -265,6 +266,13 @@ class SessionActivityRegistry:
         self._recovered_output_ids: set[tuple[str, str, str]] = set()
         self._recovered_output_counts: dict[tuple[str, str], int] = {}
         self._recovered_runtime_keys: list[tuple[str, str]] = []
+        self._recovered_output_eligibility: dict[
+            tuple[str, str], dict[str, datetime]
+        ] = {}
+        self._recovered_runtime_eligibility: dict[tuple[str, str], datetime] = {}
+        self._recovered_backend_eligibility: dict[
+            str, list[tuple[datetime, str]]
+        ] = defaultdict(list)
         self._recovered_terminals: deque[SessionActivity] = deque()
         self._restore()
 
@@ -285,11 +293,60 @@ class SessionActivityRegistry:
     def _activity_key(cls, activity: SessionActivity) -> tuple[str, str, str]:
         return cls._key(activity.backend, activity.runtime_key, activity.id)
 
-    def _add_recovered_output_id(self, activity_key: tuple[str, str, str]) -> None:
+    @staticmethod
+    def _recovered_activity_eligibility(activity: SessionActivity) -> datetime:
+        if (
+            str(activity.metadata.get("output_batch_id") or "").strip()
+            or activity.metadata.get("_output_local_settlement_only")
+        ):
+            return _IMMEDIATE_RECOVERY_ELIGIBILITY
+        raw = str(activity.completed_at or "").strip()
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return _IMMEDIATE_RECOVERY_ELIGIBILITY
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _refresh_recovered_runtime_eligibility(
+        self,
+        runtime: tuple[str, str],
+    ) -> None:
+        backend, runtime_key = runtime
+        index = self._recovered_backend_eligibility[backend]
+        previous = self._recovered_runtime_eligibility.pop(runtime, None)
+        if previous is not None and previous != _IMMEDIATE_RECOVERY_ELIGIBILITY:
+            position = bisect_left(index, (previous, runtime_key))
+            if position < len(index) and index[position] == (previous, runtime_key):
+                index.pop(position)
+
+        activities = self._recovered_output_eligibility.get(runtime)
+        if not activities:
+            self._recovered_output_eligibility.pop(runtime, None)
+            if not index:
+                self._recovered_backend_eligibility.pop(backend, None)
+            return
+        current = min(activities.values())
+        self._recovered_runtime_eligibility[runtime] = current
+        if current != _IMMEDIATE_RECOVERY_ELIGIBILITY:
+            insort(index, (current, runtime_key))
+        elif not index:
+            self._recovered_backend_eligibility.pop(backend, None)
+
+    def _add_recovered_output_id(
+        self,
+        activity_key: tuple[str, str, str],
+        activity: SessionActivity,
+    ) -> None:
         if activity_key in self._recovered_output_ids:
             return
         self._recovered_output_ids.add(activity_key)
         runtime_key = activity_key[:2]
+        self._recovered_output_eligibility.setdefault(runtime_key, {})[
+            activity_key[2]
+        ] = self._recovered_activity_eligibility(activity)
+        self._refresh_recovered_runtime_eligibility(runtime_key)
         count = self._recovered_output_counts.get(runtime_key, 0) + 1
         self._recovered_output_counts[runtime_key] = count
         if count == 1:
@@ -303,6 +360,10 @@ class SessionActivityRegistry:
             return
         self._recovered_output_ids.discard(activity_key)
         runtime_key = activity_key[:2]
+        eligibility = self._recovered_output_eligibility.get(runtime_key)
+        if eligibility is not None:
+            eligibility.pop(activity_key[2], None)
+        self._refresh_recovered_runtime_eligibility(runtime_key)
         count = self._recovered_output_counts.get(runtime_key, 0) - 1
         if count > 0:
             self._recovered_output_counts[runtime_key] = count
@@ -432,7 +493,7 @@ class SessionActivityRegistry:
                 self._completed_outputs[connection_key].append(
                     self._new_completed_output_entry(activity)
                 )
-                self._add_recovered_output_id(key)
+                self._add_recovered_output_id(key, activity)
                 continue
 
             recovered = (
@@ -1262,7 +1323,7 @@ class SessionActivityRegistry:
                 key = (str(activity.backend), str(activity.runtime_key))
                 restored_by_runtime[key].append(claimed)
                 if claimed.recovered:
-                    self._add_recovered_output_id(activity_key)
+                    self._add_recovered_output_id(activity_key, activity)
             for key, restored in restored_by_runtime.items():
                 entries = list(self._completed_outputs.get(key) or ())
                 entries.extend(item.entry for item in restored)
@@ -1306,7 +1367,7 @@ class SessionActivityRegistry:
                 key = (str(activity.backend), str(activity.runtime_key))
                 restored_by_runtime[key].append(claimed)
                 if claimed.recovered if recovered is None else recovered:
-                    self._add_recovered_output_id(activity_key)
+                    self._add_recovered_output_id(activity_key, activity)
             for key, restored in restored_by_runtime.items():
                 entries = list(self._completed_outputs.get(key) or ())
                 entries.extend(item.entry for item in restored)
@@ -1390,7 +1451,7 @@ class SessionActivityRegistry:
             else:
                 queue.append(self._new_completed_output_entry(activity))
             if recovered:
-                self._add_recovered_output_id(activity_key)
+                self._add_recovered_output_id(activity_key, activity)
         return True
 
     @staticmethod
@@ -1689,8 +1750,8 @@ class SessionActivityRegistry:
         limit: int,
         cursor: str | None,
         grace_seconds: Callable[[str], float],
-    ) -> tuple[list[tuple[str, str]], bool, float | None]:
-        """Return one due keyset page and the earliest deferred eligibility."""
+    ) -> tuple[list[tuple[str, str]], bool, float | None, str | None]:
+        """Return one bounded raw keyset page and global deferred eligibility."""
 
         page_limit = max(1, int(limit))
         cursor_key: tuple[str, str] | None = None
@@ -1699,15 +1760,14 @@ class SessionActivityRegistry:
             cursor_key = (backend, runtime_key)
         instant = datetime.now(timezone.utc)
         due: list[tuple[str, str]] = []
-        retry_after: float | None = None
-        has_more = False
         with self._lock:
             start = (
                 bisect_right(self._recovered_runtime_keys, cursor_key)
                 if cursor_key is not None
                 else 0
             )
-            for runtime in self._recovered_runtime_keys[start:]:
+            raw_page = self._recovered_runtime_keys[start : start + page_limit]
+            for runtime in raw_page:
                 delay = self._recovered_output_delay_seconds_unlocked(
                     runtime,
                     grace_seconds=grace_seconds(runtime[0]),
@@ -1715,16 +1775,17 @@ class SessionActivityRegistry:
                 )
                 if delay is None:
                     continue
-                if delay > 0:
-                    retry_after = (
-                        delay if retry_after is None else min(retry_after, delay)
-                    )
-                    continue
-                if len(due) >= page_limit:
-                    has_more = True
-                    break
-                due.append(runtime)
-        return due, has_more, retry_after
+                if delay <= 0:
+                    due.append(runtime)
+            has_more = start + len(raw_page) < len(self._recovered_runtime_keys)
+            retry_after = self._next_recovered_output_delay_seconds_unlocked(
+                grace_seconds=grace_seconds,
+                now=instant,
+            )
+            scanned_cursor = (
+                "\x1f".join(raw_page[-1]) if raw_page else None
+            )
+        return due, has_more, retry_after, scanned_cursor
 
     def recovered_output_delay_seconds(
         self,
@@ -1752,32 +1813,29 @@ class SessionActivityRegistry:
         grace_seconds: float,
         now: datetime,
     ) -> float | None:
-        recovered = [
-            entry.activity
-            for entry in self._completed_outputs.get(key, ())
-            if self._activity_key(entry.activity) in self._recovered_output_ids
-        ]
-        if not recovered:
+        first = self._recovered_runtime_eligibility.get(key)
+        if first is None:
             return None
-        if any(
-            str(activity.metadata.get("output_batch_id") or "").strip()
-            or activity.metadata.get("_output_local_settlement_only")
-            for activity in recovered
-        ):
+        if first == _IMMEDIATE_RECOVERY_ELIGIBILITY:
             return 0.0
-        completed: list[datetime] = []
-        for activity in recovered:
-            raw = str(activity.completed_at or "").strip()
-            try:
-                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except ValueError:
-                return 0.0
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            completed.append(parsed.astimezone(timezone.utc))
-        first = min(completed)
         elapsed = max(0.0, (now - first).total_seconds())
         return max(0.0, float(grace_seconds) - elapsed)
+
+    def _next_recovered_output_delay_seconds_unlocked(
+        self,
+        *,
+        grace_seconds: Callable[[str], float],
+        now: datetime,
+    ) -> float | None:
+        earliest: float | None = None
+        for backend, entries in self._recovered_backend_eligibility.items():
+            if not entries:
+                continue
+            first = entries[0][0]
+            elapsed = max(0.0, (now - first).total_seconds())
+            delay = max(0.0, float(grace_seconds(backend)) - elapsed)
+            earliest = delay if earliest is None else min(earliest, delay)
+        return earliest
 
     def drain_recovered_terminals(self) -> list[SessionActivity]:
         with self._lock:
