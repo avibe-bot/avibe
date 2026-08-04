@@ -225,26 +225,64 @@ def test_prepare_call_recorder_is_diagnostic_only_on_patch_failure(
     assert patches.prepare_call_recorder(tmp_path / "call-log.db") is None
 
 
-def test_pinned_everos_patch_contract(tmp_path: Path) -> None:
+def test_pinned_everos_patch_contract(monkeypatch, tmp_path: Path) -> None:
+    """Exercise the patched, public EverOS 1.2.1 call surfaces offline.
+
+    This intentionally calls the real wheel implementations after replacing
+    only their final provider transports.  It catches both signature drift and
+    a patch which still imports but no longer reaches the production paths.
+    """
     required = os.environ.get("AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT") == "1"
     if importlib.util.find_spec("everos") is None:
         if required:
             pytest.fail("managed EverOS runtime is required for this contract")
         pytest.skip("managed EverOS runtime is not installed")
 
+    from everalgo.llm import ChatMessage
+    from everalgo.llm.config import LLMConfig
     from everalgo.llm.providers.openai_compat import OpenAICompatClient
+    from everalgo.parser import RawFile
     from everos.component import parser
+    from everos.component.parser import _core as parser_core
     from everos.component.embedding.openai_provider import OpenAIEmbeddingProvider
+    from everos.memory.cascade.handlers import atomic_fact, episode
     from everos.memory.cascade.handlers.atomic_fact import AtomicFactHandler
     from everos.memory.cascade.handlers.episode import EpisodeHandler
     from everos.memory.extract.pipeline import user_memory
+    from pydantic import SecretStr
+    from structlog.contextvars import bind_contextvars, reset_contextvars
 
-    assert inspect.iscoroutinefunction(OpenAICompatClient.chat)
-    assert inspect.iscoroutinefunction(OpenAIEmbeddingProvider._embed_chunk)
-    assert inspect.iscoroutinefunction(parser.aparse_file)
-    assert inspect.iscoroutinefunction(user_memory._extract_with_retry)
-    assert inspect.iscoroutinefunction(EpisodeHandler._build_row)
-    assert inspect.iscoroutinefunction(AtomicFactHandler._build_row)
+    # Pin the public parser export and concrete methods that the patch wraps.
+    assert list(inspect.signature(parser.aparse_file).parameters) == ["raw_file"]
+    assert list(inspect.signature(user_memory._extract_with_retry).parameters) == [
+        "extractor",
+        "cell",
+        "prompt",
+        "memcell_id",
+    ]
+    assert list(inspect.signature(OpenAICompatClient.chat).parameters) == [
+        "self",
+        "messages",
+        "model",
+        "temperature",
+        "max_tokens",
+        "response_format",
+        "extra",
+    ]
+    assert list(inspect.signature(OpenAIEmbeddingProvider._embed_chunk).parameters) == [
+        "self",
+        "chunk",
+    ]
+    for handler in (EpisodeHandler, AtomicFactHandler):
+        assert list(inspect.signature(handler._build_row).parameters) == [
+            "self",
+            "owner_id",
+            "owner_type",
+            "app_id",
+            "project_id",
+            "md_path",
+            "entry",
+        ]
 
     handle = patches.prepare_call_recorder(tmp_path / "call-log.db")
     assert handle is not None
@@ -258,3 +296,180 @@ def test_pinned_everos_patch_contract(tmp_path: Path) -> None:
     assert getattr(user_memory._extract_with_retry, "__avibe_memory_call_patch__", False)
     assert getattr(EpisodeHandler._build_row, "__avibe_memory_call_patch__", False)
     assert getattr(AtomicFactHandler._build_row, "__avibe_memory_call_patch__", False)
+    assert parser.aparse_file.__wrapped__ is parser_core.aparse_file
+
+    captured = _Handle()
+    monkeypatch.setattr(patches, "_active_handle", captured)
+    monkeypatch.setattr(patches, "_request_id", lambda: "real-wheel-request")
+
+    # Exercise the real package-export parser body and verify that its
+    # multimodal provider call inherits the parse context.
+    parse_context: list[object] = []
+
+    async def parse_stub(raw_file, *, llm):
+        assert isinstance(raw_file, RawFile)
+        assert llm is not None
+        parse_context.append(patches._current_context.get())
+        return "parsed"
+
+    import everalgo.parser
+    import everos.component.llm
+
+    monkeypatch.setattr(everalgo.parser, "aparse", parse_stub)
+    monkeypatch.setattr(
+        everos.component.llm, "get_multimodal_llm_client", lambda: object()
+    )
+    assert asyncio.run(parser.aparse_file(RawFile(content=b"x"))) == "parsed"
+    assert parse_context[0].stage == "parse"
+    assert parse_context[0].kind == "multimodal_llm"
+
+    # The concrete episode extractor retains its memcell context through its
+    # real retry implementation.
+    extract_context: list[object] = []
+
+    class Extractor:
+        async def aextract(self, cell, *, sender_id, prompt):
+            assert cell == "cell"
+            assert sender_id is None
+            assert prompt == "prompt"
+            extract_context.append(patches._current_context.get())
+            return "episode"
+
+    assert asyncio.run(
+        user_memory._extract_with_retry(Extractor(), "cell", "prompt", "mem-1")
+    ) == "episode"
+    assert extract_context[0].stage == "episode_extract"
+    assert extract_context[0].memcell_id == "mem-1"
+
+    # Build the actual typed cascade rows with only the embedding capability
+    # substituted.  This is the closest safe execution of the production
+    # cascade handlers without opening a provider connection.
+    cascade_context: list[object] = []
+
+    class Capability:
+        async def embed_or_none(self, text):
+            cascade_context.append(patches._current_context.get())
+            return [float(len(text))] * 1024
+
+    tokenizer = SimpleNamespace(tokenize=lambda text: text.split())
+    structured = SimpleNamespace(
+        inline={
+            "session_id": "session-1",
+            "timestamp": "2026-08-04T00:00:00+00:00",
+            "parent_type": "memcell",
+            "parent_id": "mem-1",
+            "sender_ids": "[u-00000000000000000000000000000000]",
+        },
+        sections={
+            "Content": "episode text",
+            "Subject": "subject",
+            "Fact": "fact text",
+        },
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1", structured=structured, content_sha256="sha"
+    )
+    monkeypatch.setattr(episode, "get_embedding_capability", lambda: Capability())
+    monkeypatch.setattr(atomic_fact, "get_embedding_capability", lambda: Capability())
+    episode_handler = object.__new__(EpisodeHandler)
+    episode_handler._deps = SimpleNamespace(tokenizer=tokenizer)
+    atomic_handler = object.__new__(AtomicFactHandler)
+    atomic_handler._deps = SimpleNamespace(tokenizer=tokenizer)
+    episode_row = asyncio.run(
+        episode_handler._build_row(
+            owner_id="u-00000000000000000000000000000000",
+            owner_type="user",
+            app_id="avibe",
+            project_id="p-00000000000000000000000000000000",
+            md_path="users/u/episodes/episode.md",
+            entry=entry,
+        )
+    )
+    fact_row = asyncio.run(
+        atomic_handler._build_row(
+            owner_id="u-00000000000000000000000000000000",
+            owner_type="user",
+            app_id="avibe",
+            project_id="p-00000000000000000000000000000000",
+            md_path="users/u/.atomic_facts/fact.md",
+            entry=entry,
+        )
+    )
+    assert episode_row.entry_id == fact_row.entry_id == "entry-1"
+    assert {context.stage for context in cascade_context} == {"cascade"}
+    assert {context.parent_id for context in cascade_context} == {"mem-1"}
+
+    # Execute the real client/provider methods after replacing their final
+    # network transports.  A boundary request is the only capture admission.
+    llm = OpenAICompatClient(
+        LLMConfig(
+            model="real-wheel-model",
+            api_key=SecretStr("test-key"),
+            base_url="https://example.invalid/v1",
+        )
+    )
+
+    async def chat_create(kwargs):
+        assert kwargs["model"] == "requested-model"
+        return SimpleNamespace(
+            content="answer",
+            model="real-wheel-model",
+            finish_reason="stop",
+            usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2),
+        )
+
+    monkeypatch.setattr(llm, "_chat_create", chat_create)
+    with patches.boundary_request():
+        response = asyncio.run(
+            llm.chat([ChatMessage(role="user", content="hello")], model="requested-model")
+        )
+    assert response.content == "answer"
+
+    # OME binds strategy execution in structlog contextvars.  The real
+    # patched transport must preserve that scope and let it override the HTTP
+    # boundary context when it is present.
+    tokens = bind_contextvars(strategy_name="reflect", run_id="run-1", attempt=2)
+    try:
+        with patches.boundary_request():
+            assert asyncio.run(
+                llm.chat(
+                    [ChatMessage(role="user", content="strategy")],
+                    model="requested-model",
+                )
+            ).content == "answer"
+    finally:
+        reset_contextvars(**tokens)
+
+    embedding = OpenAIEmbeddingProvider(
+        model="real-wheel-embedding",
+        api_key="test-key",
+        base_url="https://example.invalid/v1",
+        dim=2,
+        dimensions=2,
+    )
+
+    async def create_embedding(**kwargs):
+        assert kwargs["input"] == ["one"]
+        return SimpleNamespace(
+            data=[SimpleNamespace(embedding=[1.0, 2.0])],
+            usage=SimpleNamespace(prompt_tokens=1),
+        )
+
+    embedding._client = SimpleNamespace(
+        embeddings=SimpleNamespace(create=create_embedding)
+    )
+    with patches.boundary_request():
+        assert asyncio.run(embedding._embed_chunk(["one"])) == [[1.0, 2.0]]
+
+    assert [(call.kind, call.stage) for call in captured.calls] == [
+        ("llm", "boundary"),
+        ("llm", "strategy"),
+        ("embedding", "boundary"),
+    ]
+    strategy_call = captured.calls[1]
+    assert (
+        strategy_call.strategy_name,
+        strategy_call.run_id,
+        strategy_call.attempt,
+        strategy_call.request_id,
+    ) == ("reflect", "run-1", 2, None)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -96,8 +96,13 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
         async def close(self, *, timeout: float) -> None:
             events.append(("recorder-close", timeout))
 
+        @contextmanager
         def boundary_request(self):
-            raise AssertionError("guard not exercised in this test")
+            events.append("boundary-enter")
+            try:
+                yield
+            finally:
+                events.append("boundary-exit")
 
     handle = _Handle()
 
@@ -147,6 +152,54 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
         "everos-stop",
         ("recorder-close", 1.0),
     ]
+
+    class _Request:
+        def __init__(self, path: str, payload: dict[str, object]) -> None:
+            self.method = "POST"
+            self.url = SimpleNamespace(path=path)
+            self._body = json.dumps(payload).encode()
+
+        async def body(self) -> bytes:
+            return self._body
+
+    search_payload = {
+        "user_id": "u-11111111111111111111111111111111",
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "query": "profile",
+        "method": "hybrid",
+        "top_k": 1,
+        "include_profile": True,
+        "enable_llm_rerank": False,
+    }
+    get_payload = {
+        "user_id": "u-11111111111111111111111111111111",
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "memory_type": "profile",
+        "page": 1,
+        "page_size": 20,
+        "sort_by": "timestamp",
+        "sort_order": "desc",
+    }
+
+    async def exercise_guard() -> None:
+        async def call_next(request):
+            return request.url.path
+
+        assert (
+            await app.guard(
+                _Request("/api/v2/memory/search", search_payload), call_next
+            )
+            == "/api/v2/memory/search"
+        )
+        assert (
+            await app.guard(_Request("/api/v2/memory/get", get_payload), call_next)
+            == "/api/v2/memory/get"
+        )
+
+    asyncio.run(exercise_guard())
+    assert "boundary-enter" not in events
 
 
 def test_sidecar_projects_recorder_state_through_existing_health_response() -> None:
