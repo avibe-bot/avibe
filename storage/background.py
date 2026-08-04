@@ -696,6 +696,11 @@ def definition_resume_clear_columns(
     Lives here, next to the single UPDATE, because two doorways must agree on
     it: the Harness UI writes through ``set_definition_enabled`` while the CLI
     and supervisor write through ``core/watches.py``.
+
+    Anything a resume must NOT rewrite therefore cannot be one of these columns.
+    ``core.watches.DELIVERY_ACK_METADATA_KEY`` is the case in point: a waiter's
+    proof that its last report reached the user has to outlive the cycle history
+    that this clears.
     """
 
     if definition_type != "watch":

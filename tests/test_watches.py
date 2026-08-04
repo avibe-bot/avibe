@@ -23,6 +23,7 @@ from core.process_isolation import (
 )
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import (
+    DELIVERY_ACK_METADATA_KEY,
     LAST_DELIVERY_ENV,
     NO_EVENT_EXIT_CODE,
     NO_EVENT_MARKER,
@@ -3540,12 +3541,12 @@ def test_a_cycle_is_told_when_this_watch_last_had_a_report_delivered(tmp_path: P
 
     A waiter cannot observe its own delivery: its stdout reaches the supervisor only
     after the process exits, so a waiter that wants to advance its own cursors past a
-    reported event has to be told. What it is told is ``last_event_at``, stamped by
-    ``_commit_cycle_result`` in the same transaction as the follow-up hook -- so a
-    waiter that staged cursors alongside the value it saw can compare, and a CHANGED
-    value means its report was queued.
+    reported event has to be told. What it is told is a count of delivered reports,
+    bumped by ``_commit_cycle_result`` in the same transaction as the follow-up hook --
+    so a waiter that staged cursors alongside the value it saw can compare, and a
+    CHANGED value means its report was queued.
 
-    A durable stamp rather than a one-shot flag handed to the next cycle: it is still
+    A durable count rather than a one-shot flag handed to the next cycle: it is still
     correct after a restart, and for a ``once`` watch, whose one report is followed by
     no cycle at all until the user resumes it -- where a lost flag would replay an
     event that was delivered long ago. And it must NOT move on a quiet cycle, which
@@ -3608,16 +3609,85 @@ def test_a_cycle_is_told_when_this_watch_last_had_a_report_delivered(tmp_path: P
     assert told[2] == told[1], "a quiet cycle queued no hook; the stamp must not move"
 
 
-def test_the_cycle_environment_carries_the_watch_and_its_last_delivery() -> None:
-    """Both facts reach the waiter as environment variables, empty for never."""
-    assert _cycle_env(SimpleNamespace(id="wat_9", last_event_at=None)) == {
+def test_resuming_a_once_watch_keeps_what_it_already_delivered(tmp_path: Path) -> None:
+    """A resume clears the cycle history and NOT the delivery acknowledgement.
+
+    A ``once`` watch reports, retires, and is resumed by the user days later. That
+    resume deliberately clears ``last_event_at`` -- the resumed watch begins a distinct
+    cycle and its row must not claim an event it has not seen. But the waiter's staged
+    cursors are still on disk beside the count they were staged against, and if that
+    count resets too, the first cycle after the resume concludes its report never left
+    and reports the same activity all over again.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store"
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor="slack_C_resume_ack")
+    watch = store.add_watch(
+        name="Watch PR once",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=[sys.executable, "-c", "print('event')"],
+        shell_command=None,
+        prefix="PR activity.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    async def _one_event(watch_arg, *, timeout_seconds):  # noqa: ANN001
+        return _CycleResult(exit_code=0, stdout="review_comment #501", stderr="", timed_out=False)
+
+    service._run_cycle = _one_event  # type: ignore[method-assign]
+    asyncio.run(service._run_watch(watch.id))
+
+    reported = store.get_watch(watch.id)
+    assert reported is not None and not reported.enabled, "a once watch retires on its report"
+    delivered = _cycle_env(reported)[LAST_DELIVERY_ENV]
+    assert delivered == "1"
+
+    resumed = store.set_enabled(watch.id, True)
+    assert resumed.last_event_at is None, "the resume clears the cycle history it owns"
+    assert _cycle_env(resumed)[LAST_DELIVERY_ENV] == delivered
+    assert resumed.metadata["origin"] == "cli", "the ack rides along with the rest of the metadata"
+
+
+def test_the_cycle_environment_carries_the_watch_and_its_delivery_count() -> None:
+    """Both facts reach the waiter as environment variables, empty for never.
+
+    Metadata a writer never touched, or left as something other than a positive count,
+    reads as "nothing delivered yet" -- the direction that reports a staged event twice
+    rather than advancing past one that never left.
+    """
+    assert _cycle_env(SimpleNamespace(id="wat_9", metadata={})) == {
         WATCH_ID_ENV: "wat_9",
         LAST_DELIVERY_ENV: "",
     }
-    assert _cycle_env(SimpleNamespace(id="wat_9", last_event_at="2026-08-04T11:00:00+00:00")) == {
+    assert _cycle_env(SimpleNamespace(id="wat_9", metadata={DELIVERY_ACK_METADATA_KEY: 3})) == {
         WATCH_ID_ENV: "wat_9",
-        LAST_DELIVERY_ENV: "2026-08-04T11:00:00+00:00",
+        LAST_DELIVERY_ENV: "3",
     }
+    for broken in ("3", True, 0, -1, None, {"count": 3}):
+        assert _cycle_env(SimpleNamespace(id="wat_9", metadata={DELIVERY_ACK_METADATA_KEY: broken})) == {
+            WATCH_ID_ENV: "wat_9",
+            LAST_DELIVERY_ENV: "",
+        }
 
 
 def test_managed_watch_service_names_the_watch_in_the_cycle_environment(tmp_path: Path) -> None:

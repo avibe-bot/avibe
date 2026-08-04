@@ -70,15 +70,26 @@ NO_EVENT_SUMMARY_LOG_LIMIT = 1000
 # per-watch state on disk use it as the owner of that state, so two identically
 # configured watches cannot silently share one file.
 WATCH_ID_ENV = "AVIBE_WATCH_ID"
-# When this watch last had an event report durably queued as a follow-up, or empty
-# for never. A waiter cannot see delivery for itself -- its output only reaches the
-# service once the process has exited -- so a waiter that stages the cursors covering
-# a reported event records this value alongside them, and a later cycle that reads a
-# DIFFERENT value knows the report was delivered and the staged cursors are safe to
-# promote. It is ``last_event_at``, stamped in the same transaction as the follow-up
-# and therefore durable: the answer survives a restart, and survives a ``once`` watch
-# being resumed long after its one report, neither of which an in-memory flag does.
+# How many event reports of this watch have been durably queued as a follow-up, or
+# empty for none. A waiter cannot see delivery for itself -- its output only reaches
+# the service once the process has exited -- so a waiter that stages the cursors
+# covering a reported event records this value alongside them, and a later cycle that
+# reads a DIFFERENT value knows the report was delivered and the staged cursors are
+# safe to promote. The value is opaque to the waiter, which only ever compares it.
 LAST_DELIVERY_ENV = "AVIBE_WATCH_LAST_DELIVERY"
+#: The count behind that value, on the watch's own ``metadata``, bumped in the same
+#: transaction as the follow-up it acknowledges. Entry: a positive ``int``, absent
+#: until the first report is queued.
+#:
+#: Metadata rather than a lifecycle column because a delivery acknowledgement has a
+#: DIFFERENT LIFETIME from cycle history: ``definition_resume_clear_columns`` clears
+#: ``last_event_at`` when a ``once`` watch is resumed, correctly -- the resumed watch
+#: begins a distinct cycle and its row must not claim an event it has not seen yet --
+#: and a stamp that resets there tells the resumed waiter that the report it staged
+#: cursors for was never delivered, so it reports the same activity again. What the
+#: waiter needs is the one fact a resume must NOT rewrite: that the earlier report
+#: left. This count only ever moves forward, for the life of the watch.
+DELIVERY_ACK_METADATA_KEY = "delivered_reports"
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
@@ -190,6 +201,20 @@ class ManagedWatch:
             last_exit_code=(int(payload["last_exit_code"]) if payload.get("last_exit_code") is not None else None),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
+
+
+def _delivered_reports(watch: ManagedWatch) -> int:
+    """How many of this watch's event reports have been queued as a follow-up.
+
+    Anything that is not a positive ``int`` reads as none: a row from before the count
+    existed, or metadata some other writer corrupted. That direction is the safe one --
+    a waiter comparing against a count that went backwards reports its staged event a
+    second time, where one that went forwards would advance past activity it never
+    delivered.
+    """
+
+    value = watch.metadata.get(DELIVERY_ACK_METADATA_KEY)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
 def _missing_watch_cwd_error(watch: ManagedWatch) -> Optional[str]:
@@ -710,6 +735,12 @@ class ManagedWatchStore:
         watch.last_error = error
         if event_detected:
             watch.last_event_at = now
+            # A NEW dict: ``expect`` above was derived from the stored one and has to
+            # keep describing the row as it was read.
+            watch.metadata = {
+                **watch.metadata,
+                DELIVERY_ACK_METADATA_KEY: _delivered_reports(watch) + 1,
+            }
         if disable:
             watch.enabled = False
         watch.updated_at = _utc_now_iso()
@@ -807,11 +838,12 @@ def _cycle_env(watch: ManagedWatch) -> dict[str, str]:
     """What one waiter cycle is told about itself.
 
     The watch id lets a waiter own its on-disk state, so two identically configured
-    watches cannot silently share a state file. The last delivery stamp lets a waiter
-    that staged cursors for a reported event tell whether that report was delivered.
+    watches cannot silently share a state file. The delivery count lets a waiter that
+    staged cursors for a reported event tell whether that report was delivered.
     """
 
-    return {WATCH_ID_ENV: watch.id, LAST_DELIVERY_ENV: watch.last_event_at or ""}
+    delivered = _delivered_reports(watch)
+    return {WATCH_ID_ENV: watch.id, LAST_DELIVERY_ENV: str(delivered) if delivered else ""}
 
 
 class ManagedWatchService:
@@ -1424,9 +1456,11 @@ class ManagedWatchService:
                     prompt=_build_prompt(watch.message or watch.prefix, result.stdout),
                 ):
                     return
-                # ``last_event_at`` moved in the same transaction as the hook, so the
-                # report is durable and every later cycle can see that it was. Nothing
-                # to carry in memory: the next iteration re-reads the watch.
+                # The delivery count moved in the same transaction as the hook, so the
+                # report is durable and every later cycle can see that it was -- after a
+                # restart, and after a resume, which is the only reason it lives outside
+                # the lifecycle columns. Nothing to carry in memory: the next iteration
+                # re-reads the watch.
                 if watch.mode != "forever":
                     return
                 continue
