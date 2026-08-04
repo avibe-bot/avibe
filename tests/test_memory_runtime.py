@@ -4295,6 +4295,49 @@ def test_sidecar_start_failure_after_host_handoff_notifies_reaped(tmp_path: Path
     assert process._restart_task is None
 
 
+def test_sidecar_restart_releases_process_lock_while_host_handoff_waits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Stop wins while a restart waits for the controller-owned call-log lock."""
+
+    callback_entered = asyncio.Event()
+    release_callback = asyncio.Event()
+    launches = 0
+
+    async def before_start() -> None:
+        callback_entered.set()
+        await release_callback.wait()
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        before_start=before_start,
+    )
+    process._desired_running = True
+
+    async def start_locked() -> bool:
+        nonlocal launches
+        launches += 1
+        return True
+
+    monkeypatch.setattr(process, "_start_locked", start_locked)
+
+    async def run() -> None:
+        restarting = asyncio.create_task(process._restart_after(0))
+        await asyncio.wait_for(callback_entered.wait(), timeout=1)
+
+        # This models a callback already in flight when Stop begins. It must
+        # not retain the process lock while waiting on controller ownership.
+        await asyncio.wait_for(process.stop(), timeout=1)
+        release_callback.set()
+        await asyncio.wait_for(restarting, timeout=1)
+
+    asyncio.run(run())
+    assert launches == 0
+
+
 def test_fake_sidecar_failed_start_notifies_reaped_for_runtime_handoff() -> None:
     reaped = 0
 

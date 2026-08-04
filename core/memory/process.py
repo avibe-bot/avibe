@@ -169,6 +169,11 @@ class EverOSProcess:
                 # not erase the crash budget. Only observed health earns that
                 # reset, otherwise repeated settings saves could restart forever.
                 self._down = False
+        if not await self._await_before_start():
+            return False
+        async with self._lifecycle_lock:
+            if not self._desired_running or self.running or self._down or self._process is not None:
+                return self.running
             return await self._start_locked()
 
     async def stop(self) -> None:
@@ -284,7 +289,6 @@ class EverOSProcess:
             await self._ownership.reap()
             self._write_generated_config()
             self._remove_owned_socket()
-            await self._notify_before_start()
             child_env = self._child_environment()
             process = await asyncio.create_subprocess_exec(
                 str(self._python),
@@ -505,6 +509,16 @@ class EverOSProcess:
             await asyncio.sleep(delay_seconds)
             async with self._lifecycle_lock:
                 if not self._desired_running or self.running or self._down:
+                    return
+            if not await self._await_before_start():
+                return
+            async with self._lifecycle_lock:
+                if (
+                    not self._desired_running
+                    or self.running
+                    or self._down
+                    or self._process is not None
+                ):
                     return
                 await self._start_locked()
         except asyncio.CancelledError:
@@ -744,6 +758,21 @@ class EverOSProcess:
         result = callback()
         if inspect.isawaitable(result):
             await result
+
+    async def _await_before_start(self) -> bool:
+        """Run the host-ownership handoff without holding process lifecycle state."""
+
+        try:
+            await self._notify_before_start()
+            return True
+        except Exception:
+            logger.exception("EverOS sidecar pre-start callback failed")
+            async with self._lifecycle_lock:
+                if self._process is None and self._desired_running:
+                    self._starting = False
+                    self._record_start_failure_locked()
+            await self._notify_reaped()
+            return False
 
     async def _notify_reaped(self) -> None:
         callback = self._on_reaped
