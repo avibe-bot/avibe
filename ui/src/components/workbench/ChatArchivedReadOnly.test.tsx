@@ -3,6 +3,7 @@ import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
+import { Archive } from 'lucide-react';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
@@ -340,6 +341,51 @@ describe('read-only header withdraws the Show Page controls', () => {
     // The title is static text, not a click-to-edit button (round-two behaviour,
     // re-asserted here so the header render is checked as a whole).
     expect(countButtons(markup)).toBe(1); // just Back
+  });
+
+  it('withdraws the session ⋯ menu on a read-only header even if actions are passed', () => {
+    // useSessionActions already returns an empty list for a read-only session, so
+    // this pins the second half: pin / rename / fork / hide / archive are all
+    // refused server-side (409 archived / 403 reserved_session), so the header must
+    // not mount a trigger for them. The trigger is the only new button in the
+    // cluster, hence the same Back-only count as above.
+    const markup = render(
+      <ChatHeaderBar
+        session={session({ status: 'archived' })}
+        agents={[]}
+        defaultAgentName={null}
+        onPatch={async () => undefined}
+        onBack={() => undefined}
+        working={false}
+        showPageMode={false}
+        showPageBusy={false}
+        onToggleShowPage={() => undefined}
+        onPrepareShowPageLaunch={async () => false}
+        annotation={{
+          state: null,
+          iframeRef: { current: null },
+          handleIframeLoad: () => undefined,
+          enable: () => undefined,
+          disable: () => undefined,
+          setMode: () => undefined,
+        }}
+        readOnlyReason="archived"
+        sessionActions={[
+          {
+            id: 'archive',
+            group: 'lifecycle',
+            icon: Archive,
+            label: en.workbench.sessionArchive,
+            danger: true,
+            onSelect: () => undefined,
+          },
+        ]}
+      />,
+    );
+    expect(markup).toContain('Model Hub');
+    expect(markup).not.toContain(en.workbench.sessionActions);
+    expect(markup).not.toContain(en.workbench.sessionArchive);
+    expect(countButtons(markup)).toBe(1); // still just Back
   });
 });
 

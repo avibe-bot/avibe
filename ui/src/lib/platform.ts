@@ -17,6 +17,14 @@ export function isIosDevice(): boolean {
   );
 }
 
+// Apple keyboard conventions: ⌘ is the command modifier and shortcut labels use
+// the glyphs. Only affects how a chord is *displayed* and which modifier a
+// matcher prefers — never gates behavior.
+export function isApplePlatform(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Mac|iP(hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
+}
+
 // Launched from the Home Screen / installed as a PWA: no browser chrome.
 // ``navigator.standalone`` is Apple's proprietary signal; the display-mode
 // media query is the cross-browser one.
