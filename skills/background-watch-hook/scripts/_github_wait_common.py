@@ -29,6 +29,10 @@ NO_EVENT_MARKER = "avibe-watch: no-event"
 # per-watch state on disk should own that state by this id, so two identically
 # configured watches cannot silently share one file. Absent for a manual run.
 WATCH_ID_ENV = "AVIBE_WATCH_ID"
+# Socket timeout for one GitHub request. Callers that have their own deadline need
+# this to size a request budget: a waiter with 20s left cannot afford a fetch that
+# is allowed to block for 30.
+REQUEST_TIMEOUT_SECONDS = 30
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 NOT_MODIFIED_STATUS = 304
 # GitHub compares timestamps at one-second resolution, and a bot that posts a
@@ -139,7 +143,7 @@ def github_get(url: str, token: str | None, *, cache: ResponseCache | None = Non
         request.add_header("If-None-Match", etag)
 
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
             if cache is not None:
                 cache.downloaded += 1

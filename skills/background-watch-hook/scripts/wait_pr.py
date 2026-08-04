@@ -31,6 +31,7 @@ from _github_wait_common import (  # noqa: E402
     list_paginated_with_count,
     max_id,
     min_interval_for_unauthenticated,
+    REQUEST_TIMEOUT_SECONDS,
     RETRY_EXIT_CODE,
     requests_per_poll,
     ResponseCache,
@@ -813,6 +814,17 @@ def _saved_str(saved: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _deliver(output: str) -> None:
+    """Hand the report to the supervisor, and make sure it has left this process.
+
+    The cursors covering a reported event are committed only after this returns, so
+    the report must be out of our own buffers first.
+    """
+
+    print(output)
+    sys.stdout.flush()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """The waiter's CLI surface, separate from main() so it can be inspected directly."""
 
@@ -1133,13 +1145,17 @@ def main() -> int:
             for _round in range(SETTLE_MAX_ROUNDS):
                 # The batch is already worth a turn, so waiting for the rest of it must
                 # not push the waiter past its own deadline: `vibe watch` kills the
-                # process on timeout and the report would be lost with it.
+                # process on timeout and the report would be lost with it. The sleep is
+                # only half the cost — the re-poll behind it is several sequential
+                # requests, each free to block for REQUEST_TIMEOUT_SECONDS — so both
+                # have to fit in what is left, not just the sleep.
                 if args.timeout > 0:
                     remaining = args.timeout - (time.monotonic() - start)
-                    if remaining <= settle_seconds:
+                    repoll_budget = max(1, requests_per_poll_count) * REQUEST_TIMEOUT_SECONDS
+                    if remaining <= settle_seconds + repoll_budget:
                         print(
-                            "Settle window would outlast --timeout; reporting the batch "
-                            "seen so far.",
+                            "Settle window plus its re-poll would outlast --timeout; "
+                            "reporting the batch seen so far.",
                             file=sys.stderr,
                         )
                         return best
@@ -1188,10 +1204,11 @@ def main() -> int:
             pr_status,
         ) = initial_result
         _advance_since()
-        # Persisted even with nothing to report: the baseline this cycle established
-        # is exactly what the next cycle must resume from.
-        _persist_pr_state()
-        if initial_output is not None:
+        if initial_output is None:
+            # Persisted even with nothing to report: the baseline this cycle
+            # established is exactly what the next cycle must resume from.
+            _persist_pr_state()
+        else:
             _write_cursor_output(
                 args.cursor_output,
                 review_cursor=review_cursor,
@@ -1200,7 +1217,13 @@ def main() -> int:
                 reaction_cursor=reaction_cursor,
                 pr_status=pr_status,
             )
-            print(initial_output)
+            _deliver(initial_output)
+            # Only now are the cursors that cover this event committed. `vibe watch`
+            # builds the follow-up from a completed process, so a kill between the
+            # two costs one repeated report next cycle, while committing first
+            # dropped the event for good: the saved cursors had moved past it and no
+            # follow-up ever carried it.
+            _persist_pr_state()
             return 0
     else:
         pr_cursor = since_pr_id if since_pr_id is not None else (0 if args.catch_up else max_id(state["pull_requests"]))
@@ -1214,17 +1237,23 @@ def main() -> int:
             pr_cursor=pr_cursor,
             event_limit=args.event_limit,
         )
-        _write_state_file(
-            args.state_file,
-            repo=args.repo,
-            pr_number=None,
-            watch_identity=watch_identity,
-            watch_id=watch_id,
-            pr_cursor=pr_cursor,
-        )
-        if initial_output is not None:
+        def _persist_new_pr_state() -> None:
+            _write_state_file(
+                args.state_file,
+                repo=args.repo,
+                pr_number=None,
+                watch_identity=watch_identity,
+                watch_id=watch_id,
+                pr_cursor=pr_cursor,
+            )
+
+        if initial_output is None:
+            _persist_new_pr_state()
+        else:
             _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
-            print(initial_output)
+            _deliver(initial_output)
+            # Same ordering as the PR path: report first, commit after.
+            _persist_new_pr_state()
             return 0
 
     while True:
@@ -1316,10 +1345,11 @@ def main() -> int:
                 pr_status,
             ) = result
             _advance_since()
-            # Cursors also move when everything new was filtered out, and that
-            # progress has to survive the cycle or the next one re-examines it.
-            _persist_pr_state()
             if output is None:
+                # Cursors also move when everything new was filtered out, and that
+                # progress has to survive the cycle or the next one re-examines it.
+                # Nothing is being reported, so there is no delivery to wait for.
+                _persist_pr_state()
                 continue
 
             _write_cursor_output(
@@ -1330,6 +1360,7 @@ def main() -> int:
                 reaction_cursor=reaction_cursor,
                 pr_status=pr_status,
             )
+            commit = _persist_pr_state
         else:
             output, pr_cursor = _render_new_pull_requests(
                 repo=args.repo,
@@ -1337,20 +1368,15 @@ def main() -> int:
                 pr_cursor=pr_cursor,
                 event_limit=args.event_limit,
             )
-            _write_state_file(
-                args.state_file,
-                repo=args.repo,
-                pr_number=None,
-                watch_identity=watch_identity,
-                watch_id=watch_id,
-                pr_cursor=pr_cursor,
-            )
             if output is None:
+                _persist_new_pr_state()
                 continue
             _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
+            commit = _persist_new_pr_state
 
         print(cache.summary(), file=sys.stderr)
-        print(output)
+        _deliver(output)
+        commit()
         return 0
 
 

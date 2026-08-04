@@ -2399,7 +2399,183 @@ def test_main_skips_the_settle_window_that_would_outlast_the_timeout(tmp_path) -
 
     assert rc == 0
     assert "review_comment #501" in stdout.getvalue()
-    assert "Settle window would outlast --timeout" in stderr.getvalue()
+    assert "Settle window plus its re-poll would outlast --timeout" in stderr.getvalue()
     # No settle sleep, and no settle re-poll: one fetch is the whole run.
     fake_sleep.assert_not_called()
     assert len(fetches) == 1
+
+
+def test_main_skips_the_settle_window_when_only_its_sleep_would_fit(tmp_path) -> None:
+    """The sleep is only half the settle cost; the re-poll behind it needs room too.
+
+    A supervisor and waiter that share a deadline would otherwise be killed mid-fetch,
+    with the already-detected batch still unreported.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_cursor": 0,
+                "review_comment_cursor": 500,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+                "pr_status": "open",
+                "viewer_login": "qiqi",
+                "token_fingerprint": module._token_fingerprint("token"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    fetches: list[object] = []
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        fetches.append(kwargs)
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    # A 5s settle fits in the 20s left, but the request budget behind it does not.
+    assert module.REQUEST_TIMEOUT_SECONDS > 5
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module.time, "sleep") as fake_sleep,
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--settle",
+                "5",
+                "--timeout",
+                "20",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert "review_comment #501" in stdout.getvalue()
+    fake_sleep.assert_not_called()
+    assert len(fetches) == 1
+
+
+def _stdout_at_persist(module, stdout: io.StringIO) -> list[str]:
+    """Record what had already been written to stdout each time state was saved."""
+
+    snapshots: list[str] = []
+    real_write = module._write_state_file
+
+    def _spy(*args, **kwargs):
+        snapshots.append(stdout.getvalue())
+        return real_write(*args, **kwargs)
+
+    module._write_state_file = _spy
+    return snapshots
+
+
+def test_main_commits_cursors_only_after_the_event_is_reported(tmp_path) -> None:
+    """A reported event's cursors move after the report, not before it.
+
+    `vibe watch` builds the follow-up from a completed process, so a kill between
+    the two orderings has opposite costs: commit-then-report loses the event for
+    good, because the saved cursors have moved past it and no follow-up carried it,
+    while report-then-commit costs at most one repeated report next cycle.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_cursor": 0,
+                "review_comment_cursor": 500,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+                "pr_status": "open",
+                "viewer_login": "qiqi",
+                "token_fingerprint": module._token_fingerprint("token"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        return _pr_state(review_comments=[_review_comment(501)]), 1
+
+    stdout = io.StringIO()
+    snapshots = _stdout_at_persist(module, stdout)
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert "review_comment #501" in stdout.getvalue()
+    # One save, and the report was already out when it happened.
+    assert len(snapshots) == 1
+    assert "review_comment #501" in snapshots[0]
+    assert json.loads(state_file.read_text(encoding="utf-8"))["review_comment_cursor"] == 501
+
+
+def test_main_new_prs_commits_the_cursor_only_after_the_event_is_reported(tmp_path) -> None:
+    """The new-PR path has the same ordering."""
+    module = _load_module()
+    state_file = tmp_path / "new-prs.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": None,
+                "pr_cursor": 400,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_fetch_new_pr_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
+        return {"pull_requests": [_new_pr(400, 157), _new_pr(410, 158)]}, 1
+
+    stdout = io.StringIO()
+    snapshots = _stdout_at_persist(module, stdout)
+    with (
+        patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--new-prs", "--state-file", str(state_file)],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert "pull_request #158" in stdout.getvalue()
+    assert len(snapshots) == 1
+    assert "pull_request #158" in snapshots[0]
+    assert json.loads(state_file.read_text(encoding="utf-8"))["pr_cursor"] == 410
