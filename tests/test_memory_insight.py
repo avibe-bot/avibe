@@ -333,6 +333,22 @@ def test_cursor_is_canonical_and_orders_duplicate_timestamps(
             reader.list_entries((ALICE, PROJECT), cursor, 2)
 
 
+def test_cursor_accepts_production_length_provider_message_ids(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    production_id = f"m_src--{'a' * 64}--e1_1722816000000_000"
+    _insert_memcell(insight_paths, production_id, ALICE, timestamp_ms=3_000)
+    _insert_memcell(insight_paths, "mc_older", ALICE, timestamp_ms=2_000)
+    reader = MemoryInsightReader(insight_paths)
+
+    first = reader.list_entries((ALICE, PROJECT), None, 1)
+    assert first["entries"][0]["memcell_id"] == production_id
+    assert isinstance(first["next_cursor"], str)
+    assert 88 < len(first["next_cursor"]) <= 256
+    second = reader.list_entries((ALICE, PROJECT), first["next_cursor"], 1)
+    assert [entry["memcell_id"] for entry in second["entries"]] == ["mc_older"]
+
+
 def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsightPaths) -> None:
     message_id = "m_session-a_5000_000"
     _insert_memcell(

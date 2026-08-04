@@ -17,7 +17,7 @@ from .recorder import _scrub_json, _scrub_text
 MemoryReadScope: TypeAlias = tuple[str, str]
 
 _APP_ID = "avibe"
-_MAX_CURSOR_BYTES = 88
+_MAX_CURSOR_BYTES = 256
 _MAX_MEMCELL_ID_BYTES = 256
 _MAX_DETAIL_CALLS = 20
 _MAX_DETAIL_RUNS = 50
