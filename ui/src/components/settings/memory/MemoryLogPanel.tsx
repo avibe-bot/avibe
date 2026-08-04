@@ -468,6 +468,38 @@ const MemoryLogDetail: React.FC<{
   );
 };
 
+export const MemoryRecorderFaultBanner: React.FC<{
+  status: MemoryStatus | null;
+  onRestartRuntime: () => void;
+  restarting: boolean;
+  onClearAll: () => void;
+}> = ({ status, onRestartRuntime, restarting, onClearAll }) => {
+  const { t } = useTranslation();
+  const recorderFault = status?.recorder?.state === 'degraded';
+  const corrupt = recorderFault && status?.recorder?.reason === 'call_log_corrupt';
+  if (!recorderFault) return null;
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[12px]">
+      <span className="flex min-w-0 items-center gap-2 text-foreground">
+        <AlertTriangle className="size-4 shrink-0 text-gold" />
+        {corrupt ? t('memory.log.recorderCorrupt') : t('memory.log.recorderDegraded')}
+      </span>
+      {corrupt ? (
+        <Button variant="destructive" size="xs" onClick={onClearAll}>
+          <Trash2 />
+          {t('memory.log.clearAction')}
+        </Button>
+      ) : (
+        <Button variant="secondary" size="xs" onClick={onRestartRuntime} disabled={restarting}>
+          {restarting ? <Loader2 className="animate-spin" /> : <RotateCcw />}
+          {t('memory.log.restartAction')}
+        </Button>
+      )}
+    </div>
+  );
+};
+
 export const MemoryLogPanel: React.FC<{
   enabled: boolean;
   loggingEnabled: boolean;
@@ -525,8 +557,6 @@ export const MemoryLogPanel: React.FC<{
     );
   }
 
-  const recorderFault = status?.recorder?.state === 'degraded';
-  const corrupt = recorderFault && status?.recorder?.reason === 'call_log_corrupt';
   const openDetail = (memcellId: string) => {
     setSelected(memcellId);
     void detailRead.reload(memcellId);
@@ -540,25 +570,12 @@ export const MemoryLogPanel: React.FC<{
           {t('memory.log.loggingOff')}
         </div>
       ) : null}
-      {recorderFault ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[12px]">
-          <span className="flex min-w-0 items-center gap-2 text-foreground">
-            <AlertTriangle className="size-4 shrink-0 text-gold" />
-            {corrupt ? t('memory.log.recorderCorrupt') : t('memory.log.recorderDegraded')}
-          </span>
-          {corrupt ? (
-            <Button variant="destructive" size="xs" onClick={onClearAll}>
-              <Trash2 />
-              {t('memory.log.clearAction')}
-            </Button>
-          ) : (
-            <Button variant="secondary" size="xs" onClick={onRestartRuntime} disabled={restarting}>
-              {restarting ? <Loader2 className="animate-spin" /> : <RotateCcw />}
-              {t('memory.log.restartAction')}
-            </Button>
-          )}
-        </div>
-      ) : null}
+      <MemoryRecorderFaultBanner
+        status={status}
+        onRestartRuntime={onRestartRuntime}
+        restarting={restarting}
+        onClearAll={onClearAll}
+      />
       {selected ? (
         detailRead.loading && !selectedDetail ? (
           <div className="flex items-center gap-2 px-1 py-5 text-sm text-muted">

@@ -8,7 +8,7 @@ import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { SegmentedRadio } from '../ui/segmented';
 import { MemoryProfilePanel } from './memory/MemoryProfilePanel';
-import { MemoryLogPanel } from './memory/MemoryLogPanel';
+import { MemoryLogPanel, MemoryRecorderFaultBanner } from './memory/MemoryLogPanel';
 import { MemorySearchPanel } from './memory/MemorySearchPanel';
 import { MemorySettingsPanel } from './memory/MemorySettingsPanel';
 import { MemoryStatusPanel } from './memory/MemoryStatusPanel';
@@ -205,6 +205,14 @@ export const SettingsMemoryPage: React.FC = () => {
       title={t('memory.title')}
       subtitle={t('memory.subtitle')}
     >
+      {!remoteUnavailable && settings?.enabled === false ? (
+        <MemoryRecorderFaultBanner
+          status={status}
+          onRestartRuntime={() => void restartEngine()}
+          restarting={restarting}
+          onClearAll={() => setClearOpen(true)}
+        />
+      ) : null}
       {remoteUnavailable ? (
         <div className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-10 text-center">
           <ShieldAlert className="size-6 text-muted" />

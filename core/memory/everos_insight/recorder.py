@@ -104,6 +104,10 @@ _POSIX_PATH_RE = re.compile(
 _WINDOWS_PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>]+")
 
 
+class _CallLogIncompatibleError(RuntimeError):
+    """The existing database requires Clear before this version can use it."""
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderCallInput:
     id: str
@@ -760,6 +764,8 @@ def _call_log_size_bytes(db_path: Path) -> int:
 
 
 def _is_corruption(error: BaseException) -> bool:
+    if isinstance(error, _CallLogIncompatibleError):
+        return True
     code = getattr(error, "sqlite_errorcode", None)
     if isinstance(code, int) and code & 0xFF in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
         return True
@@ -778,7 +784,7 @@ def _database_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
         _validate_private_database_files(db_path)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version not in {0, 1}:
-            raise RuntimeError(f"Unsupported call-log schema version: {version}")
+            raise _CallLogIncompatibleError(f"Unsupported call-log schema version: {version}")
         conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
         if conn.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
             raise RuntimeError("Call-log database does not use incremental auto-vacuum")

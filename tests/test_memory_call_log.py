@@ -1069,3 +1069,21 @@ async def test_corrupt_call_log_stays_degraded_and_is_never_recreated(tmp_path) 
     assert handle.health == {"state": "degraded", "reason": "call_log_corrupt"}
     assert db_path.read_bytes() == corrupt_bytes
     assert sorted(path.name for path in db_path.parent.iterdir()) == [db_path.name]
+
+
+async def test_unsupported_call_log_schema_is_clear_only_and_never_recreated(tmp_path) -> None:
+    db_path = _private_db_path(tmp_path)
+    initialize_call_log(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 2")
+
+    assert maintain_call_log(db_path) == "call_log_corrupt"
+    assert maintain_call_log(db_path) == "call_log_corrupt"
+
+    handle = RecorderHandle(db_path)
+    handle.start()
+    handle.submit(_call())
+    await handle.close()
+    assert handle.health == {"state": "degraded", "reason": "call_log_corrupt"}
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
