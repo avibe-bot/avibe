@@ -55,6 +55,7 @@ from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_work import (
     RuntimeWorkLane,
     RuntimeWorkRegistrationToken,
+    RuntimeWorkSupervisor,
 )
 from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
@@ -94,8 +95,10 @@ from storage.models import (
     agent_events,
     agent_runs,
     agent_sessions,
+    metadata,
     messages,
     run_definitions,
+    vault_requests,
 )
 from storage.pagination import PageRequest
 from storage.session_activities import SQLiteSessionActivityStore
@@ -1559,6 +1562,84 @@ def test_hfr_166_activity_scan_never_sleeps_ahead_of_due_runtime() -> None:
     assert [item.partition_key for item in items] == ["claude\x1fb-due"]
     assert has_more is False
     assert scheduled == [(RuntimeWorkLane.ACTIVITY_OUTPUTS, 30.0)]
+
+
+def test_hfr_165_vault_scan_arms_exact_pending_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine = create_sqlite_engine()
+    metadata.create_all(engine)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=20)
+    with engine.begin() as conn:
+        conn.execute(
+            vault_requests.insert().values(
+                id="vrq_future",
+                request_type="sign",
+                status="pending",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                expires_at=expires_at.isoformat(),
+            )
+        )
+
+    scheduled: list[tuple[RuntimeWorkLane, float]] = []
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    service._schedule_runtime_work_wake = (  # type: ignore[method-assign]
+        lambda lane, delay: scheduled.append((lane, delay))
+    )
+    handler = scheduled_tasks._ScheduledRuntimeWorkHandler(
+        service,
+        RuntimeWorkLane.VAULT_CALLBACKS,
+    )
+
+    items, has_more = handler.scan(
+        limit=1,
+        occupied=frozenset(),
+        cursor=None,
+    )
+
+    assert items == []
+    assert has_more is False
+    assert len(scheduled) == 1
+    lane, delay = scheduled[0]
+    assert lane is RuntimeWorkLane.VAULT_CALLBACKS
+    assert 0 < delay <= 20
+
+
+@pytest.mark.anyio
+async def test_hfr_166_activity_lane_lives_for_the_controller_generation(
+    tmp_path: Path,
+) -> None:
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    controller = SimpleNamespace(
+        runtime_work_supervisor=supervisor,
+        platform_settings_managers={},
+        agent_service=SimpleNamespace(activities=None, agents={}),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+
+    [token] = service.register_controller_runtime_work_lanes()
+    assert token.lane is RuntimeWorkLane.ACTIVITY_OUTPUTS
+    await supervisor.activate()
+    assert await supervisor.run_in_partition(
+        RuntimeWorkLane.ACTIVITY_OUTPUTS,
+        "claude\x1fruntime-a",
+        lambda: asyncio.sleep(0, result="delivered"),
+    ) == "delivered"
+
+    assert service._begin_runtime_work_unregistration() is None
+    registration = supervisor._registrations[RuntimeWorkLane.ACTIVITY_OUTPUTS]
+    assert registration.live is True
+    await supervisor.stop()
 
 
 def test_reconcile_jobs_skips_invalid_tasks_and_keeps_valid_jobs(tmp_path: Path) -> None:
@@ -9239,38 +9320,41 @@ def test_hfr_164_hfr_165_service_restart_joins_only_its_harness_lane_generations
         service = ScheduledTaskService(controller=controller)
         service.scheduler = _StubScheduler()
         service.start()
-        expected_harness = {
+        expected_service_lanes = {
             RuntimeWorkLane.TASK_DEFINITIONS,
             RuntimeWorkLane.REQUESTS,
             RuntimeWorkLane.RUN_CALLBACKS,
             RuntimeWorkLane.VAULT_CALLBACKS,
-            RuntimeWorkLane.ACTIVITY_OUTPUTS,
             RuntimeWorkLane.FAILURE_NOTICES,
             RuntimeWorkLane.STALE_RUNS,
         }
-        assert set(supervisor.current) == {
+        expected_controller_lanes = {
             RuntimeWorkLane.SESSION_DELIVERIES,
-            *expected_harness,
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+        }
+        assert set(supervisor.current) == {
+            *expected_controller_lanes,
+            *expected_service_lanes,
         }
         assert service._reconcile_task is None
 
         await service.stop()
-        assert set(supervisor.current) == {RuntimeWorkLane.SESSION_DELIVERIES}
-        assert set(supervisor.unregistered) == expected_harness
+        assert set(supervisor.current) == expected_controller_lanes
+        assert set(supervisor.unregistered) == expected_service_lanes
 
         for expected_generation in (2, 3):
             service.scheduler = _StubScheduler()
             service.start()
             assert set(supervisor.current) == {
-                RuntimeWorkLane.SESSION_DELIVERIES,
-                *expected_harness,
+                *expected_controller_lanes,
+                *expected_service_lanes,
             }
             assert all(
                 supervisor.generations[lane] == expected_generation
-                for lane in expected_harness
+                for lane in expected_service_lanes
             )
             await service.stop()
-            assert set(supervisor.current) == {RuntimeWorkLane.SESSION_DELIVERIES}
+            assert set(supervisor.current) == expected_controller_lanes
 
     asyncio.run(_exercise())
 

@@ -29,6 +29,7 @@ _T = TypeVar("_T")
 _DEFAULT_RECONCILE_INTERVAL_SECONDS = 30.0
 _DEFAULT_LANE_CAPACITY = 4
 _DEFAULT_SCAN_PAGE_SIZE = 32
+_DEFAULT_SCAN_CONTINUATION_PAGES = 8
 _DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 _DEFAULT_OVERDUE_SECONDS = 30.0
 
@@ -86,6 +87,7 @@ class _Registration:
     workers: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
     worker_started_at: dict[str, float] = field(default_factory=dict)
     backoff_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    scan_continuation_task: asyncio.Task[None] | None = None
     scan_started_at: float | None = None
     scan_cursor: str | None = None
     rewind_requested: bool = False
@@ -118,6 +120,7 @@ class RuntimeWorkSupervisor:
         reconcile_interval: float = _DEFAULT_RECONCILE_INTERVAL_SECONDS,
         lane_capacity: int = _DEFAULT_LANE_CAPACITY,
         scan_page_size: int = _DEFAULT_SCAN_PAGE_SIZE,
+        scan_continuation_pages: int = _DEFAULT_SCAN_CONTINUATION_PAGES,
         retry_backoff: float = _DEFAULT_RETRY_BACKOFF_SECONDS,
         retry_wait: Callable[[float], Awaitable[None]] | None = None,
         reconcile_wait: Callable[[float], Awaitable[None]] | None = None,
@@ -128,6 +131,7 @@ class RuntimeWorkSupervisor:
         self._reconcile_interval = max(0.001, float(reconcile_interval))
         self._lane_capacity = max(1, int(lane_capacity))
         self._scan_page_size = max(1, int(scan_page_size))
+        self._scan_continuation_pages = max(1, int(scan_continuation_pages))
         self._retry_backoff = max(0.001, float(retry_backoff))
         self._retry_wait = retry_wait or asyncio.sleep
         self._reconcile_wait = reconcile_wait or asyncio.sleep
@@ -217,6 +221,10 @@ class RuntimeWorkSupervisor:
             backoff.cancel()
         if backoffs:
             await asyncio.gather(*backoffs, return_exceptions=True)
+        continuation = registration.scan_continuation_task
+        if continuation is not None:
+            continuation.cancel()
+            await asyncio.gather(continuation, return_exceptions=True)
         if self._registrations.get(registration.token.lane) is registration:
             self._registrations.pop(registration.token.lane, None)
 
@@ -564,83 +572,123 @@ class RuntimeWorkSupervisor:
         while registration.live and not self._stopping:
             await registration.event.wait()
             registration.event.clear()
-            if (
-                not registration.live
-                or self._stopping
-                or not self._active
-            ):
-                continue
-            if not self._owns_service_instance():
-                self._stop_for_lost_lease()
-                return
-            capacity = self._lane_capacity - len(registration.workers)
-            if capacity <= 0:
-                continue
-            occupied = frozenset(
-                (*registration.workers, *registration.backoff_tasks)
-            )
-            scan_cursor = (
-                None if registration.rewind_requested else registration.scan_cursor
-            )
-            registration.rewind_requested = False
-            try:
-                registration.scan_started_at = self._monotonic()
-                try:
-                    items, has_more = await self.run_sync(
-                        partial(
-                            registration.handler.scan,
-                            limit=min(capacity, self._scan_page_size),
-                            occupied=occupied,
-                            cursor=scan_cursor,
-                        )
-                    )
-                finally:
-                    registration.scan_started_at = None
-            except Exception:
-                logger.exception(
-                    "Runtime work scan failed for lane=%s generation=%s",
-                    registration.token.lane.value,
-                    registration.token.generation,
-                )
-                if registration.live and not self._stopping:
-                    await self._retry_wait(self._retry_backoff)
-                    if registration.live and self._active and not self._stopping:
-                        registration.event.set()
-                continue
-            if not registration.live or self._stopping:
-                continue
-            if not self._owns_service_instance():
-                self._stop_for_lost_lease()
-                return
-            if items:
-                last_cursor = str(
-                    items[-1].cursor_key or items[-1].partition_key or ""
-                ).strip()
-                if last_cursor:
-                    registration.scan_cursor = last_cursor
-            elif registration.scan_cursor is not None and not has_more:
-                # The durable keyset reached its end. Wrap exactly once so old
-                # stale observations can be retried without pinning later keys.
-                registration.scan_cursor = None
-                registration.event.set()
-            for item in items:
-                partition = str(item.partition_key or "").strip()
+            pages_remaining = self._scan_continuation_pages
+            while pages_remaining > 0:
                 if (
-                    not partition
-                    or partition in registration.workers
-                    or partition in registration.backoff_tasks
+                    not registration.live
+                    or self._stopping
+                    or not self._active
                 ):
-                    continue
-                task = asyncio.create_task(
-                    self._run_item(registration, item),
-                    name=(
-                        f"runtime-work:{registration.token.lane.value}:"
-                        f"{partition}"
-                    ),
+                    break
+                if not self._owns_service_instance():
+                    self._stop_for_lost_lease()
+                    return
+                capacity = self._lane_capacity - len(registration.workers)
+                if capacity <= 0:
+                    break
+                occupied = frozenset(
+                    (*registration.workers, *registration.backoff_tasks)
                 )
-                registration.workers[partition] = task
-                registration.worker_started_at[partition] = self._monotonic()
-            if has_more and len(registration.workers) < self._lane_capacity:
+                scan_cursor = (
+                    None if registration.rewind_requested else registration.scan_cursor
+                )
+                registration.rewind_requested = False
+                try:
+                    registration.scan_started_at = self._monotonic()
+                    try:
+                        items, has_more = await self.run_sync(
+                            partial(
+                                registration.handler.scan,
+                                limit=min(capacity, self._scan_page_size),
+                                occupied=occupied,
+                                cursor=scan_cursor,
+                            )
+                        )
+                    finally:
+                        registration.scan_started_at = None
+                except Exception:
+                    logger.exception(
+                        "Runtime work scan failed for lane=%s generation=%s",
+                        registration.token.lane.value,
+                        registration.token.generation,
+                    )
+                    if registration.live and not self._stopping:
+                        await self._retry_wait(self._retry_backoff)
+                        if registration.live and self._active and not self._stopping:
+                            registration.event.set()
+                    break
+                if not registration.live or self._stopping:
+                    break
+                if not self._owns_service_instance():
+                    self._stop_for_lost_lease()
+                    return
+                page_advanced = False
+                if items:
+                    last_cursor = str(
+                        items[-1].cursor_key or items[-1].partition_key or ""
+                    ).strip()
+                    if last_cursor:
+                        page_advanced = last_cursor != scan_cursor
+                        registration.scan_cursor = last_cursor
+                elif registration.scan_cursor is not None and not has_more:
+                    # Reset for the next real wake. Immediately scanning from the
+                    # beginning would spin on occupied rows until their owner exits.
+                    registration.scan_cursor = None
+                for item in items:
+                    partition = str(item.partition_key or "").strip()
+                    if (
+                        not partition
+                        or partition in registration.workers
+                        or partition in registration.backoff_tasks
+                    ):
+                        continue
+                    task = asyncio.create_task(
+                        self._run_item(registration, item),
+                        name=(
+                            f"runtime-work:{registration.token.lane.value}:"
+                            f"{partition}"
+                        ),
+                    )
+                    registration.workers[partition] = task
+                    registration.worker_started_at[partition] = self._monotonic()
+                if not has_more or len(registration.workers) >= self._lane_capacity:
+                    break
+                if not page_advanced:
+                    # A broken/non-keyset handler cannot advance itself. A later
+                    # durable wake or reconciliation can retry without a hot loop.
+                    break
+                # Continue synchronously only while this wake's bounded raw-page
+                # budget remains. Partition admission may be coarser than the
+                # durable row cursor, so occupied duplicates must not hide a
+                # later partition, but they also must not create an unbounded
+                # same-tick scan loop.
+                pages_remaining -= 1
+                if pages_remaining <= 0:
+                    self._start_scan_continuation(registration)
+                    break
+
+    def _start_scan_continuation(self, registration: _Registration) -> None:
+        existing = registration.scan_continuation_task
+        if existing is not None and not existing.done():
+            return
+        registration.scan_continuation_task = asyncio.create_task(
+            self._finish_scan_continuation(registration),
+            name=(
+                f"runtime-work-scan-continuation:"
+                f"{registration.token.lane.value}"
+            ),
+        )
+
+    async def _finish_scan_continuation(
+        self,
+        registration: _Registration,
+    ) -> None:
+        try:
+            await self._retry_wait(self._retry_backoff)
+        finally:
+            if registration.scan_continuation_task is asyncio.current_task():
+                registration.scan_continuation_task = None
+            if registration.live and self._active and not self._stopping:
                 registration.event.set()
 
     async def _run_item(

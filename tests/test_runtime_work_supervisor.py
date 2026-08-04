@@ -870,6 +870,7 @@ async def test_hfr_158_occupied_page_cannot_hide_a_later_partition() -> None:
         reconcile_interval=3600,
         lane_capacity=2,
         scan_page_size=2,
+        scan_continuation_pages=16,
     )
     supervisor.register(RuntimeWorkLane.REQUESTS, handler)
     await supervisor.activate()
@@ -885,6 +886,137 @@ async def test_hfr_158_occupied_page_cannot_hide_a_later_partition() -> None:
     supervisor.notify(RuntimeWorkLane.REQUESTS)
     await asyncio.wait_for(later_started.wait(), 1)
     assert scans >= 9
+    release_live.set()
+    await live
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_158_occupied_page_without_cursor_progress_does_not_spin() -> None:
+    live_entered = asyncio.Event()
+    release_live = asyncio.Event()
+    scanned_twice = threading.Event()
+    scans = 0
+
+    class _RepeatedOccupiedPage(RuntimeWorkHandler):
+        ready = False
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            nonlocal scans
+            del limit, occupied, cursor
+            if not self.ready:
+                return [], False
+            scans += 1
+            if scans >= 2:
+                scanned_twice.set()
+            return [
+                RuntimeWorkItem("session-a", 0, cursor_key="00"),
+                RuntimeWorkItem("session-a", 1, cursor_key="01"),
+            ], True
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            raise AssertionError(item)
+
+    async def live_owner() -> None:
+        live_entered.set()
+        await release_live.wait()
+
+    handler = _RepeatedOccupiedPage()
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=2,
+        scan_page_size=2,
+    )
+    supervisor.register(RuntimeWorkLane.REQUESTS, handler)
+    await supervisor.activate()
+    live = asyncio.create_task(
+        supervisor.run_in_partition(
+            RuntimeWorkLane.REQUESTS,
+            "session-a",
+            live_owner,
+        )
+    )
+    await asyncio.wait_for(live_entered.wait(), 1)
+    handler.ready = True
+    supervisor.notify(RuntimeWorkLane.REQUESTS)
+    assert await asyncio.to_thread(scanned_twice.wait, 1)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert scans == 2
+
+    release_live.set()
+    await live
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_158_duplicate_pages_continue_only_after_bounded_backoff() -> None:
+    live_entered = asyncio.Event()
+    release_live = asyncio.Event()
+    later_started = asyncio.Event()
+    retry_started: asyncio.Queue[None] = asyncio.Queue()
+    retry_release: asyncio.Queue[None] = asyncio.Queue()
+    scans = 0
+
+    async def controlled_retry(_delay: float) -> None:
+        retry_started.put_nowait(None)
+        await retry_release.get()
+
+    class _LongOccupiedTail(RuntimeWorkHandler):
+        ready = False
+
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            nonlocal scans
+            del occupied
+            if not self.ready:
+                return [], False
+            scans += 1
+            rows = [
+                RuntimeWorkItem("session-a", index, cursor_key=f"{index:02d}")
+                for index in range(4)
+            ] + [RuntimeWorkItem("session-b", 4, cursor_key="04")]
+            rows = [row for row in rows if cursor is None or row.cursor_key > cursor]
+            return rows[:limit], len(rows) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            if item.partition_key == "session-b":
+                later_started.set()
+
+    async def live_owner() -> None:
+        live_entered.set()
+        await release_live.wait()
+
+    handler = _LongOccupiedTail()
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=2,
+        scan_page_size=2,
+        scan_continuation_pages=2,
+        retry_wait=controlled_retry,
+    )
+    supervisor.register(RuntimeWorkLane.REQUESTS, handler)
+    await supervisor.activate()
+    live = asyncio.create_task(
+        supervisor.run_in_partition(
+            RuntimeWorkLane.REQUESTS,
+            "session-a",
+            live_owner,
+        )
+    )
+    await asyncio.wait_for(live_entered.wait(), 1)
+    handler.ready = True
+    supervisor.notify(RuntimeWorkLane.REQUESTS)
+
+    await asyncio.wait_for(retry_started.get(), 1)
+    assert scans == 2
+    assert not later_started.is_set()
+    retry_release.put_nowait(None)
+    await asyncio.wait_for(retry_started.get(), 1)
+    assert scans == 4
+    assert not later_started.is_set()
+    retry_release.put_nowait(None)
+    await asyncio.wait_for(later_started.wait(), 1)
+
     release_live.set()
     await live
     await supervisor.stop()

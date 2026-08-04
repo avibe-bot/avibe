@@ -286,6 +286,9 @@ class Controller:
         # Consolidated message dispatcher
         self.message_dispatcher = ConsolidatedMessageDispatcher(self)
         self.scheduled_task_service = ScheduledTaskService(self)
+        self._runtime_work_tokens.extend(
+            self.scheduled_task_service.register_controller_runtime_work_lanes()
+        )
         self.watch_service = ManagedWatchService(self)
         self.runtime_command_watcher = RuntimeCommandWatcher(self)
         self.show_git_checkpoint_service = ShowGitCheckpointService()
@@ -1672,13 +1675,15 @@ class Controller:
                 )
         results = await asyncio.gather(*service_stops, return_exceptions=True)
         errors = [result for result in results if isinstance(result, BaseException)]
-        if errors:
-            self._shutdown_tainted = True
-            raise RuntimeError("runtime work service shutdown failed") from errors[0]
-
         stop_supervisor = getattr(supervisor, "stop", None)
         if callable(stop_supervisor):
-            await stop_supervisor()
+            try:
+                await stop_supervisor()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
+            self._shutdown_tainted = True
+            raise RuntimeError("runtime work stack shutdown failed") from errors[0]
 
     def run(self):
         """Run the controller"""

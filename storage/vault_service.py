@@ -1442,6 +1442,21 @@ def expire_overdue_requests(conn: Connection) -> None:
     _expire_pending_requests(conn)
 
 
+def earliest_pending_request_expiry(conn: Connection) -> datetime | None:
+    """Return the next durable request-expiry deadline, if one exists."""
+
+    expires_at = conn.execute(
+        select(vault_requests.c.expires_at)
+        .where(
+            vault_requests.c.status == "pending",
+            vault_requests.c.expires_at.is_not(None),
+        )
+        .order_by(vault_requests.c.expires_at)
+        .limit(1)
+    ).scalar_one_or_none()
+    return _parse_iso_datetime(str(expires_at) if expires_at is not None else None)
+
+
 def list_pending_request_callbacks(
     conn: Connection,
     *,

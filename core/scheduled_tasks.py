@@ -3660,6 +3660,9 @@ class ScheduledTaskService:
         self._runtime_work_tokens: dict[
             RuntimeWorkLane, RuntimeWorkRegistrationToken
         ] = {}
+        self._controller_runtime_work_tokens: dict[
+            RuntimeWorkLane, RuntimeWorkRegistrationToken
+        ] = {}
         self._legacy_probe_tasks: dict[str, asyncio.Task[None]] = {}
         self._legacy_task_signature: tuple[int, int, int] | None = None
         self._legacy_request_signature: tuple[_DirectoryEntrySignature, ...] | None = None
@@ -4405,6 +4408,7 @@ class ScheduledTaskService:
             teardown.result()
             self._service_teardown_task = None
         if self._supports_runtime_work_lanes():
+            self.register_controller_runtime_work_lanes()
             self._register_runtime_work_lanes()
         else:
             self._register_request_recovery()
@@ -4511,7 +4515,6 @@ class ScheduledTaskService:
                 RuntimeWorkLane.REQUESTS,
                 RuntimeWorkLane.RUN_CALLBACKS,
                 RuntimeWorkLane.VAULT_CALLBACKS,
-                RuntimeWorkLane.ACTIVITY_OUTPUTS,
                 RuntimeWorkLane.FAILURE_NOTICES,
                 RuntimeWorkLane.STALE_RUNS,
             ):
@@ -4529,6 +4532,25 @@ class ScheduledTaskService:
         self._request_recovery_token = self._runtime_work_tokens[
             RuntimeWorkLane.REQUESTS
         ]
+
+    def register_controller_runtime_work_lanes(
+        self,
+    ) -> tuple[RuntimeWorkRegistrationToken, ...]:
+        """Register live-producer lanes for the full controller generation."""
+
+        if not self._supports_runtime_work_lanes():
+            return ()
+        existing = self._controller_runtime_work_tokens.get(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS
+        )
+        if existing is not None:
+            return ()
+        token = self.controller.runtime_work_supervisor.register(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            _ScheduledRuntimeWorkHandler(self, RuntimeWorkLane.ACTIVITY_OUTPUTS),
+        )
+        self._controller_runtime_work_tokens[RuntimeWorkLane.ACTIVITY_OUTPUTS] = token
+        return (token,)
 
     def _begin_runtime_work_unregistration(self) -> asyncio.Task[None] | None:
         if not self._runtime_work_tokens:
@@ -4570,7 +4592,10 @@ class ScheduledTaskService:
     ) -> None:
         supervisor = getattr(self.controller, "runtime_work_supervisor", None)
         notify_after = getattr(supervisor, "notify_after", None)
-        token = self._runtime_work_tokens.get(lane)
+        token = self._runtime_work_tokens.get(
+            lane,
+            self._controller_runtime_work_tokens.get(lane),
+        )
         if callable(notify_after) and token is not None:
             notify_after(token, delay)
 
@@ -6917,10 +6942,19 @@ class ScheduledTaskService:
                 after = (parts[0], parts[1])
         with engine.begin() as conn:
             vault_service.expire_overdue_requests(conn)
+            next_expiry = vault_service.earliest_pending_request_expiry(conn)
             pending = vault_service.list_pending_request_callbacks(
                 conn,
                 limit=limit,
                 after=after,
+            )
+        if next_expiry is not None:
+            self._schedule_runtime_work_wake(
+                RuntimeWorkLane.VAULT_CALLBACKS,
+                max(
+                    0.0,
+                    (next_expiry - datetime.now(timezone.utc)).total_seconds(),
+                ),
             )
         items: list[RuntimeWorkItem] = []
         for row in pending:

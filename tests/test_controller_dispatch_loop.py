@@ -386,6 +386,42 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert stop_order[3] == "supervisor"
 
 
+@pytest.mark.anyio
+async def test_runtime_work_stack_stops_supervisor_after_service_failure() -> None:
+    controller = Controller.__new__(Controller)
+    controller._shutdown_tainted = False
+    stopped: list[str] = []
+
+    class _Service:
+        def __init__(self, name: str, *, fail: bool = False) -> None:
+            self.name = name
+            self.fail = fail
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+            if self.fail:
+                raise RuntimeError(f"{self.name} failed")
+
+    class _Supervisor:
+        def quiesce(self) -> None:
+            stopped.append("quiesce")
+
+        async def stop(self) -> None:
+            stopped.append("supervisor")
+
+    controller.scheduled_task_service = _Service("tasks", fail=True)
+    controller.watch_service = _Service("watch")
+    controller.runtime_work_supervisor = _Supervisor()
+
+    with pytest.raises(RuntimeError, match="runtime work stack shutdown failed"):
+        await controller._stop_runtime_work_stack()
+
+    assert stopped[0] == "quiesce"
+    assert set(stopped[1:3]) == {"tasks", "watch"}
+    assert stopped[3] == "supervisor"
+    assert controller._shutdown_tainted is True
+
+
 def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:
     controller = Controller.__new__(Controller)
     loop = asyncio.new_event_loop()
