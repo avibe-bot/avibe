@@ -3,13 +3,19 @@ import { CheckCircle2, Cloud, ExternalLink, Link2, RefreshCcw, Route } from 'luc
 import { Trans, useTranslation } from 'react-i18next';
 import { type RemoteAccessStatus, useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
-import { getTunnelQualityDisplayState } from '../lib/tunnelQuality';
+import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 
 const VIBE_CLOUD_URL = 'https://avibe.bot';
 const VIBE_CLOUD_APP_URL = 'https://avibe.bot/app';
+
+const formatLatency = (milliseconds: number) => (
+  milliseconds >= 1000
+    ? `${(milliseconds / 1000).toFixed(milliseconds >= 10_000 ? 0 : 1)} s`
+    : `${Math.round(milliseconds)} ms`
+);
 
 export const RemoteAccess: React.FC = () => {
   const { t } = useTranslation();
@@ -175,6 +181,20 @@ export const RemoteAccess: React.FC = () => {
           ? 'destructive'
           : 'secondary';
   const qualityLabel = t(`remoteAccess.quality${qualityGrade.charAt(0).toUpperCase()}${qualityGrade.slice(1)}`);
+  const requestPath = quality?.request_path;
+  const requestPathDisplayState = getTunnelRequestPathDisplayState(requestPath);
+  const requestPathUnavailable = requestPathDisplayState === 'unavailable';
+  const requestLatency = requestPathDisplayState === 'latency' ? requestPath?.latency_ms : null;
+  const effectiveProtocol = quality?.transport?.effective || quality?.protocol || 'unknown';
+  const protocolLabel = effectiveProtocol === 'http2'
+    ? 'HTTP/2'
+    : effectiveProtocol === 'quic'
+      ? 'QUIC'
+      : t('remoteAccess.protocolUnknown');
+  const configuredProtocol = quality?.transport?.configured || status?.transport_protocol;
+  const protocolDisplay = configuredProtocol === 'auto' && effectiveProtocol !== 'unknown'
+    ? t('remoteAccess.protocolAutomatic', { protocol: protocolLabel })
+    : protocolLabel;
 
   return (
     <section
@@ -248,15 +268,41 @@ export const RemoteAccess: React.FC = () => {
           <div className="text-[12px] text-muted">{t('remoteAccess.quality')}</div>
           <div className="mt-1 flex min-h-5 items-center gap-2">
             <Badge variant={qualityVariant}>{qualityLabel}</Badge>
-            {qualityFresh && quality?.rtt_ms && (
+            {qualityFresh && (requestLatency || quality?.rtt_ms) && (
               <span className="font-mono text-[11px] text-foreground">
-                {Math.round(quality.rtt_ms.median)} ms
+                {requestLatency
+                  ? `P95 ${formatLatency(requestLatency.p95)}`
+                  : formatLatency(quality!.rtt_ms!.median)}
               </span>
             )}
           </div>
-          {qualityFresh && quality?.edge_locations?.length ? (
-            <div className="mt-1 truncate font-mono text-[10px] uppercase text-muted" title={quality.edge_locations.join(', ')}>
-              {quality.edge_locations.join(' · ')}
+          {qualityFresh && quality ? (
+            <div className="mt-1 space-y-0.5 text-[10px] leading-4 text-muted">
+              <div className="truncate" title={quality.edge_locations?.join(', ')}>
+                {t('remoteAccess.connectorPath', {
+                  protocol: protocolDisplay,
+                  connections: quality.ha_connections,
+                  rtt: quality.rtt_ms ? formatLatency(quality.rtt_ms.median) : t('remoteAccess.rttUnavailable'),
+                })}
+              </div>
+              {requestPathUnavailable ? (
+                <div className="truncate font-medium text-destructive">
+                  {t('remoteAccess.requestPathUnavailable', {
+                    success: requestPath?.success_count || 0,
+                    count: requestPath?.sample_count || 0,
+                  })}
+                </div>
+              ) : requestLatency ? (
+                <div className="truncate font-mono text-foreground/80">
+                  {t('remoteAccess.requestPath', {
+                    p95: formatLatency(requestLatency.p95),
+                    p99: formatLatency(requestLatency.p99),
+                    slow: Math.round((requestPath?.slow_request_rate.over_1000_ms || 0) * 100),
+                  })}
+                </div>
+              ) : requestPath ? (
+                <div>{t('remoteAccess.requestPathMeasuring', { count: requestPath.sample_count })}</div>
+              ) : null}
             </div>
           ) : null}
         </div>

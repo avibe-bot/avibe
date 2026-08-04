@@ -803,6 +803,38 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
     assert payload["tunnel_quality"]["grade"] == "good"
 
 
+def test_ra_tq_014_runtime_status_payload_includes_v2_request_path(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.save()
+    monkeypatch.setattr(remote_access, "_local_ui_healthy", lambda cfg: True)
+    monkeypatch.setattr(remote_access, "_observed_cloudflared_origin_service", lambda: "http://127.0.0.1:5123")
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda cfg=None: {
+            "ok": True,
+            "running": True,
+            "binary_found": True,
+            "tunnel_quality": {
+                "schema_version": 2,
+                "state": "degraded",
+                "grade": "critical",
+                "sampled_at": "2026-08-03T12:45:00Z",
+                "request_path": {
+                    "confidence": "high",
+                    "latency_ms": {"p50": 202, "p95": 1100, "p99": 2300, "max": 2700},
+                },
+            },
+        },
+    )
+
+    payload = remote_access.runtime_status_payload(config, event="tunnel_quality")
+
+    assert payload["tunnel_quality"]["schema_version"] == 2
+    assert payload["tunnel_quality"]["request_path"]["latency_ms"]["p95"] == 1100
+
+
 def test_observed_cloudflared_origin_service_reads_only_log_tail(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     remote_access._cloudflared_stderr_path().parent.mkdir(parents=True, exist_ok=True)
@@ -1610,6 +1642,53 @@ def test_start_clears_previous_cloudflared_logs_before_spawn(monkeypatch, tmp_pa
     assert result["ok"] is True
     assert result["started"] is True
     assert spawn_args == [[binary, "tunnel", "--metrics", "127.0.0.1:29999", "--no-autoupdate", "run"]]
+
+
+def test_start_falls_back_to_auto_when_preferred_protocol_is_not_ready(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    binary = "/usr/local/bin/cloudflared"
+    preferred_pid = 222
+    fallback_pid = 333
+    alive = {preferred_pid, fallback_pid}
+    spawned_protocols = []
+    spawned_pids = iter([preferred_pid, fallback_pid])
+    metrics_urls = iter(["http://127.0.0.1:29998", "http://127.0.0.1:29999"])
+
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda cfg: binary)
+    monkeypatch.setattr(remote_access, "_version", lambda path: "cloudflared test")
+    monkeypatch.setattr(remote_access, "_allocate_metrics_url", lambda: next(metrics_urls))
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in alive)
+    monkeypatch.setattr(runtime, "get_process_command", lambda pid: f"{binary} tunnel run")
+    monkeypatch.setattr(remote_access, "_wait_connector_ready", lambda *args, **kwargs: False)
+
+    def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
+        pid = next(spawned_pids)
+        spawned_protocols.append(env["TUNNEL_TRANSPORT_PROTOCOL"])
+        pid_path.write_text(str(pid), encoding="utf-8")
+        return pid
+
+    def stop_pid(pid, timeout=8):
+        alive.discard(pid)
+        return True
+
+    monkeypatch.setattr(runtime, "spawn_background", spawn_background)
+    monkeypatch.setattr(runtime, "stop_pid", stop_pid)
+    previous_preference = remote_access._PREFERRED_PROTOCOL
+    remote_access._PREFERRED_PROTOCOL = "http2"
+    try:
+        result = remote_access.start(config)
+    finally:
+        remote_access._PREFERRED_PROTOCOL = previous_preference
+
+    state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert result["ok"] is True
+    assert result["pid"] == fallback_pid
+    assert spawned_protocols == ["http2", "auto"]
+    assert preferred_pid not in alive
+    assert state["active"]["requested_protocol"] == "auto"
 
 
 def test_effective_ui_bind_host_uses_setup_host_when_tunnel_disabled() -> None:

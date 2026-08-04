@@ -9803,7 +9803,40 @@ def _doctor(*, deep: bool = False):
                 )
             else:
                 rtt = quality.get("rtt_ms") if isinstance(quality.get("rtt_ms"), dict) else None
-                if rtt is None:
+                request_path = (
+                    quality.get("request_path")
+                    if isinstance(quality.get("request_path"), dict)
+                    else None
+                )
+                request_latency = (
+                    request_path.get("latency_ms")
+                    if remote_access.tunnel_quality.request_path_has_usable_latency(request_path)
+                    else None
+                )
+                request_path_unavailable = bool(
+                    request_path
+                    and request_path.get("confidence") != "low"
+                    and (
+                        request_path.get("status") == "unavailable"
+                        or int(request_path.get("success_count") or 0) == 0
+                    )
+                )
+                if request_path_unavailable:
+                    quality_message = (
+                        f"Tunnel quality: {state}/{grade}; remote requests unavailable, "
+                        f"{int(request_path.get('success_count') or 0)}/"
+                        f"{int(request_path.get('sample_count') or 0)} succeeded; "
+                        f"connector {quality.get('protocol') or 'unknown'}"
+                    )
+                elif request_latency is not None:
+                    slow_rate = request_path.get("slow_request_rate") or {}
+                    quality_message = (
+                        f"Tunnel quality: {state}/{grade}; remote requests P95 "
+                        f"{request_latency.get('p95')} ms, P99 {request_latency.get('p99')} ms, "
+                        f"{round(float(slow_rate.get('over_1000_ms') or 0) * 100)}% above 1 second; "
+                        f"connector {quality.get('protocol') or 'unknown'}"
+                    )
+                elif rtt is None:
                     quality_message = (
                         f"Tunnel quality: {state}; edge RTT unavailable for "
                         f"{quality.get('protocol') or 'unknown'} transport"
@@ -9814,7 +9847,9 @@ def _doctor(*, deep: bool = False):
                         f"maximum {rtt.get('max')} ms"
                     )
                 quality_status = "pass" if state == "healthy" and grade in {"good", "fair", "unknown"} else "warn"
-                if state == "degraded" and int(quality.get("ha_connections") or 0) == 0:
+                if request_path_unavailable or (
+                    state == "degraded" and int(quality.get("ha_connections") or 0) == 0
+                ):
                     quality_status = "fail"
                 _add_doctor_item(
                     remote_access_items,
