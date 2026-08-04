@@ -37,7 +37,7 @@ from jwt import PyJWKClient
 
 from config import paths
 from config.v2_config import V2Config
-from vibe import api, runtime
+from vibe import api, cloudflare_network, runtime
 from vibe import tunnel_quality
 
 logger = logging.getLogger(__name__)
@@ -550,7 +550,13 @@ def tunnel_quality_snapshot() -> dict[str, Any] | None:
     return None
 
 
-def status(config: V2Config | None = None) -> dict[str, Any]:
+def status(
+    config: V2Config | None = None,
+    *,
+    client_colo: str | None = None,
+    client_access: str = "local",
+    include_network_path: bool = False,
+) -> dict[str, Any]:
     try:
         config = config or V2Config.load()
     except Exception:
@@ -586,6 +592,15 @@ def status(config: V2Config | None = None) -> dict[str, Any]:
     quality = tunnel_quality_snapshot()
     if quality is not None:
         result["tunnel_quality"] = quality
+    if running and include_network_path:
+        active = _state_connector("active") or {}
+        edge_locations = quality.get("edge_locations") if isinstance(quality, dict) else None
+        result["network_path"] = cloudflare_network.network_path_snapshot(
+            edge_locations if isinstance(edge_locations, list) else [],
+            active.get("metrics_url") if isinstance(active.get("metrics_url"), str) else None,
+            client_colo=client_colo,
+            client_access=client_access,
+        )
     return result
 
 

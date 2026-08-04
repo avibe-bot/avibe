@@ -188,6 +188,82 @@ rolling deployment.
 | RA-TQ-023 | Status cleanup preserves rollback after a promoted process exits | supervisor lifecycle test |
 | RA-TQ-024 | Pinned transport rejects comparison evidence from another protocol | protocol-evidence contract test |
 
+### Local network-path diagnostics
+
+The local `GET /api/remote-access/status` response adds a `network_path`
+object while a managed Connector is running. This object never enters the
+avibe.bot runtime-status payload. It combines three bounded, independently
+verified observations:
+
+- cloudflared's loopback-only `/diag/tunnel` endpoint supplies the Anycast edge
+  IP addresses for the active Connector's live connections;
+- the existing `edge_locations` metric supplies node identifiers such as
+  `sin09`; and
+- a remote request's `CF-Ray` suffix supplies the browser ingress colo. Avibe
+  ignores `CF-Ray` unless the request matches the paired public hostname. This
+  header is diagnostic-only input and never participates in access control or
+  route recovery.
+
+Colo codes are enriched from Cloudflare's public status component catalog. The
+catalog is cached locally for seven days and refreshed in a background thread;
+status reads never wait on that external request. Unknown codes remain visible
+as raw codes instead of being assigned a guessed location.
+
+Representative local-only shape:
+
+```json
+{
+  "network_path": {
+    "schema_version": 1,
+    "provider": "Cloudflare",
+    "asn": 13335,
+    "sampled_at": "2026-08-04T04:00:00Z",
+    "locations_pending": false,
+    "client_access": "remote",
+    "client_ingress": {
+      "colo": "SIN",
+      "location": "Singapore, Singapore",
+      "country": "Singapore"
+    },
+    "connector": {
+      "locations": [
+        {
+          "id": "sin09",
+          "colo": "SIN",
+          "location": "Singapore, Singapore",
+          "country": "Singapore"
+        }
+      ],
+      "edge_ips": ["198.41.192.47"]
+    },
+    "route": { "assessment": "same_metro" }
+  }
+}
+```
+
+The route assessment is deliberately conservative:
+
+- `same_metro`: every observed Connector colo matches the browser ingress colo;
+- `same_country`: every observed Connector colo resolves to the browser
+  ingress country, but at least one metro differs;
+- `cross_country`: at least one known active Connector colo is in another
+  country, so a cross-country path is possible; and
+- `unknown`: the browser ingress, Connector colos, or location mapping is not
+  complete enough to decide.
+
+This is a geographic diagnostic, not a traceroute. Cloudflare Anycast does not
+expose the selected facility, internal router, transit carrier, or backbone
+hops through the Tunnel APIs, and multiple live Connector edges mean Avibe
+cannot identify which connection served one browser request. The UI therefore
+says `potential cross-country route` rather than claiming a definite detour.
+Geography alone never triggers route optimization; the measured request path
+and availability gates remain authoritative.
+
+| ID | Scenario | Required evidence |
+| --- | --- | --- |
+| RA-TQ-025 | Local status shows bounded active edge nodes, locations, network owner, and Anycast IPs without uploading them | parser, status, and privacy-boundary tests |
+| RA-TQ-026 | Only paired-public-host `CF-Ray` metadata participates in a conservative geographic route assessment | request-boundary and assessment tests |
+
 ## Product Decisions
 
 1. Tunnel RTT is a first-class health signal, but not a standalone truth.
@@ -200,7 +276,8 @@ rolling deployment.
 4. The local runtime owns detection and recovery. avibe.bot displays the latest
    state but does not remotely command connector lifecycle changes.
 5. Cloud reporting sends one bounded aggregate, not raw Prometheus samples,
-   edge IPs, connector IDs, request URLs, or time-series telemetry.
+   edge IPs, connector IDs, request URLs, or time-series telemetry. Raw edge
+   details remain local-only diagnostics.
 6. Normal operation uses one connector. A second connector exists only during
    evaluation and drain.
 7. V1 does not expose threshold tuning. It provides one manual "Optimize route"
@@ -594,7 +671,10 @@ After a successful promotion, show one non-blocking message such as
 navigation state across the expected SSE reconnect; do not redirect or reload
 the application shell.
 
-Avoid exposing connector IDs, edge IPs, tunnel tokens, or internal log paths.
+Keep raw infrastructure out of the primary status. The owner-visible local
+Remote Access page may expose active Cloudflare node IDs and Anycast edge IPs
+behind technical details; remote callers remain session-authenticated. Never
+expose tunnel tokens, internal log paths, or the user's client IP.
 
 ## avibe.bot Runtime-Status Contract
 
@@ -743,7 +823,10 @@ properties.
 
 - Bind metrics endpoints to `127.0.0.1` only.
 - Never report edge IP addresses, connector IDs, tunnel token fingerprints,
-  request paths, host network addresses, or public probe response bodies.
+  request paths, host network addresses, or public probe response bodies to
+  avibe.bot. The local status API may return the active Cloudflare edge IPs and
+  node IDs for owner-visible diagnostics only; remote requests remain subject
+  to the existing session authentication boundary.
 - Do not enable debug cloudflared logging; it can include request headers.
 - Keep the existing instance-secret authentication for runtime status.
 - The control plane stores only the latest bounded aggregate.

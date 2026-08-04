@@ -783,6 +783,10 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
             "ok": True,
             "running": True,
             "binary_found": True,
+            "network_path": {
+                "schema_version": 1,
+                "connector": {"edge_ips": ["198.41.192.47"]},
+            },
             "tunnel_quality": {
                 "schema_version": 1,
                 "state": "healthy",
@@ -801,6 +805,8 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
     assert payload["expected_origin_service"] == "http://127.0.0.1:5123"
     assert payload["observed_origin_service"] == "http://100.97.103.112:5123"
     assert payload["tunnel_quality"]["grade"] == "good"
+    assert "network_path" not in payload
+    assert "198.41.192.47" not in json.dumps(payload)
 
 
 def test_ra_tq_014_runtime_status_payload_includes_v2_request_path(monkeypatch, tmp_path) -> None:
@@ -1351,6 +1357,49 @@ def test_status_preserves_pid_file_when_process_command_is_unknown(monkeypatch, 
     assert result["pid_state"] == "unknown"
     assert remote_access._pid_path().read_text(encoding="utf-8") == str(pid)
     assert remote_access._state_path().exists()
+
+
+def test_ra_tq_025_status_computes_network_path_only_for_local_api(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    pid = 123
+    remote_access._pid_path().parent.mkdir(parents=True, exist_ok=True)
+    remote_access._pid_path().write_text(str(pid), encoding="utf-8")
+    runtime.write_json(
+        remote_access._state_path(),
+        {
+            "pid": pid,
+            "active": {"pid": pid, "metrics_url": "http://127.0.0.1:29001"},
+        },
+    )
+    runtime.write_json(
+        remote_access._quality_state_path(),
+        {"schema_version": 2, "edge_locations": ["sin09", "sin12"]},
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda candidate: candidate == pid)
+    monkeypatch.setattr(runtime, "get_process_command", lambda candidate: "cloudflared tunnel run")
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda cfg: "/usr/local/bin/cloudflared")
+    calls = []
+    monkeypatch.setattr(
+        remote_access.cloudflare_network,
+        "network_path_snapshot",
+        lambda locations, metrics_url, *, client_colo=None, client_access="local": calls.append(
+            (locations, metrics_url, client_colo, client_access)
+        )
+        or {"schema_version": 1},
+    )
+
+    internal_status = remote_access.status(config)
+    local_status = remote_access.status(
+        config,
+        client_colo="SIN",
+        client_access="remote",
+        include_network_path=True,
+    )
+
+    assert "network_path" not in internal_status
+    assert local_status["network_path"] == {"schema_version": 1}
+    assert calls == [(["sin09", "sin12"], "http://127.0.0.1:29001", "SIN", "remote")]
 
 
 def test_start_refuses_duplicate_connector_when_process_command_is_unknown(monkeypatch, tmp_path) -> None:
