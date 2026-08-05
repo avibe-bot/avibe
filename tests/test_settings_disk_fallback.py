@@ -514,7 +514,6 @@ def test_save_claude_relay_auth_writes_bearer_token_and_clears_v2_secret(
     monkeypatch: pytest.MonkeyPatch,
     claude_restart_calls: list[dict],
 ) -> None:
-    """Scenario: AUTH-SETUP-904"""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
