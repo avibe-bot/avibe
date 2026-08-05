@@ -294,6 +294,11 @@ Important config payload shape:
       "instance_secret": "",
       "session_secret": "",
       "cloudflared_path": "",
+      "transport_protocol": "auto",
+      "auto_recovery": true,
+      "optimization_profile": "balanced",
+      "edge_ip_version": "4",
+      "edge_bind_address": "",
       "dev_login_hint": ""
     }
   },
@@ -503,17 +508,28 @@ WeChat QR login is special: when login is confirmed and a token is returned, the
 
 These endpoints drive the managed `avibe.bot` tunnel that exposes the local Web UI to other devices. They are paired with the `remote_access.vibe_cloud` block under `/config`.
 
-- `GET /remote-access/status`
+- `GET /api/remote-access/status`
   - returns `enabled`, `paired`, `public_url`, `running` (tunnel up), `pid`, `pid_state`, plus `binary_found` / `binary_path` / `binary_version` for the resolved `cloudflared` executable. Use `running: true` to assert the tunnel is up.
-- `POST /remote-access/vibe-cloud/pair`
+- `POST /api/remote-access/vibe-cloud/pair`
   - payload: `{"pairing_key": "vrp_..."}`
   - exchanges the one-time key for an OIDC client, tunnel token, and persists the full `remote_access.vibe_cloud` block; on success Avibe launches the cloudflared tunnel
-- `POST /remote-access/start`
+- `POST /api/remote-access/start`
   - payload: `{}`
   - starts the cloudflared tunnel using the persisted pairing config
-- `POST /remote-access/stop`
+- `POST /api/remote-access/stop`
   - payload: `{}`
   - stops the cloudflared tunnel; configuration is preserved so `start` can resume later
+- `POST /api/remote-access/optimize-route`
+  - payload: `{}`
+  - starts one guarded make-before-break route evaluation; it does not override a pinned protocol
+- `GET /api/remote-access/network-interfaces`
+  - returns currently assigned, up, non-loopback local source addresses that may be selected for cloudflared
+- `POST /api/remote-access/settings`
+  - payload: `{"transport_protocol":"auto|quic|http2","auto_recovery":true,"optimization_profile":"stable|balanced|low_latency","edge_ip_version":"4|auto|6","edge_bind_address":""}`
+  - applies policy-only changes immediately; Connector-affecting changes start and verify a replacement before draining the previous Connector, and keep the previous persisted settings when the replacement cannot become ready
+- `POST /api/remote-access/diagnostics`
+  - payload: `{}`
+  - returns bounded DNS, TCP/HTTP2, and observed-active-QUIC reachability without exposing probe targets or local interface addresses
 - `GET /auth/callback`
   - OIDC redirect target used by avibe.bot during sign-in. Browser-driven; do not call directly from automation.
 - `GET /api/session`

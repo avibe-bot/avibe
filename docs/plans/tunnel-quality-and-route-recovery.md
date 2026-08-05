@@ -841,6 +841,42 @@ cohesive state machine. Automatic recovery is enabled for managed Vibe Cloud
 tunnels, can be disabled release-wide with `AVIBE_TUNNEL_AUTO_RECOVERY=0`, and
 does not expose per-user threshold knobs.
 
+### V2 Owner Controls
+
+The Remote Access page adds a bounded owner-facing control surface without
+exposing raw recovery thresholds:
+
+- transport protocol: `auto`, `quic`, or `http2`;
+- automatic route optimization: enabled or disabled;
+- optimization policy: `stable`, `balanced`, or `low_latency`;
+- Cloudflare edge address family: `4`, `auto`, or `6`; existing configs keep
+  cloudflared's IPv4 default and `auto` is an explicit owner choice;
+- outbound source address: system-selected or one currently assigned local
+  unicast address; and
+- on-demand connectivity diagnostics for DNS, the TCP/HTTP2 path, and the
+  currently observed QUIC path.
+
+`balanced` preserves the V1 trigger behavior. `stable` requires stronger
+latency evidence before automatic recovery, while `low_latency` may evaluate a
+candidate before the diagnostic grade becomes degraded. Availability, request
+failure, candidate acceptance, cooldown, and rollback safety gates remain
+shared across policies. The policy changes when Avibe evaluates a route, not
+how it measures or labels the route.
+
+Connector-affecting changes use the existing make-before-break lifecycle. Avibe
+starts a candidate with the requested protocol, address family, and source
+address, waits for four ready HA connections, persists the controls, promotes
+the candidate, and only then drains the prior Connector. Candidate readiness or
+persistence failures keep both the previous Connector and previous persisted
+controls. Policy-only changes do not restart cloudflared.
+
+The interface endpoint returns only currently assigned, up, non-loopback,
+non-link-local unicast addresses. A stale or mismatched source address is
+rejected before a candidate starts. Diagnostics call TCP reachability proven
+only after a port 7844 connection succeeds; they call QUIC available only when
+the active Connector currently demonstrates QUIC. An unobserved UDP path stays
+`unknown`, never inferred as available or unavailable.
+
 ## Scenario Catalog
 
 | ID | Scenario | Required evidence |
@@ -854,6 +890,11 @@ does not expose per-user threshold knobs.
 | RA-TQ-007 | Doctor and avibe.bot consume the V1 aggregate | payload and backend contract tests |
 | RA-TQ-008 | Restart removes an orphan candidate when active survives | crash-recovery test |
 | RA-TQ-009 | Restart promotes a ready candidate when active is gone | crash-recovery test |
+| RA-TQ-027 | Optimization policies change recovery sensitivity without changing measurements | evaluator policy test |
+| RA-TQ-028 | Live control changes replace a ready Connector before drain and roll back failed candidates | supervisor scenario tests |
+| RA-TQ-029 | Edge IP and source-address controls accept only live assigned addresses | config and network-policy tests |
+| RA-TQ-030 | Connectivity diagnostics distinguish proven from unobserved paths | diagnostics contract test |
+| RA-TQ-031 | Tunnel controls remain usable on desktop and mobile | browser/runtime proof |
 
 ## Implementation Boundaries
 
@@ -898,4 +939,5 @@ changes must update the schema first.
   console is visible.
 - No secret or sensitive request data appears in local snapshots, logs, Doctor,
   status APIs, or cloud payloads.
-- RA-TQ-001 through RA-TQ-024 pass in their required evidence layers.
+- RA-TQ-001 through RA-TQ-030 pass in their required evidence layers; RA-TQ-031
+  receives browser proof at desktop and mobile widths.

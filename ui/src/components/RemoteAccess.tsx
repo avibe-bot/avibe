@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Activity,
   ArrowRight,
   CheckCircle2,
   ChevronDown,
@@ -10,18 +11,37 @@ import {
   Network,
   RefreshCcw,
   Route,
+  Save,
   Server,
+  Settings2,
 } from 'lucide-react';
 import { Trans, useTranslation } from 'react-i18next';
-import { type CloudflareEdgeLocation, type RemoteAccessStatus, useApi } from '../context/ApiContext';
+import {
+  type CloudflareEdgeLocation,
+  type RemoteAccessSettings,
+  type RemoteAccessStatus,
+  type TunnelConnectivityDiagnostics,
+  type TunnelNetworkInterface,
+  useApi,
+} from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
+import { SegmentedRadio } from './ui/segmented';
+import { Select } from './ui/select';
+import { Switch } from './ui/switch';
 
 const VIBE_CLOUD_URL = 'https://avibe.bot';
 const VIBE_CLOUD_APP_URL = 'https://avibe.bot/app';
+const DEFAULT_SETTINGS: RemoteAccessSettings = {
+  transport_protocol: 'auto',
+  auto_recovery: true,
+  optimization_profile: 'balanced',
+  edge_ip_version: '4',
+  edge_bind_address: '',
+};
 
 const formatLatency = (milliseconds: number) => (
   milliseconds >= 1000
@@ -43,6 +63,12 @@ export const RemoteAccess: React.FC = () => {
   const [optimizing, setOptimizing] = useState(false);
   const [pairingKey, setPairingKey] = useState('');
   const [reconfiguring, setReconfiguring] = useState(false);
+  const [settingsDraft, setSettingsDraft] = useState<RemoteAccessSettings>(DEFAULT_SETTINGS);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [networkInterfaces, setNetworkInterfaces] = useState<TunnelNetworkInterface[]>([]);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<TunnelConnectivityDiagnostics | null>(null);
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const describeError = (payload: unknown) => {
@@ -60,6 +86,16 @@ export const RemoteAccess: React.FC = () => {
     try {
       const remoteStatus = await api.remoteAccessStatus();
       setStatus(remoteStatus);
+      if (remoteStatus.paired) {
+        try {
+          const result = await api.getRemoteAccessNetworkInterfaces();
+          setNetworkInterfaces(result.interfaces || []);
+        } catch {
+          setNetworkInterfaces([]);
+        }
+      } else {
+        setNetworkInterfaces([]);
+      }
     } finally {
       if (!silent) setLoading(false);
     }
@@ -85,6 +121,12 @@ export const RemoteAccess: React.FC = () => {
       window.removeEventListener('focus', refreshVisible);
     };
   }, [api, refresh]);
+
+  useEffect(() => {
+    if (!settingsDirty && status?.settings) {
+      setSettingsDraft(status.settings);
+    }
+  }, [settingsDirty, status?.settings]);
 
   const pair = async () => {
     setPairing(true);
@@ -175,6 +217,61 @@ export const RemoteAccess: React.FC = () => {
     }
   };
 
+  const updateSetting = <K extends keyof RemoteAccessSettings>(
+    key: K,
+    value: RemoteAccessSettings[K],
+  ) => {
+    setSettingsDraft((current) => ({ ...current, [key]: value }));
+    setSettingsDirty(true);
+  };
+
+  const saveTunnelSettings = async () => {
+    setSavingSettings(true);
+    setActionMessage(null);
+    try {
+      const result = await api.saveRemoteAccessSettings(settingsDraft);
+      setStatus(result);
+      if (result?.ok === false) {
+        const message = describeError(result);
+        setActionMessage({ type: 'error', text: message });
+        showToast(message, 'error');
+        return;
+      }
+      setSettingsDraft(result.settings || settingsDraft);
+      setSettingsDirty(false);
+      const message = t('remoteAccess.controlsSaved');
+      setActionMessage({ type: 'success', text: message });
+      showToast(message, 'success');
+      await refresh(true).catch(() => undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('errors.remote_access_unknown');
+      setActionMessage({ type: 'error', text: message });
+      showToast(message, 'error');
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const runDiagnostics = async () => {
+    setDiagnosing(true);
+    setActionMessage(null);
+    try {
+      const result = await api.diagnoseRemoteAccess();
+      if (result?.ok === false) {
+        const message = describeError(result);
+        setActionMessage({ type: 'error', text: message });
+        showToast(message, 'error');
+        return;
+      }
+      setDiagnostics(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('errors.remote_access_diagnostics_failed');
+      setActionMessage({ type: 'error', text: message });
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
   const publicUrl = status?.public_url;
   const paired = Boolean(status?.paired);
   const running = Boolean(status?.running);
@@ -249,6 +346,19 @@ export const RemoteAccess: React.FC = () => {
           ? 'CrossCountry'
           : 'Unknown'
   }`);
+  const controlsDisabled = savingSettings || optimizing || (qualityFresh && quality?.state === 'recovering');
+  const diagnosticRows = diagnostics ? [
+    { key: 'dns', label: t('remoteAccess.diagnosticDns'), status: diagnostics.dns.status },
+    { key: 'quic', label: t('remoteAccess.diagnosticQuic'), status: diagnostics.quic.status },
+    { key: 'http2', label: t('remoteAccess.diagnosticHttp2'), status: diagnostics.http2.status },
+  ] as const : [];
+  const diagnosticLabel = (diagnosticStatus: 'available' | 'unavailable' | 'unknown') => (
+    diagnosticStatus === 'available'
+      ? t('remoteAccess.diagnosticAvailable')
+      : diagnosticStatus === 'unavailable'
+        ? t('remoteAccess.diagnosticUnavailable')
+        : t('remoteAccess.diagnosticUnknown')
+  );
 
   return (
     <section
@@ -426,6 +536,150 @@ export const RemoteAccess: React.FC = () => {
               </div>
             </div>
           </details>
+        </div>
+      )}
+
+      {paired && !showPairingForm && (
+        <div className="border-b border-border px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Settings2 className="size-4 text-cyan" />
+              <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.controls')}</h3>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              disabled={!settingsDirty || controlsDisabled}
+              onClick={saveTunnelSettings}
+            >
+              <Save className="size-3.5" />
+              {savingSettings ? t('remoteAccess.savingControls') : t('remoteAccess.saveControls')}
+            </Button>
+          </div>
+
+          <div className="mt-3 grid gap-x-5 gap-y-4 md:grid-cols-2">
+            <div className="min-w-0 space-y-1.5">
+              <span className="flex min-h-5 items-center justify-between gap-2 text-[12px] font-medium text-foreground">
+                {t('remoteAccess.protocol')}
+                {effectiveProtocol !== 'unknown' && (
+                  <Badge variant="secondary">{protocolLabel}</Badge>
+                )}
+              </span>
+              <SegmentedRadio
+                value={settingsDraft.transport_protocol}
+                onChange={(value) => updateSetting('transport_protocol', value)}
+                ariaLabel={t('remoteAccess.protocol')}
+                disabled={controlsDisabled}
+                tone="cyan"
+                options={[
+                  { id: 'auto', label: t('remoteAccess.protocolAuto') },
+                  { id: 'quic', label: 'QUIC' },
+                  { id: 'http2', label: 'HTTP/2' },
+                ]}
+              />
+            </div>
+
+            <div className="min-w-0 space-y-1.5">
+              <span className="block min-h-5 text-[12px] font-medium text-foreground">{t('remoteAccess.autoRecovery')}</span>
+              <div className="flex h-9 items-center justify-between border-y border-border/70 px-1">
+                <Activity className="size-4 text-muted" />
+                <Switch
+                  size="sm"
+                  checked={settingsDraft.auto_recovery}
+                  onCheckedChange={(value) => updateSetting('auto_recovery', value)}
+                  label={t('remoteAccess.autoRecovery')}
+                  disabled={controlsDisabled}
+                />
+              </div>
+            </div>
+
+            <div className="min-w-0 space-y-1.5">
+              <span className="block min-h-5 text-[12px] font-medium text-foreground">{t('remoteAccess.optimizationProfile')}</span>
+              <SegmentedRadio
+                value={settingsDraft.optimization_profile}
+                onChange={(value) => updateSetting('optimization_profile', value)}
+                ariaLabel={t('remoteAccess.optimizationProfile')}
+                disabled={controlsDisabled}
+                options={[
+                  { id: 'stable', label: t('remoteAccess.profileStable') },
+                  { id: 'balanced', label: t('remoteAccess.profileBalanced') },
+                  { id: 'low_latency', label: t('remoteAccess.profileLowLatency') },
+                ]}
+              />
+            </div>
+
+            <div className="min-w-0 space-y-1.5">
+              <span className="block min-h-5 text-[12px] font-medium text-foreground">{t('remoteAccess.ipFamily')}</span>
+              <SegmentedRadio
+                value={settingsDraft.edge_ip_version}
+                onChange={(value) => updateSetting('edge_ip_version', value)}
+                ariaLabel={t('remoteAccess.ipFamily')}
+                disabled={controlsDisabled}
+                options={[
+                  { id: '4', label: t('remoteAccess.ipV4') },
+                  { id: 'auto', label: t('remoteAccess.ipAuto') },
+                  { id: '6', label: t('remoteAccess.ipV6') },
+                ]}
+              />
+            </div>
+
+            <label className="min-w-0 space-y-1.5 md:col-span-2">
+              <span className="block text-[12px] font-medium text-foreground">{t('remoteAccess.outboundInterface')}</span>
+              <Select
+                value={settingsDraft.edge_bind_address}
+                onChange={(event) => updateSetting('edge_bind_address', event.target.value)}
+                disabled={controlsDisabled}
+                className="font-mono text-[12px]"
+              >
+                <option value="">{t('remoteAccess.outboundSystem')}</option>
+                {networkInterfaces.map((networkInterface) => (
+                  <option key={networkInterface.id} value={networkInterface.address}>
+                    {networkInterface.name} · {networkInterface.address}
+                  </option>
+                ))}
+              </Select>
+            </label>
+          </div>
+
+          <div className="mt-4 border-t border-border/70 pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Activity className="size-4 text-cyan" />
+                <span className="text-[12px] font-medium text-foreground">{t('remoteAccess.diagnostics')}</span>
+                {diagnostics?.cloudflared_version && (
+                  <span className="font-mono text-[10px] text-muted">
+                    {t('remoteAccess.diagnosticVersion', { version: diagnostics.cloudflared_version })}
+                  </span>
+                )}
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="xs"
+                disabled={diagnosing || savingSettings}
+                onClick={runDiagnostics}
+              >
+                <Activity className="size-3.5" />
+                {diagnosing ? t('remoteAccess.runningDiagnostics') : t('remoteAccess.runDiagnostics')}
+              </Button>
+            </div>
+            {diagnosticRows.length > 0 && (
+              <div className="mt-3 grid border-y border-border/70 sm:grid-cols-3">
+                {diagnosticRows.map((row, index) => (
+                  <div
+                    key={row.key}
+                    className={`flex min-h-11 items-center justify-between gap-2 px-3 py-2 ${index > 0 ? 'border-t border-border/70 sm:border-l sm:border-t-0' : ''}`}
+                  >
+                    <span className="text-[11px] text-muted">{row.label}</span>
+                    <Badge variant={row.status === 'available' ? 'success' : row.status === 'unavailable' ? 'destructive' : 'secondary'}>
+                      {diagnosticLabel(row.status)}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

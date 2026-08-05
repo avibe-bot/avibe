@@ -788,6 +788,7 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
                 "schema_version": 1,
                 "connector": {"edge_ips": ["198.41.192.47"]},
             },
+            "settings": {"edge_bind_address": "192.0.2.99"},
             "tunnel_quality": {
                 "schema_version": 1,
                 "state": "healthy",
@@ -808,6 +809,8 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
     assert payload["tunnel_quality"]["grade"] == "good"
     assert "network_path" not in payload
     assert "198.41.192.47" not in json.dumps(payload)
+    assert "settings" not in payload
+    assert "192.0.2.99" not in json.dumps(payload)
 
 
 def test_ra_tq_014_runtime_status_payload_includes_v2_request_path(monkeypatch, tmp_path) -> None:
@@ -2014,3 +2017,153 @@ def test_cloud_token_for_request_returns_none_without_valid_session(monkeypatch)
 
     assert remote_access.cloud_token_for_request(config, None) is None
     assert remote_access.cloud_token_for_request(config, "bogus.cookie") is None
+
+
+def test_ra_tq_029_connector_environment_applies_ip_and_interface_controls() -> None:
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.tunnel_token = "tunnel-token"
+    cloud.edge_ip_version = "4"
+    cloud.edge_bind_address = "192.0.2.10"
+
+    environment = remote_access._connector_environment(config, "http2")
+
+    assert environment["TUNNEL_TOKEN"] == "tunnel-token"
+    assert environment["TUNNEL_TRANSPORT_PROTOCOL"] == "http2"
+    assert environment["TUNNEL_EDGE_IP_VERSION"] == "4"
+    assert environment["TUNNEL_EDGE_BIND_ADDRESS"] == "192.0.2.10"
+
+
+def test_ra_tq_029_network_interfaces_exclude_unusable_addresses(monkeypatch) -> None:
+    monkeypatch.setattr(
+        remote_access.psutil,
+        "net_if_stats",
+        lambda: {
+            "en0": SimpleNamespace(isup=True),
+            "lo0": SimpleNamespace(isup=True),
+            "down0": SimpleNamespace(isup=False),
+        },
+    )
+    monkeypatch.setattr(
+        remote_access.psutil,
+        "net_if_addrs",
+        lambda: {
+            "en0": [
+                SimpleNamespace(family=remote_access.socket.AF_INET, address="192.0.2.10"),
+                SimpleNamespace(family=remote_access.socket.AF_INET6, address="2001:db8::10%en0"),
+                SimpleNamespace(family=remote_access.socket.AF_INET6, address="fe80::1%en0"),
+            ],
+            "lo0": [SimpleNamespace(family=remote_access.socket.AF_INET, address="127.0.0.1")],
+            "down0": [SimpleNamespace(family=remote_access.socket.AF_INET, address="198.51.100.2")],
+        },
+    )
+
+    result = remote_access.network_interfaces()
+
+    assert result == {
+        "ok": True,
+        "interfaces": [
+            {"id": "en0:192.0.2.10", "name": "en0", "address": "192.0.2.10", "ip_version": "4"},
+            {"id": "en0:2001:db8::10", "name": "en0", "address": "2001:db8::10", "ip_version": "6"},
+        ],
+    }
+
+
+def test_ra_tq_030_connectivity_diagnostics_do_not_guess_quic_reachability(monkeypatch) -> None:
+    config = _config()
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda loaded=None: {
+            "running": True,
+            "binary_version": "2026.3.0",
+            "tunnel_quality": {"protocol": "http2", "transport": {"effective": "http2"}},
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_bounded_tunnel_addresses",
+        lambda: [(remote_access.socket.AF_INET, "198.51.100.10")],
+    )
+    monkeypatch.setattr(remote_access, "_tcp_tunnel_reachable", lambda *args, **kwargs: True)
+
+    result = remote_access.connectivity_diagnostics(config)
+
+    assert result["dns"]["status"] == "available"
+    assert result["http2"]["status"] == "available"
+    assert result["quic"] == {"status": "unknown", "source": "not_observed"}
+
+
+@pytest.mark.parametrize(
+    "sample_age_before_restart",
+    [remote_access.QUALITY_COMPARISON_MAX_AGE_SECONDS + 1, 1],
+)
+def test_ra_tq_030_connectivity_diagnostics_requires_fresh_active_protocol(
+    monkeypatch,
+    sample_age_before_restart,
+) -> None:
+    config = _config()
+    now = time.time()
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda loaded=None: {
+            "running": True,
+            "pid": 222,
+            "binary_version": "2026.3.0",
+            "tunnel_quality": {
+                "protocol": "quic",
+                "transport": {"effective": "quic"},
+                "sampled_at": remote_access.tunnel_quality.utc_timestamp(
+                    now - sample_age_before_restart
+                ),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_state_connector",
+        lambda name: {"pid": 222, "started_at": now} if name == "active" else None,
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_bounded_tunnel_addresses",
+        lambda: [(remote_access.socket.AF_INET, "198.51.100.10")],
+    )
+    monkeypatch.setattr(remote_access, "_tcp_tunnel_reachable", lambda *args, **kwargs: False)
+
+    result = remote_access.connectivity_diagnostics(config)
+
+    assert result["effective_protocol"] == "unknown"
+    assert result["quic"] == {"status": "unknown", "source": "not_observed"}
+    assert result["http2"] == {"status": "unavailable", "source": "tcp_probe"}
+
+
+def test_ra_tq_030_connectivity_diagnostics_filters_dns_by_selected_family(
+    monkeypatch,
+) -> None:
+    config = _config()
+    config.remote_access.vibe_cloud.edge_ip_version = "6"
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda loaded=None: {
+            "running": False,
+            "binary_version": "2026.3.0",
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_bounded_tunnel_addresses",
+        lambda: [(remote_access.socket.AF_INET, "198.51.100.10")],
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_tcp_tunnel_reachable",
+        lambda *args, **kwargs: pytest.fail("no selected-family address is available"),
+    )
+
+    result = remote_access.connectivity_diagnostics(config)
+
+    assert result["dns"]["status"] == "unavailable"
+    assert result["http2"]["status"] == "unknown"

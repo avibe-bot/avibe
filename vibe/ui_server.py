@@ -1329,19 +1329,12 @@ def _remote_access_public_url_invalid(config: V2Config) -> bool:
     return bool(cloud.enabled and not _remote_access_public_origin(config))
 
 
-def _remote_access_snapshot(config: V2Config) -> dict[str, Any]:
-    return {
-        "provider": config.remote_access.provider,
-        "vibe_cloud": config.remote_access.vibe_cloud.__dict__.copy(),
-    }
-
-
 def _remote_access_settings_changed(previous: V2Config | None, current: V2Config, payload: dict) -> bool:
     if "remote_access" not in payload:
         return False
-    if previous is None:
-        return bool(_remote_access_snapshot(current)["vibe_cloud"].get("enabled"))
-    return _remote_access_snapshot(previous) != _remote_access_snapshot(current)
+    from vibe import api
+
+    return api.remote_access_runtime_changed(previous, current)
 
 
 def _should_rotate_remote_session_secret(previous: V2Config | None, current: V2Config, payload: dict) -> bool:
@@ -4540,7 +4533,7 @@ def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, b
 
     with CONFIG_LOCK:
         previous_config = _load_remote_access_config()
-        config = api.save_config(payload)
+        config = api.save_config(payload, generic_remote_access=True)
         should_reconcile_remote_access = False
         if _remote_access_settings_changed(previous_config, config, payload):
             if _should_rotate_remote_session_secret(previous_config, config, payload):
@@ -4774,6 +4767,42 @@ def remote_access_optimize_route():
 
     result = remote_access.optimize_route()
     return jsonify(result), 202 if result.get("ok") else 409
+
+
+@app.route("/api/remote-access/network-interfaces", methods=["GET"])
+def remote_access_network_interfaces():
+    from vibe import remote_access
+
+    return jsonify(remote_access.network_interfaces())
+
+
+@app.route("/api/remote-access/settings", methods=["POST"])
+async def remote_access_settings():
+    from vibe import remote_access
+
+    payload = request.json or {}
+    result = await asyncio.to_thread(remote_access.apply_settings, payload)
+    if result.get("ok"):
+        await asyncio.to_thread(_ensure_remote_access_monitoring)
+        return jsonify(result)
+    status_code = 400 if result.get("error") == "remote_access_settings_invalid" else 409
+    return jsonify(result), status_code
+
+
+@app.route("/api/remote-access/diagnostics", methods=["POST"])
+async def remote_access_diagnostics():
+    from vibe import remote_access
+
+    try:
+        result = await asyncio.to_thread(remote_access.connectivity_diagnostics)
+    except Exception as exc:
+        logger.warning("Tunnel connectivity diagnostics failed", exc_info=True)
+        result = {
+            "ok": False,
+            "error": "remote_access_diagnostics_failed",
+            "detail": str(exc),
+        }
+    return jsonify(result), 200 if result.get("ok") else 409
 
 
 @app.route("/auth/callback", methods=["GET"])
