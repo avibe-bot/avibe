@@ -20,15 +20,21 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+from core.agent_auth_service import AgentAuthService
 from core.handlers.model_hub.service import ModelHubError
 from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.scenario_harness.model_hub_native_oauth import NativeOAuthScenarioHarness
-from vibe.api import get_claude_auth, save_claude_auth
+from vibe.api import (
+    get_claude_auth,
+    save_claude_auth,
+    test_backend_auth_async as probe_backend_auth_async,
+)
 from vibe.claude_config import (
     build_claude_subprocess_env,
     materialize_claude_subprocess_env,
+    read_claude_settings_env,
 )
 
 
@@ -70,6 +76,12 @@ class _CodexProviderBindingSessions:
 
     def bind_agent_session(self, *_args, **_kwargs):
         return "ses-provider"
+
+
+class _ReloadingV2ConfigController:
+    @property
+    def config(self):
+        return V2Config.load()
 
 
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
@@ -189,6 +201,146 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         ScenarioExpect.step_history(
             runner,
             ["confirm_oauth_is_active", "save_auth_token", "launch_next_turn"],
+        )
+
+    async def test_claude_oauth_to_api_key_probe_drops_stale_auth_token(self):
+        """Scenario: AUTH-SETUP-905"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        home = Path(state_dir.name)
+        claude_home = home / ".claude"
+        claude_home.mkdir()
+        credentials_path = claude_home / ".credentials.json"
+        credentials_path.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "oauth-access",
+                        "refreshToken": "oauth-refresh",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        probe_cli = home / "claude-probe"
+        probe_cli.write_text(
+            f"""#!{sys.executable}
+import os
+import sys
+
+expected = (
+    sys.argv[1:] == ["-p", "Hi"]
+    and os.environ.get("ANTHROPIC_API_KEY") == "relay-api-key"
+    and "ANTHROPIC_AUTH_TOKEN" not in os.environ
+    and os.environ.get("ANTHROPIC_BASE_URL") == "https://ai.coinsummer.com"
+)
+if not expected:
+    print("unexpected Claude probe environment")
+    raise SystemExit(7)
+print("relay-probe-ok")
+""",
+            encoding="utf-8",
+        )
+        probe_cli.chmod(0o755)
+
+        harness = AuthSetupScenarioHarness()
+        runner = ScenarioRunner(harness)
+        service = AgentAuthService(_ReloadingV2ConfigController())
+        cleanup_calls = []
+        restart_calls = []
+
+        def clear_oauth(cleanup_service=None):
+            cleanup_calls.append(cleanup_service)
+            credentials_path.unlink()
+            return {"ok": True}
+
+        def restart_backend(name, *, metadata=None):
+            restart_calls.append((name, metadata))
+            return {"ok": True, "message": "refreshed"}
+
+        def capture_oauth_state(current):
+            current.before_switch = get_claude_auth()
+
+        def save_api_key(current):
+            current.save_result = save_claude_auth(
+                {
+                    "auth_mode": "api_key",
+                    "api_key": "relay-api-key",
+                    "credential_type": "api_key",
+                    "base_url": "https://ai.coinsummer.com",
+                }
+            )
+
+        async def run_connection_probe(current):
+            current.test_result = await probe_backend_auth_async("claude")
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AVIBE_HOME": str(home / ".avibe"),
+                    "CLAUDE_CONFIG_DIR": str(claude_home),
+                    "ANTHROPIC_API_KEY": "stale-parent-api-key",
+                    "ANTHROPIC_AUTH_TOKEN": "stale-parent-auth-token",
+                    "ANTHROPIC_BASE_URL": "https://stale-parent.example",
+                },
+            ),
+            patch("vibe.api._get_oauth_service", return_value=service),
+            patch(
+                "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
+                side_effect=clear_oauth,
+            ),
+            patch("vibe.api.restart_backend", side_effect=restart_backend),
+            patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
+        ):
+            config = V2Config(
+                mode="self_host",
+                version="v2",
+                slack=SlackConfig(bot_token=""),
+                runtime=RuntimeConfig(default_cwd=str(home)),
+                agents=AgentsConfig(),
+            )
+            config.agents.claude.auth_mode = "oauth"
+            config.agents.claude.auth_mode_set = True
+            config.agents.claude.cli_path = str(probe_cli)
+            config.save()
+
+            await runner.run(
+                ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
+                ScenarioStep("save_api_key", save_api_key),
+                ScenarioStep("test_connection", run_connection_probe),
+            )
+            harness.saved_settings_env = read_claude_settings_env()
+
+        self.assertEqual(harness.before_switch["active_auth_mode"], "oauth")
+        self.assertEqual(harness.save_result["active_auth_mode"], "api_key")
+        self.assertEqual(harness.save_result["credential_type"], "api_key")
+        self.assertEqual(
+            harness.save_result["settings_env_key_var"],
+            "ANTHROPIC_API_KEY",
+        )
+        self.assertEqual(
+            harness.saved_settings_env,
+            {
+                "ANTHROPIC_API_KEY": "relay-api-key",
+                "ANTHROPIC_BASE_URL": "https://ai.coinsummer.com",
+            },
+        )
+        self.assertTrue(harness.test_result["ok"])
+        self.assertEqual(harness.test_result["excerpt"], "relay-probe-ok")
+        self.assertEqual(cleanup_calls, [service])
+        self.assertEqual(
+            restart_calls,
+            [
+                (
+                    "claude",
+                    {"reason": "save_claude_auth", "source": "ui_api"},
+                )
+            ],
+        )
+        ScenarioExpect.step_history(
+            runner,
+            ["confirm_oauth_is_active", "save_api_key", "test_connection"],
         )
 
     async def test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch(self):

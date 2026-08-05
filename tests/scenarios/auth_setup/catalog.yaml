@@ -169,5 +169,12 @@ scenarios:
     layer: scenario
     backend: claude
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_oauth_to_explicit_auth_token_reaches_next_turn
+  - id: AUTH-SETUP-905
+    name: Claude API key probe drops a stale inherited auth token after switching from OAuth
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_oauth_to_api_key_probe_drops_stale_auth_token
 next_priority:
   - AUTH-SETUP-301
