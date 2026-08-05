@@ -796,6 +796,41 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed_gate_current, [True])
         self.assertFalse(service._turn_gates[runtime_key].lock.locked())
 
+    async def test_setup_auth_failure_without_client_does_not_raise_unbound_client(self):
+        controller = _StubController()
+        controller.agent_auth_service.maybe_emit_auth_recovery_message = AsyncMock(return_value=True)
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(
+                side_effect=RuntimeError("OAuth login required"),
+            ),
+            mark_session_idle=lambda _key: None,
+            handle_session_error=AsyncMock(),
+            capture_session_id=lambda *_args, **_kwargs: None,
+        )
+        agent = ClaudeAgent(controller)
+        agent._delete_ack = AsyncMock()
+
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="hello",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id="wechat_o9:/tmp/work",
+            session_key="wechat-user",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+
+        await agent.handle_message(request)
+
+        controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
+        controller.session_handler.handle_session_error.assert_not_awaited()
+
     async def test_result_keeps_claude_session_active_when_requests_are_queued(self):
         controller = _StubController()
         mark_idle_calls = []
@@ -1485,6 +1520,10 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.emit_agent_message = AsyncMock()
         controller._get_session_key = lambda context: "telegram::user::U1"
         agent = ClaudeAgent(controller)
+        settlement_order = []
+        agent.record_model_hub_native_failure = AsyncMock(
+            side_effect=lambda *_args: settlement_order.append("record")
+        )
         composite_key = "session-eof:/tmp/work"
         pending_request = SimpleNamespace(
             context=SimpleNamespace(
@@ -1498,7 +1537,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._remove_specific_pending_reaction = AsyncMock()
         agent._remove_ack_reaction = AsyncMock()
         agent.session_handler = SimpleNamespace(
-            handle_session_error=AsyncMock(),
+            handle_session_error=AsyncMock(
+                side_effect=lambda *_args: settlement_order.append("handle")
+            ),
             cleanup_session=AsyncMock(),
             claude_error_diagnostic=lambda _key, _error: "Claude process terminated: SIGABRT",
         )
@@ -1511,6 +1552,11 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             await agent._handle_receiver_eof(composite_key, pending_request.context)
 
         agent.session_handler.handle_session_error.assert_awaited_once()
+        agent.record_model_hub_native_failure.assert_awaited_once_with(
+            pending_request.context,
+            "Claude process terminated: SIGABRT",
+        )
+        self.assertEqual(settlement_order, ["record", "handle"])
         agent.session_handler.cleanup_session.assert_not_awaited()
         persist.assert_called_once()
         self.assertIn("Claude Code process terminated", persist.call_args.args[2])

@@ -147,6 +147,7 @@ class ClaudeAgent(BaseAgent):
         runtime_base_session_id = request.base_session_id
         runtime_session_key = request.composite_session_id
         turn_registered = False
+        client = None
 
         # Question callback handling (disabled - SDK doesn't support AskUserQuestion response)
         # if self.ENABLE_ASK_USER_QUESTION and request.message.startswith("claude_question:"):
@@ -245,7 +246,7 @@ class ClaudeAgent(BaseAgent):
                     output=terminal_output_for(request),
                     terminal_error=diagnostic,
                 )
-                if handled and get_claude_client_returncode(client) is not None:
+                if handled and client is not None and get_claude_client_returncode(client) is not None:
                     # Auth recovery owns the visible settlement, but a query can
                     # fail after the cached CLI has already exited. Retire that
                     # runtime here so its client and Model Hub credential cannot
@@ -1870,6 +1871,8 @@ class ClaudeAgent(BaseAgent):
             eof_error = RuntimeError(terminal_error)
             error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
             diagnostic = self._claude_error_diagnostic(composite_key, eof_error)
+            failure_context = getattr(pending_request, "context", context)
+            await self.record_model_hub_native_failure(failure_context, diagnostic)
             auth_handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                 context,
                 "claude",
