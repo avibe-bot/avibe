@@ -21,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterator, Literal, Optional
 
 from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
@@ -933,16 +933,13 @@ class SessionTurnManager:
             raise RuntimeError("Session delivery context builder is not bound")
         return self._build_context(session_id)
 
-    def _delivery_context_for_binding(self, session_id: str) -> "MessageContext":
-        """Build binding context with the queued head's scheduled Agent identity."""
-        context = self._delivery_context(session_id)
-        with self._sqlite_engine().connect() as conn:
-            head = delivery_store.claimable_fifo_head(conn, session_id)
-        if head is None:
-            return context
-        provenance = (
-            delivery_store.delivery_payload(head).get("metadata") or {}
-        ).get(SCHEDULED_PROVENANCE_KEY)
+    @staticmethod
+    def _apply_delivery_binding_provenance(
+        context: "MessageContext",
+        delivery: dict[str, Any],
+    ) -> "MessageContext":
+        """Overlay only the exact queued Delivery's routing provenance."""
+        provenance = (delivery_store.delivery_payload(delivery).get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY)
         preserved = provenance.get("platform_specific") if isinstance(provenance, dict) else None
         if not isinstance(preserved, dict):
             return context
@@ -958,6 +955,15 @@ class SessionTurnManager:
                 spec[key] = preserved[key]
         context.platform_specific = spec
         return context
+
+    @staticmethod
+    def _binding_metadata(binding: dict[str, Any]) -> dict[str, Any]:
+        raw_metadata = binding.get("metadata_json")
+        try:
+            metadata = json.loads(raw_metadata) if raw_metadata else {}
+        except (TypeError, ValueError):
+            metadata = {}
+        return metadata if isinstance(metadata, dict) else {}
 
     def _context_vibe_agent_binding(self, context: "MessageContext") -> dict[str, str]:
         spec = getattr(context, "platform_specific", None) or {}
@@ -1014,18 +1020,31 @@ class SessionTurnManager:
         # different Agent for this one execution. Their top-level identity is the
         # explicit request, not a stale copy of the Session row, so durable context
         # refresh must not overwrite it.
-        if (
-            spec.get("task_trigger_kind")
-            or spec.get("turn_source") == SOURCE_SCHEDULED
-        ) and any(spec.get(key) for key in ("vibe_agent_id", "vibe_agent_name")):
-            if any(
-                str(spec.get(key) or "").strip()
-                != str(binding.get(binding_key) or "").strip()
-                for key, binding_key in (
-                    ("vibe_agent_id", "agent_id"),
-                    ("vibe_agent_name", "agent_name"),
-                )
+        if (spec.get("task_trigger_kind") or spec.get("turn_source") == SOURCE_SCHEDULED) and any(
+            spec.get(key) for key in ("vibe_agent_id", "vibe_agent_name")
+        ):
+            for key, binding_key in (
+                ("vibe_agent_id", "agent_id"),
+                ("vibe_agent_name", "agent_name"),
             ):
+                supplied = str(spec.get(key) or "").strip()
+                if supplied and supplied != str(binding.get(binding_key) or "").strip():
+                    return False
+            if (
+                spec.get(SCHEDULED_TARGET_AGENT_KEY)
+                and str(spec.get(SCHEDULED_TARGET_AGENT_KEY)).strip() != str(binding.get("agent_name") or "").strip()
+            ):
+                return False
+
+        durable_session_id = str(binding.get("id") or "").strip()
+        for projection, identity_key in (
+            (spec.get("agent_session_target"), "id"),
+            (spec.get("agent_run_target"), "agent_session_id"),
+        ):
+            if not isinstance(projection, dict):
+                continue
+            projection_id = str(projection.get(identity_key) or "").strip()
+            if projection_id and durable_session_id and projection_id != durable_session_id:
                 return False
 
         def differs(
@@ -1052,10 +1071,10 @@ class SessionTurnManager:
                 "model",
                 "reasoning_effort",
             ):
-                if key in projection and str(projection.get(key) or "").strip() != str(
-                    binding.get(key) or ""
-                ).strip():
+                if key in projection and str(projection.get(key) or "").strip() != str(binding.get(key) or "").strip():
                     return True
+            if "metadata" in projection and projection.get("metadata") != SessionTurnManager._binding_metadata(binding):
+                return True
             return False
 
         session_target = spec.get("agent_session_target")
@@ -1072,10 +1091,18 @@ class SessionTurnManager:
             require_backend=True,
         ):
             return True
+        resolved_agent = spec.get("resolved_vibe_agent")
+        if isinstance(resolved_agent, dict):
+            for key, binding_key in (
+                ("id", "agent_id"),
+                ("name", "agent_name"),
+                ("backend", "agent_backend"),
+            ):
+                if str(resolved_agent.get(key) or "").strip() != str(binding.get(binding_key) or "").strip():
+                    return True
         if any(
             isinstance(projection, dict)
-            and str(projection.get(identity_key) or "").strip()
-            == str(binding.get("id") or "").strip()
+            and str(projection.get(identity_key) or "").strip() == str(binding.get("id") or "").strip()
             for projection, identity_key in (
                 (session_target, "id"),
                 (run_target, "agent_session_id"),
@@ -1099,25 +1126,41 @@ class SessionTurnManager:
         spec = dict(getattr(context, "platform_specific", None) or {})
         target = spec.get("agent_session_target")
         target = dict(target) if isinstance(target, dict) else {}
-        target.update(
-            {
-                "id": binding.get("id"),
-                "agent_id": binding.get("agent_id"),
-                "agent_name": binding.get("agent_name"),
-                "agent_backend": binding.get("agent_backend"),
-                "agent_variant": binding.get("agent_variant"),
-                "model": binding.get("model"),
-                "reasoning_effort": binding.get("reasoning_effort"),
-            }
-        )
+        target_id = str(target.get("id") or "").strip()
+        if not target_id or target_id == str(binding.get("id") or "").strip():
+            target.update(
+                {
+                    "id": binding.get("id"),
+                    "agent_id": binding.get("agent_id"),
+                    "agent_name": binding.get("agent_name"),
+                    "agent_backend": binding.get("agent_backend"),
+                    "agent_variant": binding.get("agent_variant"),
+                    "model": binding.get("model"),
+                    "reasoning_effort": binding.get("reasoning_effort"),
+                    "metadata": SessionTurnManager._binding_metadata(binding),
+                }
+            )
         spec["agent_session_target"] = target
         # Keep every routing projection on the same durable winner. MessageHandler
         # and Controller prefer these cached fields over agent_session_target, so
         # leaving an old top-level value would route a newly bound turn elsewhere.
-        spec["vibe_agent_id"] = binding.get("agent_id")
-        spec["vibe_agent_name"] = binding.get("agent_name")
+        agent_id = str(binding.get("agent_id") or "").strip()
+        agent_name = str(binding.get("agent_name") or "").strip()
+        spec["vibe_agent_id"] = agent_id or None
+        spec["vibe_agent_name"] = agent_name or None
+        if agent_id or agent_name:
+            spec["resolved_vibe_agent"] = {
+                "id": agent_id or None,
+                "name": agent_name or None,
+                "backend": binding.get("agent_backend"),
+            }
+        else:
+            spec.pop("resolved_vibe_agent", None)
         run_target = spec.get("agent_run_target")
-        if isinstance(run_target, dict):
+        if (
+            isinstance(run_target, dict)
+            and str(run_target.get("agent_session_id") or "").strip() == str(binding.get("id") or "").strip()
+        ):
             run_target = dict(run_target)
             run_target.update(
                 {
@@ -1133,13 +1176,9 @@ class SessionTurnManager:
             spec["agent_run_target"] = run_target
         context.platform_specific = spec
 
-    def _delivery_backend(
-        self,
-        session_id: str,
-        context: Optional["MessageContext"],
-    ) -> tuple[str, "MessageContext"]:
-        resolved = context or self._delivery_context(session_id)
-        columns = (
+    @staticmethod
+    def _session_binding_columns() -> tuple[Any, ...]:
+        return (
             agent_sessions.c.id,
             agent_sessions.c.agent_id,
             agent_sessions.c.agent_name,
@@ -1150,10 +1189,86 @@ class SessionTurnManager:
             agent_sessions.c.metadata_json,
             agent_sessions.c.status,
         )
+
+    def _delivery_backend_in_transaction(
+        self,
+        conn: Connection,
+        session_id: str,
+        context: "MessageContext",
+        *,
+        resolved_agent: dict[str, str] | None = None,
+        requested_backend: str | None = None,
+    ) -> tuple[str, "MessageContext"]:
+        """Resolve and persist a Session route while the caller owns the writer lock."""
+        columns = self._session_binding_columns()
+        binding = conn.execute(select(*columns).where(agent_sessions.c.id == session_id)).mappings().one_or_none()
+        durable_backend = str((binding or {}).get("agent_backend") or "").strip()
+        if durable_backend:
+            if self._binding_projection_is_stale(context, dict(binding)):
+                self._apply_session_binding_to_context(context, dict(binding))
+            return durable_backend, context
+
+        if resolved_agent is None:
+            resolved_agent = self._context_vibe_agent_binding(context)
+        requested_backend = requested_backend or (resolved_agent["agent_backend"] or self._context_backend(context))
+        if not requested_backend:
+            raise RuntimeError(f"Session {session_id} has no resolved backend")
+
+        # An agentless Workbench Session is valid until its first turn resolves the
+        # global default Agent. Materialize that decision before crossing the runtime
+        # ownership gate; otherwise a queued Delivery is durable while its route is not.
+        if binding is not None and binding["status"] == "active" and not str(binding["agent_backend"] or "").strip():
+            values: dict[str, Any] = {
+                "agent_backend": requested_backend,
+                "updated_at": _utc_now_iso(),
+            }
+            if str(binding["agent_variant"] or "").strip() in {"", "default"}:
+                values["agent_variant"] = requested_backend
+            if resolved_agent["agent_id"] and not binding["agent_id"]:
+                values["agent_id"] = resolved_agent["agent_id"]
+            if resolved_agent["agent_name"] and not binding["agent_name"]:
+                values["agent_name"] = resolved_agent["agent_name"]
+            stored_metadata = self._binding_metadata(dict(binding))
+            reconciled_metadata = reconcile_explicit_overrides(stored_metadata)
+            if reconciled_metadata != stored_metadata:
+                values["metadata_json"] = json.dumps(
+                    reconciled_metadata,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == session_id)
+                .where(agent_sessions.c.status == "active")
+                .where(
+                    or_(
+                        agent_sessions.c.agent_backend == "",
+                        agent_sessions.c.agent_backend.is_(None),
+                    )
+                )
+                .values(**values)
+            )
+            binding = conn.execute(select(*columns).where(agent_sessions.c.id == session_id)).mappings().one_or_none()
+
+        if binding is not None:
+            binding_payload = dict(binding)
+            self._apply_session_binding_to_context(context, binding_payload)
+            durable_backend = str(binding_payload.get("agent_backend") or "").strip()
+            if durable_backend:
+                return durable_backend, context
+            if binding_payload.get("status") == "active":
+                raise RuntimeError(f"Session {session_id} has no durable backend binding")
+        return requested_backend, context
+
+    def _delivery_backend(
+        self,
+        session_id: str,
+        context: Optional["MessageContext"],
+    ) -> tuple[str, "MessageContext"]:
+        resolved = context or self._delivery_context(session_id)
+        columns = self._session_binding_columns()
         with self._sqlite_engine().connect() as conn:
-            binding = conn.execute(
-                select(*columns).where(agent_sessions.c.id == session_id)
-            ).mappings().one_or_none()
+            binding = conn.execute(select(*columns).where(agent_sessions.c.id == session_id)).mappings().one_or_none()
         durable_backend = str((binding or {}).get("agent_backend") or "").strip()
         if durable_backend:
             if self._binding_projection_is_stale(resolved, dict(binding)):
@@ -1168,93 +1283,31 @@ class SessionTurnManager:
         if not requested_backend:
             raise RuntimeError(f"Session {session_id} has no resolved backend")
 
-        # An agentless Workbench Session is valid until its first turn resolves the
-        # global default Agent. Materialize that decision before crossing the runtime
-        # ownership gate; otherwise a queued Delivery is durable while its route is not.
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
-            binding = conn.execute(
-                select(*columns).where(agent_sessions.c.id == session_id)
-            ).mappings().one_or_none()
-            if (
-                binding is not None
-                and binding["status"] == "active"
-                and not str(binding["agent_backend"] or "").strip()
-            ):
-                values: dict[str, Any] = {
-                    "agent_backend": requested_backend,
-                    "updated_at": _utc_now_iso(),
-                }
-                if str(binding["agent_variant"] or "").strip() in {"", "default"}:
-                    values["agent_variant"] = requested_backend
-                if resolved_agent["agent_id"] and not binding["agent_id"]:
-                    values["agent_id"] = resolved_agent["agent_id"]
-                if resolved_agent["agent_name"] and not binding["agent_name"]:
-                    values["agent_name"] = resolved_agent["agent_name"]
-                raw_metadata = binding.get("metadata_json")
-                try:
-                    stored_metadata = json.loads(raw_metadata) if raw_metadata else {}
-                except (TypeError, ValueError):
-                    stored_metadata = {}
-                if not isinstance(stored_metadata, dict):
-                    stored_metadata = {}
-                reconciled_metadata = reconcile_explicit_overrides(stored_metadata)
-                if reconciled_metadata != stored_metadata:
-                    values["metadata_json"] = json.dumps(
-                        reconciled_metadata,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                    )
-                conn.execute(
-                    update(agent_sessions)
-                    .where(agent_sessions.c.id == session_id)
-                    .where(agent_sessions.c.status == "active")
-                    .where(
-                        or_(
-                            agent_sessions.c.agent_backend == "",
-                            agent_sessions.c.agent_backend.is_(None),
-                        )
-                    )
-                    .values(**values)
-                )
-                binding = conn.execute(
-                    select(*columns).where(agent_sessions.c.id == session_id)
-                ).mappings().one_or_none()
-
-        if binding is not None:
-            binding_payload = dict(binding)
-            self._apply_session_binding_to_context(resolved, binding_payload)
-            durable_backend = str(binding_payload.get("agent_backend") or "").strip()
-            if durable_backend:
-                return durable_backend, resolved
-            if binding_payload.get("status") == "active":
-                raise RuntimeError(f"Session {session_id} has no durable backend binding")
-        return requested_backend, resolved
+            return self._delivery_backend_in_transaction(
+                conn,
+                session_id,
+                resolved,
+                resolved_agent=resolved_agent,
+                requested_backend=requested_backend,
+            )
 
     @contextmanager
-    def _runtime_start_owner(
+    def _runtime_start_owner_for_binding(
         self,
         session_id: str,
         backend: str,
+        binding: dict[str, Any] | None,
     ) -> Iterator[_RuntimeStartOwner]:
         """Hold the exact runtime generation through the owning SQLite commit."""
-
-        with self._sqlite_engine().connect() as conn:
-            binding = conn.execute(
-                select(
-                    agent_sessions.c.agent_backend,
-                    agent_sessions.c.session_anchor,
-                    agent_sessions.c.workdir,
-                ).where(agent_sessions.c.id == session_id)
-            ).mappings().one_or_none()
         durable_backend = str((binding or {}).get("agent_backend") or "").strip()
         requested_backend = str(backend or "").strip()
         session_anchor = str((binding or {}).get("session_anchor") or "").strip()
         workdir = (binding or {}).get("workdir")
         if binding is None or not durable_backend or not session_anchor:
             logger.warning(
-                "Refusing runtime start with incomplete durable Session binding: "
-                "session=%s",
+                "Refusing runtime start with incomplete durable Session binding: session=%s",
                 session_id,
             )
             yield _RuntimeStartOwner(
@@ -1348,6 +1401,52 @@ class SessionTurnManager:
                 admitted=bool(admitted),
                 identity=identity,
             )
+
+    @contextmanager
+    def _runtime_start_owner(
+        self,
+        session_id: str,
+        backend: str,
+    ) -> Iterator[_RuntimeStartOwner]:
+        with self._sqlite_engine().connect() as conn:
+            binding = (
+                conn.execute(
+                    select(
+                        agent_sessions.c.agent_backend,
+                        agent_sessions.c.session_anchor,
+                        agent_sessions.c.workdir,
+                    ).where(agent_sessions.c.id == session_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        with self._runtime_start_owner_for_binding(
+            session_id, backend, dict(binding) if binding is not None else None
+        ) as owner:
+            yield owner
+
+    @contextmanager
+    def _runtime_start_owner_in_transaction(
+        self,
+        conn: Connection,
+        session_id: str,
+        backend: str,
+    ) -> Iterator[_RuntimeStartOwner]:
+        binding = (
+            conn.execute(
+                select(
+                    agent_sessions.c.agent_backend,
+                    agent_sessions.c.session_anchor,
+                    agent_sessions.c.workdir,
+                ).where(agent_sessions.c.id == session_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        with self._runtime_start_owner_for_binding(
+            session_id, backend, dict(binding) if binding is not None else None
+        ) as owner:
+            yield owner
 
     @staticmethod
     def _delivery_snapshot(request: DeliveryRequest) -> dict[str, Any]:
@@ -1638,13 +1737,17 @@ class SessionTurnManager:
         self,
         conn: Connection,
         *,
-        owner: _RuntimeStartOwner,
+        owner: _RuntimeStartOwner | None,
         session_id: str,
         backend: str,
         expected_head_id: str | None = None,
         expected_head_version: int | None = None,
+        owner_factory: Callable[[Connection, list[dict[str, Any]]], ContextManager[_RuntimeStartOwner]] | None = None,
     ) -> str | None:
         """Claim the exact open FIFO head while the caller owns SQLite's writer slot."""
+
+        if owner is None and owner_factory is None:
+            raise ValueError("FIFO claim requires a runtime owner or owner factory")
 
         if (
             delivery_store.active_turn(conn, session_id) is not None
@@ -1689,16 +1792,45 @@ class SessionTurnManager:
                         row["id"],
                     )
                 continue
+            unstartable_rows = [row for row in delivery_rows if not self._delivery_agent_runs_can_start(conn, row)]
+            if unstartable_rows:
+                self._retire_unstartable_deliveries(
+                    conn,
+                    session_id,
+                    unstartable_rows,
+                )
+                continue
             turn_id = delivery_store.new_turn_id()
-            claimed = self._claim_start_batch(
-                conn,
-                owner=owner,
-                turn_id=turn_id,
-                session_id=session_id,
-                backend=backend,
-                deliveries=delivery_rows,
-                dispatch_text=_segment_dispatch_text(segment_payloads),
-            )
+            dispatch_text = _segment_dispatch_text(segment_payloads)
+            if owner is not None:
+                claimed = self._claim_start_batch(
+                    conn,
+                    owner=owner,
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    backend=backend,
+                    deliveries=delivery_rows,
+                    dispatch_text=dispatch_text,
+                )
+            else:
+                assert owner_factory is not None
+                with owner_factory(conn, delivery_rows) as prepared_owner:
+                    prepared_backend = prepared_owner.backend or backend
+                    if prepared_backend in self._draining_backends:
+                        self._deferred_restart_sessions.setdefault(
+                            prepared_backend,
+                            set(),
+                        ).add(session_id)
+                        return None
+                    claimed = self._claim_start_batch(
+                        conn,
+                        owner=prepared_owner,
+                        turn_id=turn_id,
+                        session_id=session_id,
+                        backend=prepared_backend,
+                        deliveries=delivery_rows,
+                        dispatch_text=dispatch_text,
+                    )
             if claimed is not None:
                 return turn_id
             if self._start_claim_retired_rows(conn, delivery_rows):
@@ -3491,6 +3623,65 @@ class SessionTurnManager:
                     )
             return False
 
+    def _delivery_runtime_owner_factory(
+        self,
+        session_id: str,
+        context: Optional["MessageContext"],
+    ) -> Callable[[Connection, list[dict[str, Any]]], ContextManager[_RuntimeStartOwner]]:
+        """Create a claim callback that binds the exact selected FIFO segment."""
+
+        @contextmanager
+        def prepare(
+            conn: Connection,
+            deliveries: list[dict[str, Any]],
+        ) -> Iterator[_RuntimeStartOwner]:
+            resolved = context
+            if resolved is None:
+                durable_backend = str(
+                    conn.execute(
+                        select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+                    ).scalar_one_or_none()
+                    or ""
+                ).strip()
+                if durable_backend:
+                    with self._runtime_start_owner_in_transaction(
+                        conn,
+                        session_id,
+                        durable_backend,
+                    ) as owner:
+                        yield owner
+                    return
+                try:
+                    resolved = self._delivery_context(session_id)
+                except Exception:
+                    logger.exception(
+                        "durable queue drain could not rebuild Session context: session=%s",
+                        session_id,
+                    )
+                    yield _RuntimeStartOwner(
+                        session_id=session_id,
+                        backend="",
+                        session_anchor="",
+                        workdir=None,
+                        admitted=False,
+                    )
+                    return
+            if deliveries:
+                self._apply_delivery_binding_provenance(resolved, deliveries[0])
+            backend, _ = self._delivery_backend_in_transaction(
+                conn,
+                session_id,
+                resolved,
+            )
+            with self._runtime_start_owner_in_transaction(
+                conn,
+                session_id,
+                backend,
+            ) as owner:
+                yield owner
+
+        return prepare
+
     async def drain_delivery_queue(
         self,
         session_id: str,
@@ -3499,36 +3690,16 @@ class SessionTurnManager:
         expected_head_version: int | None = None,
     ) -> bool:
         turn_id: str | None = None
-        with self._sqlite_engine().connect() as conn:
-            backend = str(
-                conn.execute(
-                    select(agent_sessions.c.agent_backend).where(
-                        agent_sessions.c.id == session_id
-                    )
-                ).scalar_one_or_none()
-                or ""
-            ).strip()
-        if not backend:
-            binding_context = (
-                self._delivery_context_for_binding(session_id)
-                if self._build_context is not None
-                else None
-            )
-            backend, _context = self._delivery_backend(session_id, binding_context)
-        with self._runtime_start_owner(session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
+        with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
-            if backend in self._draining_backends:
-                self._deferred_restart_sessions.setdefault(backend, set()).add(
-                    session_id
-                )
-                return False
             turn_id = self._claim_fifo_batch_in_transaction(
                 conn,
-                owner=start_owner,
+                owner=None,
                 session_id=session_id,
-                backend=backend,
+                backend="",
                 expected_head_id=expected_head_id,
                 expected_head_version=expected_head_version,
+                owner_factory=self._delivery_runtime_owner_factory(session_id, None),
             )
             if turn_id is None:
                 return False

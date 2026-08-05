@@ -795,6 +795,11 @@ def test_binding_refreshes_all_cached_route_projections(managers) -> None:
                 "reasoning_effort": "low",
                 "workdir": "/tmp",
             },
+            "resolved_vibe_agent": {
+                "id": "stale-agent",
+                "name": "stale",
+                "backend": "claude",
+            },
         }
     )
 
@@ -808,6 +813,7 @@ def test_binding_refreshes_all_cached_route_projections(managers) -> None:
             "agent_variant": "codex",
             "model": None,
             "reasoning_effort": None,
+            "metadata_json": '{"explicit_setting_overrides":["model"]}',
         },
     )
 
@@ -818,6 +824,134 @@ def test_binding_refreshes_all_cached_route_projections(managers) -> None:
     assert spec["agent_run_target"]["agent_backend"] == "codex"
     assert spec["agent_run_target"]["agent_name"] is None
     assert spec["agent_run_target"]["model"] is None
+    assert spec["agent_session_target"]["metadata"] == {"explicit_setting_overrides": ["model"]}
+    assert "resolved_vibe_agent" not in spec
+
+
+def test_name_only_scheduled_projection_refreshes_same_durable_agent(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    context = _context()
+    context.platform_specific.update(
+        {
+            "turn_source": SOURCE_SCHEDULED,
+            "vibe_agent_name": "reviewer",
+            "agent_session_target": {
+                "id": "ses_fsm",
+                "agent_id": "agent-reviewer",
+                "agent_name": "reviewer",
+                "agent_backend": "claude",
+                "agent_variant": "claude",
+                "model": "old-model",
+                "reasoning_effort": "low",
+                "metadata": {},
+            },
+        }
+    )
+
+    assert manager._binding_projection_is_stale(
+        context,
+        {
+            "id": "ses_fsm",
+            "agent_id": "agent-reviewer",
+            "agent_name": "reviewer",
+            "agent_backend": "codex",
+            "agent_variant": "codex",
+            "model": "new-model",
+            "reasoning_effort": "high",
+            "metadata_json": '{"explicit_setting_overrides":["model"]}',
+        },
+    )
+
+
+def test_projection_refresh_preserves_explicit_run_target(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    context = _context()
+    context.platform_specific.update(
+        {
+            "agent_run_target": {
+                "agent_session_id": "ses_scheduled_run",
+                "agent_id": "agent-writer",
+                "agent_name": "writer",
+                "agent_backend": "claude",
+            },
+            "resolved_vibe_agent": {
+                "id": "agent-writer",
+                "name": "writer",
+                "backend": "claude",
+            },
+        }
+    )
+
+    assert not manager._binding_projection_is_stale(
+        context,
+        {
+            "id": "ses_fsm",
+            "agent_id": "agent-reviewer",
+            "agent_name": "reviewer",
+            "agent_backend": "codex",
+            "metadata_json": "{}",
+        },
+    )
+
+
+def test_fifo_head_mismatch_does_not_bind_session_route(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(
+                agent_id=None,
+                agent_name=None,
+                agent_backend="",
+                agent_variant="default",
+            )
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="scheduled",
+                text="exact head",
+                metadata={
+                    SCHEDULED_PROVENANCE_KEY: {
+                        "platform_specific": {
+                            "vibe_agent_name": "reviewer",
+                        }
+                    }
+                },
+            ),
+            dispatch_text="exact head",
+            now="2026-08-01T00:00:01Z",
+        )
+        head = delivery_store.get_delivery(conn, delivery_id)
+    assert head is not None
+
+    assert not asyncio.run(
+        manager.drain_delivery_queue(
+            "ses_fsm",
+            expected_head_id="different-head",
+            expected_head_version=int(head["version"]),
+        )
+    )
+    with engine.connect() as conn:
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == "ses_fsm")
+        ).one()
+    assert binding == (None, None, "")
+    assert starts == []
 
 
 def test_im_p1_materializes_only_after_exact_native_acceptance(managers) -> None:
@@ -1134,9 +1268,7 @@ def test_post_native_terminal_storage_failure_retains_owner_and_running_projecti
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
         status = conn.execute(
-            select(agent_sessions.c.agent_status).where(
-                agent_sessions.c.id == "ses_fsm"
-            )
+            select(agent_sessions.c.agent_status).where(agent_sessions.c.id == "ses_fsm")
         ).scalar_one()
     assert turn is not None and turn["state"] == "active"
     assert status == "running"
@@ -3249,7 +3381,9 @@ def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
         status = conn.execute(
-            select(agent_sessions.c.agent_status).where(agent_sessions.c.id == "ses_fsm")
+            select(agent_sessions.c.agent_status).where(
+                agent_sessions.c.id == "ses_fsm"
+            )
         ).scalar_one()
     assert turn is not None
     assert turn["state"] == "terminal"
