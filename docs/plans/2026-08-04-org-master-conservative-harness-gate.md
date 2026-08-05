@@ -39,7 +39,11 @@ entitlement mirror before remote recurring execution can be enabled.
    Agent-definition and instruction mutations, model/backend mutations and
    runtime operations, service control, local installers, terminal sockets,
    file operations including Show Page icon uploads, and Harness definition
-   mutations before invoking their underlying services.
+   mutations before invoking their underlying services. The same boundary also
+   rejects payloads that persist future execution choices: Session Agent/model
+   overrides, Project creation/workdir/default Agent, channel/thread/
+   user cwd or routing, and Agent/platform/runtime config sections. Metadata-only
+   Session and Project edits and unrelated UI/config preferences remain available.
 3. The durable Delivery owner retires remote-origin queue entries before the
    FIFO claim that starts an Agent turn.
 4. Task and Watch stores reject explicit remote definition writes.
@@ -69,6 +73,10 @@ substitute for either dependency.
 - Remote service control, installers, Agent-definition mutations, model/backend
   mutations and probes, and Show Page icon writes fail before reaching their
   local runtime or filesystem services.
+- Remote execution-setting writes through Session, Project, channel, thread,
+  user, and config routes fail before any store save, runtime reconciliation, or
+  restart scheduling; Session titles, Project display names, and unrelated UI
+  preferences remain writable.
 - Paired Project synchronization never forwards the device secret through an
   HTTP redirect.
 - Remote Task and Watch add/update calls produce no definition write.

@@ -2233,7 +2233,142 @@ def enforce_instance_role_capabilities():
     return None
 
 
-def _is_remote_local_execution_request(method: str, path: str) -> bool:
+_SESSION_EXECUTION_SETTING_FIELDS = frozenset(
+    {
+        "agent_backend",
+        "agent_id",
+        "agent_name",
+        "agent_variant",
+        "model",
+        "reasoning_effort",
+        "scope_id",
+    }
+)
+_PROJECT_EXECUTION_SETTING_FIELDS = frozenset(
+    {
+        "agent_backend",
+        "agent_id",
+        "agent_name",
+        "agent_variant",
+        "expected_agent_id",
+        "folder_path",
+        "model",
+        "reasoning_effort",
+    }
+)
+_SCOPE_EXECUTION_SETTING_FIELDS = frozenset(
+    {"custom_cwd", "expected_agent_name", "routing"}
+)
+_CONFIG_EXECUTION_SETTING_FIELDS = frozenset(
+    {
+        "agents",
+        "audio_asr",
+        "gateway",
+        "memory",
+        "model_hub",
+        "platform",
+        "platforms",
+        "runtime",
+        "show_pages_prompt",
+        "update",
+    }
+)
+
+
+def _payload_has_any_field(payload: Any, fields: frozenset[str] | set[str]) -> bool:
+    return isinstance(payload, dict) and not fields.isdisjoint(payload)
+
+
+def _payload_changes_values(payload: Any, current: Any) -> bool:
+    """Return whether supplied values differ from the persisted projection.
+
+    Config saves accept both complete UI round-trips and partial updates. Comparing
+    only supplied leaves lets an unchanged complete payload pass while still
+    rejecting a remote caller that changes any execution-sensitive value.
+    """
+
+    if isinstance(payload, dict):
+        if not isinstance(current, dict):
+            return True
+        return any(
+            key not in current or _payload_changes_values(value, current[key])
+            for key, value in payload.items()
+        )
+    return payload != current
+
+
+def _config_execution_setting_fields() -> set[str]:
+    from config.platform_registry import im_platform_descriptors
+
+    return set(_CONFIG_EXECUTION_SETTING_FIELDS) | {
+        descriptor.config_key for descriptor in im_platform_descriptors()
+    }
+
+
+def _remote_execution_payload_route(method: str, path: str) -> bool:
+    normalized_method = method.upper()
+    if normalized_method == "POST" and path in {
+        "/api/config",
+        "/api/projects",
+        "/api/sessions",
+        "/api/settings",
+        "/api/settings/thread",
+        "/api/users",
+    }:
+        return True
+    return normalized_method == "PATCH" and bool(
+        re.fullmatch(r"/api/(?:projects|sessions)/[^/]+", path)
+    )
+
+
+def _payload_selects_remote_local_execution(method: str, path: str, payload: Any) -> bool:
+    normalized_method = method.upper()
+    if normalized_method == "POST" and path == "/api/config":
+        if not isinstance(payload, dict):
+            return False
+        sensitive_fields = _config_execution_setting_fields()
+        supplied_sensitive = sensitive_fields.intersection(payload)
+        if not supplied_sensitive:
+            return False
+        from vibe import api
+
+        current = _load_remote_access_config()
+        if current is None:
+            return True
+        current_payload = api.config_to_payload(current)
+        return any(
+            _payload_changes_values(payload[field], current_payload.get(field))
+            for field in supplied_sensitive
+        )
+    if normalized_method == "POST" and path == "/api/sessions":
+        return _payload_has_any_field(payload, _SESSION_EXECUTION_SETTING_FIELDS)
+    if normalized_method == "PATCH" and re.fullmatch(r"/api/sessions/[^/]+", path):
+        return _payload_has_any_field(payload, _SESSION_EXECUTION_SETTING_FIELDS)
+    if normalized_method == "PATCH" and re.fullmatch(r"/api/projects/[^/]+", path):
+        return _payload_has_any_field(payload, _PROJECT_EXECUTION_SETTING_FIELDS)
+    if normalized_method == "POST" and path == "/api/settings":
+        channels = payload.get("channels") if isinstance(payload, dict) else None
+        return isinstance(channels, dict) and any(
+            _payload_has_any_field(channel, _SCOPE_EXECUTION_SETTING_FIELDS)
+            for channel in channels.values()
+            if isinstance(channel, dict)
+        )
+    if normalized_method == "POST" and path == "/api/settings/thread":
+        settings = payload.get("settings") if isinstance(payload, dict) else None
+        return _payload_has_any_field(settings, _SCOPE_EXECUTION_SETTING_FIELDS)
+    if normalized_method == "POST" and path == "/api/users":
+        users = payload.get("users") if isinstance(payload, dict) else None
+        return isinstance(users, dict) and any(
+            _payload_has_any_field(user, _SCOPE_EXECUTION_SETTING_FIELDS)
+            for user in users.values()
+            if isinstance(user, dict)
+        )
+    if normalized_method == "POST" and path == "/api/projects":
+        return _payload_has_any_field(payload, {"folder_path"})
+    return False
+
+
+def _is_remote_local_execution_request(method: str, path: str, payload: Any = None) -> bool:
     normalized_method = method.upper()
     is_mutation = normalized_method not in {"GET", "HEAD", "OPTIONS"}
     if path.startswith(("/api/files/", "/api/browse")):
@@ -2275,28 +2410,34 @@ def _is_remote_local_execution_request(method: str, path: str) -> bool:
     if normalized_method == "DELETE" and (
         re.fullmatch(r"/api/skills/[^/]+", path)
         or re.fullmatch(r"/api/sessions/[^/]+(?:/queue/[^/]+)?", path)
+        or path == "/api/settings/thread"
     ):
         return True
-    return normalized_method == "POST" and bool(
+    if normalized_method == "POST" and bool(
         re.fullmatch(
             r"/api/sessions/[^/]+/(?:messages|attachments|cancel|queue/[^/]+/send-now)",
             path,
         )
-    )
+    ):
+        return True
+    return _payload_selects_remote_local_execution(method, path, payload)
 
 
 @app.before_request
-def enforce_remote_local_execution_boundary():
+async def enforce_remote_local_execution_boundary():
     """Keep shell-capable Workbench surfaces on the trusted-local origin."""
 
     context = getattr(g, "authorization_context", None)
-    if (
-        context is None
-        or not context.is_remote
-        or not _is_remote_local_execution_request(request.method, request.path)
-    ):
+    if context is None or not context.is_remote:
         return None
-    return _remote_execution_disabled_response()
+    if _is_remote_local_execution_request(request.method, request.path):
+        return _remote_execution_disabled_response()
+    if not _remote_execution_payload_route(request.method, request.path):
+        return None
+    payload = await request.load_json()
+    if _is_remote_local_execution_request(request.method, request.path, payload):
+        return _remote_execution_disabled_response()
+    return None
 
 
 _PROJECT_RESOURCE_PATHS = (

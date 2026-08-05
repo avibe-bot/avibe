@@ -929,6 +929,215 @@ def test_remote_agent_termination_is_blocked_before_controller_access(
     assert response.get_json()["code"] == "remote_execution_disabled"
 
 
+@pytest.mark.parametrize(
+    "json_body",
+    [
+        {"agent_name": "codex"},
+        {"model": "gpt-5"},
+        {"reasoning_effort": "high"},
+        {"scope_id": "scope-local"},
+    ],
+)
+def test_remote_session_execution_settings_are_blocked_before_store_access(
+    monkeypatch,
+    tmp_path,
+    json_body,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_session_update(*args, **kwargs):
+        raise AssertionError("remote session routing reached the local session store")
+
+    monkeypatch.setattr(
+        "core.services.sessions.update_session",
+        unexpected_session_update,
+    )
+    response = client.patch(
+        "/api/sessions/ses-local",
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("POST", "/api/projects", {"folder_path": "/tmp/remote-project"}),
+        ("PATCH", "/api/projects/proj-local", {"folder_path": "/tmp/remote-project"}),
+        ("PATCH", "/api/projects/proj-local", {"agent_name": "codex"}),
+        ("PATCH", "/api/projects/proj-local", {"model": "gpt-5"}),
+    ],
+)
+def test_remote_project_execution_settings_are_blocked_before_store_access(
+    monkeypatch,
+    tmp_path,
+    method,
+    path,
+    json_body,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    monkeypatch.setattr(
+        "storage.projects_service.create_project",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("remote project creation reached the local project store")
+        ),
+    )
+    monkeypatch.setattr(
+        "storage.projects_service.update_project",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("remote project routing reached the local project store")
+        ),
+    )
+    response = client.request(
+        method,
+        path,
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_scope_settings_block_execution_fields_but_allow_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    monkeypatch.setattr(api, "save_settings", lambda payload: {"ok": True, "payload": payload})
+    allowed = client.post(
+        "/api/settings",
+        json={"platform": "slack", "channels": {"C1": {"enabled": False}}},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert allowed.status_code == 200
+
+    blocked = client.post(
+        "/api/settings",
+        json={
+            "platform": "slack",
+            "channels": {"C1": {"custom_cwd": "/tmp/remote"}},
+        },
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert blocked.status_code == 403
+    assert blocked.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_thread_scope_settings_are_blocked_before_store_access(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+    monkeypatch.setattr(
+        api,
+        "save_thread_settings",
+        lambda payload: (_ for _ in ()).throw(
+            AssertionError("remote thread routing reached the local settings store")
+        ),
+    )
+
+    response = client.post(
+        "/api/settings/thread",
+        json={
+            "platform": "telegram",
+            "channel_id": "channel-1",
+            "thread_id": "thread-1",
+            "settings": {"routing": {"agent_name": "codex"}},
+        },
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
+    "json_body",
+    [
+        {"agents": {"codex": {"cli_path": "/tmp/remote-codex"}}},
+        {"platforms": {"enabled": ["telegram"], "primary": "telegram"}},
+    ],
+)
+def test_remote_execution_config_changes_are_blocked_before_runtime_reconcile(
+    monkeypatch,
+    tmp_path,
+    json_body,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_save_config_and_runtime_decisions",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("remote execution config reached persistence/reconcile")
+        ),
+    )
+
+    response = client.post(
+        "/api/config",
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_session_and_project_metadata_predicates_remain_allowed():
+    assert not ui_server._is_remote_local_execution_request(
+        "PATCH", "/api/sessions/ses-local", {"title": "renamed"}
+    )
+    assert not ui_server._is_remote_local_execution_request(
+        "PATCH", "/api/projects/proj-local", {"display_name": "renamed"}
+    )
+
+
 def test_remote_session_archive_is_blocked_before_store_access(
     monkeypatch,
     tmp_path,
