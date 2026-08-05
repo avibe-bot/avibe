@@ -972,6 +972,71 @@ class SessionTurnManager:
         return {"agent_id": "", "agent_name": "", "agent_backend": ""}
 
     @staticmethod
+    def _binding_projection_is_stale(
+        context: "MessageContext",
+        binding: dict[str, Any],
+    ) -> bool:
+        spec = getattr(context, "platform_specific", None) or {}
+
+        def differs(
+            projection: dict[str, Any],
+            *,
+            identity_key: str,
+            require_backend: bool,
+        ) -> bool:
+            if str(projection.get(identity_key) or "").strip() != str(
+                binding.get("id") or ""
+            ).strip():
+                # A context without the durable Session identity may carry a
+                # deliberate per-run target (scheduled/CLI), not a stale Session
+                # projection. The delivery backend must respect that target.
+                return False
+            if require_backend and not str(projection.get("agent_backend") or "").strip():
+                return True
+            for key in (
+                "id",
+                "agent_id",
+                "agent_name",
+                "agent_backend",
+                "agent_variant",
+                "model",
+                "reasoning_effort",
+            ):
+                if key in projection and str(projection.get(key) or "").strip() != str(
+                    binding.get(key) or ""
+                ).strip():
+                    return True
+            return False
+
+        session_target = spec.get("agent_session_target")
+        if isinstance(session_target, dict) and differs(
+            session_target,
+            identity_key="id",
+            require_backend=True,
+        ):
+            return True
+        run_target = spec.get("agent_run_target")
+        if isinstance(run_target, dict) and differs(
+            run_target,
+            identity_key="agent_session_id",
+            require_backend=True,
+        ):
+            return True
+        if any(
+            isinstance(projection, dict)
+            and str(projection.get(identity_key) or "").strip()
+            == str(binding.get("id") or "").strip()
+            for projection, identity_key in (
+                (session_target, "id"),
+                (run_target, "agent_session_id"),
+            )
+        ):
+            for key in ("vibe_agent_id", "vibe_agent_name"):
+                if spec.get(key) and str(spec.get(key)).strip() != str(binding.get(key) or "").strip():
+                    return True
+        return False
+
+    @staticmethod
     def _apply_session_binding_to_context(
         context: "MessageContext",
         binding: dict[str, Any],
@@ -1036,6 +1101,8 @@ class SessionTurnManager:
             ).mappings().one_or_none()
         durable_backend = str((binding or {}).get("agent_backend") or "").strip()
         if durable_backend:
+            if self._binding_projection_is_stale(resolved, dict(binding)):
+                self._apply_session_binding_to_context(resolved, dict(binding))
             return durable_backend, resolved
 
         resolved_agent = self._context_vibe_agent_binding(resolved)
