@@ -5,6 +5,7 @@ import {
   WINDOW_RESTORE_PARAM,
   loadWorkbenchWindows,
   saveWorkbenchWindows,
+  sharesWorkbenchLayout,
   stripRestoreParam,
   type PersistedWindow,
 } from '../lib/workbenchPersistence';
@@ -31,7 +32,18 @@ function isDesktopViewport(): boolean {
     : false;
 }
 
-export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+/**
+ * `standalone`: this document is a single-app tab (`appTabHref` + `isStandaloneAppTab`).
+ * Such a tab neither RESTORES the saved layout — the app it was opened for must not
+ * come up underneath a restored window — nor SAVES: its window list starts empty, so a
+ * save would clobber the real workbench layout with `[]` in every other tab. Windows
+ * opened later inside that tab still work (WindowLayer stays mounted); they just live
+ * and die with it. The flag is frozen by the shell at mount, so it never flips mid-life.
+ */
+export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standalone?: boolean }> = ({
+  children,
+  standalone = false,
+}) => {
   const idSeq = useRef(0);
   const zSeq = useRef(0);
   const openCount = useRef(0);
@@ -62,7 +74,13 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   // in a position to wipe the stored layout.
   // eslint-disable-next-line react-hooks/refs -- Mount-time bootstrap; see above.
   const [windows, setWindows] = useState<WindowInstance[]>(() => {
-    if (!isDesktopViewport()) return [];
+    if (!sharesWorkbenchLayout(standalone, isDesktopViewport())) {
+      // A standalone tab marks itself restored so the after-widen path below stays inert
+      // too: "no restore" must hold for its whole life, not just at mount. A narrow shell
+      // leaves the flag clear, so widening to desktop still restores (unchanged).
+      if (standalone) restoredRef.current = true;
+      return [];
+    }
     restoredRef.current = true;
     return loadAndSeed();
   });
@@ -122,17 +140,17 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    if (!isDesktopViewport()) return; // never persist (incl. clobber with []) from a non-desktop viewport
+    if (!sharesWorkbenchLayout(standalone, isDesktopViewport())) return;
     saveWorkbenchWindows(buildSnapshot());
-  }, [buildSnapshot]);
+  }, [buildSnapshot, standalone]);
   const scheduleSave = useCallback(() => {
-    if (!isDesktopViewport()) return;
+    if (!sharesWorkbenchLayout(standalone, isDesktopViewport())) return;
     if (saveTimer.current !== null) clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       saveTimer.current = null;
       saveWorkbenchWindows(buildSnapshot());
     }, 400);
-  }, [buildSnapshot]);
+  }, [buildSnapshot, standalone]);
 
   const confirmClose = useCallback((id: string): boolean => {
     const message = closeGuards.current.get(id)?.();

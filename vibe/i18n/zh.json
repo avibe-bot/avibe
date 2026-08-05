@@ -21,6 +21,16 @@
   },
   "harness": {
     "agentInitiatedContinuation": "Agent 主动发起的续接",
+    "promptEcho": {
+      "scheduled": "⏰ 定时任务",
+      "watch": "👀 监听",
+      "webhook": "🔗 Webhook",
+      "hook": "🪝 Hook",
+      "agentRun": "🤖 Agent 运行",
+      "generic": "⚙️ 后台任务",
+      "named": "{label} · {name}",
+      "truncated": "…（已截断）"
+    },
     "watch": {
       "supervisorFailed": "Watch 监控进程失败：{detail}",
       "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。",

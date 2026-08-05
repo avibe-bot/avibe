@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
 from core.session_activities import SessionActivityRegistry
-from core.message_output import terminal_output_for, terminal_turn_output
+from core.message_output import (
+    HARNESS_PROMPT_ECHO_SPEC_KEY,
+    HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS,
+    terminal_output_for,
+    terminal_turn_output,
+)
 from core.runtime_activation import (
     RuntimeActivationIdentity,
     RuntimeActivationRegistry,
@@ -1031,6 +1036,7 @@ class AgentService:
                 update_thread_message_id(context)
             except Exception:
                 logger.debug("update_thread_message_id failed at turn start", exc_info=True)
+        await self._emit_staged_harness_prompt(context)
         dispatcher = getattr(self.controller, "message_dispatcher", None)
         begin_status_bubble = getattr(dispatcher, "begin_status_bubble", None) if dispatcher else None
         if callable(begin_status_bubble):
@@ -1038,6 +1044,42 @@ class AgentService:
                 await begin_status_bubble(context)
             except Exception:
                 logger.debug("begin_status_bubble failed at turn start", exc_info=True)
+
+    async def _emit_staged_harness_prompt(self, context: Any) -> None:
+        """Echo a staged Harness prompt into its IM conversation at turn start.
+
+        The turn pipeline stages the prompt (``HARNESS_PROMPT_ECHO_SPEC_KEY``); it is
+        sent from here so the channel sees it only once this turn owns the runtime
+        gate — never while it is still queued behind another turn, and never for a
+        turn cancelled before it ran. Popped so a retry cannot post it twice, and
+        emitted before the status bubble so the order stays trigger -> work -> result.
+        Best-effort and time-bounded: the dispatcher owns the gates, and neither a
+        failed nor a slow echo may break or stall the turn.
+        """
+        spec = getattr(context, "platform_specific", None)
+        if not isinstance(spec, dict):
+            return
+        text = spec.pop(HARNESS_PROMPT_ECHO_SPEC_KEY, None)
+        if not text:
+            return
+        dispatcher = getattr(self.controller, "message_dispatcher", None)
+        emit = getattr(dispatcher, "emit_harness_prompt", None)
+        if not callable(emit):
+            return
+        try:
+            # This await holds the runtime gate (see ``_begin_turn_status``), so an
+            # unbounded send would let a degraded IM transport delay the background
+            # task itself and every turn queued behind it for the adapter's full
+            # request budget. The staged text is already popped, so a timeout drops
+            # this one echo rather than deferring it into a later turn.
+            await asyncio.wait_for(
+                emit(context, text),
+                timeout=HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.debug("harness prompt echo timed out at turn start; turn continues")
+        except Exception:
+            logger.debug("harness prompt echo failed at turn start", exc_info=True)
 
     def _track_processing_indicator_turn(self, request: AgentRequest) -> None:
         handle = getattr(request, "processing_indicator", None)

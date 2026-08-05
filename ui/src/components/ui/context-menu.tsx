@@ -9,9 +9,13 @@ import clsx from 'clsx';
 export const ContextMenuItem: React.FC<{
   icon?: React.ReactNode;
   label: string;
+  /** Trailing, muted key/gesture hint (e.g. `⌘-click → new tab`) — the discoverable
+   *  twin of an item that also has a modifier gesture. Grows the menu's needed width,
+   *  so pass `width` on the parent `ContextMenu` accordingly. */
+  shortcut?: string;
   danger?: boolean;
   onClick: () => void;
-}> = ({ icon, label, danger, onClick }) => (
+}> = ({ icon, label, shortcut, danger, onClick }) => (
   <button
     type="button"
     role="menuitem"
@@ -22,7 +26,10 @@ export const ContextMenuItem: React.FC<{
     )}
   >
     {icon !== undefined && <span className="grid size-4 shrink-0 place-items-center">{icon}</span>}
-    {label}
+    <span className="min-w-0 truncate">{label}</span>
+    {shortcut && (
+      <span className="ml-auto shrink-0 pl-2 font-mono text-[10px] leading-none text-muted">{shortcut}</span>
+    )}
   </button>
 );
 

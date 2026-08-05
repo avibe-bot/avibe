@@ -309,6 +309,33 @@ def test_save_config_preserves_status_bubble_settings_on_partial_save(monkeypatc
     assert payload["agent_status_heartbeat_ms"] == 12000
 
 
+def test_save_config_preserves_harness_runtime_knobs_on_partial_save(monkeypatch, tmp_path):
+    """The config-only Harness knobs must survive an unrelated UI save (Codex P1).
+
+    ``config_to_payload`` is the deep-merge base for every ``/api/config`` save, so a
+    ``runtime`` key it omits is absent from the merged payload and ``from_payload``
+    rebuilds it from the dataclass default: a ``harness_prompt_echo: false`` opt-out
+    came back enabled after any unrelated settings change. Same shape as the
+    status-bubble regression above.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    full = _full_config_payload()
+    full["runtime"]["harness_prompt_echo"] = False
+    full["runtime"]["harness_run_queued_ttl_seconds"] = 4242
+    created = api.save_config(full)
+    assert created.runtime.harness_prompt_echo is False
+    assert created.runtime.harness_run_queued_ttl_seconds == 4242
+
+    updated = api.save_config({"show_duration": False})
+    payload = api.config_to_payload(updated)
+
+    assert updated.runtime.harness_prompt_echo is False
+    assert updated.runtime.harness_run_queued_ttl_seconds == 4242
+    assert payload["runtime"]["harness_prompt_echo"] is False
+    assert payload["runtime"]["harness_run_queued_ttl_seconds"] == 4242
+
+
 def test_config_load_defaults_missing_show_pages_prompt_to_enabled():
     payload = _full_config_payload()
     payload.pop("show_pages_prompt")

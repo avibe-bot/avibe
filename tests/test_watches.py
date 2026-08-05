@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,12 +16,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
-from core import watch_worker
+from core import watch_worker, watches as watches_module
 from core.process_isolation import (
     PersistedProcessIdentity,
     ProcessIdentity,
     fingerprint_process_marker,
 )
+from core.runtime_work import RuntimeWorkItem, RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import (
     DELIVERY_ACK_METADATA_KEY,
@@ -33,6 +35,8 @@ from core.watches import (
     WatchRuntimeStateStore,
     _CycleResult,
     _cycle_env,
+    _ManagedWatchRuntimeWorkHandler,
+    _StaleWorkerRecovery,
 )
 from storage.background import SQLiteBackgroundTaskStore
 
@@ -202,6 +206,40 @@ def test_managed_watch_store_round_trip(tmp_path: Path) -> None:
     assert saved.mode == "forever"
     assert saved.retry_exit_codes == [75]
     assert saved.post_to == "channel"
+
+
+def test_hfr_174_watch_definition_commit_emits_watch_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import inbox_events
+
+    monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", True)
+    events: list[tuple[str, dict]] = []
+    subscription = inbox_events.bus.subscribe_callback(
+        lambda event_type, payload: events.append((event_type, payload))
+    )
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    store.add_watch(
+        name="Definition wake",
+        session_key="avibe::agent::default",
+        command=["true"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=30,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    inbox_events.bus.unsubscribe(subscription)
+
+    assert events == [
+        (inbox_events.DEFINITIONS_UPDATED_EVENT, {"definition_type": "watch"})
+    ]
 
 
 def test_managed_watch_store_preserves_zero_values_on_reload(tmp_path: Path) -> None:
@@ -1909,7 +1947,11 @@ def test_managed_watch_service_start_keeps_recovery_off_event_loop(
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
-    monkeypatch.setattr(service, "_reap_stale_workers", lambda: time.sleep(0.15))
+    def inspect_stale_workers() -> _StaleWorkerRecovery:
+        time.sleep(0.15)
+        return _StaleWorkerRecovery(True)
+
+    monkeypatch.setattr(service, "_inspect_stale_workers", inspect_stale_workers)
     monkeypatch.setattr(service, "reconcile_watches", lambda: False)
 
     async def _run() -> None:
@@ -1924,6 +1966,365 @@ def test_managed_watch_service_start_keeps_recovery_off_event_loop(
         await service.stop()
 
     asyncio.run(_run())
+
+
+def test_hfr_164_watch_restart_replaces_only_its_registration_generation(
+    tmp_path: Path,
+) -> None:
+    class EmptyHandler:
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item) -> None:  # noqa: ANN001
+            raise AssertionError(item)
+
+    async def _run() -> None:
+        supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+        delivery_token = supervisor.register(
+            RuntimeWorkLane.SESSION_DELIVERIES,
+            EmptyHandler(),
+        )
+        await supervisor.activate()
+        service = ManagedWatchService(
+            controller=SimpleNamespace(runtime_work_supervisor=supervisor),
+            store=ManagedWatchStore(tmp_path / "watches.json"),
+            request_store=TaskExecutionStore(tmp_path / "task_requests"),
+            runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+        )
+
+        await _start_watch_service(service)
+        first = service._runtime_work_token
+        assert first is not None
+        assert RuntimeWorkLane.SESSION_DELIVERIES in supervisor._registrations
+        await service.stop()
+        assert RuntimeWorkLane.WATCH_DEFINITIONS not in supervisor._registrations
+        assert supervisor._registrations[RuntimeWorkLane.SESSION_DELIVERIES].token == delivery_token
+
+        await _start_watch_service(service)
+        second = service._runtime_work_token
+        assert second is not None
+        assert second.generation > first.generation
+        await service.stop()
+        await supervisor.stop()
+
+    asyncio.run(_run())
+
+
+def test_hfr_176_legacy_watch_probe_only_wakes_watch_definitions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notified: list[RuntimeWorkLane] = []
+    service = ManagedWatchService(
+        controller=SimpleNamespace(
+            runtime_work_supervisor=SimpleNamespace(
+                notify=lambda *lanes: notified.extend(lanes),
+            )
+        ),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._running = True
+    service._legacy_watch_signature = (1, 1, 1)
+    monkeypatch.setattr(watches_module, "_path_signature", lambda _path: (2, 2, 2))
+
+    async def stop_after_tick(_delay: float) -> None:
+        service._running = False
+
+    monkeypatch.setattr(watches_module.asyncio, "sleep", stop_after_tick)
+    asyncio.run(service._legacy_runtime_work_probe())
+
+    assert notified == [RuntimeWorkLane.WATCH_DEFINITIONS]
+
+
+def test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._runtime_state_dirty = False
+    scan_entered = threading.Event()
+    release_scan = threading.Event()
+    guarded_entered = threading.Event()
+    scan_threads: list[int] = []
+    reconcile_threads: list[int] = []
+
+    def blocking_reload() -> bool:
+        scan_threads.append(threading.get_ident())
+        scan_entered.set()
+        assert release_scan.wait(timeout=1)
+        return True
+
+    monkeypatch.setattr(service.store, "maybe_reload", blocking_reload)
+
+    async def _run() -> None:
+        loop_thread = threading.get_ident()
+        handler = _ManagedWatchRuntimeWorkHandler(service)
+        scan = asyncio.create_task(
+            asyncio.to_thread(
+                handler.scan,
+                limit=1,
+                occupied=frozenset(),
+                cursor=None,
+            )
+        )
+        assert await asyncio.to_thread(scan_entered.wait, 1)
+
+        guarded = asyncio.create_task(
+            service._watch_store_call_async(
+                "watch-a",
+                "guarded-test",
+                lambda: guarded_entered.set() or True,
+                guarded=True,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not guarded_entered.is_set()
+        release_scan.set()
+        items, has_more = await scan
+        assert not has_more
+        assert await guarded is True
+
+        def reconcile(watches) -> bool:  # noqa: ANN001
+            del watches
+            reconcile_threads.append(threading.get_ident())
+            return False
+
+        monkeypatch.setattr(service, "reconcile_watches", reconcile)
+        assert await handler.process(items[0]) is True
+        assert scan_threads and scan_threads[0] != loop_thread
+        assert reconcile_threads == [loop_thread]
+
+    asyncio.run(_run())
+
+
+def test_hfr_179_watch_wake_during_reconcile_replays_after_owner_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(runtime_work_supervisor=supervisor),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = True
+    reload_calls = 0
+    persist_entered = asyncio.Event()
+    release_persist = asyncio.Event()
+    second_reload = threading.Event()
+
+    def reload_store() -> bool:
+        nonlocal reload_calls
+        reload_calls += 1
+        if reload_calls == 2:
+            second_reload.set()
+        return False
+
+    async def persist_runtime_state() -> None:
+        persist_entered.set()
+        await release_persist.wait()
+        service._runtime_state_dirty = False
+
+    monkeypatch.setattr(service.store, "maybe_reload", reload_store)
+    monkeypatch.setattr(service, "_persist_runtime_state", persist_runtime_state)
+
+    async def _run() -> None:
+        supervisor.register(
+            RuntimeWorkLane.WATCH_DEFINITIONS,
+            _ManagedWatchRuntimeWorkHandler(service),
+        )
+        await supervisor.activate()
+        await asyncio.wait_for(persist_entered.wait(), 1)
+
+        supervisor.notify(RuntimeWorkLane.WATCH_DEFINITIONS)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert reload_calls == 1
+
+        release_persist.set()
+        assert await asyncio.to_thread(second_reload.wait, 1)
+        assert reload_calls == 2
+        await supervisor.stop()
+
+    asyncio.run(_run())
+
+
+def test_hfr_179_blocked_watch_recovery_arms_generation_scoped_recheck(
+    tmp_path: Path,
+) -> None:
+    delayed: list[tuple[object, float]] = []
+    supervisor = SimpleNamespace(
+        notify_after=lambda token, delay: delayed.append((token, delay)),
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(runtime_work_supervisor=supervisor),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    token = object()
+    service._runtime_work_token = token  # type: ignore[assignment]
+    service._recovery_pending = False
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = False
+    service._recovery_blocked_watch_ids.add("watch-a")
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+    item = RuntimeWorkItem(
+        "managed-watches",
+        {
+            "recovery": _StaleWorkerRecovery(True),
+            "unblocked": (),
+            "changed": False,
+            "watches": (),
+            "store_error": None,
+            "fused": False,
+        },
+        rearm_after_process=False,
+    )
+
+    assert asyncio.run(handler.process(item)) is True
+    assert delayed == [(token, watches_module.WATCH_RECONCILE_INTERVAL_SECONDS)]
+
+
+def test_hfr_179_pending_watch_recovery_uses_watch_lane_cadence(
+    tmp_path: Path,
+) -> None:
+    delayed: list[tuple[object, float]] = []
+    supervisor = SimpleNamespace(
+        notify_after=lambda token, delay: delayed.append((token, delay)),
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(runtime_work_supervisor=supervisor),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    token = object()
+    service._runtime_work_token = token  # type: ignore[assignment]
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+    item = RuntimeWorkItem(
+        "managed-watches",
+        {
+            "recovery": _StaleWorkerRecovery(False),
+            "unblocked": (),
+            "changed": False,
+            "watches": (),
+            "store_error": None,
+            "fused": False,
+        },
+        rearm_after_process=False,
+    )
+
+    assert asyncio.run(handler.process(item)) is True
+    assert service._recovery_pending is True
+    assert delayed == [(token, watches_module.WATCH_RECONCILE_INTERVAL_SECONDS)]
+
+
+def test_hfr_179_watch_store_fuse_stops_generation_reads_and_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = False
+    reads = 0
+
+    def fail_read() -> bool:
+        nonlocal reads
+        reads += 1
+        raise OSError("watch store unavailable")
+
+    monkeypatch.setattr(service.store, "maybe_reload", fail_read)
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+
+    async def _run() -> None:
+        outcomes = []
+        for _ in range(watches_module.WATCH_STORE_RECONCILE_FUSE_FAILURES):
+            items, _has_more = await asyncio.to_thread(
+                handler.scan,
+                limit=1,
+                occupied=frozenset(),
+                cursor=None,
+            )
+            outcomes.append(await handler.process(items[0]))
+
+        assert outcomes[:-1] == [False] * (len(outcomes) - 1)
+        assert outcomes[-1] is True
+        assert service._store_error_fused is True
+        assert reads == watches_module.WATCH_STORE_RECONCILE_FUSE_FAILURES
+
+        persisted = 0
+
+        async def persist_runtime_state() -> None:
+            nonlocal persisted
+            persisted += 1
+            service._runtime_state_dirty = False
+
+        monkeypatch.setattr(service, "_persist_runtime_state", persist_runtime_state)
+        service._runtime_state_dirty = True
+        items, _has_more = await asyncio.to_thread(
+            handler.scan,
+            limit=1,
+            occupied=frozenset(),
+            cursor=None,
+        )
+        assert await handler.process(items[0]) is True
+        assert reads == watches_module.WATCH_STORE_RECONCILE_FUSE_FAILURES
+        assert persisted == 1
+
+    asyncio.run(_run())
+
+
+def test_watch_runtime_state_persistence_failure_rearms_maintenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = True
+
+    async def _persist_but_remain_dirty() -> None:
+        service._runtime_state_dirty = True
+
+    monkeypatch.setattr(service, "_persist_runtime_state", _persist_but_remain_dirty)
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+    item = RuntimeWorkItem(
+        "managed-watches",
+        {
+            "recovery": _StaleWorkerRecovery(True),
+            "unblocked": (),
+            "changed": False,
+            "watches": (),
+        },
+        rearm_after_process=False,
+    )
+
+    assert asyncio.run(handler.process(item)) is False
+    assert service._runtime_state_dirty is True
 
 
 def test_managed_watch_service_start_retries_unreadable_runtime_before_reconcile(

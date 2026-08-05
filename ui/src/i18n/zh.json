@@ -1314,7 +1314,7 @@
       }
     },
     "dock": {
-      "newInstanceHint": "⌘ 点击可新建窗口",
+      "newTabChord": "{{key}} 点击 → 新标签页",
       "switchShortcut": "⌥{{number}}",
       "newWindow": "新建窗口",
       "showAllWindows": "显示所有窗口",
@@ -1613,6 +1613,7 @@
       "kbdEsc": "Esc",
       "kbdNavigate": "切换",
       "kbdOpen": "打开",
+      "kbdNewTab": "新标签页",
       "kbdClose": "关闭",
       "footerNote": "应用与消息内容 · 全部会话",
       "scopeAll": "全部会话"
@@ -2901,7 +2902,11 @@
       "timeoutSeconds": "{{seconds}} 秒",
       "timeoutNone": "不限时",
       "timeoutDefault": "{{duration}}（默认）",
-      "lastExitCode": "最近退出码"
+      "lastExitCode": "最近退出码",
+      "escalation": "失败后 → 交给 Agent",
+      "triagePrompt": "排查提示词",
+      "cwdFromSession": "跟随绑定会话，否则运行时默认目录或 Avibe 状态目录",
+      "cwdRuntimeDefault": "运行时默认目录，否则 Avibe 状态目录"
     },
     "taskKind": {
       "command": "命令"

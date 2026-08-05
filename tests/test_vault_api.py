@@ -332,11 +332,15 @@ def test_create_list_delete_roundtrip(monkeypatch):
 
 def test_create_vault_secret_publishes_update_event(monkeypatch):
     published = []
+    bridged = []
     monkeypatch.setattr(
         "vibe.sse_broker.broker.publish",
         lambda event_type, data: published.append((event_type, data)),
     )
-    monkeypatch.setattr("vibe.internal_client.publish_event_sync", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "vibe.internal_client.publish_event_sync",
+        lambda *args, **kwargs: bridged.append((args, kwargs)),
+    )
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
 
     api.create_vault_secret(
@@ -347,6 +351,10 @@ def test_create_vault_secret_publishes_update_event(monkeypatch):
     )
 
     assert ("vaults.updated", {"scope": "secret", "secret_name": "EVENT_KEY"}) in published
+    assert len(bridged) == 1
+    assert bridged[0][0][0] == "vaults.updated"
+    assert bridged[0][0][1]["scope"] == "secret"
+    assert bridged[0][0][1]["_event_id"]
 
 
 def test_standard_rest_create_rejects_plaintext_value(monkeypatch):

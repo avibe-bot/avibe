@@ -7,12 +7,14 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from functools import partial, wraps
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
-from typing import Any, Dict, Mapping, NamedTuple, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, NamedTuple, Optional, Sequence, TypeVar
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -44,6 +46,8 @@ from core.runtime_activation import (
 )
 from core.runtime_recovery import FallbackRequestRecoveryHandler
 from core.runtime_work import (
+    RuntimeWorkHandler,
+    RuntimeWorkItem,
     RuntimeWorkLane,
     RuntimeWorkRegistrationToken,
 )
@@ -101,6 +105,7 @@ from storage.background import (
     NOTICE_PENDING,
     NOTICE_SENT,
     NOTICE_SKIPPED,
+    OWED_FAILURE_NOTICE_KEY,
     SKIP_REASON_SESSION_BUSY,
     SKIP_REASON_TRANSPORT_UNAVAILABLE,
     SQLiteBackgroundTaskStore,
@@ -121,6 +126,8 @@ from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
+_TaskStoreResult = TypeVar("_TaskStoreResult")
+
 AGENT_RUN_DELIVERY_STEER = "steer"
 AGENT_RUN_DELIVERY_SEND_NOW = "send_now"
 AGENT_RUN_DELIVERY_QUEUE = "queue"
@@ -133,6 +140,15 @@ AGENT_RUN_DELIVERY_INTENTS = frozenset(
 )
 AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
 AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
+
+
+def _publish_task_definitions_updated() -> None:
+    try:
+        from core.inbox_events import publish_definitions_updated
+
+        publish_definitions_updated(definition_type="scheduled")
+    except Exception:
+        logger.debug("scheduled definition wake failed", exc_info=True)
 
 
 class _ScopeAgentTarget(NamedTuple):
@@ -1222,6 +1238,23 @@ def _retire_stale_agent_run_queue_rows(
         return retired
 
 
+def _serialize_task_mirror(
+    method: Callable[..., _TaskStoreResult],
+) -> Callable[..., _TaskStoreResult]:
+    """Hold one mirror generation across each read-modify-write operation."""
+
+    @wraps(method)
+    def _locked(
+        self: "ScheduledTaskStore",
+        *args: Any,
+        **kwargs: Any,
+    ) -> _TaskStoreResult:
+        with self._reload_lock:
+            return method(self, *args, **kwargs)
+
+    return _locked
+
+
 class ScheduledTaskStore:
     def __init__(self, path: Optional[Path] = None):
         self.path = path or (paths.get_state_dir() / "scheduled_tasks.json")
@@ -1231,9 +1264,14 @@ class ScheduledTaskStore:
         #: Set when a failed write left this mirror INCOMPLETE, cleared by the reload
         #: that repairs it. See ``maybe_reload`` and ``_reload_after_lost_write``.
         self._reload_required = False
+        self._reload_lock = threading.RLock()
         self.load()
 
     def load(self) -> None:
+        with self._reload_lock:
+            self._load_unlocked()
+
+    def _load_unlocked(self) -> None:
         if self._sqlite is not None:
             self._tasks = {
                 item["id"]: ScheduledTask.from_dict(item)
@@ -1285,6 +1323,10 @@ class ScheduledTaskStore:
         so a reload that fails again keeps retrying on every later tick.
         """
 
+        with self._reload_lock:
+            return self._maybe_reload_unlocked()
+
+    def _maybe_reload_unlocked(self) -> bool:
         if self._sqlite is not None:
             changed = self._sqlite.maybe_reload()
             if self._reload_required:
@@ -1326,10 +1368,23 @@ class ScheduledTaskStore:
         self._signature = _path_signature(self.path)
 
     def list_tasks(self) -> list[ScheduledTask]:
-        return sorted(self._tasks.values(), key=lambda item: (item.created_at, item.id))
+        with self._reload_lock:
+            return sorted(
+                self._tasks.values(),
+                key=lambda item: (item.created_at, item.id),
+            )
 
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
-        return self._tasks.get(task_id)
+        with self._reload_lock:
+            return self._tasks.get(task_id)
+
+    def refresh_task(self, task_id: str) -> Optional[ScheduledTask]:
+        """Reload and read one scheduler definition under the same mirror lock."""
+
+        with self._reload_lock:
+            self._maybe_reload_unlocked()
+            task = self._tasks.get(task_id)
+            return ScheduledTask.from_dict(task.to_dict()) if task is not None else None
 
     def get_watch_definition(self, definition_id: str) -> Optional[Dict[str, Any]]:
         """The watch row for *definition_id*, or ``None`` when it is not a watch.
@@ -1416,6 +1471,7 @@ class ScheduledTaskStore:
                         "with the task row"
                     )
                 self._save()
+                _publish_task_definitions_updated()
                 return True
             if queued_run is None:
                 landed = self._sqlite.upsert_scheduled_task(
@@ -1437,6 +1493,7 @@ class ScheduledTaskStore:
             self._reload_after_lost_write(task.id)
             raise
         if landed:
+            _publish_task_definitions_updated()
             return True
         self.load()
         return False
@@ -1465,6 +1522,7 @@ class ScheduledTaskStore:
             self._signature = None
             self._reload_required = True
 
+    @_serialize_task_mirror
     def upsert_task(
         self,
         task: ScheduledTask,
@@ -1494,12 +1552,15 @@ class ScheduledTaskStore:
                 )
                 if expected_reference_agent_id is not None:
                     self.load()
+                    _publish_task_definitions_updated()
                     return self._tasks[task.id]
+                _publish_task_definitions_updated()
                 return task
             self._save()
         except Exception:
             self._reload_after_lost_write(task.id)
             raise
+        _publish_task_definitions_updated()
         return task
 
     def add_task(
@@ -1551,6 +1612,7 @@ class ScheduledTaskStore:
             expected_reference_agent_id=expected_reference_agent_id,
         )
 
+    @_serialize_task_mirror
     def remove_task(self, task_id: str) -> bool:
         """Delete a task; the mirror rolls back with the delete (HFR-275).
 
@@ -1566,13 +1628,16 @@ class ScheduledTaskStore:
         try:
             if self._sqlite is not None:
                 self._sqlite.remove_task(task_id)
+                _publish_task_definitions_updated()
                 return True
             self._save()
         except Exception:
             self._reload_after_lost_write(task_id)
             raise
+        _publish_task_definitions_updated()
         return True
 
+    @_serialize_task_mirror
     def set_enabled(self, task_id: str, enabled: bool) -> ScheduledTask:
         task = self._tasks[task_id]
         expect = self._read_state(task)
@@ -1585,6 +1650,7 @@ class ScheduledTaskStore:
             raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
         return task
 
+    @_serialize_task_mirror
     def update_task(
         self,
         task_id: str,
@@ -1657,6 +1723,7 @@ class ScheduledTaskStore:
             return self._tasks[task_id]
         return task
 
+    @_serialize_task_mirror
     def record_binding_recovery(
         self,
         task_id: str,
@@ -1701,6 +1768,7 @@ class ScheduledTaskStore:
             return False
         return self._write_task(task, expect)
 
+    @_serialize_task_mirror
     def list_orphaned_reservations(self, task_id: str) -> list[dict[str, Any]]:
         """The reserved sessions recorded against ``task_id`` that were never given back."""
 
@@ -1712,6 +1780,7 @@ class ScheduledTaskStore:
             return []
         return [dict(entry) for entry in entries if isinstance(entry, dict)]
 
+    @_serialize_task_mirror
     def record_orphaned_reservations(self, task_id: str, entries: list[dict[str, Any]]) -> bool:
         """Durably record (or clear) the reservations this definition could not release.
 
@@ -1742,6 +1811,7 @@ class ScheduledTaskStore:
         task.updated_at = _utc_now_iso()
         return self._write_task(task, expect)
 
+    @_serialize_task_mirror
     def mark_task_result(
         self,
         task_id: str,
@@ -1831,6 +1901,7 @@ class TaskExecutionStore:
         self.pending_dir = self.root / "pending"
         self.processing_dir = self.root / "processing"
         self.completed_dir = self.root / "completed"
+        self._file_enqueue_lock = threading.Lock()
         self._ensure_dirs()
         self._signature = self._state_signature()
 
@@ -2230,16 +2301,30 @@ class TaskExecutionStore:
         *,
         source_kind: str = "cli",
         task: Optional[ScheduledTask] = None,
-    ) -> TaskExecutionRequest:
+        suppress_scheduler_successor: bool = False,
+    ) -> Optional[TaskExecutionRequest]:
         if task is None:
-            return self.enqueue(
-                TaskExecutionRequest(
-                    id=uuid4().hex[:12],
-                    request_type="scheduled",
-                    task_id=task_id,
-                    source_kind=source_kind,
-                )
+            request = TaskExecutionRequest(
+                id=uuid4().hex[:12],
+                request_type="scheduled",
+                task_id=task_id,
+                source_kind=source_kind,
             )
+            if self._sqlite is not None:
+                if suppress_scheduler_successor and any(
+                    pending.task_id == task_id
+                    and pending.source_kind == "scheduler"
+                    for pending in self.list_pending()
+                ):
+                    return None
+                return self.enqueue(request)
+            with self._file_enqueue_lock:
+                if (
+                    suppress_scheduler_successor
+                    and self._file_has_unstarted_scheduler_run(task_id)
+                ):
+                    return None
+                return self.enqueue(request)
         metadata = dict(task.metadata or {})
         snapshot = command_snapshot(task)
         if snapshot is not None:
@@ -2259,6 +2344,7 @@ class TaskExecutionStore:
             agent_name=task.agent_name,
             session_policy=task.session_policy,
             metadata=metadata,
+            suppress_scheduler_successor=suppress_scheduler_successor,
         )
 
     def enqueue_definition_run(
@@ -2277,7 +2363,8 @@ class TaskExecutionStore:
         source_actor: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
-    ) -> TaskExecutionRequest:
+        suppress_scheduler_successor: bool = False,
+    ) -> Optional[TaskExecutionRequest]:
         request = TaskExecutionRequest(
             id=uuid4().hex[:12],
             request_type=run_type,
@@ -2296,8 +2383,19 @@ class TaskExecutionStore:
             metadata=dict(metadata or {}),
         )
         if self._sqlite is None:
-            return self.enqueue(request)
-        snapshot = self._sqlite.enqueue_definition_run(self.queued_run_payload(request))
+            with self._file_enqueue_lock:
+                if (
+                    suppress_scheduler_successor
+                    and self._file_has_unstarted_scheduler_run(definition_id)
+                ):
+                    return None
+                return self.enqueue(request)
+        snapshot = self._sqlite.enqueue_definition_run(
+            self.queued_run_payload(request),
+            suppress_scheduler_successor=suppress_scheduler_successor,
+        )
+        if snapshot is None:
+            return None
         for field_name in (
             "agent_name",
             "agent_id",
@@ -2457,11 +2555,21 @@ class TaskExecutionStore:
             expected_enabled_agent_id=expected_enabled_agent_id,
         )
 
-    def list_pending(self) -> list[TaskExecutionRequest]:
+    def list_pending(
+        self,
+        *,
+        limit: int | None = None,
+        after: tuple[str, str] | None = None,
+    ) -> list[TaskExecutionRequest]:
         if self._sqlite is not None:
             return [
                 TaskExecutionRequest.from_dict(item)
-                for item in self._sqlite.list_runs(status="pending")
+                for item in self._sqlite.list_runs(
+                    status="pending",
+                    run_types=tuple(EXECUTION_RUN_TYPES),
+                    after=after,
+                    limit=limit,
+                )
                 # ``task_escalation`` belongs here for the same reason ``hook_send``
                 # does: it is a queued Agent turn the drain loop must claim. Left out,
                 # the escalation row would be durable and never executed -- a failure
@@ -2479,7 +2587,29 @@ class TaskExecutionStore:
             if not isinstance(payload, dict):
                 continue
             requests.append(TaskExecutionRequest.from_dict(payload))
-        return sorted(requests, key=lambda item: (item.created_at, item.id))
+        ordered = sorted(requests, key=lambda item: (item.created_at, item.id))
+        if after is not None:
+            ordered = [
+                item
+                for item in ordered
+                if (item.created_at, item.id) > (str(after[0]), str(after[1]))
+            ]
+        return ordered if limit is None else ordered[: max(0, int(limit))]
+
+    def _file_has_unstarted_scheduler_run(self, definition_id: str) -> bool:
+        """Match SQLite's queued-or-claimed scheduler successor fence."""
+
+        for run in self._list_file_runs():
+            if (
+                str(run.get("task_id") or run.get("definition_id") or "")
+                != str(definition_id)
+                or run.get("source_kind") != "scheduler"
+            ):
+                continue
+            status = _normalize_requested_run_status(run.get("status"))
+            if status == "queued" or (status == "running" and not run.get("pid")):
+                return True
+        return False
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         if self._sqlite is not None:
@@ -2523,9 +2653,14 @@ class TaskExecutionStore:
             count += 1
         return count
 
-    def list_pending_callbacks(self, *, limit: int = 20) -> list[dict[str, Any]]:
+    def list_pending_callbacks(
+        self,
+        *,
+        limit: int = 20,
+        after: tuple[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
         if self._sqlite is not None:
-            return self._sqlite.list_pending_callbacks(limit=limit)
+            return self._sqlite.list_pending_callbacks(limit=limit, after=after)
         runs = [
             item
             for item in self._list_file_runs()
@@ -2534,7 +2669,18 @@ class TaskExecutionStore:
             and item.get("completed_at")
             and (_normalize_requested_run_status(item.get("status")) or item.get("status")) in TERMINAL_RUN_STATUSES
         ]
-        return sorted(runs, key=lambda item: (item.get("completed_at") or "", item.get("id") or ""))[:limit]
+        ordered = sorted(
+            runs,
+            key=lambda item: (item.get("completed_at") or "", item.get("id") or ""),
+        )
+        if after is not None:
+            ordered = [
+                item
+                for item in ordered
+                if (item.get("completed_at") or "", item.get("id") or "")
+                > (str(after[0]), str(after[1]))
+            ]
+        return ordered[:limit]
 
     def list_deferred_runs(self) -> list[dict[str, Any]]:
         if self._sqlite is not None:
@@ -3217,6 +3363,350 @@ class TaskExecutionStore:
         self.complete(request, ok=ok, error=error)
 
 
+class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
+    """Thin lane adapter around the existing durable owners.
+
+    Scans run in the supervisor's executor. Processing remains on the controller
+    loop only where it must create/cancel asyncio tasks or perform transport I/O.
+    """
+
+    def __init__(self, service: "ScheduledTaskService", lane: RuntimeWorkLane) -> None:
+        self.service = service
+        self.lane = lane
+        self._fallback = (
+            FallbackRequestRecoveryHandler(
+                service.request_store.sqlite_backend,
+                live_claims=lambda: service._live_claimed_run_ids,
+                partition_key=service._fallback_request_partition_key,
+            )
+            if lane is RuntimeWorkLane.REQUESTS
+            and service.request_store.sqlite_backend is not None
+            else None
+        )
+
+    def scan(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None,
+    ) -> tuple[list[RuntimeWorkItem], bool]:
+        if self.lane is RuntimeWorkLane.TASK_DEFINITIONS:
+            changed = self.service.store.maybe_reload()
+            return [
+                RuntimeWorkItem(
+                    "scheduled-tasks",
+                    changed,
+                    rearm_after_process=False,
+                )
+            ], False
+        if self.lane is RuntimeWorkLane.REQUESTS:
+            return self._scan_requests(limit=limit, occupied=occupied, cursor=cursor)
+        if self.lane is RuntimeWorkLane.RUN_CALLBACKS:
+            return self._scan_run_callbacks(limit=limit, occupied=occupied, cursor=cursor)
+        if self.lane is RuntimeWorkLane.VAULT_CALLBACKS:
+            return self.service._scan_vault_callback_work(
+                limit=limit,
+                occupied=occupied,
+                cursor=cursor,
+            )
+        if self.lane is RuntimeWorkLane.ACTIVITY_OUTPUTS:
+            registry = self.service._activity_registry()
+            if registry is None:
+                return [], False
+            runtimes, has_more, retry_after, scanned_cursor = (
+                registry.scan_recovered_output_runtimes(
+                    limit=limit,
+                    cursor=cursor,
+                    grace_seconds=self.service._activity_output_grace_seconds,
+                )
+            )
+            if retry_after is not None:
+                self.service._schedule_runtime_work_wake(
+                    RuntimeWorkLane.ACTIVITY_OUTPUTS,
+                    retry_after,
+                )
+            items = [
+                RuntimeWorkItem(
+                    f"{backend}\x1f{runtime_key}",
+                    (backend, runtime_key),
+                    cursor_key=f"{backend}\x1f{runtime_key}",
+                )
+                for backend, runtime_key in runtimes
+            ]
+            if scanned_cursor and (
+                not items or items[-1].cursor_key != scanned_cursor
+            ):
+                items.append(
+                    RuntimeWorkItem(
+                        "",
+                        None,
+                        cursor_key=scanned_cursor,
+                        rearm_after_process=False,
+                        cursor_only=True,
+                    )
+                )
+            return items, has_more
+        if self.lane is RuntimeWorkLane.FAILURE_NOTICES:
+            return self._scan_failure_notices(
+                limit=limit,
+                occupied=occupied,
+                cursor=cursor,
+            )
+        if self.lane is RuntimeWorkLane.STALE_RUNS:
+            retry_after = self.service._stale_run_sweep_delay_seconds()
+            if retry_after is None:
+                return [
+                    RuntimeWorkItem(
+                        "run-cancellations",
+                        None,
+                        rearm_after_process=False,
+                    )
+                ], False
+            if retry_after > 0:
+                self.service._schedule_runtime_work_wake(
+                    RuntimeWorkLane.STALE_RUNS,
+                    retry_after,
+                )
+                return [
+                    RuntimeWorkItem(
+                        "run-cancellations",
+                        None,
+                        rearm_after_process=False,
+                    )
+                ], False
+            return [
+                RuntimeWorkItem(
+                    "stale-runs",
+                    None,
+                    rearm_after_process=False,
+                )
+            ], False
+        return [], False
+
+    def _scan_requests(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None,
+    ) -> tuple[list[RuntimeWorkItem], bool]:
+        items: list[RuntimeWorkItem] = []
+        fallback_has_more = False
+        if self._fallback is not None:
+            fallback_cursor = None
+            scan_fallback = cursor is None or cursor.startswith("0\x1f")
+            if cursor and scan_fallback:
+                fallback_cursor = cursor.split("\x1f", 1)[1]
+            recovered, fallback_has_more = (
+                self._fallback.scan(
+                    limit=limit,
+                    occupied=occupied,
+                    cursor=fallback_cursor,
+                )
+                if scan_fallback
+                else ([], False)
+            )
+            items.extend(
+                [
+                    RuntimeWorkItem(
+                        item.partition_key,
+                        ("fallback", item.observation),
+                        cursor_key=f"0\x1f{item.cursor_key or item.partition_key}",
+                    )
+                    for item in recovered
+                ]
+            )
+
+        remaining = max(0, limit - len(items))
+        if remaining == 0:
+            return items, fallback_has_more
+        fallback_continuation = (
+            items[-1].cursor_key
+            if fallback_has_more and items
+            else None
+        )
+
+        after = None
+        if cursor and cursor.startswith("1\x1f"):
+            parts = cursor.split("\x1f", 2)
+            if len(parts) == 3:
+                after = (parts[1], parts[2])
+        pending = self.service.request_store.list_pending(limit=remaining, after=after)
+        items.extend(
+            [
+                RuntimeWorkItem(
+                    self.service._request_partition_key(request),
+                    ("queued", request),
+                    cursor_key=(
+                        fallback_continuation
+                        or f"1\x1f{request.created_at}\x1f{request.id}"
+                    ),
+                )
+                for request in pending
+            ]
+        )
+        return items, fallback_has_more or len(pending) >= remaining
+
+    def _scan_run_callbacks(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None,
+    ) -> tuple[list[RuntimeWorkItem], bool]:
+        after = None
+        if cursor:
+            parts = cursor.split("\x1f", 1)
+            if len(parts) == 2:
+                after = (parts[0], parts[1])
+        rows = self.service.request_store.list_pending_callbacks(
+            limit=limit,
+            after=after,
+        )
+        items: list[RuntimeWorkItem] = []
+        for row in rows:
+            run_id = str(row.get("id") or "")
+            session_id = str(row.get("callback_session_id") or "")
+            partition = f"session:{session_id}" if session_id else f"run:{run_id}"
+            if run_id:
+                items.append(
+                    RuntimeWorkItem(
+                        partition,
+                        row,
+                        cursor_key=(
+                            f"{row.get('completed_at') or ''}\x1f{run_id}"
+                        ),
+                    )
+                )
+        return items, len(rows) >= limit
+
+    @staticmethod
+    def _failure_notice_cursor(row: dict[str, Any]) -> tuple[str, str, str]:
+        metadata = row.get("metadata")
+        notice = (
+            metadata.get(OWED_FAILURE_NOTICE_KEY)
+            if isinstance(metadata, dict)
+            else None
+        )
+        return (
+            str(notice.get("next_attempt_at") or "")
+            if isinstance(notice, dict)
+            else "",
+            str(row.get("created_at") or ""),
+            str(row.get("id") or ""),
+        )
+
+    def _scan_failure_notices(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None,
+    ) -> tuple[list[RuntimeWorkItem], bool]:
+        store = self.service.request_store.sqlite_backend
+        if store is None:
+            return [], False
+        after = None
+        if cursor:
+            parts = cursor.split("\x1f", 2)
+            if len(parts) == 3:
+                after = (parts[0], parts[1], parts[2])
+        rows = store.list_owed_failure_notices(limit=limit, after=after)
+        next_attempt_at = store.next_owed_failure_notice_at()
+        if next_attempt_at:
+            try:
+                next_attempt = datetime.fromisoformat(next_attempt_at)
+                if next_attempt.tzinfo is None:
+                    next_attempt = next_attempt.replace(tzinfo=timezone.utc)
+                delay = max(
+                    0.0,
+                    (next_attempt.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds(),
+                )
+                self.service._schedule_runtime_work_wake(
+                    RuntimeWorkLane.FAILURE_NOTICES,
+                    delay,
+                )
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Ignoring invalid failure-notice retry timestamp %r",
+                    next_attempt_at,
+                )
+        items: list[RuntimeWorkItem] = []
+        for row in rows:
+            run_id = str(row.get("id") or "")
+            metadata = row.get("metadata")
+            notice = (
+                metadata.get(OWED_FAILURE_NOTICE_KEY)
+                if isinstance(metadata, dict)
+                else None
+            )
+            definition_id = str(
+                row.get("definition_id") or row.get("task_id") or ""
+            )
+            if definition_id and not failure_notices.bypasses_suppression(notice):
+                partition = f"definition:{definition_id}"
+            else:
+                partition = f"run:{run_id}"
+            if run_id:
+                cursor_parts = self._failure_notice_cursor(row)
+                items.append(
+                    RuntimeWorkItem(
+                        partition,
+                        row,
+                        cursor_key="\x1f".join(cursor_parts),
+                    )
+                )
+        return items, len(rows) >= limit
+
+    async def process(self, item: RuntimeWorkItem) -> bool | None:
+        if self.lane is RuntimeWorkLane.TASK_DEFINITIONS:
+            self.service.reconcile_jobs()
+            return True
+        if self.lane is RuntimeWorkLane.REQUESTS:
+            kind, observation = item.observation
+            if kind == "fallback":
+                assert self._fallback is not None
+                return await self.service._run_runtime_sync(
+                    self._fallback.process_sync,
+                    RuntimeWorkItem(item.partition_key, observation),
+                )
+            return await self.service._process_pending_request(observation)
+        if self.lane is RuntimeWorkLane.RUN_CALLBACKS:
+            return await self.service._process_run_callback(item.observation)
+        if self.lane is RuntimeWorkLane.VAULT_CALLBACKS:
+            return await self.service._process_vault_callback(item.observation)
+        if self.lane is RuntimeWorkLane.ACTIVITY_OUTPUTS:
+            backend, runtime_key = item.observation
+            return await self.service._process_recovered_activity_output(
+                backend,
+                runtime_key,
+            )
+        if self.lane is RuntimeWorkLane.FAILURE_NOTICES:
+            store = self.service.request_store.sqlite_backend
+            if store is not None:
+                await self.service._deliver_one_failure_notice(store, item.observation)
+            return True
+        if self.lane is RuntimeWorkLane.STALE_RUNS:
+            if item.partition_key == "run-cancellations":
+                await self.service._propagate_requested_cancellations_async()
+                return True
+            await self.service._propagate_requested_cancellations_async()
+            await self.service._run_runtime_sync(
+                self.service._sweep_stale_runs,
+                release_leaked_locks=False,
+            )
+            self.service._release_leaked_session_locks()
+            retry_after = self.service._stale_run_sweep_delay_seconds()
+            if retry_after is not None and retry_after > 0:
+                self.service._schedule_runtime_work_wake(
+                    RuntimeWorkLane.STALE_RUNS,
+                    retry_after,
+                )
+            return True
+        return True
+
+
 class ScheduledTaskService:
     """Controller-owned runtime that executes persisted scheduled tasks."""
 
@@ -3244,6 +3734,15 @@ class ScheduledTaskService:
         self._service_teardown_task: Optional["asyncio.Task[None]"] = None
         self._request_recovery_token: RuntimeWorkRegistrationToken | None = None
         self._request_recovery_unregistration_task: asyncio.Task[None] | None = None
+        self._runtime_work_tokens: dict[
+            RuntimeWorkLane, RuntimeWorkRegistrationToken
+        ] = {}
+        self._controller_runtime_work_tokens: dict[
+            RuntimeWorkLane, RuntimeWorkRegistrationToken
+        ] = {}
+        self._legacy_probe_tasks: dict[str, asyncio.Task[None]] = {}
+        self._legacy_task_signature: tuple[int, int, int] | None = None
+        self._legacy_request_signature: tuple[_DirectoryEntrySignature, ...] | None = None
         # The owed-notice drain pass currently in flight, if any. It runs OUTSIDE the
         # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
         # be torn down by name: cancelling the watch no longer stops it.
@@ -3254,6 +3753,7 @@ class ScheduledTaskService:
         # Claimed requests currently executing, keyed by request id, so a
         # single slow/hung turn can't stall delivery of every other request.
         self._inflight_executions: Dict[str, "asyncio.Task[Any]"] = {}
+        self._request_capacity_reservations: set[str] = set()
         # Immutable loop-published view consumed by the off-thread recovery scan.
         # The handler rechecks it on the loop before the recovery CAS.
         self._live_claimed_run_ids: frozenset[str] = frozenset()
@@ -3721,7 +4221,11 @@ class ScheduledTaskService:
                 exc_info=True,
             )
             return
-        self._drain_dirty = True
+        self._wake_runtime_work(
+            RuntimeWorkLane.REQUESTS,
+            RuntimeWorkLane.RUN_CALLBACKS,
+            RuntimeWorkLane.FAILURE_NOTICES,
+        )
 
     def _execution_interruption(self, execution_id: str) -> str:
         return self._inflight_cancellation_causes.get(
@@ -3746,6 +4250,17 @@ class ScheduledTaskService:
 
     def _activity_registry(self) -> Any:
         return getattr(getattr(self.controller, "agent_service", None), "activities", None)
+
+    def _activity_output_grace_seconds(self, backend: str) -> float:
+        agents = getattr(getattr(self.controller, "agent_service", None), "agents", {})
+        agent = agents.get(str(backend)) if isinstance(agents, dict) else None
+        try:
+            return max(
+                0.0,
+                float(getattr(agent, "ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS", 0.0)),
+            )
+        except (TypeError, ValueError):
+            return 0.0
 
     def _recover_activity_lifecycle(self) -> None:
         """Reconcile persisted Activity blockers before queued-Run recovery."""
@@ -3793,7 +4308,11 @@ class ScheduledTaskService:
             if callable(has_pending_output) and has_pending_output(run_id):
                 continue
             if self.request_store.settle_deferred_run(run_id):
-                self._drain_dirty = True
+                self._wake_runtime_work(
+                    RuntimeWorkLane.REQUESTS,
+                    RuntimeWorkLane.RUN_CALLBACKS,
+                    RuntimeWorkLane.FAILURE_NOTICES,
+                )
 
     def _settle_pending_recovered_activity_terminals(self) -> None:
         """Acknowledge terminal snapshots only after owned output leaves the Outbox."""
@@ -3833,7 +4352,11 @@ class ScheduledTaskService:
                 terminal_status="succeeded",
             )
             if self.request_store.settle_deferred_run(run_id):
-                self._drain_dirty = True
+                self._wake_runtime_work(
+                    RuntimeWorkLane.REQUESTS,
+                    RuntimeWorkLane.RUN_CALLBACKS,
+                    RuntimeWorkLane.FAILURE_NOTICES,
+                )
 
     async def _deliver_recovered_activity_output(self, activity: Any) -> None:
         registry = self._activity_registry()
@@ -3915,6 +4438,41 @@ class ScheduledTaskService:
                     break
         self._settle_pending_recovered_activity_terminals()
 
+    async def _process_recovered_activity_output(
+        self,
+        backend: str,
+        runtime_key: str,
+    ) -> bool:
+        registry = self._activity_registry()
+        claim = getattr(registry, "claim_completed_output", None)
+        if registry is None or not callable(claim):
+            return True
+        activity = claim(backend, runtime_key, recovered_only=True)
+        if activity is None:
+            self._settle_pending_recovered_activity_terminals()
+            return not bool(registry.has_completed_output(backend, runtime_key))
+        try:
+            await self._deliver_recovered_activity_output(activity)
+        except Exception:
+            registry.requeue_completed_output(activity, recovered=True)
+            logger.warning(
+                "Failed to deliver recovered Activity output %s",
+                getattr(activity, "id", ""),
+                exc_info=True,
+            )
+            return False
+        self._settle_pending_recovered_activity_terminals()
+        has_recovered_output = getattr(registry, "has_recovered_output", None)
+        if callable(has_recovered_output) and has_recovered_output(
+            backend,
+            runtime_key,
+        ):
+            self._wake_runtime_work(
+                RuntimeWorkLane.ACTIVITY_OUTPUTS,
+                reset_cursor=True,
+            )
+        return True
+
     def validate_platform(self, platform: str) -> None:
         # The real IM platforms have a settings manager; ``avibe`` (the web
         # workbench) is a virtual platform with an IM client but no settings
@@ -3935,14 +4493,21 @@ class ScheduledTaskService:
                 raise RuntimeError("scheduled task service generation is still stopping")
             teardown.result()
             self._service_teardown_task = None
-        self._register_request_recovery()
+        if self._supports_runtime_work_lanes():
+            self.register_controller_runtime_work_lanes()
+            self._register_runtime_work_lanes()
+        else:
+            self._register_request_recovery()
         try:
             self.scheduler.start()
         except BaseException:
             self._begin_stop()
             raise
         self._running = True
-        self._spawn_watch_store()
+        if not self._supports_runtime_work_lanes():
+            self._spawn_watch_store()
+        else:
+            self._start_legacy_runtime_work_probes()
         try:
             self.reconcile_jobs()
         except Exception as exc:
@@ -4007,8 +4572,181 @@ class ScheduledTaskService:
             FallbackRequestRecoveryHandler(
                 sqlite_store,
                 live_claims=lambda: self._live_claimed_run_ids,
+                partition_key=self._fallback_request_partition_key,
             ),
         )
+
+    def _supports_runtime_work_lanes(self) -> bool:
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        return callable(getattr(supervisor, "notify", None))
+
+    def _register_runtime_work_lanes(self) -> None:
+        previous = self._request_recovery_unregistration_task
+        if previous is not None:
+            if not previous.done():
+                raise RuntimeError(
+                    "scheduled task service runtime work generation is still stopping"
+                )
+            previous.result()
+            self._request_recovery_unregistration_task = None
+        if self._runtime_work_tokens:
+            raise RuntimeError(
+                "scheduled task service runtime work generation is already registered"
+            )
+        supervisor = self.controller.runtime_work_supervisor
+        registered: list[RuntimeWorkRegistrationToken] = []
+        try:
+            for lane in (
+                RuntimeWorkLane.TASK_DEFINITIONS,
+                RuntimeWorkLane.REQUESTS,
+                RuntimeWorkLane.RUN_CALLBACKS,
+                RuntimeWorkLane.VAULT_CALLBACKS,
+                RuntimeWorkLane.FAILURE_NOTICES,
+                RuntimeWorkLane.STALE_RUNS,
+            ):
+                token = supervisor.register(
+                    lane,
+                    _ScheduledRuntimeWorkHandler(self, lane),
+                )
+                self._runtime_work_tokens[lane] = token
+                registered.append(token)
+        except BaseException:
+            for token in registered:
+                supervisor.begin_unregister(token)
+            self._runtime_work_tokens.clear()
+            raise
+        self._request_recovery_token = self._runtime_work_tokens[
+            RuntimeWorkLane.REQUESTS
+        ]
+
+    def register_controller_runtime_work_lanes(
+        self,
+    ) -> tuple[RuntimeWorkRegistrationToken, ...]:
+        """Register live-producer lanes for the full controller generation."""
+
+        if not self._supports_runtime_work_lanes():
+            return ()
+        existing = self._controller_runtime_work_tokens.get(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS
+        )
+        if existing is not None:
+            return ()
+        token = self.controller.runtime_work_supervisor.register(
+            RuntimeWorkLane.ACTIVITY_OUTPUTS,
+            _ScheduledRuntimeWorkHandler(self, RuntimeWorkLane.ACTIVITY_OUTPUTS),
+        )
+        self._controller_runtime_work_tokens[RuntimeWorkLane.ACTIVITY_OUTPUTS] = token
+        return (token,)
+
+    def _begin_runtime_work_unregistration(self) -> asyncio.Task[None] | None:
+        if not self._runtime_work_tokens:
+            return self._begin_request_recovery_unregistration()
+        existing = self._request_recovery_unregistration_task
+        if existing is not None:
+            return existing
+        supervisor = self.controller.runtime_work_supervisor
+        tasks = [
+            supervisor.begin_unregister(token)
+            for token in self._runtime_work_tokens.values()
+        ]
+        self._runtime_work_tokens.clear()
+        self._request_recovery_token = None
+
+        async def _join() -> None:
+            await asyncio.gather(*tasks)
+
+        joined = asyncio.create_task(
+            _join(),
+            name="scheduled-runtime-work-unregister",
+        )
+        self._request_recovery_unregistration_task = joined
+        return joined
+
+    def _wake_runtime_work(
+        self,
+        *lanes: RuntimeWorkLane,
+        reset_cursor: bool = False,
+    ) -> None:
+        controller = getattr(self, "controller", None)
+        supervisor = getattr(controller, "runtime_work_supervisor", None)
+        notify = getattr(supervisor, "notify", None)
+        if callable(notify):
+            if reset_cursor:
+                notify(*lanes, reset_cursor=True)
+            else:
+                notify(*lanes)
+        else:
+            self._drain_dirty = True
+
+    def _schedule_runtime_work_wake(
+        self,
+        lane: RuntimeWorkLane,
+        delay: float,
+    ) -> None:
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        notify_after = getattr(supervisor, "notify_after", None)
+        token = self._runtime_work_tokens.get(
+            lane,
+            self._controller_runtime_work_tokens.get(lane),
+        )
+        if callable(notify_after) and token is not None:
+            notify_after(token, delay)
+
+    async def _run_runtime_sync(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
+        call = partial(operation, *args, **kwargs)
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        run_sync = getattr(supervisor, "run_sync", None)
+        if callable(run_sync):
+            return await run_sync(call)
+        return await asyncio.to_thread(call)
+
+    def _start_legacy_runtime_work_probes(self) -> None:
+        if self.store.sqlite_backend is None:
+            self._legacy_task_signature = _path_signature(self.store.path)
+            self._legacy_probe_tasks["tasks"] = asyncio.create_task(
+                self._legacy_task_definition_probe(),
+                name="scheduled-runtime-work-task-file-probe",
+            )
+        if self.request_store.sqlite_backend is None:
+            self._legacy_request_signature = self.request_store._state_signature()
+            self._legacy_probe_tasks["requests"] = asyncio.create_task(
+                self._legacy_request_directory_probe(),
+                name="scheduled-runtime-work-request-file-probe",
+            )
+
+    async def _legacy_task_definition_probe(self) -> None:
+        """Wake only when the injected task file signature changes."""
+
+        try:
+            while self._running:
+                await asyncio.sleep(2)
+                signature = await self._run_runtime_sync(_path_signature, self.store.path)
+                if signature == self._legacy_task_signature:
+                    continue
+                self._legacy_task_signature = signature
+                self._wake_runtime_work(RuntimeWorkLane.TASK_DEFINITIONS)
+        except asyncio.CancelledError:
+            raise
+
+    async def _legacy_request_directory_probe(self) -> None:
+        """Wake every Run consumer on a legacy directory edge."""
+
+        try:
+            while self._running:
+                await asyncio.sleep(2)
+                signature = await self._run_runtime_sync(
+                    self.request_store._state_signature
+                )
+                if signature == self._legacy_request_signature:
+                    continue
+                self._legacy_request_signature = signature
+                self._wake_runtime_work(
+                    RuntimeWorkLane.REQUESTS,
+                    RuntimeWorkLane.RUN_CALLBACKS,
+                    RuntimeWorkLane.STALE_RUNS,
+                )
+        except asyncio.CancelledError:
+            raise
 
     def _begin_request_recovery_unregistration(
         self,
@@ -4139,16 +4877,52 @@ class ScheduledTaskService:
             self._inflight_cancellation_causes[request_id] = SETTLED_BY_STOPPED
             execution.cancel()
 
+    async def _propagate_requested_cancellations_async(self) -> None:
+        """Off-loop store reads with loop-owned cancellation decisions."""
+
+        candidates = [
+            (request_id, execution, self._inflight_requests.get(request_id))
+            for request_id, execution in self._inflight_executions.items()
+            if not execution.done()
+            and request_id not in self._inflight_cancellation_causes
+        ]
+        for request_id, execution, request in candidates:
+            if request is None or not self._is_command_execution(request):
+                continue
+            try:
+                run = await self._run_runtime_sync(
+                    self.request_store.get_run,
+                    request_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to read Run %s while checking for a requested cancellation",
+                    request_id,
+                )
+                continue
+            if (
+                not run
+                or not bool(run.get("cancel_requested"))
+                or str(run.get("status") or "") in TERMINAL_RUN_STATUSES
+                or execution.done()
+            ):
+                continue
+            self._inflight_cancellation_causes[request_id] = SETTLED_BY_STOPPED
+            execution.cancel()
+
     def _begin_stop(
         self,
         *,
         cancel_reconcile: bool = True,
     ) -> asyncio.Task[None] | None:
         self._running = False
-        request_recovery_stop = self._begin_request_recovery_unregistration()
+        request_recovery_stop = self._begin_runtime_work_unregistration()
         current_task = self._current_asyncio_task()
         if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
             self._reconcile_task.cancel()
+        for probe in self._legacy_probe_tasks.values():
+            if probe is not current_task:
+                probe.cancel()
         # Cancelled by name, and not gated on ``cancel_reconcile``: the notice drain is
         # no longer part of the watch coroutine, so stopping the watch leaves it running
         # — a delivery on behalf of a service this process no longer owns, or one that
@@ -4179,6 +4953,10 @@ class ScheduledTaskService:
 
     async def stop(self) -> None:
         request_recovery_stop = self._begin_stop()
+        legacy_probes = tuple(self._legacy_probe_tasks.values())
+        self._legacy_probe_tasks.clear()
+        if legacy_probes:
+            await asyncio.gather(*legacy_probes, return_exceptions=True)
         if self._reconcile_task:
             self._reconcile_task.cancel()
             try:
@@ -4216,6 +4994,7 @@ class ScheduledTaskService:
             if self._request_recovery_unregistration_task is request_recovery_stop:
                 self._request_recovery_unregistration_task = None
         self._inflight_executions.clear()
+        self._request_capacity_reservations.clear()
         self._live_claimed_run_ids = frozenset()
         self._inflight_requests.clear()
         self._inflight_cancellation_causes.clear()
@@ -4349,10 +5128,14 @@ class ScheduledTaskService:
         if leaked:
             # The wedge is gone; re-check the queue now instead of waiting for the
             # next store change, which a stuck session has no reason to produce.
-            self._drain_dirty = True
+            self._wake_runtime_work(
+                RuntimeWorkLane.REQUESTS,
+                RuntimeWorkLane.RUN_CALLBACKS,
+                RuntimeWorkLane.FAILURE_NOTICES,
+            )
         return set(leaked)
 
-    def _sweep_stale_runs(self) -> None:
+    def _sweep_stale_runs(self, *, release_leaked_locks: bool = True) -> None:
         """Terminalize runs that nothing is executing any more (plan §4).
 
         Rides the existing store tick because the leak it repairs is the ABSENCE of
@@ -4411,10 +5194,26 @@ class ScheduledTaskService:
         )
         # Unconditional: the in-memory wedge and the stale rows are independent
         # failures, and either can outlive the other.
-        self._release_leaked_session_locks()
+        if release_leaked_locks:
+            self._release_leaked_session_locks()
         if swept:
-            self._drain_dirty = True
+            self._wake_runtime_work(
+                RuntimeWorkLane.REQUESTS,
+                RuntimeWorkLane.RUN_CALLBACKS,
+                RuntimeWorkLane.FAILURE_NOTICES,
+            )
             self._retire_swept_queue_segments(swept)
+
+    def _stale_run_sweep_delay_seconds(self) -> float | None:
+        interval = self._runtime_seconds(
+            "harness_run_sweep_interval_seconds",
+            DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS,
+        )
+        if interval <= 0:
+            return None
+        if not self._last_sweep_at:
+            return 0.0
+        return max(0.0, interval - (time.monotonic() - self._last_sweep_at))
 
     def _retire_swept_queue_segments(self, swept: list[Any]) -> None:
         """Drop the persisted Workbench queue rows a swept run left behind.
@@ -4523,45 +5322,124 @@ class ScheduledTaskService:
     async def _run_task(self, task_id: str) -> None:
         if not self._owns_service_instance():
             return
-        self.store.maybe_reload()
-        task = self.store.get_task(task_id)
+        task = await self._run_runtime_sync(self.store.refresh_task, task_id)
         if not task or not task.enabled:
             return
-        if any(
-            request.request_type == "scheduled"
-            and request.source_kind == "scheduler"
-            and request.task_id == task.id
-            for request in self.request_store.list_pending()
-        ):
-            self._drain_dirty = True
-            return
-        queued = self.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
-        if not self._transport_ready_for_request(queued):
-            self._drain_dirty = True
-            return
-        request = self._claim_pending_request(queued)
-        if request is None:
-            return
+        queued = await self._run_runtime_sync(
+            self.request_store.enqueue_task_run,
+            task.id,
+            source_kind="scheduler",
+            task=task,
+            suppress_scheduler_successor=True,
+        )
+        if queued is not None:
+            self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
+
+    def _request_partition_key(self, request: TaskExecutionRequest) -> str:
         lock_key = self._execution_lock_key(request)
-        if len(self._inflight_executions) >= self._MAX_CONCURRENT_EXECUTIONS:
-            self.request_store.requeue(request.id)
-            return
-        if lock_key is not None and lock_key in self._inflight_sessions:
-            self.request_store.requeue(request.id)
-            return
-        command_definition_id = self._command_fire_definition_id(request)
-        if command_definition_id is not None and self._command_definition_has_live_worker(
-            command_definition_id
+        if lock_key:
+            return lock_key
+        return f"run:{request.id}"
+
+    def _fallback_request_partition_key(self, row: dict[str, Any]) -> str:
+        return self._request_partition_key(TaskExecutionRequest.from_dict(row))
+
+    async def _process_pending_request(
+        self,
+        pending: TaskExecutionRequest,
+    ) -> bool:
+        if not self._owns_service_instance():
+            return True
+        if pending.id in self._request_capacity_reservations:
+            return True
+        if (
+            len(self._inflight_executions) + len(self._request_capacity_reservations)
+            >= self._MAX_CONCURRENT_EXECUTIONS
         ):
-            # Requeued, not dropped: the row stays the definition's one pending fire and
-            # runs as soon as the earlier worker is shown gone.
-            self.request_store.requeue(request.id)
-            self._drain_dirty = True
-            return
-        self._spawn_execution(request, lock_key)
-        execution = self._inflight_executions.get(request.id)
-        if execution is not None:
-            await execution
+            return False
+        if pending.id in self._inflight_executions:
+            return True
+        registration = self._runtime_work_tokens.get(RuntimeWorkLane.REQUESTS)
+        self._request_capacity_reservations.add(pending.id)
+        try:
+            if not self._transport_ready_for_request(pending):
+                await self._run_runtime_sync(
+                    self.request_store.record_skip_reason,
+                    pending.id,
+                    reason=SKIP_REASON_TRANSPORT_UNAVAILABLE,
+                )
+                return False
+            lock_key = self._execution_lock_key(pending)
+            if lock_key is not None and lock_key in self._inflight_sessions:
+                await self._run_runtime_sync(
+                    self.request_store.record_skip_reason,
+                    pending.id,
+                    reason=SKIP_REASON_SESSION_BUSY,
+                )
+                return False
+            command_definition_id = self._command_fire_definition_id(pending)
+            if command_definition_id is not None and await self._run_runtime_sync(
+                self._command_definition_has_live_worker,
+                command_definition_id,
+            ):
+                await self._run_runtime_sync(
+                    self.request_store.record_skip_reason,
+                    pending.id,
+                    reason=SKIP_REASON_SESSION_BUSY,
+                )
+                return False
+            request = await self._run_runtime_sync(self._claim_pending_request, pending)
+            if request is None:
+                return True
+            if registration is not None and (
+                not self._running
+                or self._runtime_work_tokens.get(RuntimeWorkLane.REQUESTS)
+                != registration
+                or not self._owns_service_instance()
+            ):
+                await self._run_runtime_sync(
+                    self.request_store.requeue,
+                    request.id,
+                )
+                return True
+            self._spawn_execution(request, lock_key)
+            return True
+        finally:
+            self._request_capacity_reservations.discard(pending.id)
+
+    async def _process_run_callback(self, run: dict[str, Any]) -> bool:
+        run_id = str(run.get("id") or "")
+        if not run_id:
+            return True
+        try:
+            callback_run = await self._run_runtime_sync(
+                self._enqueue_callback_run,
+                run,
+            )
+        except Exception as exc:
+            logger.error("Agent run callback failed for %s: %s", run_id, exc, exc_info=True)
+            await self._run_runtime_sync(
+                self.request_store.update_callback_status,
+                run_id,
+                status="failed",
+                error=str(exc),
+            )
+            return False
+        if callback_run is None:
+            await self._run_runtime_sync(
+                self.request_store.update_callback_status,
+                run_id,
+                status="skipped",
+            )
+            return True
+        await self._run_runtime_sync(
+            self.request_store.update_callback_status,
+            run_id,
+            status="sent",
+            callback_run_id=callback_run.id,
+        )
+        self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
+        return True
 
     async def _drain_requests(self) -> None:
         if not self._owns_service_instance():
@@ -4623,14 +5501,17 @@ class ScheduledTaskService:
             except Exception as exc:
                 logger.error("Agent run callback failed for %s: %s", run_id, exc, exc_info=True)
                 self.request_store.update_callback_status(run_id, status="failed", error=str(exc))
-                self._drain_dirty = True
+                self._wake_runtime_work(RuntimeWorkLane.RUN_CALLBACKS)
                 continue
             if callback_run is None:
                 self.request_store.update_callback_status(run_id, status="skipped")
-                self._drain_dirty = True
+                self._wake_runtime_work(RuntimeWorkLane.RUN_CALLBACKS)
                 continue
             self.request_store.update_callback_status(run_id, status="sent", callback_run_id=callback_run.id)
-            self._drain_dirty = True
+            self._wake_runtime_work(
+                RuntimeWorkLane.REQUESTS,
+                RuntimeWorkLane.RUN_CALLBACKS,
+            )
 
     # --- the owed-failure-notice drain ---------------------------------------
     #
@@ -4734,7 +5615,7 @@ class ScheduledTaskService:
     async def _deliver_one_failure_notice(self, store: Any, run: dict[str, Any]) -> None:
         run_id = str(run["id"])
         definition_id = str(run.get("task_id") or run.get("definition_id") or "") or None
-        notice = store.owed_failure_notice(run_id)
+        notice = await self._run_runtime_sync(store.owed_failure_notice, run_id)
         # Re-read and re-check ELIGIBILITY, not merely the state. The batch was listed
         # before this pass began and each row is then delivered one at a time, so by
         # the time a row is reached another owner may already have claimed it — and a
@@ -4761,7 +5642,8 @@ class ScheduledTaskService:
         # failures and defer the notice behind a canonical row it has nothing to do
         # with.
         if definition_id and not failure_notices.bypasses_suppression(notice):
-            earlier_unsettled = store.earliest_unsettled_run_before(
+            earlier_unsettled = await self._run_runtime_sync(
+                store.earliest_unsettled_run_before,
                 definition_id,
                 created_at=str(run.get("created_at") or ""),
                 run_id=run_id,
@@ -4773,7 +5655,11 @@ class ScheduledTaskService:
                 # read snapshot: read separately, a success settling between the
                 # boundary seek and the row read merges two streaks, and a ``sent``
                 # notice from the earlier outage then skips a live one.
-                streak_facts = store.failure_streak_decision(definition_id, run_id)
+                streak_facts = await self._run_runtime_sync(
+                    store.failure_streak_decision,
+                    definition_id,
+                    run_id,
+                )
 
         # The callback's status is read FRESH, not taken from the listed row: the
         # batch predates this decision by up to a whole pass, and ``_drain_callbacks``
@@ -4781,13 +5667,17 @@ class ScheduledTaskService:
         # callback already landed, and a stale absence would deliver beside it. A
         # read failure propagates to the drain loop's per-row handler and the row is
         # retried later, which errs toward one message rather than two.
+        callback_status = await self._run_runtime_sync(
+            store.run_callback_state,
+            run_id,
+        )
         decision = failure_notices.decide(
             run_id=run_id,
             definition_id=definition_id,
             notice=notice,
             streak_facts=streak_facts,
             earlier_unsettled=earlier_unsettled,
-            callback_status=store.run_callback_state(run_id),
+            callback_status=callback_status,
         )
         if decision.action == failure_notices.ACTION_DEFER:
             # No attempt consumed — this row has not been tried. But the deferral is
@@ -4795,7 +5685,8 @@ class ScheduledTaskService:
             # is re-selected by every tick and keeps occupying the batch, so one
             # definition with more than a batch worth of pending failures starved
             # every other definition's notices indefinitely.
-            store.update_owed_failure_notice(
+            await self._run_runtime_sync(
+                store.update_owed_failure_notice,
                 run_id,
                 expect=expect,
                 next_attempt_at=(
@@ -4807,7 +5698,8 @@ class ScheduledTaskService:
             logger.debug("failure notice for %s deferred (%s)", run_id, decision.reason)
             return
         if decision.action == failure_notices.ACTION_SKIP:
-            store.update_owed_failure_notice(
+            await self._run_runtime_sync(
+                store.update_owed_failure_notice,
                 run_id,
                 expect=expect,
                 state=NOTICE_SKIPPED,
@@ -4846,7 +5738,8 @@ class ScheduledTaskService:
         # bound, and the recovered pass consumes its own attempt rather than inheriting
         # the dead one, so the retry ladder stays finite. The residual is at-least-once
         # delivery, documented on that constant.
-        claimed = store.update_owed_failure_notice(
+        claimed = await self._run_runtime_sync(
+            store.update_owed_failure_notice,
             run_id,
             expect=expect,
             attempts=attempt,
@@ -4948,7 +5841,8 @@ class ScheduledTaskService:
             # on a function return. ``emit_replayed_backend_failure`` discards the
             # notify result and returns normally either way, so a returns-cleanly ack
             # would flip a lost notice to ``sent`` permanently.
-            store.update_owed_failure_notice(
+            await self._run_runtime_sync(
+                store.update_owed_failure_notice,
                 run_id,
                 expect=expect,
                 state=NOTICE_SENT,
@@ -4962,14 +5856,15 @@ class ScheduledTaskService:
                 # diagnosis and must NOT trigger a resend.
                 error=evidence.error_text,
             )
-            self._drain_dirty = True
+            self._wake_runtime_work(RuntimeWorkLane.FAILURE_NOTICES)
             return
 
         error_text = evidence.error_text or "failure notice delivery produced no evidence"
         if retry_after is None:
             # Dead letter, carrying the raised exception's own message rather than a
             # generic string. Visible rather than silently retrying forever.
-            store.update_owed_failure_notice(
+            await self._run_runtime_sync(
+                store.update_owed_failure_notice,
                 run_id,
                 expect=expect,
                 state=NOTICE_FAILED,
@@ -4981,7 +5876,8 @@ class ScheduledTaskService:
         next_attempt_at = (
             datetime.now(timezone.utc) + timedelta(seconds=retry_after)
         ).isoformat()
-        store.update_owed_failure_notice(
+        await self._run_runtime_sync(
+            store.update_owed_failure_notice,
             run_id,
             expect=expect,
             state=NOTICE_PENDING,
@@ -6059,7 +6955,11 @@ class ScheduledTaskService:
             ):
                 settled.append(run_id)
         if settled:
-            self._drain_dirty = True
+            self._wake_runtime_work(
+                RuntimeWorkLane.REQUESTS,
+                RuntimeWorkLane.RUN_CALLBACKS,
+                RuntimeWorkLane.FAILURE_NOTICES,
+            )
         return settled
 
     async def _drain_vault_callbacks(self) -> None:
@@ -6126,7 +7026,109 @@ class ScheduledTaskService:
                 continue
             if status == "sent":
                 # A callback run was enqueued into the run store; drain it promptly.
-                self._drain_dirty = True
+                self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
+
+    def _scan_vault_callback_work(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None,
+    ) -> tuple[list[RuntimeWorkItem], bool]:
+        from storage import vault_service
+
+        engine = get_cached_sqlite_engine(paths.get_sqlite_state_path())
+        after = None
+        if cursor:
+            parts = cursor.split("\x1f", 1)
+            if len(parts) == 2:
+                after = (parts[0], parts[1])
+        with engine.begin() as conn:
+            vault_service.expire_overdue_requests(conn)
+            next_expiry = vault_service.earliest_pending_request_expiry(conn)
+            pending = vault_service.list_pending_request_callbacks(
+                conn,
+                limit=limit,
+                after=after,
+            )
+        if next_expiry is not None:
+            self._schedule_runtime_work_wake(
+                RuntimeWorkLane.VAULT_CALLBACKS,
+                max(
+                    0.0,
+                    (next_expiry - datetime.now(timezone.utc)).total_seconds(),
+                ),
+            )
+        items: list[RuntimeWorkItem] = []
+        for row in pending:
+            request_id = str(row.get("id") or "")
+            if not request_id:
+                continue
+            try:
+                plan = vault_service.resolve_request_callback(row)
+            except Exception:
+                plan = None
+            session_id = str(getattr(plan, "session_id", "") or "")
+            partition = f"session:{session_id}" if session_id else f"request:{request_id}"
+            items.append(
+                RuntimeWorkItem(
+                    partition,
+                    row,
+                    cursor_key=f"{row.get('decided_at') or ''}\x1f{request_id}",
+                )
+            )
+        return items, len(pending) >= limit
+
+    async def _process_vault_callback(self, row: dict[str, Any]) -> bool:
+        status = await self._run_runtime_sync(self._process_vault_callback_sync, row)
+        if status == "sent":
+            self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
+        return status != "pending"
+
+    def _process_vault_callback_sync(self, row: dict[str, Any]) -> str:
+        from storage import vault_service
+
+        request_id = str(row.get("id") or "")
+        if not request_id:
+            return "skipped"
+        engine = get_cached_sqlite_engine(paths.get_sqlite_state_path())
+        status = "skipped"
+        try:
+            with engine.begin() as conn:
+                ready = vault_service.request_callback_ready(conn, row)
+            if not ready:
+                return "pending"
+            plan = vault_service.resolve_request_callback(row)
+            if plan is not None:
+                enqueue_session_callback(
+                    self.request_store,
+                    session_id=plan.session_id,
+                    message=plan.message,
+                    source_actor=f"vault:{request_id}",
+                )
+                status = "sent"
+        except ValueError:
+            status = "skipped"
+        except Exception as exc:
+            logger.error(
+                "Vault request callback failed for %s: %s",
+                request_id,
+                exc,
+                exc_info=True,
+            )
+            status = "failed"
+        try:
+            with engine.begin() as conn:
+                vault_service.mark_request_callback(conn, request_id, status=status)
+        except Exception as exc:
+            logger.error(
+                "Vault request callback mark failed for %s: %s",
+                request_id,
+                exc,
+                exc_info=True,
+            )
+            return "pending"
+        return status
 
     def _enqueue_callback_run(self, run: dict[str, Any]) -> Optional[TaskExecutionRequest]:
         callback_session_id = str(run.get("callback_session_id") or "").strip()
@@ -6278,6 +7280,11 @@ class ScheduledTaskService:
 
     def notify_transport_ready(self, platform: str) -> None:
         logger.info("Transport %s ready; scheduled Run queue will be drained", platform)
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        notify = getattr(supervisor, "notify", None)
+        if callable(notify):
+            notify(RuntimeWorkLane.REQUESTS, reset_cursor=True)
+            return
         self._drain_dirty = True
 
     def _canonical_session_lock(self, session_id: str, session_key: Optional[str]) -> str:
@@ -6339,7 +7346,11 @@ class ScheduledTaskService:
             # live lock as leaked.
             if self._session_lock_owners.get(lock_key) == request_id:
                 self._session_lock_owners.pop(lock_key, None)
-        self._drain_dirty = True
+        self._wake_runtime_work(
+            RuntimeWorkLane.REQUESTS,
+            RuntimeWorkLane.RUN_CALLBACKS,
+            RuntimeWorkLane.FAILURE_NOTICES,
+        )
         # ``_execute_claimed_request`` already terminalizes cancellations and
         # records ordinary failures. A task cancelled before its coroutine enters
         # has no execution to settle; put that bare claim back in the queue.
@@ -6680,6 +7691,10 @@ class ScheduledTaskService:
                         else request.request_type
                     ),
                     agent_name=request.agent_name,
+                    # A composed hook / watch / webhook / escalation prompt is the one
+                    # case where the request itself knows which part a person wrote, so
+                    # its metadata must reach ``_build_context``.
+                    metadata=request.metadata if isinstance(request.metadata, dict) else None,
                     _capture_dispatch_result=True,
                     **({"agent_id": request.agent_id} if request.agent_id else {}),
                 )
@@ -7648,7 +8663,11 @@ class ScheduledTaskService:
                 expected_status=settled,
             )
         if settled_any:
-            self._drain_dirty = True
+            self._wake_runtime_work(
+                RuntimeWorkLane.REQUESTS,
+                RuntimeWorkLane.RUN_CALLBACKS,
+                RuntimeWorkLane.FAILURE_NOTICES,
+            )
 
     def settle_agent_runs_from_terminal_turn(
         self,
@@ -7741,7 +8760,11 @@ class ScheduledTaskService:
                 result.get("terminal_transition") or result.get("text_backfilled")
             )
         if settled_any:
-            self._drain_dirty = True
+            self._wake_runtime_work(
+                RuntimeWorkLane.REQUESTS,
+                RuntimeWorkLane.RUN_CALLBACKS,
+                RuntimeWorkLane.FAILURE_NOTICES,
+            )
 
     def _retract_escalation_of_stopped_fire(self, execution_id: str) -> None:
         """Take back the Agent turn a fire queued, once the user stops that fire.
@@ -8924,6 +9947,7 @@ class ScheduledTaskService:
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
         _capture_dispatch_result: bool = False,
     ) -> Optional[str] | TaskDispatchResult:
         target_info = resolve_session_id_target(session_id) if session_id else None
@@ -8943,6 +9967,12 @@ class ScheduledTaskService:
             agent_name=agent_name,
             agent_id=agent_id,
             target_info=target_info,
+            # Forwarded like the ``agent_run`` path already does. Without it every
+            # metadata field ``_build_context`` reads — the display-prompt override, the
+            # source/parent provenance — is unreachable for an enqueued hook, watch,
+            # webhook, or escalation request, which are exactly the composed kinds whose
+            # echo depends on being handed the user-authored instruction.
+            metadata=metadata,
         )
         # A scheduled avibe turn drives the sidebar dot through the SAME two
         # chokepoints as any other turn — inbound AgentService.handle_message
@@ -9025,6 +10055,8 @@ class ScheduledTaskService:
         if native_session_fork is None and target_info and not str(target_info.native_session_id or "").strip():
             native_session_fork = fork_metadata_from_session_metadata(getattr(target_info, "metadata", None))
 
+        definition_name, definition_prompt = self._definition_display_fields(task_id)
+
         return MessageContext(
             user_id=session_target_context["user_id"],
             channel_id=channel_id,
@@ -9057,6 +10089,17 @@ class ScheduledTaskService:
                 # definition id (task / watch). Carried so the message mirror can
                 # attribute the injected prompt to its precise definition.
                 "task_definition_id": task_id,
+                # Human label for the same definition, so an outward echo of the
+                # injected prompt can name what fired instead of an opaque id.
+                "task_definition_name": definition_name,
+                # The definition's STORED instruction, i.e. the part of this run's
+                # prompt a person actually wrote. A watch / hook / webhook prompt is
+                # composed for the agent to read and appends machine-generated
+                # evidence (waiter stdout, a failure report, a webhook payload); an
+                # outward echo may show only this segment, never the composed text.
+                "harness_display_prompt": (
+                    str((metadata or {}).get("harness_display_prompt") or "").strip() or definition_prompt
+                ),
                 "vibe_agent_name": agent_name,
                 "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
@@ -9084,6 +10127,42 @@ class ScheduledTaskService:
                     else None
                 ),
             },
+        )
+
+    def _definition_display_fields(
+        self, definition_id: Optional[str]
+    ) -> tuple[Optional[str], Optional[str]]:
+        """``(name, stored instruction)`` for *definition_id*, either one ``None``.
+
+        Resolved the same way the failure notice does it (``get_task`` mirrors
+        scheduled tasks only, so a watch needs the definition row), in ONE lookup
+        because both fields feed the same display copy, and best-effort: a store that
+        cannot answer must not break the run it is describing. ``agent_run`` has no
+        definition and passes ``None``.
+
+        The stored instruction is the definition's own prompt — a task's ``prompt``,
+        a watch's ``message`` (which the row already falls back to ``prefix`` for) —
+        so it is the user-authored text with none of the evidence a composed run
+        prompt appends.
+        """
+
+        identifier = str(definition_id or "").strip()
+        if not identifier:
+            return None, None
+        try:
+            task = self.store.get_task(identifier)
+            if task is not None:
+                return (
+                    str(getattr(task, "name", "") or "").strip() or None,
+                    str(getattr(task, "prompt", "") or "").strip() or None,
+                )
+            watch = self.store.get_watch_definition(identifier) or {}
+        except Exception:
+            logger.debug("failed to resolve definition display fields for %s", identifier, exc_info=True)
+            return None, None
+        return (
+            str(watch.get("name") or "").strip() or None,
+            str(watch.get("message") or watch.get("prefix") or "").strip() or None,
         )
 
     def _resolve_target_context(self, target: ParsedSessionKey) -> Dict[str, Any]:

@@ -427,22 +427,34 @@ async def _publish_event_round_trip():
                     "data": {"session_id": "ses_queue"},
                 },
             )
+            definitions_resp = await client.post(
+                "/internal/events",
+                json={
+                    "type": "definitions.updated",
+                    "data": {"definition_type": "scheduled"},
+                },
+            )
             bad_resp = await client.post("/internal/events", json={"type": "unsupported", "data": {}})
         events = [
             await asyncio.wait_for(queue.get(), timeout=1.0),
             await asyncio.wait_for(queue.get(), timeout=1.0),
+            await asyncio.wait_for(queue.get(), timeout=1.0),
         ]
-        return resp, queue_resp, bad_resp, events
+        return resp, queue_resp, definitions_resp, bad_resp, events
     finally:
         inbox_events.bus.unsubscribe(sub_id)
 
 
 def test_publish_event_endpoint_emits_allowlisted_bus_event():
-    resp, queue_resp, bad_resp, events = asyncio.run(_publish_event_round_trip())
+    resp, queue_resp, definitions_resp, bad_resp, events = asyncio.run(
+        _publish_event_round_trip()
+    )
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
     assert queue_resp.status_code == 200
     assert queue_resp.json() == {"ok": True}
+    assert definitions_resp.status_code == 200
+    assert definitions_resp.json() == {"ok": True}
     assert bad_resp.status_code == 400
     assert events == [
         (
@@ -450,6 +462,7 @@ def test_publish_event_endpoint_emits_allowlisted_bus_event():
             {"scope": "request", "request_id": "vreq_1", "request_status": "pending"},
         ),
         ("queue.updated", {"session_id": "ses_queue"}),
+        ("definitions.updated", {"definition_type": "scheduled"}),
     ]
 
 
@@ -5223,21 +5236,22 @@ def test_flush_quarantines_agent_run_when_native_start_may_have_written(
 def test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    def prov(execution_id: str) -> dict:
+    def prov(execution_id: str, instruction: str) -> dict:
         return {
             "message_id": f"watch:def-watch:{execution_id}",
             "platform_specific": {
                 "task_execution_id": execution_id,
                 "task_trigger_kind": "watch",
                 "task_definition_id": "def-watch",
+                "harness_display_prompt": instruction,
                 "suppress_delivery": True,
             },
         }
 
     session_id = _seed_avibe_session_with_queue(
         [
-            ("first callback", prov("run-1")),
-            ("second callback", prov("run-2")),
+            ("first callback", prov("run-1", "watch the deploy")),
+            ("second callback", prov("run-2", "watch the deploy and page me")),
         ]
     )
 
@@ -5249,6 +5263,20 @@ def test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn(tmp_path, 
     assert len(runs) == 1
     assert runs[0][2].message_id == "watch:def-watch:run-1"
     assert len(runs[0][2].platform_specific["delivery_ids"]) == 2
+    # Every merged Delivery's display snapshot travels with the context. The dispatch
+    # text carries BOTH prompts, so a consumer that reads the singular ``display_text``
+    # (the IM prompt echo) would announce one instruction for a two-prompt result.
+    assert runs[0][2].platform_specific["display_texts"] == [
+        "first callback",
+        "second callback",
+    ]
+    # Same for the composed kinds, whose echo shows the stored instruction instead of
+    # the snapshot: an instruction edited between the two firings leaves the merged
+    # batch dispatching both, so each Delivery's own stamped instruction travels too.
+    assert runs[0][2].platform_specific["harness_display_prompts"] == [
+        "watch the deploy",
+        "watch the deploy and page me",
+    ]
     with create_sqlite_engine().begin() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
 

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -582,7 +582,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(activity)
         activity_key = registry._activity_key(activity)
         with registry._lock:
-            registry._recovered_output_ids.add(activity_key)
+            registry._add_recovered_output_id(activity_key, activity)
 
         service = object.__new__(ScheduledTaskService)
         service.controller = controller
@@ -3754,3 +3754,485 @@ class PostSendBookkeepingDeliveryEvidenceTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(client.delivered, ["bot-msg-1"])
         self.assertEqual(message_id, "bot-msg-1")
         self.assertEqual(calls, [("record", "run-bookkeeping", "delivered body", "bot-msg-1", "succeeded")])
+
+
+class HarnessPromptEchoTests(unittest.IsolatedAsyncioTestCase):
+    """MESSAGE-DELIVERY-018: a Harness turn announces its prompt in the IM channel.
+
+    Without the echo an IM conversation only ever received the agent's reply, so a
+    scheduled/watch/webhook/hook/``agent run`` result read as an answer to a question
+    nobody in the channel could see.
+    """
+
+    def _context(self, **spec):
+        payload = {
+            "task_trigger_kind": "scheduled",
+            "task_execution_id": "run-echo-1",
+            "task_definition_id": "task-echo-1",
+        }
+        payload.update(spec)
+        return MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform=payload.pop("platform", "slack"),
+            thread_id=payload.pop("thread_id", None),
+            message_id=payload.pop("message_id", "scheduled:run-echo-1"),
+            platform_specific=payload,
+        )
+
+    async def test_scheduled_prompt_is_echoed_to_the_channel(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        message_id = await dispatcher.emit_harness_prompt(
+            self._context(task_definition_name="Daily digest"),
+            "summarize yesterday's deploys",
+        )
+
+        self.assertEqual(message_id, "bot-msg-1")
+        self.assertEqual(len(controller.im_client.sent), 1)
+        channel_id, thread_id, text = controller.im_client.sent[0]
+        self.assertEqual(channel_id, "C123")
+        self.assertIsNone(thread_id)
+        self.assertIn("Daily digest", text)
+        self.assertIn("> summarize yesterday's deploys", text)
+
+    async def test_every_harness_trigger_kind_is_echoed(self):
+        for kind in ("scheduled", "watch", "webhook", "hook", "agent_run"):
+            with self.subTest(kind=kind):
+                controller = _StubController()
+                dispatcher = ConsolidatedMessageDispatcher(controller)
+                await dispatcher.emit_harness_prompt(
+                    # ``watch`` / ``webhook`` / ``hook`` echo their definition's stored
+                    # instruction; the other two echo the dispatch text itself.
+                    self._context(task_trigger_kind=kind, harness_display_prompt="do the thing"),
+                    "do the thing",
+                )
+                self.assertEqual(len(controller.im_client.sent), 1)
+
+    async def test_composed_prompt_echoes_the_instruction_not_the_generated_evidence(self):
+        """Scenario: MESSAGE-DELIVERY-018
+
+        A watch prompt is composed FOR THE AGENT: the stored instruction plus the
+        waiter's raw stdout (``core/watches.py::_build_prompt``); an
+        ``--on-failure agent`` escalation appends a generated failure report the same
+        way. Echoing that verbatim would publish raw command output — tokens
+        included — into a shared channel before the agent can redact it (Codex P1).
+        """
+        for kind in ("watch", "webhook", "hook"):
+            with self.subTest(kind=kind):
+                controller = _StubController()
+                dispatcher = ConsolidatedMessageDispatcher(controller)
+                composed = "check the deploy and report\n\ntoken=ghp_SECRET\nrows=42"
+
+                await dispatcher.emit_harness_prompt(
+                    self._context(
+                        task_trigger_kind=kind,
+                        harness_display_prompt="check the deploy and report",
+                        display_text=composed,
+                    ),
+                    composed,
+                )
+
+                _channel_id, _thread_id, text = controller.im_client.sent[0]
+                self.assertIn("> check the deploy and report", text)
+                self.assertNotIn("ghp_SECRET", text)
+                self.assertNotIn("rows=42", text)
+
+    async def test_composed_prompt_without_a_stored_instruction_echoes_nothing(self):
+        # A deleted / unresolvable definition means nothing here can tell the
+        # user-authored instruction from the generated evidence, so the echo stays
+        # silent rather than guessing (the Workbench row still has the full prompt).
+        for kind in ("watch", "webhook", "hook"):
+            with self.subTest(kind=kind):
+                controller = _StubController()
+                dispatcher = ConsolidatedMessageDispatcher(controller)
+
+                result = await dispatcher.emit_harness_prompt(
+                    self._context(task_trigger_kind=kind),
+                    "waiter said: token=ghp_SECRET",
+                )
+
+                self.assertIsNone(result)
+                self.assertEqual(controller.im_client.sent, [])
+
+    async def test_echoed_mentions_cannot_ping_the_channel(self):
+        """Quoting does not stop a renderer from resolving a mention (Codex P2).
+
+        Discord sends without ``allowed_mentions``, so an echoed ``@everyone`` would
+        really broadcast; Slack resolves ``<@U…>`` / ``<!channel>`` the same way.
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(task_definition_name="@here nightly"),
+            "ping @everyone plus <@U123>, <@&456> and <!channel>",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        for mention in ("@everyone", "@here", "<@U123>", "<@&456>", "<!channel>"):
+            self.assertNotIn(mention, text)
+        # Only a zero-width break was inserted, so the prompt still reads the same.
+        self.assertIn("ping @everyone plus <@U123>, <@&456> and <!channel>", text.replace("\u200b", ""))
+
+    async def test_echoed_username_mention_cannot_notify_on_telegram(self):
+        """A bare ``@username`` is a real mention on Telegram (Codex P2).
+
+        ``TelegramFormatter.render`` HTML-escapes the body but leaves the sigil intact,
+        so an echoed handle would notify that account. Neutralized for every adapter
+        rather than in the Telegram formatter: one body is rendered by all of them, and
+        a new adapter inherits the guard.
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(platform="telegram", task_definition_name="@release_bot nightly"),
+            "ask @alice_dev to review, cc @team_lead",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        for mention in ("@alice_dev", "@team_lead", "@release_bot"):
+            self.assertNotIn(mention, text)
+        self.assertIn("ask @alice_dev to review, cc @team_lead", text.replace("\u200b", ""))
+
+    async def test_echo_is_sent_as_markdown_so_the_quote_renders(self):
+        # Slack builds a plain_text block for anything but markdown and would show
+        # the ``> `` markers literally (Codex P3). Telegram resolves either value to
+        # its own HTML default, so this changes nothing there.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        recorded: dict = {}
+
+        async def _send(context, text, parse_mode=None, reply_to=None):
+            recorded["parse_mode"] = parse_mode
+            return "bot-msg-1"
+
+        controller.im_client.send_message = _send
+
+        await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertEqual(recorded["parse_mode"], "markdown")
+
+    async def test_activity_recovery_and_human_turns_are_not_echoed(self):
+        # ``activity_recovery`` is a runtime re-injection, not a user-authored
+        # instruction; a human turn's prompt IS the IM message already on screen.
+        for kind in ("activity_recovery", "", "human"):
+            with self.subTest(kind=kind):
+                controller = _StubController()
+                dispatcher = ConsolidatedMessageDispatcher(controller)
+                result = await dispatcher.emit_harness_prompt(
+                    self._context(task_trigger_kind=kind),
+                    "do the thing",
+                )
+                self.assertIsNone(result)
+                self.assertEqual(controller.im_client.sent, [])
+
+    async def test_workbench_platform_is_not_echoed(self):
+        # Workbench Chat renders the ``harness`` Message row itself.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(
+            self._context(platform="avibe"),
+            "do the thing",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_background_session_is_not_echoed(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(
+            self._context(suppress_delivery=True),
+            "do the thing",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_disabled_runtime_switch_keeps_result_only_behavior(self):
+        controller = _StubController()
+        controller.config.harness_prompt_echo = False
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_display_snapshot_wins_over_internal_dispatch_text(self):
+        """A replayed durable turn carries an internal recovery guard in its dispatch
+        text; the channel must see the stored prompt instead (Codex P2)."""
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(display_text="summarize open PRs"),
+            "[Avibe recovery: this request may have been delivered before restart.]"
+            "\n\nsummarize open PRs",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertIn("> summarize open PRs", text)
+        self.assertNotIn("Avibe recovery", text)
+
+    async def test_merged_batch_echoes_every_distinct_prompt_it_dispatched(self):
+        """Scenario: MESSAGE-DELIVERY-018
+
+        Two ``vibe agent run`` deliveries queued for one busy session merge into a
+        single Turn (``_collect_delivery_segment``) and BOTH prompts reach the backend
+        (``_segment_dispatch_text``). Echoing the first snapshot alone would announce
+        one instruction for a result that answers two (Codex P2).
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                task_trigger_kind="agent_run",
+                display_text="summarize open PRs",
+                display_texts=["summarize open PRs", "then close the stale ones"],
+            ),
+            "summarize open PRs\n\n---\n\nthen close the stale ones",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertIn("> summarize open PRs", text)
+        self.assertIn("> then close the stale ones", text)
+
+    async def test_merged_repeat_firings_of_one_task_echo_the_prompt_once(self):
+        # Two firings of the same scheduled task carry the SAME stored prompt, so the
+        # merged batch must not read as the instruction having been given twice.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                display_text="summarize open PRs",
+                display_texts=["summarize open PRs", "summarize open PRs"],
+            ),
+            "summarize open PRs\n\n---\n\nsummarize open PRs",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertEqual(text.count("> summarize open PRs"), 1)
+
+    async def test_empty_batch_snapshots_fall_back_to_the_single_snapshot(self):
+        # The legacy mirror path stages no batch, and a batch of blank snapshots must
+        # not silence an echo the singular key can still serve.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(display_text="summarize open PRs", display_texts=["", "  "]),
+            "summarize open PRs",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertIn("> summarize open PRs", text)
+
+    async def test_merged_composed_batch_echoes_each_stored_instruction(self):
+        """Scenario: MESSAGE-DELIVERY-018
+
+        The composed kinds echo the definition's stored instruction, and that
+        instruction can be EDITED between two firings — so a merged batch dispatches
+        two different ones and the singular key would announce only the first
+        (Codex P2). Each Delivery's own stamped instruction, and still none of the
+        generated evidence.
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                task_trigger_kind="watch",
+                harness_display_prompt="check the deploy",
+                harness_display_prompts=["check the deploy", "check the deploy and page me"],
+            ),
+            "check the deploy\n\ntoken=ghp_SECRET",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertIn("> check the deploy", text)
+        self.assertIn("> check the deploy and page me", text)
+        self.assertNotIn("ghp_SECRET", text)
+
+    async def test_merged_composed_batch_of_one_instruction_echoes_it_once(self):
+        # Repeat firings of an UNCHANGED watch carry the same stored instruction; the
+        # merged batch must not read as it having been given twice.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                task_trigger_kind="watch",
+                harness_display_prompt="check the deploy",
+                harness_display_prompts=["check the deploy", "check the deploy"],
+            ),
+            "check the deploy\n\ntoken=ghp_SECRET",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertEqual(text.count("> check the deploy"), 1)
+
+    async def test_merged_composed_batch_without_instructions_stays_silent(self):
+        # An empty batch falls back to the singular key, and when that is absent too
+        # the composed kinds still refuse to publish the generated evidence.
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(
+            self._context(task_trigger_kind="watch", harness_display_prompts=["", "  "]),
+            "waiter said: token=ghp_SECRET",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_long_definition_name_is_bounded_before_sending(self):
+        """A task/watch name is never length-validated at creation (Codex P2).
+
+        The label is appended AFTER the prompt cap, so an unbounded name could push the
+        body past Discord's 2,000-char limit — the adapter would reject the echo and the
+        channel would see no prompt at all.
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        limit = message_dispatcher_module.HARNESS_PROMPT_ECHO_MAX_NAME_CHARS
+
+        await dispatcher.emit_harness_prompt(
+            self._context(task_definition_name="n" * (limit * 40)),
+            "do the thing",
+        )
+
+        _channel_id, _thread_id, text = controller.im_client.sent[0]
+        self.assertNotIn("n" * (limit + 1), text)
+        self.assertIn("n" * limit, text)
+        self.assertIn("truncated", text)
+        self.assertIn("> do the thing", text)
+
+    async def test_runtime_switch_is_reloaded_before_the_gate(self):
+        """A Harness turn reaches no IM inbound handler, so nothing else reloads
+        ``controller.config``: the config-only toggle must be re-read here, or a
+        true->false change would still send one more prompt (Codex P2)."""
+        controller = _StubController()
+        refreshed = []
+
+        def _refresh_config_from_disk():
+            refreshed.append(True)
+            controller.config.harness_prompt_echo = False
+
+        controller._refresh_config_from_disk = _refresh_config_from_disk
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertTrue(refreshed)
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_failed_config_reload_still_echoes(self):
+        controller = _StubController()
+        controller._refresh_config_from_disk = Mock(side_effect=RuntimeError("disk gone"))
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertEqual(result, "bot-msg-1")
+        self.assertEqual(len(controller.im_client.sent), 1)
+
+    async def test_echo_follows_the_delivery_override_target(self):
+        # The question must land where the answer lands (``post_to`` / deliver key).
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(
+            self._context(
+                delivery_override={
+                    "user_id": "U9",
+                    "channel_id": "C999",
+                    "thread_id": "T9",
+                    "platform": "slack",
+                    "is_dm": False,
+                }
+            ),
+            "do the thing",
+        )
+
+        self.assertEqual(controller.im_client.sent[0][0], "C999")
+        self.assertEqual(controller.im_client.sent[0][1], "T9")
+
+    async def test_repeat_dispatch_of_one_delivery_echoes_once(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = self._context()
+
+        first = await dispatcher.emit_harness_prompt(context, "do the thing")
+        second = await dispatcher.emit_harness_prompt(context, "do the thing")
+
+        self.assertEqual(first, "bot-msg-1")
+        self.assertIsNone(second)
+        self.assertEqual(len(controller.im_client.sent), 1)
+
+    async def test_distinct_runs_in_one_channel_each_echo(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        await dispatcher.emit_harness_prompt(self._context(message_id="scheduled:run-a"), "first")
+        await dispatcher.emit_harness_prompt(self._context(message_id="scheduled:run-b"), "second")
+
+        self.assertEqual(len(controller.im_client.sent), 2)
+
+    async def test_echo_memory_stays_bounded(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        limit = message_dispatcher_module.HARNESS_PROMPT_ECHO_MEMORY
+
+        for index in range(limit + 5):
+            await dispatcher.emit_harness_prompt(
+                self._context(message_id=f"scheduled:run-{index}"),
+                "do the thing",
+            )
+
+        self.assertEqual(len(dispatcher._harness_prompt_echo_keys), limit)
+        self.assertEqual(len(dispatcher._harness_prompt_echo_order), limit)
+
+    async def test_long_prompt_is_truncated_and_every_line_quoted(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        limit = message_dispatcher_module.HARNESS_PROMPT_ECHO_MAX_CHARS
+
+        await dispatcher.emit_harness_prompt(self._context(), "line one\nline two\n" + "x" * (limit * 2))
+
+        text = controller.im_client.sent[0][2]
+        body = text.split("\n", 1)[1]
+        self.assertTrue(all(line.startswith("> ") for line in body.splitlines()))
+        self.assertIn("truncated", text)
+        self.assertLess(len(text), limit * 2)
+
+    async def test_silent_only_prompt_sends_nothing(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(
+            self._context(),
+            "<silent>internal bookkeeping</silent>",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_send_failure_never_blocks_the_turn(self):
+        controller = _StubController()
+        controller.im_client = _FailingIMClient()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        result = await dispatcher.emit_harness_prompt(self._context(), "do the thing")
+
+        self.assertIsNone(result)
+        # Not remembered, so a later healthy attempt for the same run can still echo.
+        self.assertEqual(dispatcher._harness_prompt_echo_keys, set())

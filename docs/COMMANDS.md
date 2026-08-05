@@ -743,11 +743,18 @@ Important options:
 - `--shell`
 - `--on-failure {none,agent}`
 - `--timeout <seconds>`
+- `--cwd <dir>`
 - `--timezone`
 
 A command task (`--shell` or a trailing `-- <argv>`) runs with no Agent turn and
 takes no session, scope, or agent flags unless `--on-failure agent` is set.
 `--timeout` bounds each command run (default 21600 seconds, `0` = no timeout).
+`--cwd` is where the command runs; with `--on-failure agent` bound to an existing
+Session it means only that, and the escalation Session keeps its own working
+directory. With `--create-session` / `--create-session-per-run` it places that
+Session too. Without it, a Session-bound command follows that Session's directory
+— read live at fire time — and every other command records the directory you ran
+`vibe task add` from. See `docs/CLI.md` for the full rules.
 
 ### `vibe task update`
 
@@ -772,10 +779,14 @@ Important options:
 - `--message-file`
 - `--shell`
 - `--timeout <seconds>`
+- `--cwd <dir>`
 - `--timezone`
 
 Switching a task between message and command form, or changing `--on-failure`,
-is rejected with `task_mode_immutable` — remove the task and recreate it.
+is rejected with `task_mode_immutable` — remove the task and recreate it. `--cwd`
+repoints a command task's working directory without touching the Session it
+escalates to; on a message task it is still refused once the target Session
+exists.
 
 ### `vibe task list`
 

@@ -1338,6 +1338,11 @@ export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
   timeout_seconds?: number | null;
   last_exit_code?: number | null;
   metadata?: Record<string, unknown> | null;
+  // Where a command task's subprocess runs. Null is not "nowhere": a definition
+  // bound to a Session follows that Session's workdir, read live at fire time
+  // (``_bound_session_workdir``), so the pane names the source rather than
+  // printing a blank.
+  cwd?: string | null;
 };
 
 export type HarnessWatchRuntime = {

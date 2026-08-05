@@ -2,6 +2,7 @@ import { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 
+import { appLaunchIntent, appTabHref, type LaunchModifiers } from '../../../apps/appLaunch';
 import { APP_LIST } from '../../../apps/registry';
 import { showAppRoutePath } from '../../apps/mobileDock';
 import { useShowPageInventory } from '../../useShowPages';
@@ -49,7 +50,16 @@ export function useOpenSearchApp() {
   const location = useLocation();
 
   return useCallback(
-    (result: AppSearchResult) => {
+    (result: AppSearchResult, launch?: LaunchModifiers | null) => {
+      // Tab modifier held (click OR Enter) → hand the app to the browser as a real
+      // tab, the same rule the Dock and the App Library rows follow (§7.1m).
+      if (launch && appLaunchIntent(launch) === 'newTab') {
+        const href = appTabHref({ appId: result.appId, sessionId: result.kind === 'showpage' ? result.sessionId : null });
+        if (href) {
+          window.open(href, '_blank', 'noopener,noreferrer');
+          return;
+        }
+      }
       const desktop = typeof window !== 'undefined' && !!window.matchMedia?.('(min-width: 768px)').matches;
       if (desktop) {
         wm.openApp(result.appId, {

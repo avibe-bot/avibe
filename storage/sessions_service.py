@@ -62,6 +62,18 @@ SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 logger = logging.getLogger(__name__)
 
 
+def _publish_definition_reclaim_hint() -> None:
+    """Wake both definition owners after a committed Session teardown."""
+
+    try:
+        from core.inbox_events import publish_definitions_updated
+
+        publish_definitions_updated(definition_type="scheduled")
+        publish_definitions_updated(definition_type="watch")
+    except Exception:
+        logger.debug("session definition reclaim wake failed", exc_info=True)
+
+
 def _require_enabled_agent_identity(
     conn: Connection,
     *,
@@ -457,7 +469,11 @@ class SQLiteSessionsService:
         row = self.get_agent_session_by_id(str(session_id))
         if row is None:
             return False
-        with reclaim_ledger_transaction(), self.engine.begin() as conn:
+        from storage.background import run_update_event_transaction
+
+        with reclaim_ledger_transaction(), run_update_event_transaction(
+            self.engine
+        ) as conn:
             reserve_write_lock(conn)
             deleted = _delete_agent_session_rows(
                 conn,
@@ -1122,23 +1138,29 @@ class SQLiteSessionsService:
         reclaim_reason: str | None = None,
     ) -> bool:
         now = _utc_now_iso()
+        from storage.background import run_update_event_transaction
+
         # ``reclaim_ledger_transaction`` OUTSIDE ``begin()``: every transaction that can
         # reclaim a definition must discard its ledger entries if it does not commit
         # (HFR-273), and the truncation has to run after the rollback.
-        with reclaim_ledger_transaction(), self.engine.begin() as conn:
+        deleted = 0
+        with reclaim_ledger_transaction(), run_update_event_transaction(
+            self.engine
+        ) as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
-            if scope_id is None:
-                return False
-            deleted = _delete_agent_session_rows(
-                conn,
-                select(agent_sessions.c.id)
-                .where(agent_sessions.c.scope_id == scope_id)
-                .where(_agent_session_name_predicate(str(agent_name) or "default"))
-                .where(agent_sessions.c.session_anchor == str(session_anchor)),
-                reclaim_mode=reclaim_mode,
-                reclaim_reason=reclaim_reason,
-            )
-            return bool(deleted)
+            if scope_id is not None:
+                deleted = _delete_agent_session_rows(
+                    conn,
+                    select(agent_sessions.c.id)
+                    .where(agent_sessions.c.scope_id == scope_id)
+                    .where(_agent_session_name_predicate(str(agent_name) or "default"))
+                    .where(agent_sessions.c.session_anchor == str(session_anchor)),
+                    reclaim_mode=reclaim_mode,
+                    reclaim_reason=reclaim_reason,
+                )
+        if scope_id is not None:
+            _publish_definition_reclaim_hint()
+        return bool(deleted)
 
     def delete_agent_sessions(
         self,
@@ -1151,21 +1173,31 @@ class SQLiteSessionsService:
         include_superseded: bool = False,
     ) -> int:
         now = _utc_now_iso()
-        with reclaim_ledger_transaction(), self.engine.begin() as conn:
+        deleted = 0
+        from storage.background import run_update_event_transaction
+
+        with reclaim_ledger_transaction(), run_update_event_transaction(
+            self.engine
+        ) as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
-                return 0
-            stmt = select(agent_sessions.c.id).where(agent_sessions.c.scope_id == scope_id)
-            if agent_name is not None:
-                stmt = stmt.where(_agent_session_name_predicate(str(agent_name) or "default"))
-            if session_anchor_prefix is not None:
+                stmt = None
+            else:
+                stmt = select(agent_sessions.c.id).where(
+                    agent_sessions.c.scope_id == scope_id
+                )
+            if stmt is not None and agent_name is not None:
+                stmt = stmt.where(
+                    _agent_session_name_predicate(str(agent_name) or "default")
+                )
+            if stmt is not None and session_anchor_prefix is not None:
                 prefix = str(session_anchor_prefix)
                 prefix_pattern = f"{_escape_sql_like(prefix)}:%"
                 stmt = stmt.where(
                     (agent_sessions.c.session_anchor == prefix)
                     | (agent_sessions.c.session_anchor.like(prefix_pattern, escape="\\"))
                 )
-            if not include_superseded:
+            if stmt is not None and not include_superseded:
                 # A superseded row carries ``<original_anchor>:superseded:<id>``.
                 # This is a HARD delete and superseding deliberately keeps the row
                 # -- its native id is write-once and its history is not
@@ -1197,12 +1229,16 @@ class SQLiteSessionsService:
                         ),
                     )
                 )
-            return _delete_agent_session_rows(
-                conn,
-                stmt,
-                reclaim_mode=reclaim_mode,
-                reclaim_reason=reclaim_reason,
-            )
+            if stmt is not None:
+                deleted = _delete_agent_session_rows(
+                    conn,
+                    stmt,
+                    reclaim_mode=reclaim_mode,
+                    reclaim_reason=reclaim_reason,
+                )
+        if scope_id is not None:
+            _publish_definition_reclaim_hint()
+        return deleted
 
     def load_state(self) -> SessionState:
         with self.engine.connect() as conn:
@@ -2248,10 +2284,18 @@ def _delete_agent_session_rows(
         # cancel-shaped guard could ever see it. The cancel below closes that.
         from storage.background import (
             TEARDOWN_CONDEMNED_RUN_STATUSES,
+            _defer_run_ids_updated_from_connection,
             rearm_notices_for_escalations_canceled_with_session,
         )
 
         rearm_notices_for_escalations_canceled_with_session(conn, session_id, now=now)
+        condemned_run_ids = list(
+            conn.execute(
+                select(agent_runs.c.id)
+                .where(agent_runs.c.session_id == session_id)
+                .where(agent_runs.c.status.in_(TEARDOWN_CONDEMNED_RUN_STATUSES))
+            ).scalars()
+        )
         # Also before the branch, and for the same reason. ``agent_runs.session_id``
         # carries no foreign key, so deleting the Session row leaves its runs ``queued``
         # and claimable against a Session that is gone -- and for an escalation that is
@@ -2273,6 +2317,7 @@ def _delete_agent_session_rows(
             .where(agent_runs.c.status.in_(("pending", "queued")))
             .values(status="canceled", completed_at=now, updated_at=now)
         )
+        _defer_run_ids_updated_from_connection(conn, condemned_run_ids)
         has_retained_history = bool(
             conn.execute(
                 select(messages.c.id)

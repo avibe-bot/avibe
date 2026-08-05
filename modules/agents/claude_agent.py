@@ -17,6 +17,7 @@ from core.message_output import (
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.reply_enhancer import strip_silent_blocks
 from core.runtime_activation import RuntimeActivationIdentity
+from core.runtime_work import RuntimeWorkLane
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -2648,6 +2649,11 @@ class ClaudeAgent(BaseAgent):
             retain_terminal_snapshot=status != "completed" and not foreground,
             activation_identity=activation_identity,
         )
+        if completed is not None and status == "completed" and not foreground:
+            supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+            notify = getattr(supervisor, "notify", None)
+            if callable(notify):
+                notify(RuntimeWorkLane.ACTIVITY_OUTPUTS)
         service = getattr(self.controller, "agent_service", None)
         on_terminal = getattr(service, "on_activity_terminal", None)
         if completed is not None and not foreground and callable(on_terminal):
@@ -2874,6 +2880,36 @@ class ClaudeAgent(BaseAgent):
         allow_closing: bool = False,
     ) -> bool:
         """Deliver task notifications that ended the receiver without a Result."""
+
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        run_in_partition = getattr(supervisor, "run_in_partition", None)
+        if callable(run_in_partition):
+            return await run_in_partition(
+                RuntimeWorkLane.ACTIVITY_OUTPUTS,
+                f"{self.name}\x1f{composite_key}",
+                lambda: self._flush_completed_activity_outputs_owned(
+                    composite_key,
+                    context,
+                    expected_steering_generation=expected_steering_generation,
+                    allow_closing=allow_closing,
+                ),
+            )
+        return await self._flush_completed_activity_outputs_owned(
+            composite_key,
+            context,
+            expected_steering_generation=expected_steering_generation,
+            allow_closing=allow_closing,
+        )
+
+    async def _flush_completed_activity_outputs_owned(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        *,
+        expected_steering_generation: int | None = None,
+        allow_closing: bool = False,
+    ) -> bool:
+        """Claim, emit, and settle while the exact runtime partition is held."""
 
         registry = self._activity_registry()
         if registry is None:

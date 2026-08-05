@@ -195,6 +195,7 @@ class Controller:
         self._im_run_exception: Optional[BaseException] = None
         self._shutdown_requested = False
         self._shutdown_task: asyncio.Task[None] | None = None
+        self._runtime_work_shutdown_task: asyncio.Task[None] | None = None
         self._shutdown_tainted = False
         self._service_lock_safe_to_release = False
         self._runtime_work_shutdown_grace_seconds = (
@@ -241,7 +242,9 @@ class Controller:
         self.runtime_ownership = RuntimeOwnershipProvider(
             self.session_turns._sqlite_engine()
         )
-        self.runtime_work_supervisor = RuntimeWorkSupervisor()
+        self.runtime_work_supervisor = RuntimeWorkSupervisor(
+            on_lease_lost=lambda: self.request_shutdown("service lease lost")
+        )
         self._runtime_work_tokens = [
             self.runtime_work_supervisor.register(
                 RuntimeWorkLane.SESSION_DELIVERIES,
@@ -283,6 +286,9 @@ class Controller:
         # Consolidated message dispatcher
         self.message_dispatcher = ConsolidatedMessageDispatcher(self)
         self.scheduled_task_service = ScheduledTaskService(self)
+        self._runtime_work_tokens.extend(
+            self.scheduled_task_service.register_controller_runtime_work_lanes()
+        )
         self.watch_service = ManagedWatchService(self)
         self.runtime_command_watcher = RuntimeCommandWatcher(self)
         self.show_git_checkpoint_service = ShowGitCheckpointService()
@@ -649,6 +655,7 @@ class Controller:
                 self.config.agent_status_heartbeat_ms = v2_config.agent_status_heartbeat_ms
                 self.config.agent_status_no_output_ms = v2_config.agent_status_no_output_ms
                 self.config.resource_governance = v2_config.runtime.resource_governance
+                self.config.harness_prompt_echo = v2_config.runtime.harness_prompt_echo
                 governor = getattr(self, "_agent_resource_governor", None)
                 if governor is not None:
                     governor.update_config(self.config.resource_governance)
@@ -1606,33 +1613,27 @@ class Controller:
         """Join passive recovery owners before allowing the loop to stop."""
 
         logger.info("Controller shutdown started: %s", reason)
-        supervisor = getattr(self, "runtime_work_supervisor", None)
-        stop_supervisor = getattr(supervisor, "stop", None)
         try:
-            if callable(stop_supervisor):
-                stop_task = asyncio.create_task(
-                    stop_supervisor(),
-                    name="controller-runtime-work-stop",
-                )
-                grace = max(
-                    0.0,
-                    float(
-                        getattr(
-                            self,
-                            "_runtime_work_shutdown_grace_seconds",
-                            _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS,
-                        )
-                    ),
-                )
-                done, _ = await asyncio.wait({stop_task}, timeout=grace)
-                if not done:
-                    self._shutdown_tainted = True
-                    logger.critical(
-                        "Runtime work shutdown exceeded %.1fs; retaining the "
-                        "service lease until exact workers join",
-                        grace,
+            stop_task = self._begin_runtime_work_stack_shutdown()
+            grace = max(
+                0.0,
+                float(
+                    getattr(
+                        self,
+                        "_runtime_work_shutdown_grace_seconds",
+                        _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS,
                     )
-                await asyncio.shield(stop_task)
+                ),
+            )
+            done, _ = await asyncio.wait({stop_task}, timeout=grace)
+            if not done:
+                self._shutdown_tainted = True
+                logger.critical(
+                    "Runtime work shutdown exceeded %.1fs; retaining the "
+                    "service lease until exact workers join",
+                    grace,
+                )
+            await asyncio.shield(stop_task)
         except Exception:
             self._shutdown_tainted = True
             logger.exception("Controller shutdown could not join runtime work")
@@ -1640,6 +1641,81 @@ class Controller:
             loop = self._loop
             if loop is not None and loop.is_running():
                 loop.call_soon(loop.stop)
+
+    def _begin_runtime_work_stack_shutdown(self) -> asyncio.Task[None]:
+        task = getattr(self, "_runtime_work_shutdown_task", None)
+        if task is None:
+            task = asyncio.create_task(
+                self._stop_runtime_work_stack(),
+                name="controller-runtime-work-stack-stop",
+            )
+            self._runtime_work_shutdown_task = task
+        return task
+
+    async def _join_runtime_work_stack_shutdown(self) -> None:
+        await asyncio.shield(self._begin_runtime_work_stack_shutdown())
+
+    async def _stop_runtime_work_stack(self) -> None:
+        """Stop lane consumers before disposing their shared executor."""
+
+        supervisor = getattr(self, "runtime_work_supervisor", None)
+        quiesce = getattr(supervisor, "quiesce", None)
+        if callable(quiesce):
+            quiesce()
+
+        # Controller-generation lanes can still be finishing work after
+        # quiesce. Join them before ScheduledTaskService releases durable Turn
+        # owners; otherwise a delivery-recovery worker can admit a new Turn
+        # immediately after the final owner snapshot.
+        controller_tokens = tuple(getattr(self, "_runtime_work_tokens", ()))
+        if controller_tokens:
+            begin_unregister = getattr(supervisor, "begin_unregister", None)
+            if not callable(begin_unregister):
+                self._shutdown_tainted = True
+                raise RuntimeError(
+                    "runtime work supervisor cannot join controller lanes"
+                )
+            controller_lane_joins = [
+                begin_unregister(token) for token in controller_tokens
+            ]
+            self._runtime_work_tokens = []
+            controller_results = await asyncio.gather(
+                *controller_lane_joins,
+                return_exceptions=True,
+            )
+            controller_errors = [
+                result
+                for result in controller_results
+                if isinstance(result, BaseException)
+            ]
+            if controller_errors:
+                self._shutdown_tainted = True
+                raise RuntimeError(
+                    "controller runtime work lane shutdown failed"
+                ) from controller_errors[0]
+
+        service_stops: list[asyncio.Task[None]] = []
+        for service_name in ("scheduled_task_service", "watch_service"):
+            service = getattr(self, service_name, None)
+            stop = getattr(service, "stop", None)
+            if callable(stop):
+                service_stops.append(
+                    asyncio.create_task(
+                        stop(),
+                        name=f"controller-{service_name}-stop",
+                    )
+                )
+        results = await asyncio.gather(*service_stops, return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        stop_supervisor = getattr(supervisor, "stop", None)
+        if callable(stop_supervisor):
+            try:
+                await stop_supervisor()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
+            self._shutdown_tainted = True
+            raise RuntimeError("runtime work stack shutdown failed") from errors[0]
 
     def run(self):
         """Run the controller"""
@@ -1793,12 +1869,10 @@ class Controller:
             self.cleanup_task = None
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
-        _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
-        supervisor = getattr(self, "runtime_work_supervisor", None)
-        stop_supervisor = getattr(supervisor, "stop", None)
-        if callable(stop_supervisor):
-            _stop_loop_coroutine(stop_supervisor(), "Runtime work supervisor")
-        _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
+        _stop_loop_coroutine(
+            self._join_runtime_work_stack_shutdown(),
+            "Runtime work stack",
+        )
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
         model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)
         if model_hub_turn_gateway is not None:
