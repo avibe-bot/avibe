@@ -1,16 +1,17 @@
 import * as React from 'react';
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { Ellipsis, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
-import { PopoverContent } from '../ui/popover';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { mobileChatSessionActions } from './chatSessionActions';
 
 // Presentation half of the shared session action menu: the ⋯ trigger and the menu
 // body, used by the desktop sidebar row, the mobile projects row and the chat
 // header. The actions themselves (labels, writes, pending state) come from
-// useSessionActions.tsx — one model, so the surfaces cannot drift again.
+// useSessionActions.tsx; surfaces opt into only the capabilities they can render.
 
 export type SessionActionId = 'pin' | 'reference' | 'fork' | 'rename' | 'hide' | 'archive';
 
@@ -35,9 +36,9 @@ export interface SessionActionDescriptor {
 }
 
 // The ⋯ trigger. Rows reveal it on hover / keyboard focus and keep it visible on
-// coarse pointers (touch has no hover) and while its menu is open; the chat
-// header always shows it. forwardRef + prop spread so <PopoverTrigger asChild>
-// can attach its own ref and handlers.
+// coarse pointers (touch has no hover) and while its menu is open; a bar trigger
+// stays visible whenever its responsive wrapper is mounted. forwardRef + prop
+// spread lets <PopoverTrigger asChild> attach its own ref and handlers.
 //
 // It deliberately writes NO aria-haspopup / aria-expanded of its own: <PopoverTrigger
 // asChild> injects both (as `dialog`, which is what a Popover actually opens), and
@@ -216,5 +217,34 @@ export const SessionActionMenuContent: React.FC<{
         }}
       />
     </PopoverContent>
+  );
+};
+
+// Chat keeps this compact action entry point on mobile only. Owning the responsive
+// wrapper here makes the breakpoint part of the tested component contract instead
+// of an incidental class buried in the large ChatPage render tree. Rename is also
+// removed at this presentation boundary so future callers cannot reintroduce it.
+export const MobileChatSessionActionMenu: React.FC<{
+  actions: SessionActionDescriptor[];
+  label: string;
+}> = ({ actions, label }) => {
+  const [open, setOpen] = useState(false);
+  const visibleActions = mobileChatSessionActions(actions);
+  if (visibleActions.length === 0) return null;
+
+  return (
+    <div className="md:hidden">
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <SessionActionsTrigger label={label} open={open} variant="bar" />
+        </PopoverTrigger>
+        <SessionActionMenuContent
+          actions={visibleActions}
+          label={label}
+          align="end"
+          onClose={() => setOpen(false)}
+        />
+      </Popover>
+    </div>
   );
 };
