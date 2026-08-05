@@ -338,6 +338,41 @@ def test_ra_tq_028_settings_do_not_persist_when_connector_lane_is_owned_and_down
     assert V2Config.load().remote_access.vibe_cloud.edge_ip_version == "4"
 
 
+def test_ra_tq_028_settings_recheck_stopped_connector_before_persisting(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    status_calls = 0
+    started = []
+
+    def connector_status(loaded=None):
+        nonlocal status_calls
+        status_calls += 1
+        return {"running": status_calls >= 2, "pid_state": "cloudflared"}
+
+    monkeypatch.setattr(remote_access, "status", connector_status)
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda loaded: "/usr/bin/cloudflared")
+    monkeypatch.setattr(
+        remote_access,
+        "_start_candidate_connector",
+        lambda loaded, binary, protocol: started.append(protocol) or (222, "http://metrics"),
+    )
+    monkeypatch.setattr(remote_access, "_wait_candidate_ready", lambda pid, metrics: False)
+    monkeypatch.setattr(remote_access, "_discard_candidate_connector", lambda pid: None)
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = None
+
+    result = remote_access.apply_settings({"transport_protocol": "http2"})
+
+    assert result["ok"] is False
+    assert started == ["http2"]
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "auto"
+
+
 def test_ra_tq_028_settings_auto_protocol_falls_back_after_preference_fails(
     monkeypatch,
     tmp_path,

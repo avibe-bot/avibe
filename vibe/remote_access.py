@@ -920,34 +920,48 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
         for field in connector_fields
     )
     current_status = status(current_config)
-    if connector_changed and current_status.get("pid_state") == "unknown":
-        return {
-            **current_status,
-            "ok": False,
-            "error": "remote_access_settings_unavailable",
-        }
-    if not connector_changed or not current_status.get("running"):
-        if connector_changed:
-            with _RECOVERY_LOCK:
-                if _connector_lane_reserved_locked():
-                    return {
-                        **current_status,
-                        "ok": False,
-                        "error": "remote_access_settings_unavailable",
-                    }
-                candidate_config = api.save_config(
-                    {"remote_access": {"vibe_cloud": payload}}
-                )
-        else:
-            candidate_config = api.save_config(
-                {"remote_access": {"vibe_cloud": payload}}
-            )
+    if not connector_changed:
+        candidate_config = api.save_config(
+            {"remote_access": {"vibe_cloud": payload}}
+        )
         return {
             **status(candidate_config),
             "ok": True,
             "settings_applied": True,
             "connector_replaced": False,
         }
+
+    with _RECOVERY_LOCK:
+        if _connector_lane_reserved_locked():
+            return {
+                **current_status,
+                "ok": False,
+                "error": "remote_access_settings_unavailable",
+            }
+        with _CONNECTOR_LOCK:
+            live_config = V2Config.load()
+            live_status = status(live_config)
+            if (
+                live_status.get("pid_state") == "unknown"
+                or _remote_access_settings(live_config) != previous_settings
+            ):
+                return {
+                    **live_status,
+                    "ok": False,
+                    "error": "remote_access_settings_unavailable",
+                }
+            if not live_status.get("running"):
+                candidate_config = api.save_config(
+                    {"remote_access": {"vibe_cloud": payload}}
+                )
+                return {
+                    **status(candidate_config),
+                    "ok": True,
+                    "settings_applied": True,
+                    "connector_replaced": False,
+                }
+
+    current_status = live_status
 
     binary = _resolve_binary(candidate_config)
     if not binary:

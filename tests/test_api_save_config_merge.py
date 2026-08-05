@@ -292,6 +292,90 @@ def test_save_config_rejects_remote_access_bind_family_mismatch(
     assert saved.edge_bind_address == ""
 
 
+def test_generic_config_save_rejects_connector_control_changes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+
+    with pytest.raises(ValueError, match="/api/remote-access/settings"):
+        api.save_config(
+            {
+                "remote_access": {
+                    "vibe_cloud": {"transport_protocol": "http2"}
+                }
+            },
+            generic_remote_access=True,
+        )
+
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "auto"
+
+
+def test_generic_runtime_save_validates_an_unchanged_stale_bind_address(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = _full_config_payload()
+    payload["remote_access"] = {
+        "provider": "vibe_cloud",
+        "vibe_cloud": {
+            "enabled": True,
+            "public_url": "https://old.avibe.bot",
+            "edge_bind_address": "192.0.2.10",
+        },
+    }
+    V2Config.from_payload(payload).save()
+    monkeypatch.setattr(
+        remote_access,
+        "network_interfaces",
+        lambda: {"ok": True, "interfaces": []},
+    )
+
+    with pytest.raises(ValueError, match="active network interface"):
+        api.save_config(
+            {
+                "remote_access": {
+                    "vibe_cloud": {"public_url": "https://new.avibe.bot"}
+                }
+            },
+            generic_remote_access=True,
+        )
+
+    assert V2Config.load().remote_access.vibe_cloud.public_url == "https://old.avibe.bot"
+
+
+def test_generic_policy_save_does_not_validate_an_unchanged_stale_bind_address(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = _full_config_payload()
+    payload["remote_access"] = {
+        "provider": "vibe_cloud",
+        "vibe_cloud": {
+            "enabled": True,
+            "edge_bind_address": "192.0.2.10",
+        },
+    }
+    V2Config.from_payload(payload).save()
+    monkeypatch.setattr(
+        remote_access,
+        "network_interfaces",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("policy-only saves must not validate Connector binding")
+        ),
+    )
+
+    updated = api.save_config(
+        {"remote_access": {"vibe_cloud": {"auto_recovery": False}}},
+        generic_remote_access=True,
+    )
+
+    assert updated.remote_access.vibe_cloud.auto_recovery is False
+
+
 def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

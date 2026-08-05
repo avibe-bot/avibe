@@ -1462,6 +1462,69 @@ def test_first_config_post_starts_remote_access_monitoring(monkeypatch, tmp_path
     assert monitoring[0].version == "v2"
 
 
+def test_config_post_policy_only_save_does_not_start_a_stopped_tunnel(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from config.v2_config import V2Config
+    from vibe import api
+
+    payload = _full_config_payload()
+    payload["remote_access"] = {
+        "provider": "vibe_cloud",
+        "vibe_cloud": {"enabled": True, "auto_recovery": True},
+    }
+    api.save_config(payload)
+    monkeypatch.setattr(
+        remote_access,
+        "reconcile",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("policy-only save must not start the Connector")
+        ),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"remote_access": {"vibe_cloud": {"auto_recovery": False}}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert V2Config.load().remote_access.vibe_cloud.auto_recovery is False
+    assert "remote_access_runtime" not in response.get_json()
+
+
+def test_config_post_rejects_connector_controls_that_require_make_before_break(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from config.v2_config import V2Config
+    from vibe import api
+
+    api.save_config(_full_config_payload())
+    monkeypatch.setattr(
+        remote_access,
+        "reconcile",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("rejected Connector controls must not reconcile")
+        ),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"remote_access": {"vibe_cloud": {"transport_protocol": "http2"}}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert "/api/remote-access/settings" in response.get_json()["error"]
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "auto"
+
+
 def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = _full_config_payload()
