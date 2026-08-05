@@ -248,8 +248,8 @@ vibe task remove <task-id>
 - 用 `--cron` / `--at` 控制定时方式
 - 以及 `--name`、`--timezone`、`--message-file` 等参数
 - 用 `--shell` 或写在 `--` 之后的 argv 创建不触发 Agent turn 的定时命令任务，
-  可搭配 `--on-failure {none,agent}` 和按次执行的 `--timeout`
-  （默认 21600 秒，`0` 表示不限制）
+  可搭配 `--on-failure {none,agent}`、按次执行的 `--timeout`
+  （默认 21600 秒，`0` 表示不限制），以及指定命令执行目录的 `--cwd`
 
 当 `vibe task add` 运行在 Avibe 已注入 caller context 的 Agent shell 内时，
 可以省略 `--session-id`。Avibe 会把任务目标默认到 `AVIBE_SESSION_ID`
@@ -261,8 +261,24 @@ session creation 参数和 delivery 参数仍然优先。
 持久化的失败通知，并在通知中写明命令与退出码。若使用
 `--on-failure agent --message '<处理说明>'`，失败会改为触发一次携带失败报告的 Agent
 turn，并由该 turn 取代这次执行的失败通知。`vibe task update` 可以修改命令任务的
-`--shell`、argv 或 `--timeout`，但在 message 形态与 command 形态之间切换、或修改
-`--on-failure`，都会被拒绝——请删除任务后重新创建。
+`--shell`、argv、`--timeout` 或 `--cwd`，但在 message 形态与 command 形态之间切换、
+或修改 `--on-failure`，都会被拒绝——请删除任务后重新创建。
+
+`--cwd` 指定命令的执行目录。它是否还会影响 Session，取决于该定义是否要「创建」
+Session：
+
+- 绑定到已存在的 Session（`--session-id`，或调用方 Session 默认值），或已经预留过
+  可复用 Session 时：该参数只作用于命令。升级 Session 保留自己的工作目录——这正是
+  引入该参数要解决的场景：命令任务绑定 Session 是为了让 `--on-failure agent`
+  有地方落地，而不是为了指定命令在哪里执行。
+- 需要创建 Session 时（`--create-session`、`--create-session-per-run`）：该参数
+  同时决定这个 Session 的目录，也就是升级 turn 会和命令跑在同一个目录。如果希望
+  Session 继承目录，请改用 `--same-scope` / `--scope-id` 指定 scope 并省略 `--cwd`。
+
+不传该参数时，绑定了 Session 的命令会跟随那个 Session 的目录（该目录在触发时实时
+读取，因此在那个会话里执行 `/setcwd` 会让任务换个地方运行），其他命令则记录你执行
+`vibe task add` 时所在的目录。对 message 任务，`--cwd` 仍然用于放置它创建的
+Session，且在目标 Session 已存在时仍然会被拒绝。
 
 `--session-key` 仍兼容旧脚本，但新任务应使用当前 Avibe prompt
 里展示的 Agent Session ID。

@@ -5715,7 +5715,15 @@ def test_cancel_retires_exact_agent_run_delivery_without_reordering_survivors(
     assert published.count(("queue.updated", {"session_id": session_id})) >= 1
 
 
-def test_turn_claim_refuses_batch_with_terminal_agent_run_without_dispatch(tmp_path, monkeypatch):
+def test_turn_claim_retires_terminal_agent_run_and_dispatches_the_rest(tmp_path, monkeypatch):
+    """A Run terminalized behind its Delivery's back must not brick the flush.
+
+    ``cancel_run`` retires the Delivery itself, but a Run can also settle without
+    that path — a watch fire whose Run ended ``failed``, or a crash between the
+    two writes. The claim path then converges on the same outcome as the proper
+    cancellation above instead of raising and crash-looping the controller.
+    """
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.scheduled_tasks import TaskExecutionStore
@@ -5766,9 +5774,14 @@ def test_turn_claim_refuses_batch_with_terminal_agent_run_without_dispatch(tmp_p
 
     mgr, runs = _manager_capturing_runs()
 
-    with pytest.raises(RuntimeError, match="unclaimable Agent Run"):
-        asyncio.run(mgr.flush_queue(session_id))
-    assert runs == []
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    assert len(runs) == 1
+    text, _source, ctx = runs[0]
+    assert text == "cli agent message 1\n\n---\n\ncli agent message 3"
+    assert ctx.platform_specific["accepted_agent_run_ids"] == [
+        run_ids[0],
+        run_ids[2],
+    ]
 
     bg = SQLiteBackgroundTaskStore()
     try:
@@ -5776,15 +5789,17 @@ def test_turn_claim_refuses_batch_with_terminal_agent_run_without_dispatch(tmp_p
     finally:
         bg.close()
 
-    assert stored[run_ids[0]]["status"] == "queued"
+    assert stored[run_ids[0]]["status"] == "running"
     assert stored[run_ids[1]]["status"] == "canceled"
-    assert stored[run_ids[2]]["status"] == "queued"
+    assert stored[run_ids[2]]["status"] == "running"
     with mgr._sqlite_engine().connect() as conn:
-        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
-            "cli agent message 1",
-            "cli agent message 2",
-            "cli agent message 3",
-        ]
+        assert message_deliveries.list_queued(conn, session_id) == []
+        retired = message_deliveries.get_delivery(
+            conn,
+            stored[run_ids[1]]["delivery_id"],
+        )
+    assert retired is not None
+    assert retired["state"] == "retired"
 
 
 def test_flush_merges_agent_runs_with_different_callback_targets(tmp_path, monkeypatch):

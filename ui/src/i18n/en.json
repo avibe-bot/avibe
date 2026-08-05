@@ -1145,10 +1145,10 @@
     "requestPathUnavailable": "Requests unavailable · {{success}}/{{count}} succeeded",
     "requestPathMeasuring": "Measuring requests · {{count}} samples",
     "networkPath": "Network path",
-    "networkBrowserIngress": "This browser",
+    "networkBrowserIngress": "Cloudflare ingress for this browser request",
     "networkProvider": "Network",
     "networkConnectorEdges": "Tunnel edges",
-    "networkLocalBrowser": "Local browser",
+    "networkLocalBrowser": "Local request, bypassing Cloudflare",
     "networkIngressUnavailable": "Ingress location unavailable",
     "networkLocationUnavailable": "Location unavailable",
     "networkAdditionalLocations": "{{location}} +{{count}} more",
@@ -2908,7 +2908,11 @@
       "timeoutSeconds": "{{seconds}}s",
       "timeoutNone": "No timeout",
       "timeoutDefault": "{{duration}} (default)",
-      "lastExitCode": "Last exit code"
+      "lastExitCode": "Last exit code",
+      "escalation": "On failure → escalation",
+      "triagePrompt": "Triage prompt",
+      "cwdFromSession": "Bound session, else runtime default or Avibe state dir",
+      "cwdRuntimeDefault": "Runtime default, else Avibe state dir"
     },
     "sessionPolicy": {
       "createPerRun": "New session each run",

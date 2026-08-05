@@ -272,8 +272,8 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 - `--cron` and `--at` scheduling
 - `--name`, `--timezone`, and message file support
 - `--shell` / trailing `-- <argv>` for a scheduled command with no Agent turn,
-  with `--on-failure {none,agent}` and a per-run `--timeout` (default 21600
-  seconds, 0 = none)
+  with `--on-failure {none,agent}`, a per-run `--timeout` (default 21600
+  seconds, 0 = none), and `--cwd` for the directory the command runs in
 
 When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
 may be omitted. Avibe defaults the task target to the caller Session from
@@ -286,8 +286,27 @@ a failed run records a durable failure notice naming the command and its exit
 code. With `--on-failure agent --message '<instructions>'` the failure instead
 starts one Agent turn carrying the failure report, and that turn replaces the
 notice for the run. `vibe task update` can change a command task's `--shell`,
-argv, or `--timeout`, but switching a task between message and command form, or
-changing `--on-failure`, is rejected — remove the task and recreate it.
+argv, `--timeout`, or `--cwd`, but switching a task between message and command
+form, or changing `--on-failure`, is rejected — remove the task and recreate it.
+
+`--cwd` is where the command runs. What else it touches depends on whether the
+definition also *creates* a Session:
+
+- Bound to an existing Session (`--session-id`, or the caller-session default),
+  or to a reusable one already reserved: the flag is the command's alone. The
+  escalation Session keeps its own working directory, which is the case the flag
+  was added for — a command task binds to a Session so `--on-failure agent` has
+  somewhere to land, not to say where it runs.
+- Creating one (`--create-session`, `--create-session-per-run`): the flag places
+  that Session too, so the escalation turn runs where the command does. Pass a
+  scope instead (`--same-scope` / `--scope-id`) and omit `--cwd` if you want the
+  Session to inherit its directory.
+
+Without the flag, a Session-bound command follows that Session's directory —
+read live at fire time, so `/setcwd` on that conversation relocates the job —
+and every other command records the directory you ran `vibe task add` from. For
+a message task `--cwd` still places the Session it creates, and is still refused
+for one that already exists.
 
 `--session-key` remains accepted for older scripts, but new tasks should use
 the Agent Session ID shown in the active Avibe prompt.

@@ -49,6 +49,10 @@ def test_classifier_combines_stdout_and_stderr() -> None:
     assert _classify_test_failure("Error: invalid api key", "") == "invalid_credentials"
 
 
+def test_classifier_treats_not_logged_in_as_api_key_failure_in_api_key_mode() -> None:
+    assert _classify_test_failure("Not logged in - Please run /login", "", auth_mode="api_key") == "invalid_credentials"
+
+
 def test_classifier_is_case_insensitive() -> None:
     assert _classify_test_failure("", "401 UNAUTHORIZED") == "invalid_credentials"
     assert _classify_test_failure("", "Connection Refused") == "endpoint_unreachable"

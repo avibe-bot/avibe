@@ -1315,11 +1315,11 @@ class DiscordBot(BaseIMClient):
                 await save_interaction.response.defer()
                 if hasattr(self, "_on_settings_update"):
                     await self._on_settings_update(
-                        str(save_interaction.user.id),
-                        show_types,
-                        channel_id or str(save_interaction.channel_id or ""),
-                        require_mention,
-                        language,
+                        user_id=str(save_interaction.user.id),
+                        show_message_types=show_types,
+                        channel_id=channel_id or str(save_interaction.channel_id or ""),
+                        require_mention=require_mention,
+                        language=language,
                         notify_user=True,
                         is_dm=save_interaction.guild is None,
                     )
@@ -2043,18 +2043,18 @@ class DiscordBot(BaseIMClient):
 
                     if hasattr(self.outer, "_on_routing_update"):
                         await self.outer._on_routing_update(
-                            str(interaction.user.id),
-                            channel_id,
-                            self.selected_backend,
-                            _normalize(self.oc_agent),
-                            _normalize(self.oc_model),
-                            _normalize(self.oc_reasoning),
-                            _normalize(self.claude_agent),
-                            _normalize(self.claude_model),
-                            _normalize(self.claude_reasoning),
-                            _normalize(self.codex_agent),
-                            _normalize(self.codex_model),
-                            _normalize(self.codex_reasoning),
+                            user_id=str(interaction.user.id),
+                            channel_id=channel_id,
+                            backend=self.selected_backend,
+                            opencode_agent=_normalize(self.oc_agent),
+                            opencode_model=_normalize(self.oc_model),
+                            opencode_reasoning_effort=_normalize(self.oc_reasoning),
+                            claude_agent=_normalize(self.claude_agent),
+                            claude_model=_normalize(self.claude_model),
+                            claude_reasoning_effort=_normalize(self.claude_reasoning),
+                            codex_agent=_normalize(self.codex_agent),
+                            codex_model=_normalize(self.codex_model),
+                            codex_reasoning_effort=_normalize(self.codex_reasoning),
                             notify_user=True,
                             is_dm=interaction.guild is None,
                         )

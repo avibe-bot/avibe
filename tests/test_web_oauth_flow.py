@@ -1550,6 +1550,7 @@ def test_test_web_auth_not_logged_in_has_specific_error_code(
         return _FakeProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
 
     result = _run(service.test_web_auth("claude"))
 
@@ -1557,3 +1558,26 @@ def test_test_web_auth_not_logged_in_has_specific_error_code(
     assert result["error"] == "not_logged_in"
     assert result["exit_code"] == 1
     assert "Not logged in" in (result.get("detail") or "")
+
+
+def test_test_web_auth_api_key_mode_does_not_prompt_for_oauth_login(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeProcess:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"Not logged in \xc2\xb7 Please run /login", b"")
+
+    async def _spawn(*_args, **_kwargs):
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(_Backend, "auth_mode", "api_key", raising=False)
+    monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
+
+    result = _run(service.test_web_auth("claude"))
+
+    assert result["ok"] is False
+    assert result["error"] == "invalid_credentials"
+    assert result["exit_code"] == 1

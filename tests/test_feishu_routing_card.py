@@ -246,16 +246,60 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
         )
 
         bot._on_routing_update.assert_awaited_once()
-        args = bot._on_routing_update.await_args.args
-        self.assertEqual(args[3], None)
-        self.assertEqual(args[4], None)
-        self.assertEqual(args[5], None)
-        self.assertEqual(args[6], None)
-        self.assertEqual(args[7], None)
-        self.assertEqual(args[8], None)
-        self.assertEqual(args[9], "reviewer")
-        self.assertEqual(args[10], "gpt-5.4")
-        self.assertEqual(args[11], "high")
+        call = bot._on_routing_update.await_args
+        self.assertEqual(call.args, ())
+        self.assertEqual(
+            call.kwargs,
+            {
+                "user_id": "user",
+                "channel_id": "chat",
+                "backend": "codex",
+                "opencode_agent": None,
+                "opencode_model": None,
+                "opencode_reasoning_effort": None,
+                "claude_agent": None,
+                "claude_model": None,
+                "claude_reasoning_effort": None,
+                "codex_agent": "reviewer",
+                "codex_model": "gpt-5.4",
+                "codex_reasoning_effort": "high",
+                "is_dm": False,
+            },
+        )
+
+    async def test_settings_submit_binds_optional_fields_by_name(self):
+        bot = self._make_bot()
+        bot._on_settings_update = AsyncMock()
+        context = MessageContext(
+            user_id="user",
+            channel_id="chat",
+            platform="lark",
+            platform_specific={"is_dm": False},
+        )
+
+        await bot._handle_settings_form_submit(
+            context,
+            {
+                "show_message_types": ["assistant"],
+                "require_mention": "false",
+                "language": "zh",
+            },
+        )
+
+        bot._on_settings_update.assert_awaited_once()
+        call = bot._on_settings_update.await_args
+        self.assertEqual(call.args, ())
+        self.assertEqual(
+            call.kwargs,
+            {
+                "user_id": "user",
+                "show_message_types": ["assistant"],
+                "channel_id": "chat",
+                "require_mention": False,
+                "language": "zh",
+                "is_dm": False,
+            },
+        )
 
     async def test_routing_draft_populates_selected_backend_from_current_selection(self):
         bot = self._make_bot()

@@ -328,6 +328,16 @@ _DEFINITION_SESSION_KEY_FIELDS = ("session_key", "deliver_key")
 # ``core/watches.py`` (the ``timeout`` convention), read here to tell an ending
 # that ran out of time from one that failed.
 _TIMEOUT_EXIT_CODE = 124
+# The exit code a waiter carries when it ran to completion and found nothing worth
+# an Agent turn. Written by ``core/watches.py`` (which imports it from here so the
+# two layers cannot drift), read here because it is a CLEAN ending: the projections
+# below classify every finished non-zero code as a failure, which reported an
+# intentionally quiet cycle -- green CI, filtered review chatter -- as an error.
+# 64 is also BSD ``sysexits`` EX_USAGE, so the supervisor only records it bare like
+# this for a waiter that also printed the no-event marker; a generic command that
+# rejects its own arguments is recorded with its error text and stays a failure
+# here, because every branch above requires ``no_error``.
+NO_EVENT_EXIT_CODE = 64
 # The runs a definition's own executions are recorded as. A watch's supervisor
 # heartbeat is *also* an ``agent_runs`` row and is ``running`` for as long as the
 # waiter lives, so counting it as an execution would make every healthy waiter
@@ -635,6 +645,9 @@ def _successful_finished_definition_expression(definition_type: str, lifecycle: 
             or_(
                 run_definitions.c.last_exit_code.is_(None),
                 run_definitions.c.last_exit_code == 0,
+                # A quiet cycle is a successful one: the waiter ran, decided there
+                # was nothing to report, and retired the ``once`` watch on purpose.
+                run_definitions.c.last_exit_code == NO_EVENT_EXIT_CODE,
             ),
             no_error,
         )
@@ -683,6 +696,11 @@ def definition_resume_clear_columns(
     Lives here, next to the single UPDATE, because two doorways must agree on
     it: the Harness UI writes through ``set_definition_enabled`` while the CLI
     and supervisor write through ``core/watches.py``.
+
+    Anything a resume must NOT rewrite therefore cannot be one of these columns.
+    ``core.watches.DELIVERY_ACK_METADATA_KEY`` is the case in point: a waiter's
+    proof that its last report reached the user has to outlive the cycle history
+    that this clears.
     """
 
     if definition_type != "watch":
@@ -754,7 +772,11 @@ def definition_lifecycle_detail(
         return "timeout"
     if timed_out is None and last_exit_code == _TIMEOUT_EXIT_CODE:
         return "timeout"
-    if last_exit_code not in (None, 0):
+    # 64 is a completion, not a failure: the waiter finished its cycle and decided
+    # it had nothing worth an Agent turn. Reading it as an ending that "went wrong"
+    # made a quiet watch — the whole point of the code — look broken in
+    # ``vibe watch show/list`` and in the Harness UI.
+    if last_exit_code not in (None, 0, NO_EVENT_EXIT_CODE):
         return "error"
     # Scheduled tasks never write an exit code, so the code alone would report
     # every failed one as a normal ending; ``last_error`` is where their failure

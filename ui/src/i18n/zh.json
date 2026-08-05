@@ -1145,10 +1145,10 @@
     "requestPathUnavailable": "远程请求不可用 · {{success}}/{{count}} 成功",
     "requestPathMeasuring": "正在测量远程请求 · {{count}} 个样本",
     "networkPath": "网络路径",
-    "networkBrowserIngress": "当前浏览器",
+    "networkBrowserIngress": "浏览器请求的 Cloudflare 入口",
     "networkProvider": "网络",
     "networkConnectorEdges": "Tunnel 边缘节点",
-    "networkLocalBrowser": "本地浏览器",
+    "networkLocalBrowser": "本地请求，未经过 Cloudflare",
     "networkIngressUnavailable": "入口位置暂不可用",
     "networkLocationUnavailable": "位置暂不可用",
     "networkAdditionalLocations": "{{location}}，另有 {{count}} 个",
@@ -2908,7 +2908,11 @@
       "timeoutSeconds": "{{seconds}} 秒",
       "timeoutNone": "不限时",
       "timeoutDefault": "{{duration}}（默认）",
-      "lastExitCode": "最近退出码"
+      "lastExitCode": "最近退出码",
+      "escalation": "失败后 → 交给 Agent",
+      "triagePrompt": "排查提示词",
+      "cwdFromSession": "跟随绑定会话，否则运行时默认目录或 Avibe 状态目录",
+      "cwdRuntimeDefault": "运行时默认目录，否则 Avibe 状态目录"
     },
     "sessionPolicy": {
       "createPerRun": "每次运行新建会话",

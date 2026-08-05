@@ -52,6 +52,7 @@ from core.command_runner import command_line_preview
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
+    NO_EVENT_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
     WATCH_RECONCILE_INTERVAL_SECONDS,
     ManagedWatchStore,
@@ -676,6 +677,8 @@ def _task_add_examples_text() -> str:
           Failure handling is silent-success by default: a successful run stays quiet, and a failed run records a failure notice.
           Add --on-failure agent with --message to spend an Agent turn triaging a failed run instead.
           --timeout bounds one run; use 0 for no timeout.
+          --cwd is where the command runs; without it, a Session-bound command follows that Session's directory
+          and every other command records the directory you ran this from.
 
         Examples:
           vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
@@ -1377,6 +1380,11 @@ def _watch_add_examples_text() -> str:
           Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
           Terminal failures also send a follow-up and disable the watch.
           In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
+          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and sends a timeout follow-up;
+          64 PLUS the line 'avibe-watch: no-event' on stderr means the cycle ran and found nothing worth reporting,
+          so the watch ends or re-arms WITHOUT an Agent turn; any other non-zero is a failure.
+          The marker is required: 64 alone is also sysexits EX_USAGE, so a bare 64 stays a failure and stops the watch.
+          Use it in waiters whose normal outcome is uninteresting, such as green CI.
           Pass either --shell '<command>' or a command after '--'.
           --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
 
@@ -3231,7 +3239,14 @@ def _wait_for_watch_startup(
                 help_command=inspect_command,
                 details={"watch": _watch_mutation_payload(watch, runtime_entry)},
             )
-        if watch.mode == "once" and watch.last_finished_at and not watch.last_error and watch.last_exit_code == 0:
+        # NO_EVENT_EXIT_CODE is a clean finish too: a once watch whose first cycle
+        # already decided there is nothing to report has completed, not hung.
+        if (
+            watch.mode == "once"
+            and watch.last_finished_at
+            and not watch.last_error
+            and watch.last_exit_code in (0, NO_EVENT_EXIT_CODE)
+        ):
             return watch, runtime_entry
         if runtime_entry and runtime_entry.get("running"):
             stable_for = _seconds_since_iso(runtime_entry.get("started_at")) or _seconds_since_iso(watch.last_started_at)
@@ -3475,11 +3490,16 @@ def cmd_task_add(args):
                 existing_cwd=None,
                 session_policy=session_policy,
                 scoped_session=_has_modern_scope_target(args),
+                has_command=has_command,
                 help_command="vibe task add --help",
             )
             session_workdir = cwd
             cwd = _command_definition_spawn_cwd(
-                cwd, has_command=has_command, session_policy=session_policy
+                cwd,
+                has_command=has_command,
+                session_policy=session_policy,
+                explicit_cwd=getattr(args, "cwd", None),
+                help_command="vibe task add --help",
             )
             agent_resolution = _resolve_agent_target(
                 agent_name=getattr(args, "agent", None),
@@ -3497,7 +3517,11 @@ def cmd_task_add(args):
                     agent_name=agent_name,
                     agent_id=agent.id if agent else None,
                     deliver_key=scope_key or "",
-                    workdir=cwd,
+                    # The SESSION half, captured before the command's overwrote it. The
+                    # two agree here today, but reading the command's answer is what
+                    # made the update path place a Session in a subprocess directory,
+                    # and the same line is the one that would do it here.
+                    workdir=session_workdir,
                     help_command="vibe task add --help",
                     require_enabled_agent=expected_enabled_agent_id is not None,
                     expected_reference_agent_id=expected_reference_agent_id,
@@ -4116,13 +4140,40 @@ def cmd_task_update(args):
             current_policy=task.session_policy,
             current_session_id=task.session_id,
             create_session=bool(getattr(args, "create_session", False)),
+            has_command=task.has_command,
             help_command="vibe task update --help",
         )
-        if session_policy == "existing":
+        # This edit is not placing a Session: the definition is bound to one that owns
+        # its own directory, or has already reserved its reusable one and passed no
+        # --create-session to replace it. For a message task that leaves ``--cwd``
+        # nothing to do, and the two refusals above say so. For a command task it
+        # leaves exactly one question -- where the subprocess runs -- so the flag is
+        # resolved as the command's alone and the Session's half is read back from
+        # storage untouched. Without the branch, every path below writes SOME answer
+        # into ``session_workdir``, and for a command task that answer is the command's
+        # directory: an unrelated ``--name`` edit on a reserved definition wrote the
+        # subprocess directory into ``metadata["session_workdir"]``.
+        command_only_cwd = task.has_command and (
+            session_policy == "existing"
+            or (
+                session_policy == "create_once"
+                and bool(task.session_id)
+                and not getattr(args, "create_session", False)
+            )
+        )
+        if command_only_cwd:
+            session_workdir = _stored_session_workdir(task, metadata)
+            cwd = _resolve_command_only_cwd(
+                explicit_cwd,
+                stored_cwd=task.cwd,
+                help_command="vibe task update --help",
+            )
+        elif session_policy == "existing":
             cwd = _resolve_definition_session_cwd(
                 explicit_cwd=explicit_cwd,
                 existing_cwd=None,
                 session_policy=session_policy,
+                has_command=task.has_command,
                 help_command="vibe task update --help",
             )
         elif explicit_cwd is not None:
@@ -4136,17 +4187,32 @@ def cmd_task_update(args):
         elif getattr(args, "create_session", False) or getattr(args, "create_session_per_run", False):
             cwd = _resolve_definition_session_cwd(
                 explicit_cwd=None,
-                existing_cwd=task.cwd,
+                existing_cwd=_stored_session_workdir(task, metadata),
                 session_policy=session_policy,
                 scoped_session=_has_modern_scope_target(args) or bool(str(metadata.get("session_scope_id") or "").strip()),
                 help_command="vibe task update --help",
             )
         else:
-            cwd = task.cwd
-        session_workdir = cwd
-        cwd = _command_definition_spawn_cwd(
-            cwd, has_command=task.has_command, session_policy=session_policy
-        )
+            # Nothing in this edit asks about directories, so each half carries forward
+            # from where that half is stored. For a message task ``task.cwd`` IS the
+            # Session's answer; for a command task it is the command's alone, and
+            # reading it here promoted it into ``metadata["session_workdir"]`` -- so a
+            # plain ``--name`` on a per-run definition that deliberately left its
+            # Sessions unplaced (SCT-047) pinned every future one to the directory
+            # ``task add`` happened to be typed in, and a ``create_once`` definition
+            # that had not reserved yet reserved there. The command half is untouched:
+            # ``_command_definition_spawn_cwd`` falls back to ``stored_cwd`` below.
+            cwd = _stored_session_workdir(task, metadata) if task.has_command else task.cwd
+        if not command_only_cwd:
+            session_workdir = cwd
+            cwd = _command_definition_spawn_cwd(
+                cwd,
+                has_command=task.has_command,
+                session_policy=session_policy,
+                explicit_cwd=explicit_cwd,
+                stored_cwd=task.cwd,
+                help_command="vibe task update --help",
+            )
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
         if session_policy == "create_once" and not scope_key:
             raise TaskCliError(
@@ -4192,7 +4258,13 @@ def cmd_task_update(args):
                 agent_name=agent_name,
                 agent_id=agent.id if agent else None,
                 deliver_key=scope_key,
-                workdir=cwd,
+                # The SESSION half, captured before ``_command_definition_spawn_cwd``
+                # overwrote ``cwd`` with the command's. Reading ``cwd`` here handed the
+                # replacement Session the directory the user picked for a subprocess,
+                # so it stopped inheriting from its Scope -- the same defect
+                # ``_stored_session_workdir`` closes one branch earlier, through the
+                # one line that could reintroduce it.
+                workdir=session_workdir,
                 help_command="vibe task update --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
                 expected_reference_agent_id=expected_reference_agent_id,
@@ -5148,9 +5220,21 @@ def _reject_inert_create_once_cwd_update(
     current_policy: Optional[str],
     current_session_id: Optional[str],
     create_session: bool,
+    has_command: bool = False,
     help_command: str,
 ) -> None:
-    if explicit_cwd is None or create_session:
+    """Refuse a ``--cwd`` that would change nothing, for the tasks where it changes nothing.
+
+    A reusable Session that has already been reserved owns its workdir, so for a
+    message task the flag is inert and saying so beats accepting it silently. A command
+    task in the same position still has the other question to answer -- where its
+    subprocess runs -- and this refusal reached it first, so the only way to repoint a
+    nightly command was to replace an escalation Session that had nothing to do with
+    the request. Same rule as ``_resolve_definition_session_cwd``'s, softened the same
+    way and for the same reason.
+    """
+
+    if explicit_cwd is None or create_session or has_command:
         return
     if current_policy == "create_once" and current_session_id:
         raise TaskCliError(
@@ -5265,11 +5349,27 @@ def _resolve_definition_session_cwd(
     existing_cwd: Optional[str],
     session_policy: str,
     scoped_session: bool = False,
+    has_command: bool = False,
     help_command: str,
 ) -> Optional[str]:
+    """Where a Session this definition CREATES should run. Never the command's answer.
+
+    The ``existing`` refusal states a rule that is still true -- a Session bound here
+    owns its own directory, and a definition pointing at one must not rewrite it. What
+    it must not also do is refuse the OTHER question. A command task binds to an
+    existing Session for a reason unrelated to where it runs (``--on-failure agent``
+    needs somewhere to escalate), so the refusal landed on ``--cwd`` as collateral and
+    left the command with no way to say where it spawns.
+
+    ``has_command`` therefore softens the refusal rather than widening the return: this
+    still answers only the Session question, and answers it ``None``, so nothing writes
+    a workdir onto a Session that owns one. ``_command_definition_spawn_cwd`` picks the
+    flag up as the command's half.
+    """
+
     raw = (explicit_cwd or "").strip()
     if session_policy == "existing":
-        if raw:
+        if raw and not has_command:
             raise TaskCliError(
                 "--cwd only applies when this definition creates new Sessions",
                 code="cwd_with_existing_session",
@@ -5293,6 +5393,9 @@ def _command_definition_spawn_cwd(
     *,
     has_command: bool,
     session_policy: str,
+    explicit_cwd: Optional[str] = None,
+    stored_cwd: Optional[str] = None,
+    help_command: str = "vibe task add --help",
 ) -> Optional[str]:
     """Where this definition's COMMAND runs, given where its Session would run.
 
@@ -5310,11 +5413,101 @@ def _command_definition_spawn_cwd(
     -- an ``existing`` binding is read live from its Session at fire time, and
     ``create_once`` reserves its Session immediately -- and never over an explicit
     ``--cwd``.
+
+    ``explicit_cwd`` is that flag arriving for the one policy whose Session question
+    answers ``None`` on purpose. Every other policy has already folded it into
+    ``session_cwd``, where it is BOTH answers at once: a created Session and its
+    command run in the same place. An ``existing`` binding is the case where the two
+    genuinely differ -- the Session keeps its directory, the command gets the one the
+    user named -- so the flag is resolved here, under the same ``cwd_not_found`` check
+    every other policy gives it, and stored as the definition's ``cwd``. Fire time
+    already prefers that over the bound Session's live workdir
+    (``_bound_session_workdir``), so omitting the flag keeps today's
+    inherit-from-Session behaviour untouched.
+
+    ``stored_cwd`` is what an UPDATE must not drop. A bound definition resolves its
+    Session question to ``None`` on every edit, and the update path persists that with
+    ``update_cwd=True`` -- so without this, renaming an escalating command task would
+    silently un-pin the directory it was created with, and the next fire would go back
+    to following the Session. Only the explicit flag replaces it, and it outranks the
+    invocation directory for every policy rather than only for ``existing``: a policy
+    change is not a request to move the command, and re-stamping the directory the
+    UPDATE happened to run from is the same silent relocation in a different lane.
+    It outranks ``session_cwd`` for the same reason. The two are equal wherever
+    ``--cwd`` set both, and differ exactly where the user separated them -- a bound
+    command moved to B while its Session keeps A -- so reading the Session half first
+    let a later ``--create-session*`` carry A forward onto the command and move it
+    back. ``stored_cwd`` defaults to ``None``, so ``task add`` -- which has nothing
+    stored yet -- resolves exactly as it did before.
     """
 
-    if not has_command or session_cwd or session_policy != "create_per_run":
+    if not has_command:
         return session_cwd
-    return os.getcwd()
+    raw = (explicit_cwd or "").strip()
+    if raw:
+        # The flag is the command's answer wherever it arrives. A creating policy has
+        # already folded it into ``session_cwd`` -- same directory, both halves -- so
+        # resolving it again here returns the same path; an ``existing`` binding answers
+        # its Session question ``None`` on purpose, and this is the only place the flag
+        # can be picked up at all.
+        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+    if stored_cwd:
+        # Before ``session_cwd``, because the two can legitimately differ and only one of
+        # them is an answer to this question. Once ``--cwd`` moves a bound command to B
+        # while its Session keeps A, a later ``--create-session*`` carrying A forward
+        # resolved the command to A as well -- moving it back, with nothing in the edit
+        # asking to. Same rule as ``_resolve_command_only_cwd``'s and SCT-051's: only the
+        # explicit flag replaces a stored directory.
+        return stored_cwd
+    if session_cwd:
+        return session_cwd
+    if session_policy == "create_per_run":
+        return os.getcwd()
+    return None
+
+
+def _resolve_command_only_cwd(
+    explicit_cwd: Optional[str],
+    *,
+    stored_cwd: Optional[str],
+    help_command: str,
+) -> Optional[str]:
+    """``--cwd`` for an edit that answers the command question and nothing else.
+
+    Under the same ``cwd_not_found`` check every other policy gives the flag. Omitting
+    it keeps the stored directory rather than re-deriving one, because a definition
+    whose Session is already settled has no other source to fall back to and the
+    invocation directory of an unrelated edit is not an answer anybody asked for.
+    """
+
+    raw = (explicit_cwd or "").strip()
+    if raw:
+        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+    return stored_cwd
+
+
+def _stored_session_workdir(task, metadata: Optional[dict]) -> Optional[str]:
+    """The SESSION half of what a definition already stores, for a policy change.
+
+    Retargeting at ``--create-session``/``--create-session-per-run`` without naming a
+    directory carries forward the one the definition already had. For a message task
+    ``task.cwd`` IS that directory: the Session question and the run question are the
+    same question, answered once at ``task add``.
+
+    For a command task they can differ, and since the ``existing`` refusal was softened
+    they routinely do -- ``task.cwd`` is where the COMMAND runs. The Session half lives
+    in ``metadata["session_workdir"]``, or is deliberately absent: a bound definition
+    never had one, and a per-run definition leaves it unset on purpose so an
+    escalation's Session follows its Scope (SCT-047). Reading ``task.cwd`` for it
+    promotes a directory the user picked for a subprocess into a Session placement they
+    never asked for, and the newly created Session stops inheriting from its Scope with
+    nothing in the edit saying so. ``_command_definition_spawn_cwd`` keeps the command
+    half from its own ``stored_cwd``, so the two survive the retarget separately.
+    """
+
+    if not task.has_command:
+        return task.cwd
+    return str((metadata or {}).get("session_workdir") or "").strip() or None
 
 
 def _has_modern_scope_target(args) -> bool:
@@ -14821,7 +15014,13 @@ def build_parser():
     task_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller Session scope")
     task_add_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     task_add_parser.add_argument("--agent", help="Avibe Agent name to use when the task runs")
-    task_add_parser.add_argument("--cwd", help="Working directory for Sessions created by this task. Defaults to the caller's current directory.")
+    task_add_parser.add_argument(
+        "--cwd",
+        help=(
+            "Working directory for Sessions created by this task, and for a command task, "
+            "the directory its command runs in. Defaults to the caller's current directory."
+        ),
+    )
     delivery_group = task_add_parser.add_mutually_exclusive_group()
     delivery_group.add_argument(
         "--post-to",
@@ -14890,7 +15089,10 @@ def build_parser():
     task_update_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     task_update_parser.add_argument("--agent", help="Replace the Avibe Agent used by this task")
     task_update_parser.add_argument("--clear-agent", action="store_true", help="Clear the stored Avibe Agent override")
-    task_update_parser.add_argument("--cwd", help="Set working directory for Sessions created by this task")
+    task_update_parser.add_argument(
+        "--cwd",
+        help="Set working directory for Sessions created by this task, or for a command task, where its command runs",
+    )
     update_delivery_group = task_update_parser.add_mutually_exclusive_group()
     update_delivery_group.add_argument(
         "--post-to",

@@ -18,7 +18,7 @@ import sys
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 from core import watch_worker
 from core.process_isolation import (
@@ -275,16 +275,21 @@ async def run_supervised_command(
     label: str,
     on_spawn: Optional[Callable[[int, Optional[PersistedProcessIdentity]], None]] = None,
     max_output_bytes: Optional[int] = None,
+    extra_env: Optional[Mapping[str, str]] = None,
 ) -> SupervisedCommandResult:
     """Run one command under the stable supervisor and return its outcome.
 
     ``timeout_seconds <= 0`` means no timeout. ``max_output_bytes`` of ``None``
     keeps exact ``communicate()`` semantics; a value caps the retained bytes per
-    stream while still draining the child to EOF.
+    stream while still draining the child to EOF. ``extra_env`` is added to the
+    environment the supervisor hands the command, for context the command can only
+    learn from its caller.
     """
 
     worker_marker = new_process_identity_marker()
     spawn_env = process_identity_subprocess_env(worker_marker)
+    if extra_env:
+        spawn_env.update(extra_env)
     process = await asyncio.create_subprocess_exec(
         os.path.abspath(sys.executable),
         os.fspath(Path(watch_worker.__file__).resolve()),

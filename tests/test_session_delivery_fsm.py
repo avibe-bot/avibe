@@ -3494,6 +3494,200 @@ def test_fifo_claim_retires_invalid_attachment_head_and_starts_next(
     assert [text for _turn_id, text in starts] == ["valid following input"]
 
 
+def _insert_queued_delivery_with_run(
+    engine,
+    *,
+    delivery_id: str,
+    text: str,
+    now: str,
+    run_id: str | None = None,
+    run_status: str = "queued",
+    cancel_requested: int = 0,
+) -> None:
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text=text,
+            ),
+            dispatch_text=text,
+            now=now,
+        )
+        if run_id is not None:
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    run_type="agent",
+                    status=run_status,
+                    session_id="ses_fsm",
+                    delivery_id=delivery_id,
+                    cancel_requested=cancel_requested,
+                    created_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
+
+
+@pytest.mark.parametrize(
+    ("run_status", "cancel_requested"),
+    [("failed", 0), ("completed", 0), ("canceled", 0), ("queued", 1)],
+)
+def test_fifo_claim_retires_head_whose_agent_run_can_no_longer_start(
+    managers,
+    run_status: str,
+    cancel_requested: int,
+) -> None:
+    """A settled Agent Run must not brick its Session's queue (crash loop)."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    poisoned_id = delivery_store.new_delivery_id()
+    valid_id = delivery_store.new_delivery_id()
+    _insert_queued_delivery_with_run(
+        engine,
+        delivery_id=poisoned_id,
+        text="unexecutable head",
+        now="2026-08-01T00:00:01Z",
+        run_id="run_settled_before_claim",
+        run_status=run_status,
+        cancel_requested=cancel_requested,
+    )
+    _insert_queued_delivery_with_run(
+        engine,
+        delivery_id=valid_id,
+        text="valid following input",
+        now="2026-08-01T00:00:02Z",
+    )
+
+    assert asyncio.run(manager.drain_delivery_queue("ses_fsm"))
+
+    assert _row(engine, poisoned_id)["state"] == "retired"
+    assert _row(engine, valid_id)["state"] == "claimed"
+    assert [text for _turn_id, text in starts] == ["valid following input"]
+
+
+def test_recovery_survives_queued_delivery_whose_agent_run_settled(
+    managers,
+) -> None:
+    """Startup recovery must not raise on a Delivery its Run already abandoned."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    poisoned_id = delivery_store.new_delivery_id()
+    _insert_queued_delivery_with_run(
+        engine,
+        delivery_id=poisoned_id,
+        text="watch fire whose run failed",
+        now="2026-08-01T00:00:01Z",
+        run_id="run_failed_before_restart",
+        run_status="failed",
+    )
+
+    assert asyncio.run(manager.recover_durable_delivery_state(service_restart=True)) == []
+
+    assert _row(engine, poisoned_id)["state"] == "retired"
+    assert starts == []
+
+
+def test_fifo_claim_starts_head_whose_agent_run_is_still_queued(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    _insert_queued_delivery_with_run(
+        engine,
+        delivery_id=delivery_id,
+        text="claimable input",
+        now="2026-08-01T00:00:01Z",
+        run_id="run_claimable",
+    )
+
+    assert asyncio.run(manager.drain_delivery_queue("ses_fsm"))
+
+    assert _row(engine, delivery_id)["state"] == "claimed"
+    assert [text for _turn_id, text in starts] == ["claimable input"]
+    with engine.connect() as conn:
+        run = conn.execute(
+            select(agent_runs).where(agent_runs.c.id == "run_claimable")
+        ).mappings().one()
+    assert run["status"] == "running"
+
+
+def test_send_now_retires_head_whose_agent_run_can_no_longer_start(
+    managers,
+) -> None:
+    """Explicit promotion must not raise on the same poisoned row startup drain retires."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    poisoned_id = delivery_store.new_delivery_id()
+    _insert_queued_delivery_with_run(
+        engine,
+        delivery_id=poisoned_id,
+        text="held head whose run failed",
+        now="2026-08-01T00:00:01Z",
+        run_id="run_settled_behind_hold",
+        run_status="failed",
+    )
+    with engine.begin() as conn:
+        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
+
+    promoted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content=None,
+                expected_delivery_id=poisoned_id,
+            ),
+            context=_context(),
+        )
+    )
+
+    assert promoted.state == "refused"
+    assert promoted.reason == "stale_head"
+    assert _row(engine, poisoned_id)["state"] == "retired"
+    assert starts == []
+    with engine.connect() as conn:
+        assert delivery_store.queue_is_held(conn, "ses_fsm")
+
+
+def test_p3_admission_retires_poisoned_backlog_and_still_starts(
+    managers,
+) -> None:
+    """Immediate admission drains past a settled Run instead of raising on it."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    poisoned_id = delivery_store.new_delivery_id()
+    _insert_queued_delivery_with_run(
+        engine,
+        delivery_id=poisoned_id,
+        text="backlog whose run failed",
+        now="2026-08-01T00:00:01Z",
+        run_id="run_settled_before_admission",
+        run_status="failed",
+    )
+
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="fresh input"),
+            context=_context(),
+        )
+    )
+
+    assert _row(engine, poisoned_id)["state"] == "retired"
+    assert admitted.turn_id
+    assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
+    assert [text for _turn_id, text in starts] == ["fresh input"]
+
+
 def test_final_dispatch_gate_retires_batch_when_attachment_expires_after_claim(
     managers,
     tmp_path: Path,

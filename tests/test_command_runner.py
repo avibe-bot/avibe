@@ -495,3 +495,26 @@ async def test_no_cap_returns_large_output_in_full(tmp_path: Path) -> None:
     assert len(result.stdout.encode("utf-8")) == 300000
     assert result.stdout_truncated is False
     assert result.stderr_truncated is False
+
+
+async def test_extra_env_reaches_the_child_without_replacing_its_environment(tmp_path: Path) -> None:
+    """Callers can name the child's context without rebuilding the whole env.
+
+    The supervisor owns the rest of the spawn environment (PATH, the isolation
+    marker), so an extra variable is merged into it rather than passed instead of it.
+    """
+    result = await run_supervised_command(
+        command=[
+            sys.executable,
+            "-c",
+            "import os; print(os.environ.get('AVIBE_WATCH_ID', 'missing')); print(bool(os.environ.get('PATH')))",
+        ],
+        cwd=str(tmp_path),
+        timeout_seconds=10,
+        label="test extra env",
+        extra_env={"AVIBE_WATCH_ID": "wat_123"},
+    )
+
+    assert result.exit_code == 0
+    assert "wat_123" in result.stdout
+    assert "True" in result.stdout
