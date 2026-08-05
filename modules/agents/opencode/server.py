@@ -59,6 +59,15 @@ def _percent_encode_path(path: str) -> str:
     return _url_quote(path, safe="/")
 
 
+def native_message_id_for_attempt(attempt_id: str) -> str:
+    """Map one durable attempt identity into OpenCode's message namespace."""
+
+    value = str(attempt_id or "").strip()
+    if not value.startswith("atm") or len(value) == 3:
+        raise ValueError("OpenCode prompt attempt identity must start with 'atm'")
+    return f"msg{value[3:]}"
+
+
 class OpenCodePromptRejectedError(RuntimeError):
     """Definitive HTTP rejection from OpenCode's async prompt endpoint."""
 
@@ -66,6 +75,10 @@ class OpenCodePromptRejectedError(RuntimeError):
         self.status = status
         self.response_text = response_text
         super().__init__(f"Failed to start async prompt: {status} {response_text}")
+
+    @property
+    def is_permanent_input_rejection(self) -> bool:
+        return self.status == 400
 
 
 class OpenCodeServerManager:

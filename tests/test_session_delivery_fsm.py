@@ -2573,6 +2573,47 @@ def test_exact_missing_start_attempt_requeues_only_its_own_delivery(managers) ->
     assert terminal["terminal_outcome"] == "not_written"
 
 
+def test_permanent_start_rejection_retires_delivery_without_retry(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="invalid payload"),
+            context=_context(),
+        )
+    )
+    following = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="continue FIFO"),
+            context=_context(),
+        )
+    )
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, str(admitted.turn_id))
+    assert turn is not None
+    attempt_id = str(turn["start_attempt_id"])
+
+    assert manager.settle_start_attempt_invalid_input(
+        str(admitted.turn_id),
+        attempt_id,
+        backend="opencode",
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    assert delivery["state"] == "retired"
+    history = json.loads(delivery["delivery_history_json"])["events"]
+    assert history[-1]["outcome"] == "invalid_input"
+    assert _row(engine, str(following.delivery_id))["state"] == "queued"
+    assert len(starts) == 1
+    with engine.connect() as conn:
+        terminal = delivery_store.get_turn(conn, str(admitted.turn_id))
+        assert delivery_store.claimable_fifo_head(conn, "ses_fsm") is not None
+    assert terminal is not None
+    assert terminal["terminal_outcome"] == "not_written"
+
+    asyncio.run(manager._resume_post_terminal("ses_fsm"))
+    assert _row(engine, str(following.delivery_id))["state"] == "claimed"
+    assert starts[-1][1] == "continue FIFO"
+
+
 def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) -> None:
     first, restarted, engine, _engine_b, starts = managers
 

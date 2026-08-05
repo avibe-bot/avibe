@@ -53,7 +53,11 @@ from .caller_context import bind_session as bind_caller_context_session
 from .client_manager import OpenCodeClientManager
 from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import OpenCodePollLoop, restored_platform_from_poll_info, restored_session_key_from_poll_info
-from .server import OpenCodePromptRejectedError, OpenCodeServerManager
+from .server import (
+    OpenCodePromptRejectedError,
+    OpenCodeServerManager,
+    native_message_id_for_attempt,
+)
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
@@ -1041,13 +1045,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 session_id=session_id,
                 directory=request.working_path,
                 text=prompt_text,
-                message_id=str(
-                    (request.context.platform_specific or {}).get(
-                        "delivery_start_attempt_id"
-                    )
-                    or ""
-                )
-                or None,
+                message_id=(
+                    native_message_id_for_attempt(start_attempt_id)
+                    if start_attempt_id
+                    else None
+                ),
                 agent=agent_to_use,
                 model=model_dict,
                 reasoning_effort=reasoning_effort,
@@ -1141,26 +1143,42 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             poll_can_be_removed = not (logical_turn_id and start_attempt_id)
             if logical_turn_id and start_attempt_id:
-                reconcile = getattr(
-                    getattr(self.controller, "session_turns", None),
-                    "reconcile_start_attempt_not_written",
-                    None,
-                )
-                if callable(reconcile):
-                    try:
-                        poll_can_be_removed = bool(
-                            reconcile(
-                                logical_turn_id,
-                                start_attempt_id,
-                                backend=self.name,
+                session_turns = getattr(self.controller, "session_turns", None)
+                try:
+                    if e.is_permanent_input_rejection:
+                        settle_invalid = getattr(
+                            session_turns,
+                            "settle_start_attempt_invalid_input",
+                            None,
+                        )
+                        if callable(settle_invalid):
+                            poll_can_be_removed = bool(
+                                settle_invalid(
+                                    logical_turn_id,
+                                    start_attempt_id,
+                                    backend=self.name,
+                                )
                             )
+                    else:
+                        reconcile = getattr(
+                            session_turns,
+                            "reconcile_start_attempt_not_written",
+                            None,
                         )
-                    except Exception:
-                        logger.exception(
-                            "Failed to persist definitive rejected OpenCode start "
-                            "for Turn=%s; preserving its active poll",
-                            logical_turn_id,
-                        )
+                        if callable(reconcile):
+                            poll_can_be_removed = bool(
+                                reconcile(
+                                    logical_turn_id,
+                                    start_attempt_id,
+                                    backend=self.name,
+                                )
+                            )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist definitive rejected OpenCode start "
+                        "for Turn=%s; preserving its active poll",
+                        logical_turn_id,
+                    )
 
             await self._remove_ack_reaction(request)
             if session_id and poll_can_be_removed:
@@ -1323,7 +1341,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         "tools": {"question": False},
                     }
                     if request.attempt_id:
-                        prompt_kwargs["message_id"] = request.attempt_id
+                        prompt_kwargs["message_id"] = native_message_id_for_attempt(
+                            request.attempt_id
+                        )
                     await server.prompt_async(
                         **prompt_kwargs,
                     )
@@ -1421,9 +1441,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 backend=self.name,
             )
         try:
+            native_message_id = native_message_id_for_attempt(request.attempt_id)
             message = await server.get_message(
                 native_session_id,
-                request.attempt_id,
+                native_message_id,
                 directory,
             )
         except Exception as exc:  # noqa: BLE001 - absence is not negative proof
@@ -1436,14 +1457,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         info = message.get("info") if isinstance(message, dict) else None
         if (
             isinstance(info, dict)
-            and str(info.get("id") or "") == request.attempt_id
+            and str(info.get("id") or "") == native_message_id
             and info.get("role") == "user"
         ):
             return steer_result(
                 SteerOutcome.ACCEPTED,
                 reason="native_message_found",
                 backend=self.name,
-                native_message_id=request.attempt_id,
+                native_message_id=native_message_id,
             )
         return steer_result(
             SteerOutcome.UNKNOWN,
@@ -1631,7 +1652,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 start_attempt_id
                 and message.get("info", {}).get("role") == "user"
                 and str(message.get("info", {}).get("id") or "")
-                == start_attempt_id
+                == native_message_id_for_attempt(start_attempt_id)
                 for message in messages
             )
             has_in_progress = False

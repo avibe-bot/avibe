@@ -3754,6 +3754,41 @@ class SessionTurnManager:
         )
         return bool(result.get("changed"))
 
+    def settle_start_attempt_invalid_input(
+        self,
+        turn_id: str,
+        attempt_id: str,
+        *,
+        backend: str,
+    ) -> bool:
+        """Retire a start batch rejected permanently before any native write."""
+
+        if not turn_id or not attempt_id:
+            return False
+        with self._sqlite_engine().connect() as conn:
+            turn = delivery_store.get_turn(conn, turn_id)
+            if turn is None or turn.get("start_attempt_id") != attempt_id:
+                return False
+            session_id = str(turn["session_id"])
+            delivery_ids = {
+                str(row["id"])
+                for row in delivery_store.initial_deliveries_for_turn(conn, turn_id)
+            }
+        if not delivery_ids:
+            return False
+        result = self._terminalize_durable_turn(
+            turn_id,
+            "not_written",
+            settled_by="adapter_start_invalid_input",
+            evidence_kind="native_start_invalid_input",
+            evidence={"backend": backend, "attempt_id": attempt_id},
+            expected_start_attempt_id=attempt_id,
+            retire_unwritten_delivery_ids=delivery_ids,
+        )
+        if result.get("changed"):
+            self._publish_queue_update(session_id)
+        return bool(result.get("changed"))
+
     def _settle_durable_prewrite_failure(
         self,
         turn_id: str,

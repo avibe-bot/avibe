@@ -336,7 +336,7 @@ def test_restore_preserves_durable_poll_when_verification_is_temporarily_unavail
     )
     poll.processing_indicator = {
         "platform": "avibe",
-        "delivery_start_attempt_id": "attempt-unknown",
+        "delivery_start_attempt_id": "atm-unknown",
         "opencode_native_steering": {
             "target_session_id": "ses_wb",
             "logical_turn_id": "turn-unknown",
@@ -379,7 +379,7 @@ def test_restore_rebuilds_completed_exact_start_attempt() -> None:
     }
     agent, _, removed, _ = _build_agent({"oc-1": poll})
     agent._test_server.messages = [
-        {"info": {"id": "atm-start", "role": "user", "time": {}}},
+        {"info": {"id": "msg-start", "role": "user", "time": {}}},
         {
             "info": {
                 "id": "assistant-done",
