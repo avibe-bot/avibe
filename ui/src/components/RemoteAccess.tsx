@@ -310,6 +310,25 @@ export const RemoteAccess: React.FC = () => {
   const protocolDisplay = configuredProtocol === 'auto' && effectiveProtocol !== 'unknown'
     ? t('remoteAccess.protocolAutomatic', { protocol: protocolLabel })
     : protocolLabel;
+  const connectorConnectionLabel = quality
+    ? quality.ha_connections >= 4
+      ? t('remoteAccess.connectorConnectionsHealthy')
+      : quality.ha_connections > 0
+        ? t('remoteAccess.connectorConnectionsPartial', { connections: quality.ha_connections })
+        : t('remoteAccess.connectorConnectionsUnavailable')
+    : '';
+  const connectorPathLabel = quality
+    ? quality.rtt_ms
+      ? t('remoteAccess.connectorPathWithLatency', {
+          protocol: protocolDisplay,
+          connections: connectorConnectionLabel,
+          rtt: formatLatency(quality.rtt_ms.median),
+        })
+      : t('remoteAccess.connectorPath', {
+          protocol: protocolDisplay,
+          connections: connectorConnectionLabel,
+        })
+    : '';
   const networkPath = status?.network_path;
   const connectorLocations = networkPath?.connector.locations || [];
   const connectorMetros = connectorLocations.filter((location, index) => (
@@ -456,12 +475,8 @@ export const RemoteAccess: React.FC = () => {
           </div>
           {qualityFresh && quality ? (
             <div className="mt-1 space-y-0.5 text-[10px] leading-4 text-muted">
-              <div className="truncate" title={quality.edge_locations?.join(', ')}>
-                {t('remoteAccess.connectorPath', {
-                  protocol: protocolDisplay,
-                  connections: quality.ha_connections,
-                  rtt: quality.rtt_ms ? formatLatency(quality.rtt_ms.median) : t('remoteAccess.rttUnavailable'),
-                })}
+              <div className="break-words" title={quality.edge_locations?.join(', ')}>
+                {connectorPathLabel}
               </div>
               {requestPathUnavailable ? (
                 <div className="truncate font-medium text-destructive">
