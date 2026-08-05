@@ -207,6 +207,15 @@ def test_remote_access_transport_protocol_is_normalized_and_validated() -> None:
         V2Config.from_payload(payload)
 
 
+def test_remote_access_legacy_config_keeps_cloudflared_ipv4_default() -> None:
+    payload = _full_config_payload()
+    payload["remote_access"] = {"vibe_cloud": {"transport_protocol": "auto"}}
+
+    config = V2Config.from_payload(payload)
+
+    assert config.remote_access.vibe_cloud.edge_ip_version == "4"
+
+
 def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

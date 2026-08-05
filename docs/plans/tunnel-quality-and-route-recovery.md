@@ -849,7 +849,8 @@ exposing raw recovery thresholds:
 - transport protocol: `auto`, `quic`, or `http2`;
 - automatic route optimization: enabled or disabled;
 - optimization policy: `stable`, `balanced`, or `low_latency`;
-- Cloudflare edge address family: `auto`, `4`, or `6`;
+- Cloudflare edge address family: `4`, `auto`, or `6`; existing configs keep
+  cloudflared's IPv4 default and `auto` is an explicit owner choice;
 - outbound source address: system-selected or one currently assigned local
   unicast address; and
 - on-demand connectivity diagnostics for DNS, the TCP/HTTP2 path, and the

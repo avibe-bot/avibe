@@ -39,7 +39,7 @@ const DEFAULT_SETTINGS: RemoteAccessSettings = {
   transport_protocol: 'auto',
   auto_recovery: true,
   optimization_profile: 'balanced',
-  edge_ip_version: 'auto',
+  edge_ip_version: '4',
   edge_bind_address: '',
 };
 
@@ -228,6 +228,12 @@ export const RemoteAccess: React.FC = () => {
     try {
       const result = await api.saveRemoteAccessSettings(settingsDraft);
       setStatus(result);
+      if (result?.ok === false) {
+        const message = describeError(result);
+        setActionMessage({ type: 'error', text: message });
+        showToast(message, 'error');
+        return;
+      }
       setSettingsDraft(result.settings || settingsDraft);
       setSettingsDirty(false);
       const message = t('remoteAccess.controlsSaved');
@@ -247,7 +253,14 @@ export const RemoteAccess: React.FC = () => {
     setDiagnosing(true);
     setActionMessage(null);
     try {
-      setDiagnostics(await api.diagnoseRemoteAccess());
+      const result = await api.diagnoseRemoteAccess();
+      if (result?.ok === false) {
+        const message = describeError(result);
+        setActionMessage({ type: 'error', text: message });
+        showToast(message, 'error');
+        return;
+      }
+      setDiagnostics(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : t('errors.remote_access_diagnostics_failed');
       setActionMessage({ type: 'error', text: message });
@@ -601,8 +614,8 @@ export const RemoteAccess: React.FC = () => {
                 ariaLabel={t('remoteAccess.ipFamily')}
                 disabled={controlsDisabled}
                 options={[
-                  { id: 'auto', label: t('remoteAccess.ipAuto') },
                   { id: '4', label: t('remoteAccess.ipV4') },
+                  { id: 'auto', label: t('remoteAccess.ipAuto') },
                   { id: '6', label: t('remoteAccess.ipV6') },
                 ]}
               />

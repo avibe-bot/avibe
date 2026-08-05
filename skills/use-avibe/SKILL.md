@@ -297,7 +297,7 @@ Important config payload shape:
       "transport_protocol": "auto",
       "auto_recovery": true,
       "optimization_profile": "balanced",
-      "edge_ip_version": "auto",
+      "edge_ip_version": "4",
       "edge_bind_address": "",
       "dev_login_hint": ""
     }
@@ -525,7 +525,7 @@ These endpoints drive the managed `avibe.bot` tunnel that exposes the local Web 
 - `GET /api/remote-access/network-interfaces`
   - returns currently assigned, up, non-loopback local source addresses that may be selected for cloudflared
 - `POST /api/remote-access/settings`
-  - payload: `{"transport_protocol":"auto|quic|http2","auto_recovery":true,"optimization_profile":"stable|balanced|low_latency","edge_ip_version":"auto|4|6","edge_bind_address":""}`
+  - payload: `{"transport_protocol":"auto|quic|http2","auto_recovery":true,"optimization_profile":"stable|balanced|low_latency","edge_ip_version":"4|auto|6","edge_bind_address":""}`
   - applies policy-only changes immediately; Connector-affecting changes start and verify a replacement before draining the previous Connector, and keep the previous persisted settings when the replacement cannot become ready
 - `POST /api/remote-access/diagnostics`
   - payload: `{}`

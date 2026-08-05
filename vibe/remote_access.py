@@ -361,7 +361,7 @@ def _configured_optimization_profile(config: V2Config) -> str:
 
 def _configured_edge_ip_version(config: V2Config) -> str:
     version = str(
-        getattr(config.remote_access.vibe_cloud, "edge_ip_version", "auto") or "auto"
+        getattr(config.remote_access.vibe_cloud, "edge_ip_version", "4") or "4"
     ).lower()
     return version if version in {"auto", "4", "6"} else "auto"
 
@@ -579,7 +579,7 @@ def _running_signature(pid: int | None) -> dict[str, str] | None:
         "public_url": str(state.get("public_url") or ""),
         "tunnel_token_sha256": str(state.get("tunnel_token_sha256") or ""),
         "transport_protocol": str(state.get("transport_protocol") or ""),
-        "edge_ip_version": str(state.get("edge_ip_version") or "auto"),
+        "edge_ip_version": str(state.get("edge_ip_version") or "4"),
         "edge_bind_address": str(state.get("edge_bind_address") or ""),
     }
 
@@ -661,7 +661,7 @@ def status(
             "transport_protocol": "auto",
             "auto_recovery": True,
             "optimization_profile": "balanced",
-            "edge_ip_version": "auto",
+            "edge_ip_version": "4",
             "edge_bind_address": "",
         },
     }

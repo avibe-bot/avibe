@@ -921,7 +921,7 @@ class VibeCloudRemoteAccessConfig:
     transport_protocol: str = "auto"
     auto_recovery: bool = True
     optimization_profile: str = "balanced"
-    edge_ip_version: str = "auto"
+    edge_ip_version: str = "4"
     edge_bind_address: str = ""
     dev_login_hint: str = ""
 
@@ -1233,7 +1233,7 @@ class V2Config:
                 "'stable', 'balanced', or 'low_latency'"
             )
         remote_access.vibe_cloud.edge_ip_version = str(
-            remote_access.vibe_cloud.edge_ip_version or "auto"
+            remote_access.vibe_cloud.edge_ip_version or "4"
         ).strip().lower()
         if remote_access.vibe_cloud.edge_ip_version not in {"auto", "4", "6"}:
             raise ValueError(
