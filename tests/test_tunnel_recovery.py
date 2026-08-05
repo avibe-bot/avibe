@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import pytest
@@ -211,6 +212,108 @@ def test_ra_tq_028_settings_promote_before_draining_previous_connector(monkeypat
     assert result["connector_replaced"] is True
     assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "http2"
     assert events == [("start", "http2"), ("promote", "http2"), ("drain", 111)]
+
+
+@pytest.mark.parametrize(
+    "lane_owner",
+    ["reserved_recovery", "pending_tail_rollback", "candidate_pid"],
+)
+def test_ra_tq_028_settings_wait_for_every_candidate_lane_owner(
+    monkeypatch,
+    tmp_path,
+    lane_owner,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    monkeypatch.setattr(remote_access, "status", lambda loaded=None: {"running": True})
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda loaded: "/usr/bin/cloudflared")
+    monkeypatch.setattr(
+        remote_access,
+        "_start_candidate_connector",
+        lambda *args, **kwargs: pytest.fail("candidate lane must remain reserved"),
+    )
+
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = (
+            threading.Thread() if lane_owner == "reserved_recovery" else None
+        )
+    if lane_owner == "pending_tail_rollback":
+        runtime.write_json(
+            remote_access._state_path(),
+            {
+                "pending_tail_rollback": {
+                    "active_pid": 111,
+                    "previous_protocol": "quic",
+                }
+            },
+        )
+    elif lane_owner == "candidate_pid":
+        remote_access._candidate_pid_path().write_text("222", encoding="utf-8")
+
+    try:
+        result = remote_access.apply_settings({"edge_ip_version": "6"})
+    finally:
+        with remote_access._RECOVERY_LOCK:
+            remote_access._RECOVERY_THREAD = None
+
+    assert result["ok"] is False
+    assert result["error"] == "remote_access_settings_unavailable"
+    assert V2Config.load().remote_access.vibe_cloud.edge_ip_version == "4"
+
+
+def test_ra_tq_028_settings_auto_protocol_falls_back_after_preference_fails(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    protocols = []
+    discarded = []
+    candidate_pids = iter([222, 333])
+    monkeypatch.setattr(remote_access, "status", lambda loaded=None: {"running": True})
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda loaded: "/usr/bin/cloudflared")
+    monkeypatch.setattr(
+        remote_access,
+        "_start_candidate_connector",
+        lambda loaded, binary, protocol: (
+            protocols.append(protocol) or next(candidate_pids),
+            f"http://metrics/{protocol}",
+        ),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_wait_candidate_ready",
+        lambda pid, metrics: pid == 333,
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_discard_candidate_connector",
+        lambda pid: discarded.append(pid),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_promote_candidate_connector",
+        lambda pid, **kwargs: {"pid": 111},
+    )
+    monkeypatch.setattr(remote_access, "_drain_tracked_connector", lambda connector: True)
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = None
+    previous_preference = remote_access._PREFERRED_PROTOCOL
+    remote_access._PREFERRED_PROTOCOL = "quic"
+
+    try:
+        result = remote_access.apply_settings({"edge_ip_version": "6"})
+    finally:
+        remote_access._PREFERRED_PROTOCOL = previous_preference
+
+    assert result["ok"] is True
+    assert protocols == ["quic", "auto"]
+    assert discarded == [222]
+    assert V2Config.load().remote_access.vibe_cloud.edge_ip_version == "6"
 
 
 def test_ra_tq_012_tail_recovery_keeps_better_alternate_protocol(monkeypatch, tmp_path) -> None:

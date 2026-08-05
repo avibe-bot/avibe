@@ -894,31 +894,54 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
         return {**current_status, "ok": False, "error": "cloudflared_not_found"}
     previous_runtime_signature = _runtime_signature(current_config, binary)
 
+    def start_settings_candidate(protocol: str) -> tuple[int, str] | None:
+        with _RECOVERY_LOCK:
+            if _RECOVERY_THREAD is not None:
+                return None
+            with _CONNECTOR_LOCK:
+                if (
+                    _state_connector("candidate")
+                    or _state_connector("draining")
+                    or _pending_tail_rollback()
+                    or _read_pid_file(_candidate_pid_path()) is not None
+                ):
+                    return None
+                return _start_candidate_connector(
+                    candidate_config,
+                    binary,
+                    protocol,
+                )
+
     candidate_pid: int | None = None
     try:
-        # Reserve the candidate lane atomically with automatic recovery. Once the
-        # candidate record exists, later recovery reservations will reject it.
-        with _RECOVERY_LOCK:
-            if _RECOVERY_THREAD is not None and _RECOVERY_THREAD.is_alive():
+        requested_protocol = _initial_connector_protocol(candidate_config)
+        started_candidate = start_settings_candidate(requested_protocol)
+        if started_candidate is None:
+            return {
+                **current_status,
+                "ok": False,
+                "error": "remote_access_settings_unavailable",
+            }
+        candidate_pid, metrics_url = started_candidate
+        if not _wait_candidate_ready(candidate_pid, metrics_url):
+            fallback_to_auto = (
+                _configured_protocol(candidate_config) == "auto"
+                and requested_protocol in {"quic", "http2"}
+            )
+            _discard_candidate_connector(candidate_pid)
+            candidate_pid = None
+            if not fallback_to_auto:
+                raise RuntimeError("candidate_not_ready")
+            started_candidate = start_settings_candidate("auto")
+            if started_candidate is None:
                 return {
                     **current_status,
                     "ok": False,
                     "error": "remote_access_settings_unavailable",
                 }
-            with _CONNECTOR_LOCK:
-                if _state_connector("candidate") or _state_connector("draining"):
-                    return {
-                        **current_status,
-                        "ok": False,
-                        "error": "remote_access_settings_unavailable",
-                    }
-                candidate_pid, metrics_url = _start_candidate_connector(
-                    candidate_config,
-                    binary,
-                    _initial_connector_protocol(candidate_config),
-                )
-        if not _wait_candidate_ready(candidate_pid, metrics_url):
-            raise RuntimeError("candidate_not_ready")
+            candidate_pid, metrics_url = started_candidate
+            if not _wait_candidate_ready(candidate_pid, metrics_url):
+                raise RuntimeError("candidate_not_ready")
         with CONFIG_LOCK:
             live_config = V2Config.load()
             live_binary = _resolve_binary(live_config)
