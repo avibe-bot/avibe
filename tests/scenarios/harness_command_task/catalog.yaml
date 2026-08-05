@@ -510,3 +510,165 @@ scenarios:
     # updates the row the metadata already lives on, which is why the gap was invisible
     # from there; the recovery writer already composed from the file, so the same backend's
     # two terminal writers disagreed about what a settled row remembers.
+  - id: SCT-050
+    name: an escalating command task can name the directory its command runs in
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_add_escalating_command_task_accepts_an_explicit_cwd
+    # SCT-008 made a bound definition supply the directory ``--cwd`` was refused, which
+    # stopped commands landing in ``~/.avibe`` without giving the user a way to say where
+    # they run. The refusal is a SESSION rule -- an existing Session owns its workdir --
+    # and a command task binds to one only so ``--on-failure agent`` has somewhere to
+    # escalate, so the rule was answering a question nobody asked it. Softened for
+    # commands only: the flag becomes the definition's ``cwd``, ``session_workdir`` stays
+    # unset so the Session still owns its own, and a message task is refused exactly as
+    # before. Omitting it keeps SCT-008 intact, which matters because the inherited
+    # directory is read live -- ``vibe session update --cwd`` on an unrelated conversation
+    # silently relocates every unpinned command, and nothing errors, because every
+    # fallback in the chain is ``isdir``-validated. The runtime half -- that a stored
+    # ``cwd`` actually beats the live Session read at fire time, or accepting the flag
+    # means nothing -- is
+    # tests/test_scheduled_tasks.py::test_a_stored_cwd_beats_the_bound_sessions_workdir.
+  - id: SCT-051
+    name: an unrelated edit does not un-pin a command task's working directory
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_keeps_a_command_tasks_cwd_through_an_unrelated_edit
+    # A bound definition resolves its Session question to ``None`` on every edit, and the
+    # update path persists that with ``update_cwd=True``. Harmless while no command task
+    # could store a ``cwd``; the moment SCT-050 let one, ``vibe task update --name`` erased
+    # it and the next fire went back to following the escalation Session. Only the explicit
+    # flag replaces a stored directory.
+  - id: SCT-052
+    name: the task pane presents the escalation lane as the job it only runs instead of
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task states the failure policy before the routing it governs, not after it
+    # SCT-043 settled WHETHER to show Agent/Session/mode/delivery/message on a command
+    # task -- gated on the bindings, because an escalation turn is routed by exactly those
+    # fields. It did not settle what they mean once shown. Five fields describing a path
+    # that runs on no healthy day rendered at the same weight as the command and the
+    # schedule, with the ``On failure`` that qualifies them BELOW all five, so the pane
+    # read top-down as a daily Opus turn -- the cost an agent-free task is chosen to
+    # avoid. The qualifier moves above the block, the block gets a name, and the message
+    # is called a triage prompt rather than sharing a label with a message task's payload.
+    # The working directory is shown for the first time on this pane in the same pass: it
+    # was unanswerable from the UI even once SCT-050 could store one.
+  - id: SCT-053
+    name: a command task's directory and its Session's survive a policy change separately
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_retarget_does_not_promote_a_command_cwd_onto_a_new_session
+    # Retargeting at ``--create-session``/``--create-session-per-run`` without naming a
+    # directory carries forward the stored one, reading it off ``task.cwd``. That is the
+    # right source while ``cwd`` has one meaning -- for a message task it IS the Session's
+    # directory -- and the wrong one the moment SCT-050 let the two differ: the command's
+    # directory was promoted into the new Session's placement, so an escalation Session
+    # stopped inheriting from its Scope with nothing in the edit saying so. The Session
+    # half now comes from ``metadata["session_workdir"]``, which a bound definition never
+    # had and a per-run definition leaves unset on purpose (SCT-047). The command half
+    # comes from its own stored value, which also stops a policy change from re-stamping
+    # the directory the UPDATE happened to run from -- SCT-051's rule in the lane the
+    # explicit flag does not cover.
+  - id: SCT-054
+    name: nothing is called an escalation on a command task that escalates to no one
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task calls nothing an escalation on a command task that escalates to no one
+    # SCT-052's heading was keyed on the KIND, which is the same mistake SCT-043 rejected
+    # one level down: a command task with ``--on-failure none`` delivered to a real
+    # conversation keeps the routing fields legitimately, and heading them "On failure ->
+    # escalation" made the pane say "Notice only (no Agent)" and "escalation" about one
+    # task, one field apart. Keyed on ``on_failure`` instead -- the same value the field
+    # above it prints -- so the two cannot contradict each other.
+  - id: SCT-055
+    name: the pane does not name a Session the command cannot inherit a directory from
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task does not name a session the command cannot inherit a directory from
+    # "Session working directory" named an OUTCOME the pane cannot verify.
+    # ``_bound_session_workdir`` answers ``None`` for a deleted row, a NULL workdir or a
+    # failed read, and every fallback is ``isdir``-validated besides, so the command lands
+    # on the runtime default while the pane points at a Session -- next to the "Session
+    # deleted" the Session field prints two rows up, in the case the UI can already see.
+    # The field names the CHAIN the fire walks instead, and drops the Session term where
+    # the binding is visibly gone or absent. The chain does not stop at
+    # ``runtime.default_cwd`` either: it is unset on a fresh install and revalidated on
+    # every fire, and ``_execute_command_task`` then falls through to the Avibe state
+    # directory -- so "Runtime default" alone named a specific config key the run may
+    # never reach, which is the same overclaim one link further down. Both strings name
+    # the terminal fallback, asserted on the copy in ``en`` and ``zh`` because that is
+    # where the claim lives.
+  - id: SCT-056
+    name: a replacement reusable Session is reserved where the Session belongs, not where the command runs
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_reserves_a_replacement_session_without_the_commands_directory
+    # SCT-053 split the two halves of ``cwd`` on the read side, then handed the reservation
+    # ``cwd`` -- the variable ``_command_definition_spawn_cwd`` had just overwritten with
+    # the COMMAND's answer. So ``--create-session`` on a command task pinned to a build
+    # directory reserved its replacement escalation Session in that build directory instead
+    # of letting it inherit from its Scope: the defect SCT-053 closed, reintroduced one
+    # line later and through the same field. The reservation reads the Session half it was
+    # always meant to. The add path carried the identical line and is fixed with it.
+  - id: SCT-057
+    name: repointing a reserved command task's directory does not replace the Session it escalates to
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_repoints_a_reserved_command_task_without_replacing_its_session
+    # ``_reject_inert_create_once_cwd_update`` refuses ``--cwd`` once a reusable Session
+    # exists, and for a message task that is right -- the Session owns its workdir and the
+    # flag would change nothing. It runs before the command-aware resolution, so it reached
+    # a command task first and left ``--create-session`` as the only way to move a nightly
+    # build: discarding an escalation Session that had nothing to do with the request.
+    # Softened exactly as SCT-050 softened the ``existing`` refusal, and for the same
+    # reason. The same branch stops an unrelated edit on a reserved definition from
+    # falling through and stamping the command's directory into
+    # ``metadata["session_workdir"]`` -- SCT-053's rule in the lane SCT-051 does not cover.
+  - id: SCT-058
+    name: an edit that asks nothing about directories places no Session
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_unrelated_edit_leaves_a_per_run_definitions_sessions_unplaced
+    # SCT-053 fixed the retarget; this is the same conflation in the lane where the edit
+    # asks nothing at all. With no ``--cwd`` and no creation flag the update carries the
+    # stored directory forward from ``task.cwd`` -- the COMMAND's half -- and then writes
+    # it as the Session's, so ``vibe task update --name`` pinned every future per-run
+    # Session to the directory ``task add`` was typed in and undid SCT-047's deliberate
+    # blank. A ``create_once`` definition that had not reserved yet reserved there for the
+    # same reason. Each half now carries forward from where that half is stored, which is
+    # the rule SCT-053, SCT-056 and SCT-057 each enforce in one other lane.
+  - id: SCT-059
+    name: a policy change does not pull a command back to its Session's directory
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_retarget_does_not_pull_the_command_back_to_its_sessions_directory
+    # The mirror image of SCT-053, and the last lane where one half was read as the other.
+    # ``--cwd`` on a bound escalating command moves the command to B and leaves its
+    # Session on A -- that separation is what SCT-050 exists for. A later
+    # ``--create-session*`` carries A forward as the SESSION's answer, correctly, and
+    # ``_command_definition_spawn_cwd`` read it before the stored command half, so the
+    # command was pulled back to A with nothing in the edit asking. The two are equal
+    # wherever ``--cwd`` set both and differ exactly where the user separated them, so
+    # the stored command half now outranks the Session's: SCT-051's rule -- only the
+    # explicit flag replaces a stored directory -- in the retarget lane.

@@ -16125,21 +16125,68 @@ def test_the_escalation_prompt_prepends_the_stored_message_and_names_the_run(
     )
 
 
+def test_a_stored_cwd_beats_the_bound_sessions_workdir(tmp_path: Path, monkeypatch) -> None:
+    """SCT-050 -- an explicit ``--cwd`` has to actually win, or accepting the flag means nothing.
+
+    The bound Session's workdir is read LIVE at fire time, by design, so a command with
+    no directory of its own follows a Session that moves. That is the behaviour the
+    flag exists to opt out of: a scheduled job should not relocate because someone ran
+    ``vibe session update --cwd`` on an unrelated conversation. Both directories exist
+    here and hold different files, so the assertion cannot pass by falling back.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / "marker").write_text("session-workdir\n", encoding="utf-8")
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    (pinned / "marker").write_text("pinned-workdir\n", encoding="utf-8")
+
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=session_dir, anchor="avibe_task_pinned_cwd")
+    task = store.add_task(
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        cwd=str(pinned),
+        deliver_key="slack::channel::C123",
+        shell_command="cat marker",
+        metadata={"origin": "cli", "on_failure": "agent"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    run = _fire_command_task(service, task)
+
+    assert run["status"] == "succeeded", run["error"]
+    assert "pinned-workdir" in (run["stdout"] or ""), (
+        "the definition's own cwd lost to the Session it only escalates into, so "
+        f"--cwd cannot pin a scheduled command at all: {run['stdout']!r}"
+    )
+
+
 def test_an_escalating_command_runs_in_its_bound_sessions_workdir(
     tmp_path: Path, monkeypatch
 ) -> None:
     """SCT-008 -- the relative commands the docs promise have to resolve somewhere.
 
-    ``--cwd`` is REFUSED for a definition bound to an existing Session, on the rule
-    that the Session owns its working directory (`cwd_with_existing_session`), so the
-    CLI stores ``cwd=None``. For a message task that is complete: the Agent turn starts
-    in the Session's workdir. A command task has no Agent turn to inherit it from, so
-    the stored ``None`` fell through to the ``~/.avibe`` fallback -- meaning
-    ``--shell './scripts/sync.sh'``, the form the docs use, ran from the product state
-    directory with no way to override it: the flag that would fix it is the one the
-    Session rule rejects.
+    A definition bound to an existing Session stores ``cwd=None`` unless its command
+    was given one: ``--cwd`` is still refused for a MESSAGE task, on the rule that the
+    Session owns its working directory (`cwd_with_existing_session`), and for a message
+    task that is complete -- the Agent turn starts in the Session's workdir. A command
+    task has no Agent turn to inherit it from, so the stored ``None`` fell through to
+    the ``~/.avibe`` fallback, meaning ``--shell './scripts/sync.sh'``, the form the
+    docs use, ran from the product state directory.
 
-    So the binding has to supply what it refused to let the user state.
+    A command task can now name its own directory
+    (``test_task_add_escalating_command_task_accepts_an_explicit_cwd``). This is the
+    other half: what happens when it does not. The binding supplies the answer, and
+    goes on supplying it, so omitting the flag keeps the behaviour every task created
+    before it relies on.
 
     The lookup opens a store per FIRE, and each one carries an engine and an
     invalidation probe, so the second assertion is that it does not outlive the read:

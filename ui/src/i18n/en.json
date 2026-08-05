@@ -2902,7 +2902,11 @@
       "timeoutSeconds": "{{seconds}}s",
       "timeoutNone": "No timeout",
       "timeoutDefault": "{{duration}} (default)",
-      "lastExitCode": "Last exit code"
+      "lastExitCode": "Last exit code",
+      "escalation": "On failure → escalation",
+      "triagePrompt": "Triage prompt",
+      "cwdFromSession": "Bound session, else runtime default or Avibe state dir",
+      "cwdRuntimeDefault": "Runtime default, else Avibe state dir"
     },
     "taskKind": {
       "command": "Command"

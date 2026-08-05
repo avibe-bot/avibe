@@ -6,6 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
+import zh from '../../i18n/zh.json';
 import type {
   ApiContextType,
   HarnessRun,
@@ -547,6 +548,109 @@ describe('TaskDetail command task', () => {
     expect(message).toContain(`>${i18n.t('harness.detail.agent')}<`);
     expect(message).toContain(i18n.t('harness.detail.agentInherit'));
     expect(message).toContain(`>${i18n.t('harness.detail.sessionPolicy')}<`);
+  });
+
+  it('shows where the command runs, and names the source when it follows a session', () => {
+    // SCT-052. ``WatchDetail`` has shown the working directory since it shipped; the task pane
+    // never did, so a scheduled command's directory was unanswerable from the UI even
+    // once ``--cwd`` could store one.
+    const pinned = detail(task({ shell_command: 'make test', cwd: '/srv/app' }));
+    expect(pinned).toContain(`>${i18n.t('harness.detail.cwd')}<`);
+    expect(pinned).toContain('/srv/app');
+
+    // A null is not "nowhere": the fire walks a chain, which is a different answer
+    // from the bare em-dash a missing field would print. Stated as the chain rather
+    // than as an outcome — ``_bound_session_workdir`` answers None for a NULL workdir
+    // or a failed read too, so "Session working directory" was a promise the pane
+    // cannot keep.
+    const inherited = detail(
+      task({ shell_command: 'make test', session_id: 'ses1', session_platform: 'slack', cwd: null }),
+    );
+    expect(inherited).toContain(i18n.t('harness.detail.cwdFromSession'));
+  });
+
+  it('does not name a session the command cannot inherit a directory from', () => {
+    // SCT-055. A binding whose Session row is gone resolves to None at fire time and falls
+    // through to the runtime default — so naming the Session here would contradict the
+    // "Session deleted" the Session field prints two rows up, and misstate where the
+    // command runs.
+    const deleted = detail(task({ shell_command: 'make test', session_id: 'ses-gone', cwd: null }));
+    expect(deleted).toContain(i18n.t('harness.detail.cwdRuntimeDefault'));
+    expect(deleted).not.toContain(i18n.t('harness.detail.cwdFromSession'));
+
+    const unbound = detail(task({ shell_command: 'make test', session_id: null, cwd: null }));
+    expect(unbound).toContain(i18n.t('harness.detail.cwdRuntimeDefault'));
+
+    // Asserted on the copy itself because that is where the claim lives. The chain does
+    // not end at ``runtime.default_cwd`` — it is unset on a fresh install and
+    // revalidated on every fire, and ``_execute_command_task`` then falls through to the
+    // Avibe state directory. Naming only the config key is the same overclaim as naming
+    // the Session, one link further down.
+    expect(en.harness.detail.cwdRuntimeDefault).toMatch(/Avibe/);
+    expect(en.harness.detail.cwdFromSession).toMatch(/Avibe/);
+    expect(zh.harness.detail.cwdRuntimeDefault).toMatch(/Avibe/);
+    expect(zh.harness.detail.cwdFromSession).toMatch(/Avibe/);
+  });
+
+  it('states the failure policy before the routing it governs, not after it', () => {
+    // SCT-052. The five routing fields describe a path that runs on no healthy day. Rendered
+    // above the ``On failure`` that qualifies them, the pane read top-down as "this
+    // job spends an Agent turn every morning" — the exact cost an agent-free command
+    // task is chosen to avoid.
+    const html = detail(task({ shell_command: 'make test', metadata: { on_failure: 'agent' } }));
+
+    const onFailure = html.indexOf(`>${i18n.t('harness.detail.onFailure')}<`);
+    const agent = html.indexOf(`>${i18n.t('harness.detail.agent')}<`);
+    expect(onFailure).toBeGreaterThan(-1);
+    expect(agent).toBeGreaterThan(-1);
+    expect(onFailure).toBeLessThan(agent);
+    expect(html).toContain(`>${i18n.t('harness.detail.escalation')}<`);
+  });
+
+  it('calls an escalating command task\'s message a triage prompt, not the job', () => {
+    // SCT-052. Same label as a message task's payload, entirely different meaning: this text is
+    // sent only when the command fails.
+    const html = detail(
+      task({ shell_command: 'make test', message: 'Diagnose it.', metadata: { on_failure: 'agent' } }),
+    );
+
+    expect(html).toContain(`>${i18n.t('harness.detail.triagePrompt')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.message')}<`);
+    expect(html).toContain('Diagnose it.');
+  });
+
+  it('calls nothing an escalation on a command task that escalates to no one', () => {
+    // SCT-054. The routing gate is SCT-043's: bindings, not kind. A command task with
+    // ``--on-failure none`` delivered to a real conversation keeps these fields
+    // legitimately — and heading them "On failure → escalation" would have the pane
+    // say "Notice only (no Agent)" and "escalation" about the same task, one field
+    // apart.
+    const html = detail(
+      task({
+        shell_command: 'make test',
+        session_key: 'slack::channel::C123',
+        post_to: 'thread',
+        message: 'Left over from an older edit.',
+        metadata: { on_failure: 'none' },
+      }),
+    );
+
+    expect(html).toContain(`>${i18n.t('harness.onFailure.none')}<`);
+    expect(html).toContain(`>${i18n.t('harness.detail.delivery')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.escalation')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.triagePrompt')}<`);
+    expect(html).toContain(`>${i18n.t('harness.detail.message')}<`);
+  });
+
+  it('leaves a message task reading as the job it is', () => {
+    // SCT-054. A message task routes EVERY run through those fields, so grouping them under a
+    // failure heading would be a lie in the other direction.
+    const html = detail(task({ prompt: 'Summarize #ops', message: 'Summarize #ops' }));
+
+    expect(html).toContain(`>${i18n.t('harness.detail.message')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.escalation')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.triagePrompt')}<`);
+    expect(html).not.toContain(`>${i18n.t('harness.detail.onFailure')}<`);
   });
 
   it('drops the Message field a command task has nothing to put in', () => {
