@@ -832,6 +832,9 @@ def _verify_state_file_writable(
     of them share the path. Both steps happen under a lock on the path, so the
     read-then-write that decides ownership cannot interleave with another waiter's.
 
+    A file that belongs to somebody else is left untouched and unprobed, and this
+    returns without writing anything -- see the conflict branch below.
+
     For a file that already exists the probe is the whole write, ``os.replace``
     included, because that is the step persistence actually depends on and the step a
     sibling-creation check cannot speak for: a target that is a directory, or one in a
@@ -866,27 +869,31 @@ def _verify_state_file_writable(
             # rename in later cycles lands on a file this process owns.
             return
 
+        # Somebody else's file is not ours to touch AT ALL -- not to adopt, and not to
+        # probe. The probe below is an ``os.replace`` of bytes read a moment earlier,
+        # and the owner's own cursor writes do NOT take this lock, so probing a foreign
+        # path can land stale bytes over a cursor it has just advanced or a ``pending``
+        # handoff it is mid-way through, making the owning watch replay or lose
+        # activity. Returning here costs nothing: ``_load_state_file`` refuses the same
+        # file moments later, with the same conflict, before a single poll.
+        conflict = _owner_conflict(
+            _state_file_owner(target),
+            repo=repo,
+            pr_number=pr_number,
+            watch_identity=watch_identity,
+            watch_id=watch_id,
+        )
+        if conflict is not None:
+            return
+
         # An ownerless file is adopted, not merely accepted: taking the name is what
         # makes a second managed watch on the same path fail instead of sharing it.
-        # Only when nobody else's claim is on it -- another PR's or another watch's
-        # file is left exactly as it is, for `_load_state_file` to refuse.
-        if (
-            watch_id is not None
-            and _owner_conflict(
-                _state_file_owner(target),
-                repo=repo,
-                pr_number=pr_number,
-                watch_identity=watch_identity,
-                watch_id=watch_id,
-            )
-            is None
-            and _adopt_state_file(
-                target,
-                repo=repo,
-                pr_number=pr_number,
-                watch_id=watch_id,
-                watch_identity=watch_identity,
-            )
+        if watch_id is not None and _adopt_state_file(
+            target,
+            repo=repo,
+            pr_number=pr_number,
+            watch_id=watch_id,
+            watch_identity=watch_identity,
         ):
             # Rewriting the real file is the write probe, as the claim is above.
             return

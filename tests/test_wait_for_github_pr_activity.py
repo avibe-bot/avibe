@@ -3025,6 +3025,57 @@ def test_preflight_claims_an_empty_state_file_for_a_managed_watch(tmp_path) -> N
         )
 
 
+def test_preflight_does_not_rewrite_another_watchs_state_file(tmp_path) -> None:
+    """A foreign file is left unprobed, not merely unadopted.
+
+    The probe is an ``os.replace`` of bytes read a moment earlier, and the owning
+    watch's own cursor writes do NOT take the preflight lock -- so probing its path can
+    land stale bytes over a cursor it has just advanced, or over a ``pending`` handoff
+    it is midway through, making it replay or lose activity.
+
+    The assertion is on ``os.replace`` itself rather than on the resulting bytes: the
+    probe rewrites the file with the bytes it already held, so content alone cannot
+    tell a skipped write from a completed round trip.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _ownerless_state(module, state_file, watch="abc123", owner="wat_first")
+    before = state_file.read_bytes()
+
+    replaced = []
+    real_replace = module.os.replace
+
+    def _spy(src, dst, *args, **kwargs):
+        replaced.append((src, dst))
+        return real_replace(src, dst, *args, **kwargs)
+
+    # Both shapes of foreign file: another watch on this PR, and another PR entirely.
+    with patch.object(module.os, "replace", _spy):
+        module._verify_state_file_writable(
+            str(state_file),
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            watch_identity="abc123",
+            watch_id="wat_second",
+        )
+        module._verify_state_file_writable(
+            str(state_file), repo="avibe-bot/avibe", pr_number=999, watch_identity="abc123"
+        )
+
+    assert replaced == [], f"the preflight wrote to a foreign state file: {replaced}"
+    assert state_file.read_bytes() == before
+
+    # Refusal still happens -- it just happens at the load, before any poll.
+    with pytest.raises(module.StateFileOwnershipError):
+        module._load_state_file(
+            str(state_file),
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            watch_identity="abc123",
+            watch_id="wat_second",
+        )
+
+
 def test_state_file_lock_serializes_the_ownership_decision(tmp_path) -> None:
     """The lock is held on a sidecar, not on the file that gets replaced.
 
