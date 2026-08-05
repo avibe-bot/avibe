@@ -52,6 +52,7 @@ from core.show_session_events import (
     ShowSessionEventError,
     localized_show_event_error,
     show_event_payload_session_mismatch,
+    show_event_request_requests_dispatch,
     show_event_requests_dispatch,
 )
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
@@ -11592,7 +11593,7 @@ async def _show_event_response_from_payload(
     if (
         context is not None
         and context.is_remote
-        and show_event_requests_dispatch(payload)
+        and show_event_request_requests_dispatch(payload)
     ):
         return _remote_execution_disabled_response()
     if show_event_payload_session_mismatch(session_id, payload):

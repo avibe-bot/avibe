@@ -464,12 +464,18 @@ def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy
     if path.startswith("/api/cloud-management/"):
         return HttpAuthorizationPolicy("viewer")
     if path.startswith("/show/"):
-        minimum_role = (
-            "viewer" if normalized_method in {"GET", "HEAD", "OPTIONS"} else "editor"
+        is_read = normalized_method in {"GET", "HEAD", "OPTIONS"}
+        # The server-owned event endpoint does not proxy into Show Runtime. Its
+        # handler rejects any remote request that would dispatch an Agent turn
+        # before the event store can reserve a delivery.
+        is_safe_human_event = normalized_method == "POST" and re.fullmatch(
+            r"^/show/[^/]+/(?:__show/events|__events)$",
+            path,
         )
+        minimum_role = "viewer" if is_read else "editor"
         remote_access = (
             REMOTE_HTTP_ALLOWED
-            if normalized_method in {"GET", "HEAD", "OPTIONS"}
+            if is_read or is_safe_human_event
             else REMOTE_HTTP_LOCAL_ONLY
         )
         return HttpAuthorizationPolicy(minimum_role, remote_access)

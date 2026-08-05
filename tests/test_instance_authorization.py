@@ -179,6 +179,7 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("GET", "/api/users", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/bind-codes", REMOTE_HTTP_ALLOWED),
         ("GET", "/show/ses-1/", REMOTE_HTTP_ALLOWED),
+        ("POST", "/show/ses-1/__show/events", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/config", REMOTE_HTTP_PAYLOAD_FILTERED),
         ("PATCH", "/api/projects/proj-1", REMOTE_HTTP_PAYLOAD_FILTERED),
         ("PATCH", "/api/sessions/ses-1", REMOTE_HTTP_PAYLOAD_FILTERED),

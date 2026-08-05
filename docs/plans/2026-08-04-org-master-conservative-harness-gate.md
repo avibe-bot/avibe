@@ -22,9 +22,11 @@ entitlement mirror before remote recurring execution can be enabled.
 - Keep IM-triggered Agent behavior unchanged.
 - This phase provides no remote authorization for Harness execution or
   definition writes, Vault secret-bearing operations, IM ingress configuration,
-  native Agent session forks, or non-read private Show Runtime routes; these
-  capabilities remain trusted-local. Public `/p/<share_id>/...` flows are a
-  separate sharing surface, not remote Workbench authorization.
+  native Agent session forks, or private Show Runtime API writes; these
+  capabilities remain trusted-local. Signed private Show human annotations and
+  mark-read receipts remain available only when they cannot dispatch an Agent
+  turn. Public `/p/<share_id>/...` flows are a separate sharing surface, not
+  remote Workbench authorization.
 - Make every remote Workbench capability read-only with respect to local Agent,
   terminal, file, and Harness execution.
 - Reject remote Task and Watch creation or update at the definition service
@@ -52,14 +54,16 @@ entitlement mirror before remote recurring execution can be enabled.
    policy payload-filters routes that persist future execution choices with
    explicit safe-field allowlists: Session Agent/model overrides, Project
    creation/workdir/default Agent, and Agent/platform/runtime config sections.
-   IM channel and thread settings, native Agent session forks, and non-read
-   private Show Runtime routes are explicitly trusted-local because they can
-   alter future Agent ingress or invoke local runtime code. Unknown fields fail
-   closed. Complete config round-trips may preserve protected values but cannot
-   change them, and protected fields are stripped before persistence so a
-   concurrent local update cannot be overwritten by a stale remote round-trip.
-   Explicit Session/Project display fields and explicit UI/config preferences
-   remain available.
+   IM channel and thread settings, native Agent session forks, and private Show
+   Runtime API writes are explicitly trusted-local because they can alter future
+   Agent ingress or invoke local runtime code. The separate server-owned Show
+   human-event endpoint may record a signed annotation or mark-read receipt, but
+   rejects remote requests that would reserve or dispatch an Agent turn before
+   event persistence. Unknown fields fail closed. Complete config round-trips
+   may preserve protected values but cannot change them, and protected fields
+   are stripped before persistence so a concurrent local update cannot be
+   overwritten by a stale remote round-trip. Explicit Session/Project display
+   fields and explicit UI/config preferences remain available.
 3. The durable Delivery owner retires remote-origin queue entries before the
    FIFO claim that starts an Agent turn.
 4. Task and Watch stores reject explicit remote definition writes.

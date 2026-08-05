@@ -22,6 +22,7 @@ from core.show_session_events import (
     _format_dispatch_text,
     _format_transcript_text,
     localized_show_event_error,
+    show_event_request_requests_dispatch,
     show_event_requests_dispatch,
 )
 from storage import message_deliveries
@@ -968,6 +969,35 @@ def test_show_trigger_kind_is_closed_over_dispatching_event_types():
                 "payload": {"dispatch": True},
             }
         )
+
+
+@pytest.mark.parametrize(
+    "request_payload",
+    [
+        {
+            "type": "human.annotation.created",
+            "annotation": {"comment": "Run this.", "dispatch": True},
+        },
+        {
+            "type": "human.intent.submitted",
+            "payload": {"intent": "choose", "dispatch": True},
+        },
+    ],
+)
+def test_show_event_request_dispatch_matches_normalized_event(request_payload):
+    assert show_event_request_requests_dispatch(request_payload) is True
+
+
+def test_show_event_request_without_dispatch_does_not_start_agent_turn():
+    assert (
+        show_event_request_requests_dispatch(
+            {
+                "type": "human.annotation.created",
+                "annotation": {"comment": "Leave a review."},
+            }
+        )
+        is False
+    )
 
 
 def test_show_event_store_records_assistant_page_update(isolated_state):

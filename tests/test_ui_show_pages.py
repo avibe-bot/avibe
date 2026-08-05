@@ -2935,6 +2935,45 @@ def test_private_show_page_records_remote_oauth_author(monkeypatch, tmp_path):
     assert event["message"]["metadata"]["author"] == expected_author
 
 
+def test_private_show_page_rejects_remote_dispatch_before_event_store(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    token = "session-write-token"
+    monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: token)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+    monkeypatch.setattr(
+        "vibe.ui_server._show_session_event_store",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("remote Show dispatch reached the event store")
+        ),
+    )
+
+    response = client.post(
+        "/show/ses123/__show/events",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={
+            "Origin": "https://alex.avibe.bot",
+            "Content-Type": "application/json",
+            "X-Vibe-Show-Token": token,
+        },
+        json={
+            "type": "human.annotation.created",
+            "annotation": {"comment": "Try to dispatch.", "dispatch": True},
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
 def test_private_show_page_accepts_mark_read_receipt_and_records_reader(monkeypatch, tmp_path):
     from core.show_session_events import ShowSessionEventStore
 
