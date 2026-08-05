@@ -6246,6 +6246,9 @@ _MARKER_AWARE_SESSION_ROUTE_WRITERS = {
     # its bind moves an unbound row to another backend; the remaining sites here
     # write the route only as part of creating / importing / relabelling a row.
     "storage/sessions_service.py",
+    # First-turn binding materializes an inherited backend on an agentless row and
+    # normalizes its override marker without changing explicitly pinned settings.
+    "core/session_turns.py",
 }
 
 #: The reconciliation API a marker-aware writer has to reach for.

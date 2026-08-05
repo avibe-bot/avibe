@@ -53,6 +53,7 @@ from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import normalize_run_status
+from storage.session_reclaim import reconcile_explicit_overrides
 from storage.models import (
     agent_runs,
     agent_sessions,
@@ -997,6 +998,7 @@ class SessionTurnManager:
             agent_sessions.c.agent_variant,
             agent_sessions.c.model,
             agent_sessions.c.reasoning_effort,
+            agent_sessions.c.metadata_json,
             agent_sessions.c.status,
         )
         with self._sqlite_engine().connect() as conn:
@@ -1005,7 +1007,6 @@ class SessionTurnManager:
             ).mappings().one_or_none()
         durable_backend = str((binding or {}).get("agent_backend") or "").strip()
         if durable_backend:
-            self._apply_session_binding_to_context(resolved, dict(binding))
             return durable_backend, resolved
 
         resolved_agent = self._context_vibe_agent_binding(resolved)
@@ -1039,6 +1040,20 @@ class SessionTurnManager:
                     values["agent_id"] = resolved_agent["agent_id"]
                 if resolved_agent["agent_name"] and not binding["agent_name"]:
                     values["agent_name"] = resolved_agent["agent_name"]
+                raw_metadata = binding.get("metadata_json")
+                try:
+                    stored_metadata = json.loads(raw_metadata) if raw_metadata else {}
+                except (TypeError, ValueError):
+                    stored_metadata = {}
+                if not isinstance(stored_metadata, dict):
+                    stored_metadata = {}
+                reconciled_metadata = reconcile_explicit_overrides(stored_metadata)
+                if reconciled_metadata != stored_metadata:
+                    values["metadata_json"] = json.dumps(
+                        reconciled_metadata,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
                 conn.execute(
                     update(agent_sessions)
                     .where(agent_sessions.c.id == session_id)
