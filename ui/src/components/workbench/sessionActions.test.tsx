@@ -135,6 +135,9 @@ describe('SessionActionsTrigger', () => {
   it('hides the row variant until hover, keyboard focus, a coarse pointer, or an open menu', () => {
     const closed = renderToStaticMarkup(<SessionActionsTrigger label="Session actions" open={false} />);
 
+    expect(closed).toContain('size-5');
+    expect(closed).toContain('rounded-md');
+    expect(closed).not.toContain('rounded-lg');
     expect(closed).toContain('opacity-0');
     expect(closed).toContain('group-hover/sess:opacity-100');
     expect(closed).toContain('group-focus-within/sess:opacity-100');

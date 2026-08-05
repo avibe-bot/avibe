@@ -7,6 +7,7 @@ import type { LucideIcon } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { mobileChatSessionActions } from './chatSessionActions';
+import { SESSION_ROW_ACTION_BUTTON_CLASS } from './sessionRowLayout';
 
 // Presentation half of the shared session action menu: the ⋯ trigger and the menu
 // body, used by the desktop sidebar row, the mobile projects row and the chat
@@ -65,7 +66,8 @@ export const SessionActionsTrigger = React.forwardRef<HTMLButtonElement, Session
         'shrink-0 text-muted transition hover:text-foreground',
         variant === 'row'
           ? [
-              'size-6 opacity-0 group-hover/sess:opacity-100 group-focus-within/sess:opacity-100 pointer-coarse:opacity-100',
+              SESSION_ROW_ACTION_BUTTON_CLASS,
+              'opacity-0 group-hover/sess:opacity-100 group-focus-within/sess:opacity-100 pointer-coarse:opacity-100',
               open && 'opacity-100',
             ]
           : 'size-7',
