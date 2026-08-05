@@ -36,6 +36,7 @@ from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_REFUSED_CONCURRENT_TURN,
 )
+from core.message_context import resolve_turn_sink_key
 from core.native_dispatch_phase import backend_dispatch_attempted
 from modules.im import MessageContext
 
@@ -141,7 +142,10 @@ async def dispatch_turn_with_outcome(
             backend_dispatch_attempted=backend_dispatch_attempted(context),
         )
 
-    session_key = controller._get_session_key(context)
+    # Thread-scoped, NOT ``_get_session_key`` (channel-scoped): this gate refuses
+    # a turn when the slot is taken, so a channel-wide key made one busy Telegram
+    # forum topic / Slack thread refuse every sibling thread's turn.
+    session_key = resolve_turn_sink_key(controller, context)
     if controller.get_turn_sink(session_key) is not None:
         # Serialize per session. A streaming turn is already in flight for
         # this session (a second browser tab, or a resend before the first

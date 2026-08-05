@@ -90,6 +90,8 @@ capabilities:
       - tests/test_ui_api.py
       - tests/test_auth_pipeline.py
       - tests/test_agent_run_target.py
+      - tests/test_core_services_dispatch.py
     unit_or_contract_tests:
       - tests/test_sqlite_settings_store.py
+      - tests/test_message_context_helpers.py
       - tests/test_chat_discovery.py

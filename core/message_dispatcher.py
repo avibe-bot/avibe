@@ -22,6 +22,7 @@ from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
+from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
@@ -167,21 +168,20 @@ async def _stream_chunk(
     ``controller.active_turn_sinks`` (see ``core.services.dispatch.dispatch_turn``)
     so the SSE response stream sees notify + result emits as they happen —
     even though the agent's receiver runs on a background task carrying a
-    stale per-turn context. We resolve the sink by *session key* (stable
-    across a session's turns) rather than off the context, so reused agent
-    sessions stream correctly too. A terminal ``result`` emit also marks the
+    stale per-turn context. We resolve the sink by its *thread-scoped sink key*
+    (stable across a session's turns) rather than off the context, so reused
+    agent sessions stream correctly too. A terminal ``result`` emit also marks the
     turn complete so ``dispatch_turn`` can close the stream right after it;
     multi-output callers explicitly pass ``completes_turn=False``. No
     sink (IM / CLI turns) => no-op, byte-identical to master.
     """
 
     get_sink = getattr(controller, "get_turn_sink", None)
-    get_key = getattr(controller, "_get_session_key", None)
-    if not callable(get_sink) or not callable(get_key):
+    if not callable(get_sink):
         # Controller has no streaming turn-sink registry (IM/CLI stubs, older
         # controllers) => nothing to stream to; stay a no-op.
         return
-    sink = get_sink(get_key(context))
+    sink = get_sink(resolve_turn_sink_key(controller, context))
     if sink is None:
         return
     # NB: we deliberately do NOT gate forwarding on a per-turn token here.

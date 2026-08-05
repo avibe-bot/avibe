@@ -1209,6 +1209,18 @@ class Controller:
         settings_key = resolve_context_settings_key(context)
         return build_context_session_key(context, platform=platform, settings_key=settings_key)
 
+    def _get_turn_sink_key(self, context: MessageContext) -> str:
+        """Get the live turn sink's key for ``context``.
+
+        Thread-scoped, unlike ``_get_session_key``: the sink is one agent
+        session's turn-concurrency slot, so sharing it across a channel's
+        threads made ``dispatch_turn`` refuse unrelated sessions' turns. See
+        ``core.message_context.build_context_turn_sink_key``.
+        """
+        from core.message_context import build_context_turn_sink_key
+
+        return build_context_turn_sink_key(context, session_key=self._get_session_key(context))
+
     def backend_alive(self, context: MessageContext) -> Optional[bool]:
         """Best-effort backend liveness for the concise status bubble's footer.
 
@@ -1343,7 +1355,7 @@ class Controller:
         when an agent turn is genuinely in flight (the result emit releases it)."""
         if context is None:
             return
-        sink = self.get_turn_sink(self._get_session_key(context))
+        sink = self.get_turn_sink(self._get_turn_sink_key(context))
         if sink is None:
             return
         # Turn-token guard (mirrors ``_stream_chunk`` / ``_is_active_turn``): a

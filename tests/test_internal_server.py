@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from core import internal_server, session_turns
+from core.message_context import build_context_turn_sink_key
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.dispatch import (
     SOURCE_HUMAN,
@@ -241,6 +242,12 @@ def _build_controller_double(handler=None):
     sinks: dict = {}
     controller.active_turn_sinks = sinks
     controller._get_session_key = lambda ctx: f"{getattr(ctx, 'platform', None)}::{getattr(ctx, 'channel_id', None)}"
+    # MUST be set explicitly: a MagicMock would auto-generate this attribute and hand
+    # dispatch_turn a bogus key, so every sink lookup would miss and a refused-turn
+    # test would hang in ``done.wait()`` instead of failing.
+    controller._get_turn_sink_key = lambda ctx: build_context_turn_sink_key(
+        ctx, session_key=controller._get_session_key(ctx)
+    )
 
     def _register(session_key, *, on_chunk, done_event, turn_token=None, context=None):
         sinks[session_key] = {"on_chunk": on_chunk, "done_event": done_event, "turn_token": turn_token}
