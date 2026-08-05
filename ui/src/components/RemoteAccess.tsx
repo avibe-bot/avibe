@@ -466,38 +466,15 @@ export const RemoteAccess: React.FC = () => {
           <div className="mt-1 flex min-h-5 items-center gap-2">
             <Badge variant={qualityVariant}>{qualityLabel}</Badge>
             {qualityFresh && (requestLatency || quality?.rtt_ms) && (
-              <span className="font-mono text-[11px] text-foreground">
-                {requestLatency
-                  ? `P95 ${formatLatency(requestLatency.p95)}`
-                  : formatLatency(quality!.rtt_ms!.median)}
+              <span className="text-[11px] font-medium tabular-nums text-foreground">
+                {t('remoteAccess.qualityLatency', {
+                  latency: requestLatency
+                    ? formatLatency(requestLatency.p95)
+                    : formatLatency(quality!.rtt_ms!.median),
+                })}
               </span>
             )}
           </div>
-          {qualityFresh && quality ? (
-            <div className="mt-1 space-y-0.5 text-[10px] leading-4 text-muted">
-              <div className="break-words" title={quality.edge_locations?.join(', ')}>
-                {connectorPathLabel}
-              </div>
-              {requestPathUnavailable ? (
-                <div className="truncate font-medium text-destructive">
-                  {t('remoteAccess.requestPathUnavailable', {
-                    success: requestPath?.success_count || 0,
-                    count: requestPath?.sample_count || 0,
-                  })}
-                </div>
-              ) : requestLatency ? (
-                <div className="truncate font-mono text-foreground/80">
-                  {t('remoteAccess.requestPath', {
-                    p95: formatLatency(requestLatency.p95),
-                    p99: formatLatency(requestLatency.p99),
-                    slow: Math.round((requestPath?.slow_request_rate.over_1000_ms || 0) * 100),
-                  })}
-                </div>
-              ) : requestPath ? (
-                <div>{t('remoteAccess.requestPathMeasuring', { count: requestPath.sample_count })}</div>
-              ) : null}
-            </div>
-          ) : null}
         </div>
       </div>
 
@@ -563,6 +540,34 @@ export const RemoteAccess: React.FC = () => {
                   )) : <div>{t('remoteAccess.networkIpUnavailable')}</div>}
                 </div>
               </div>
+              {qualityFresh && quality && (
+                <div className="min-w-0 border-t border-border/60 pt-3 sm:col-span-2">
+                  <div className="font-medium text-muted">{t('remoteAccess.quality')}</div>
+                  <div className="mt-1 space-y-1 text-foreground/85">
+                    <div className="break-words" title={quality.edge_locations?.join(', ')}>
+                      {connectorPathLabel}
+                    </div>
+                    {requestPathUnavailable ? (
+                      <div className="break-words font-medium text-destructive">
+                        {t('remoteAccess.requestPathUnavailable', {
+                          success: requestPath?.success_count || 0,
+                          count: requestPath?.sample_count || 0,
+                        })}
+                      </div>
+                    ) : requestLatency ? (
+                      <div className="break-words font-mono text-foreground/80">
+                        {t('remoteAccess.requestPath', {
+                          p95: formatLatency(requestLatency.p95),
+                          p99: formatLatency(requestLatency.p99),
+                          slow: Math.round((requestPath?.slow_request_rate.over_1000_ms || 0) * 100),
+                        })}
+                      </div>
+                    ) : requestPath ? (
+                      <div>{t('remoteAccess.requestPathMeasuring', { count: requestPath.sample_count })}</div>
+                    ) : null}
+                  </div>
+                </div>
+              )}
             </div>
           </details>
         </div>

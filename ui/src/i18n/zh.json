@@ -1132,6 +1132,7 @@
     "qualityUnknown": "测量中",
     "qualityRecovering": "正在优化",
     "qualityDegraded": "异常",
+    "qualityLatency": "延迟 {{latency}}",
     "protocolAutomatic": "{{protocol}}（自动）",
     "protocolUnknown": "检测中",
     "connectorConnectionsHealthy": "Cloudflare 连接正常",
