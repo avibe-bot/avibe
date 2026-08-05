@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from vibe.i18n import t as i18n_t
 from core.backend_failure import emit_backend_failure
+from core.reply_enhancer import strip_silent_blocks
 
 if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
@@ -242,9 +243,10 @@ class CodexEventHandler:
         if item_type == "agentMessage":
             text = item.get("text", "")
             if text:
-                # Emit previous pending message as assistant, buffer this one
                 prev = turn_state.pending_assistant if turn_state else None
-                if prev:
+                text_is_visible = bool(strip_silent_blocks(text).strip())
+                prev_is_visible = bool(prev and strip_silent_blocks(prev[0]).strip())
+                if text_is_visible and prev_is_visible:
                     prev_text, prev_pm = prev
                     await self._agent.controller.emit_agent_message(
                         request.context,
@@ -252,7 +254,9 @@ class CodexEventHandler:
                         prev_text,
                         parse_mode=prev_pm or "markdown",
                     )
-                if turn_state:
+                # A silent terminal response may settle the turn, but it must
+                # not displace an earlier visible result candidate.
+                if turn_state and (text_is_visible or not prev_is_visible):
                     turn_state.pending_assistant = (text, "markdown")
 
         elif item_type == "commandExecution":
