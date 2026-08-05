@@ -932,22 +932,138 @@ class SessionTurnManager:
             raise RuntimeError("Session delivery context builder is not bound")
         return self._build_context(session_id)
 
-    def _delivery_backend(self, session_id: str, context: Optional["MessageContext"]) -> tuple[str, "MessageContext"]:
+    def _context_vibe_agent_binding(self, context: "MessageContext") -> dict[str, str]:
+        spec = getattr(context, "platform_specific", None) or {}
+        resolver = getattr(self.controller, "resolve_vibe_agent_for_context", None)
+        agent = None
+        if callable(resolver):
+            try:
+                agent = resolver(context, required=False)
+            except Exception:
+                logger.debug(
+                    "Failed to resolve inherited Vibe Agent before Session binding",
+                    exc_info=True,
+                )
+        if agent is not None:
+            return {
+                "agent_id": str(getattr(agent, "id", None) or "").strip(),
+                "agent_name": str(getattr(agent, "name", None) or "").strip(),
+                "agent_backend": str(getattr(agent, "backend", None) or "").strip(),
+            }
+        resolved = spec.get("resolved_vibe_agent")
+        if isinstance(resolved, dict):
+            return {
+                "agent_id": str(resolved.get("id") or "").strip(),
+                "agent_name": str(resolved.get("name") or "").strip(),
+                "agent_backend": str(resolved.get("backend") or "").strip(),
+            }
+        return {"agent_id": "", "agent_name": "", "agent_backend": ""}
+
+    @staticmethod
+    def _apply_session_binding_to_context(
+        context: "MessageContext",
+        binding: dict[str, Any],
+    ) -> None:
+        spec = dict(getattr(context, "platform_specific", None) or {})
+        target = spec.get("agent_session_target")
+        target = dict(target) if isinstance(target, dict) else {}
+        target.update(
+            {
+                "id": binding.get("id"),
+                "agent_id": binding.get("agent_id"),
+                "agent_name": binding.get("agent_name"),
+                "agent_backend": binding.get("agent_backend"),
+                "agent_variant": binding.get("agent_variant"),
+                "model": binding.get("model"),
+                "reasoning_effort": binding.get("reasoning_effort"),
+            }
+        )
+        spec["agent_session_target"] = target
+        if binding.get("agent_name"):
+            spec["vibe_agent_name"] = binding["agent_name"]
+        context.platform_specific = spec
+
+    def _delivery_backend(
+        self,
+        session_id: str,
+        context: Optional["MessageContext"],
+    ) -> tuple[str, "MessageContext"]:
         resolved = context or self._delivery_context(session_id)
+        columns = (
+            agent_sessions.c.id,
+            agent_sessions.c.agent_id,
+            agent_sessions.c.agent_name,
+            agent_sessions.c.agent_backend,
+            agent_sessions.c.agent_variant,
+            agent_sessions.c.model,
+            agent_sessions.c.reasoning_effort,
+            agent_sessions.c.status,
+        )
         with self._sqlite_engine().connect() as conn:
-            backend = str(
-                conn.execute(
-                    select(agent_sessions.c.agent_backend).where(
-                        agent_sessions.c.id == session_id
-                    )
-                ).scalar_one_or_none()
-                or ""
-            ).strip()
-        if not backend:
-            backend = self._context_backend(resolved)
-        if not backend:
+            binding = conn.execute(
+                select(*columns).where(agent_sessions.c.id == session_id)
+            ).mappings().one_or_none()
+        durable_backend = str((binding or {}).get("agent_backend") or "").strip()
+        if durable_backend:
+            self._apply_session_binding_to_context(resolved, dict(binding))
+            return durable_backend, resolved
+
+        resolved_agent = self._context_vibe_agent_binding(resolved)
+        requested_backend = (
+            resolved_agent["agent_backend"]
+            or self._context_backend(resolved)
+        )
+        if not requested_backend:
             raise RuntimeError(f"Session {session_id} has no resolved backend")
-        return backend, resolved
+
+        # An agentless Workbench Session is valid until its first turn resolves the
+        # global default Agent. Materialize that decision before crossing the runtime
+        # ownership gate; otherwise a queued Delivery is durable while its route is not.
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            binding = conn.execute(
+                select(*columns).where(agent_sessions.c.id == session_id)
+            ).mappings().one_or_none()
+            if (
+                binding is not None
+                and binding["status"] == "active"
+                and not str(binding["agent_backend"] or "").strip()
+            ):
+                values: dict[str, Any] = {
+                    "agent_backend": requested_backend,
+                    "updated_at": _utc_now_iso(),
+                }
+                if str(binding["agent_variant"] or "").strip() in {"", "default"}:
+                    values["agent_variant"] = requested_backend
+                if resolved_agent["agent_id"] and not binding["agent_id"]:
+                    values["agent_id"] = resolved_agent["agent_id"]
+                if resolved_agent["agent_name"] and not binding["agent_name"]:
+                    values["agent_name"] = resolved_agent["agent_name"]
+                conn.execute(
+                    update(agent_sessions)
+                    .where(agent_sessions.c.id == session_id)
+                    .where(agent_sessions.c.status == "active")
+                    .where(
+                        or_(
+                            agent_sessions.c.agent_backend == "",
+                            agent_sessions.c.agent_backend.is_(None),
+                        )
+                    )
+                    .values(**values)
+                )
+                binding = conn.execute(
+                    select(*columns).where(agent_sessions.c.id == session_id)
+                ).mappings().one_or_none()
+
+        if binding is not None:
+            binding_payload = dict(binding)
+            self._apply_session_binding_to_context(resolved, binding_payload)
+            durable_backend = str(binding_payload.get("agent_backend") or "").strip()
+            if durable_backend:
+                return durable_backend, resolved
+            if binding_payload.get("status") == "active":
+                raise RuntimeError(f"Session {session_id} has no durable backend binding")
+        return requested_backend, resolved
 
     @contextmanager
     def _runtime_start_owner(
@@ -1757,7 +1873,10 @@ class SessionTurnManager:
             request = replace(request, content=None)
         if request.priority == "p3" and not content_present:
             raise ValueError("P3 requires content")
-        backend, resolved_context = self._delivery_backend(request.session_id, context)
+        backend, resolved_context = self._delivery_backend(
+            request.session_id,
+            context,
+        )
         if request.priority == "p3":
             return await self._admit_p3(request, backend, resolved_context)
         if request.priority == "p1":
@@ -3224,7 +3343,7 @@ class SessionTurnManager:
                 or ""
             ).strip()
         if not backend:
-            raise RuntimeError(f"Session {session_id} has no resolved backend")
+            backend, _context = self._delivery_backend(session_id, None)
         with self._runtime_start_owner(session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             if backend in self._draining_backends:
