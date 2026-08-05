@@ -7110,7 +7110,8 @@ def backend_claude_auth_get():
 def backend_claude_auth_post():
     """Persist Claude auth and refresh cached Claude SDK sessions.
 
-    Body: ``{auth_mode: 'oauth'|'api_key', api_key?: string, base_url?: string}``.
+    Body: ``{auth_mode: 'oauth'|'api_key', api_key?: string,
+    credential_type?: 'api_key'|'auth_token', base_url?: string}``.
     Secrets live in Claude Code's own settings; V2Config records the selected
     mode, and the controller rolls its Claude runtime state after the write.
     """

@@ -293,6 +293,7 @@
         "hint": "Choose an Agent name without path separators."
       }
     },
+    "claudeCredentialTypeInvalid": "Choose either API key or auth token for the Claude Code credential.",
     "opencodeBackendError": "OpenCode error: {error}"
   },
   "success": {

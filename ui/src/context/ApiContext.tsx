@@ -1950,6 +1950,7 @@ export type CodexAuthSaveResult = CodexAuthState & {
 };
 
 export type ClaudeAuthMode = 'oauth' | 'api_key';
+export type ClaudeCredentialType = 'api_key' | 'auth_token';
 
 // Claude Code reads ``~/.claude/settings.json`` at launch and its ``env``
 // block wins over inherited process env. avibe therefore writes
@@ -1978,6 +1979,7 @@ export type ClaudeAuthState = {
   settings_env_has_key: boolean;
   settings_env_key_length: number;
   settings_env_key_var: 'ANTHROPIC_API_KEY' | 'ANTHROPIC_AUTH_TOKEN' | null;
+  credential_type: ClaudeCredentialType | null;
   settings_env_base_url: string | null;
   settings_conflict: boolean;
   message?: string;
@@ -1986,6 +1988,7 @@ export type ClaudeAuthState = {
 export type ClaudeAuthPayload = {
   auth_mode: ClaudeAuthMode;
   api_key?: string | null;
+  credential_type?: ClaudeCredentialType;
   base_url?: string | null;
 };
 

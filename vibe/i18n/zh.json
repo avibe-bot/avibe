@@ -293,6 +293,7 @@
         "hint": "请选择不含路径分隔符的 Agent 名称。"
       }
     },
+    "claudeCredentialTypeInvalid": "Claude Code 凭据类型只能选择 API Key 或 Auth Token。",
     "opencodeBackendError": "OpenCode 错误：{error}"
   },
   "success": {
