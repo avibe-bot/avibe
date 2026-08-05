@@ -3787,6 +3787,11 @@ class SessionTurnManager:
         )
         if result.get("changed"):
             self._publish_queue_update(session_id)
+            if not result.get("preserve_queue"):
+                asyncio.create_task(
+                    self._resume_after_native_terminal(session_id, turn_id),
+                    name=f"durable-terminal-resume:{session_id}",
+                )
         return bool(result.get("changed"))
 
     def _settle_durable_prewrite_failure(

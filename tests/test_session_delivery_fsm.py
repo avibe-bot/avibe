@@ -2573,19 +2573,16 @@ def test_exact_missing_start_attempt_requeues_only_its_own_delivery(managers) ->
     assert terminal["terminal_outcome"] == "not_written"
 
 
-def test_permanent_start_rejection_retires_delivery_without_retry(managers) -> None:
+@pytest.mark.anyio
+async def test_permanent_start_rejection_retires_delivery_without_retry(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
-    admitted = asyncio.run(
-        manager.deliver(
-            DeliveryRequest(session_id="ses_fsm", priority="p3", content="invalid payload"),
-            context=_context(),
-        )
+    admitted = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="invalid payload"),
+        context=_context(),
     )
-    following = asyncio.run(
-        manager.deliver(
-            DeliveryRequest(session_id="ses_fsm", priority="p3", content="continue FIFO"),
-            context=_context(),
-        )
+    following = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="continue FIFO"),
+        context=_context(),
     )
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, str(admitted.turn_id))
@@ -2609,7 +2606,7 @@ def test_permanent_start_rejection_retires_delivery_without_retry(managers) -> N
     assert terminal is not None
     assert terminal["terminal_outcome"] == "not_written"
 
-    asyncio.run(manager._resume_post_terminal("ses_fsm"))
+    await asyncio.sleep(0)
     assert _row(engine, str(following.delivery_id))["state"] == "claimed"
     assert starts[-1][1] == "continue FIFO"
 

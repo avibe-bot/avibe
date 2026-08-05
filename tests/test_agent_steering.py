@@ -659,6 +659,39 @@ async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> 
 
 
 @pytest.mark.anyio
+async def test_opencode_reconciles_legacy_native_attempt_without_resteering() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    attempt_id = "atm_legacy_restart_evidence"
+    server = _OpenCodeServer(
+        messages=[
+            {"info": {"id": attempt_id, "role": "user"}, "parts": []},
+        ]
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        reconciled = await reconcile_steer_attempt(
+            controller,
+            "opencode",
+            SteerReconcileRequest(
+                target_session_id="avibe-session",
+                expected_logical_turn_id=identity[0],
+                expected_native_turn_id=identity[1],
+                attempt_id=attempt_id,
+            ),
+        )
+
+        assert reconciled.outcome is SteerOutcome.ACCEPTED
+        assert reconciled.details["native_message_id"] == attempt_id
+        assert server.prompt_calls == []
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
 async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()

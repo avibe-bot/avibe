@@ -68,6 +68,19 @@ def native_message_id_for_attempt(attempt_id: str) -> str:
     return f"msg{value[3:]}"
 
 
+def native_message_ids_for_attempt(attempt_id: str) -> tuple[str, ...]:
+    """Return current and legacy native identities for exact evidence reads."""
+
+    value = str(attempt_id or "").strip()
+    if not value:
+        return ()
+    try:
+        current = native_message_id_for_attempt(value)
+    except ValueError:
+        return (value,)
+    return (current, value) if current != value else (value,)
+
+
 class OpenCodePromptRejectedError(RuntimeError):
     """Definitive HTTP rejection from OpenCode's async prompt endpoint."""
 
