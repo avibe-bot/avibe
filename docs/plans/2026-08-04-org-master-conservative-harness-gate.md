@@ -35,15 +35,23 @@ entitlement mirror before remote recurring execution can be enabled.
 
 1. The signed HTTP session projects remote `can_chat`, terminal, file, and
    system execution capabilities as false.
-2. The UI server rejects remote message dispatch, Show-event Agent dispatch,
-   Agent-definition and instruction mutations, model/backend mutations and
-   runtime operations, service control, local installers, terminal sockets,
+2. The central HTTP authorization policy defaults every unclassified remote API
+   route to trusted-local access. It explicitly permits approved remote reads and
+   management routes, and rejects remote message dispatch, Show-event Agent
+   dispatch, Agent-definition and instruction mutations, model/backend mutations
+   and runtime operations, service control, local installers, terminal sockets,
    file operations including Show Page icon uploads, and Harness definition
-   mutations before invoking their underlying services. The same boundary also
-   rejects payloads that persist future execution choices: Session Agent/model
-   overrides, Project creation/workdir/default Agent, channel/thread/
-   user cwd or routing, and Agent/platform/runtime config sections. Metadata-only
-   Session and Project edits and unrelated UI/config preferences remain available.
+   mutations before invoking their underlying services. Local logs and Doctor
+   reports/diagnostics are also trusted-local because they expose machine paths,
+   process state, prompts, command output, and potentially credentials. The same
+   policy payload-filters routes that persist future execution choices with
+   explicit safe-field allowlists: Session Agent/model overrides, Project
+   creation/workdir/default Agent, channel/thread/user cwd or routing, and
+   Agent/platform/runtime config sections. Unknown fields fail closed. Complete
+   config round-trips may preserve protected values but cannot change them, and
+   protected fields are stripped before persistence so a concurrent local update
+   cannot be overwritten by a stale remote round-trip. Explicit Session/Project
+   display fields and explicit UI/config preferences remain available.
 3. The durable Delivery owner retires remote-origin queue entries before the
    FIFO claim that starts an Agent turn.
 4. Task and Watch stores reject explicit remote definition writes.
@@ -73,10 +81,15 @@ substitute for either dependency.
 - Remote service control, installers, Agent-definition mutations, model/backend
   mutations and probes, and Show Page icon writes fail before reaching their
   local runtime or filesystem services.
+- Remote logs, Doctor reads/runs, UI reloads, and legacy OpenCode helpers fail
+  before any file read, diagnostic, process spawn, service exit, or config write.
+- An unknown owner-only API route is trusted-local by default; remote exposure
+  requires an exact method/path policy entry and regression evidence. A new path
+  under an already approved namespace does not inherit remote access.
 - Remote execution-setting writes through Session, Project, channel, thread,
   user, and config routes fail before any store save, runtime reconciliation, or
-  restart scheduling; Session titles, Project display names, and unrelated UI
-  preferences remain writable.
+  restart scheduling; unknown payload fields fail closed, while Session titles,
+  Project display names, and explicitly allowlisted UI preferences remain writable.
 - Paired Project synchronization never forwards the device secret through an
   HTTP redirect.
 - Remote Task and Watch add/update calls produce no definition write.

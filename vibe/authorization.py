@@ -36,6 +36,16 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
 )
 _EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated", "show.event"})
 
+REMOTE_HTTP_ALLOWED = "allowed"
+REMOTE_HTTP_LOCAL_ONLY = "local_only"
+REMOTE_HTTP_PAYLOAD_FILTERED = "payload_filtered"
+
+
+@dataclass(frozen=True)
+class HttpAuthorizationPolicy:
+    minimum_role: str | None
+    remote_access: str = REMOTE_HTTP_ALLOWED
+
 
 @dataclass(frozen=True)
 class AuthorizationContext:
@@ -324,6 +334,180 @@ _EDITOR_HTTP_RULES = tuple(
     )
 )
 
+_REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("DELETE", r"^/api/sessions/[^/]+(?:/queue/[^/]+)?$"),
+        (
+            "POST",
+            r"^/api/sessions/[^/]+/(?:messages|attachments|cancel|queue/[^/]+/send-now)$",
+        ),
+        ("POST", r"^/api/asr/transcribe$"),
+        ("POST", r"^/api/show/sessions/[^/]+/(?:events|prewarm)$"),
+    )
+)
+
+_REMOTE_PAYLOAD_FILTERED_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        (
+            "POST",
+            r"^/api/(?:config|projects|sessions|settings|settings/thread|users)$",
+        ),
+        ("PATCH", r"^/api/(?:projects|sessions)/[^/]+$"),
+    )
+)
+
+_REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
+    (methods, re.compile(pattern))
+    for methods, pattern in (
+        (frozenset({"GET", "HEAD", "POST"}), r"^/api/agent-onboarding$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/(?:agents/[^/]+|agents-graph|running-agents|settings)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|settings|vmk|requests|requests/[^/]+|provision-requests/[^/]+|provision-requests/by-id/[^/]+|grants|audit)$",
+        ),
+        (
+            frozenset({"POST"}),
+            r"^/api/vault/(?:agent-bindings:batch|agent-binding|authz/factors/webauthn/options|authz/factors/webauthn|signing-addresses|secrets|secrets/[^/]+/reveal-context|requests/[^/]+/deny|requests/[^/]+/fulfill-access|grants|sign|pubkey-pin)$",
+        ),
+        (
+            frozenset({"PATCH"}),
+            r"^/api/vault/(?:settings|secrets/[^/]+)$",
+        ),
+        (
+            frozenset({"DELETE"}),
+            r"^/api/vault/(?:secrets/[^/]+|grants/[^/]+)$",
+        ),
+        (
+            frozenset({"POST"}),
+            r"^/api/show-pages/[^/]+/(?:ensure|rotate-share|share-id|visibility)$",
+        ),
+        (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
+        (frozenset({"POST"}), r"^/api/dock/pins$"),
+        (frozenset({"DELETE"}), r"^/api/dock/pins/[^/]+$"),
+        (frozenset({"PUT"}), r"^/api/dock/order$"),
+        (frozenset({"PUT"}), r"^/api/workbench/prefs$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/web-push/(?:status|vapid-public-key)$",
+        ),
+        (
+            frozenset({"POST"}),
+            r"^/api/web-push/(?:status|subscriptions|test)$",
+        ),
+        (frozenset({"DELETE"}), r"^/api/web-push/subscriptions$"),
+        (
+            frozenset({"PUT"}),
+            r"^/api/resource-policies/[^/]+/[^/]+$",
+        ),
+        (frozenset({"DELETE"}), r"^/api/projects/[^/]+$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/(?:projects/[^/]+/agents-md|global-prompts)$",
+        ),
+        (frozenset({"POST"}), r"^/api/skills/preview$"),
+        (frozenset({"GET", "HEAD"}), r"^/api/skills/(?:check|find)$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/models/(?:sources|agents|events|runtime/status)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/models/agents/[^/]+/(?:sources|chain)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/models/(?:turns/[^/]+/provenance|oauth/status/[^/]+)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/backend/(?:[^/]+/runtime|(?:claude|codex)/auth|[^/]+/auth/oauth/status/[^/]+)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/(?:opencode/permission-status|remote-access/status)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/harness/(?:counts|tasks|watches|runs|bootstrap|runs/[^/]+)$",
+        ),
+        (frozenset({"GET", "HEAD"}), r"^/api/users$"),
+        (frozenset({"POST"}), r"^/api/users/[^/]+/admin$"),
+        (frozenset({"DELETE"}), r"^/api/users/[^/]+$"),
+        (frozenset({"GET", "HEAD", "POST"}), r"^/api/bind-codes$"),
+        (frozenset({"DELETE"}), r"^/api/bind-codes/[^/]+$"),
+    )
+)
+
+
+def _http_rule_matches(
+    method: str,
+    path: str,
+    rules: tuple[tuple[str, re.Pattern[str]], ...],
+) -> bool:
+    return any(rule_method == method and pattern.fullmatch(path) for rule_method, pattern in rules)
+
+
+def _owner_http_rule_matches(method: str, path: str) -> bool:
+    return any(
+        method in methods and pattern.fullmatch(path)
+        for methods, pattern in _REMOTE_OWNER_ALLOWED_HTTP_RULES
+    )
+
+
+def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy:
+    """Return role and remote-exposure policy for one HTTP request.
+
+    Explicit viewer/editor and owner-management routes keep their approved remote
+    behavior. Unknown API routes fail closed to trusted-local callers so adding a
+    new owner-only endpoint cannot silently expose local machine capabilities.
+    """
+
+    normalized_method = method.upper()
+    # Organization management is an explicit Cloud proxy namespace. Cloud user
+    # identity and object authorization are re-evaluated by that boundary.
+    if path.startswith("/api/cloud-management/"):
+        return HttpAuthorizationPolicy("viewer")
+    if path.startswith("/show/"):
+        minimum_role = (
+            "viewer" if normalized_method in {"GET", "HEAD", "OPTIONS"} else "editor"
+        )
+        return HttpAuthorizationPolicy(minimum_role)
+    if not path.startswith("/api/"):
+        return HttpAuthorizationPolicy(None)
+
+    minimum_role = "owner"
+    for rule_method, pattern in _EDITOR_HTTP_RULES:
+        if normalized_method == rule_method and pattern.fullmatch(path):
+            minimum_role = "editor"
+            break
+    else:
+        if normalized_method in {"GET", "HEAD", "OPTIONS"} and any(
+            pattern.fullmatch(path) for pattern in _VIEWER_HTTP_RULES
+        ):
+            minimum_role = "viewer"
+
+    if _http_rule_matches(normalized_method, path, _REMOTE_LOCAL_ONLY_HTTP_RULES):
+        remote_access = REMOTE_HTTP_LOCAL_ONLY
+    elif _http_rule_matches(
+        normalized_method,
+        path,
+        _REMOTE_PAYLOAD_FILTERED_HTTP_RULES,
+    ):
+        remote_access = REMOTE_HTTP_PAYLOAD_FILTERED
+    elif minimum_role in {"viewer", "editor"} or _owner_http_rule_matches(
+        normalized_method,
+        path,
+    ):
+        remote_access = REMOTE_HTTP_ALLOWED
+    else:
+        remote_access = REMOTE_HTTP_LOCAL_ONLY
+    return HttpAuthorizationPolicy(minimum_role, remote_access)
+
 
 def required_instance_role(method: str, path: str) -> str | None:
     """Return the minimum role for a remote HTTP request.
@@ -333,21 +517,4 @@ def required_instance_role(method: str, path: str) -> str | None:
     cannot accidentally become available to editors or viewers.
     """
 
-    normalized_method = method.upper()
-    # Organization management establishes and evaluates a separate Cloud user
-    # identity. Any authenticated Instance viewer may enter that identity gate;
-    # the Cloud service then re-evaluates Organization role and object ownership
-    # for every read and mutation.
-    if path.startswith("/api/cloud-management/"):
-        return "viewer"
-    if path.startswith("/show/"):
-        return "viewer" if normalized_method in {"GET", "HEAD", "OPTIONS"} else "editor"
-    if not path.startswith("/api/"):
-        return None
-    for rule_method, pattern in _EDITOR_HTTP_RULES:
-        if normalized_method == rule_method and pattern.fullmatch(path):
-            return "editor"
-    if normalized_method in {"GET", "HEAD", "OPTIONS"}:
-        if any(pattern.fullmatch(path) for pattern in _VIEWER_HTTP_RULES):
-            return "viewer"
-    return "owner"
+    return http_authorization_policy(method, path).minimum_role

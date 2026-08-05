@@ -2216,9 +2216,11 @@ def enforce_remote_access_cookie():
 def enforce_instance_role_capabilities():
     if _remote_auth_exempt_path():
         return None
-    from vibe.authorization import required_instance_role
+    from vibe.authorization import http_authorization_policy
 
-    minimum_role = required_instance_role(request.method, request.path)
+    policy = http_authorization_policy(request.method, request.path)
+    g.http_authorization_policy = policy
+    minimum_role = policy.minimum_role
     if minimum_role is None:
         return None
     context = getattr(g, "authorization_context", None)
@@ -2233,50 +2235,55 @@ def enforce_instance_role_capabilities():
     return None
 
 
-_SESSION_EXECUTION_SETTING_FIELDS = frozenset(
+_REMOTE_CONFIG_MUTABLE_FIELDS = frozenset(
     {
-        "agent_backend",
-        "agent_id",
-        "agent_name",
-        "agent_variant",
-        "model",
-        "reasoning_effort",
-        "scope_id",
+        "ack_mode",
+        "agent_progress_style",
+        "agent_status_heartbeat_ms",
+        "agent_status_no_output_ms",
+        "include_time_info",
+        "include_user_info",
+        "language",
+        "reply_enhancements",
+        "show_duration",
     }
 )
-_PROJECT_EXECUTION_SETTING_FIELDS = frozenset(
+_REMOTE_UI_CONFIG_MUTABLE_FIELDS = frozenset(
     {
-        "agent_backend",
-        "agent_id",
-        "agent_name",
-        "agent_variant",
-        "expected_agent_id",
-        "folder_path",
-        "model",
-        "reasoning_effort",
+        "chat_message_font_size",
+        "instance_name",
+        "show_agent_activity",
+        "show_tool_calls",
     }
 )
-_SCOPE_EXECUTION_SETTING_FIELDS = frozenset(
-    {"custom_cwd", "expected_agent_name", "routing"}
+_REMOTE_CHANNEL_SETTING_FIELDS = frozenset(
+    {"enabled", "require_bind", "require_mention", "show_message_types"}
 )
-_CONFIG_EXECUTION_SETTING_FIELDS = frozenset(
+_REMOTE_SETTINGS_FIELDS = frozenset(
     {
-        "agents",
-        "audio_asr",
-        "gateway",
-        "memory",
-        "model_hub",
+        "channels",
+        "guild_allowlist",
+        "guild_default_enabled",
+        "guilds",
         "platform",
-        "platforms",
-        "runtime",
-        "show_pages_prompt",
-        "update",
+    }
+)
+_REMOTE_THREAD_SETTINGS_FIELDS = frozenset(
+    {"channel_id", "platform", "settings", "thread_id"}
+)
+_REMOTE_USER_SETTING_FIELDS = frozenset(
+    {
+        "bound_at",
+        "display_name",
+        "enabled",
+        "is_admin",
+        "show_message_types",
     }
 )
 
 
-def _payload_has_any_field(payload: Any, fields: frozenset[str] | set[str]) -> bool:
-    return isinstance(payload, dict) and not fields.isdisjoint(payload)
+def _payload_has_only_fields(payload: Any, fields: frozenset[str] | set[str]) -> bool:
+    return isinstance(payload, dict) and set(payload).issubset(fields)
 
 
 def _payload_changes_values(payload: Any, current: Any) -> bool:
@@ -2284,7 +2291,7 @@ def _payload_changes_values(payload: Any, current: Any) -> bool:
 
     Config saves accept both complete UI round-trips and partial updates. Comparing
     only supplied leaves lets an unchanged complete payload pass while still
-    rejecting a remote caller that changes any execution-sensitive value.
+    rejecting a remote caller that changes any protected value.
     """
 
     if isinstance(payload, dict):
@@ -2297,146 +2304,167 @@ def _payload_changes_values(payload: Any, current: Any) -> bool:
     return payload != current
 
 
-def _config_execution_setting_fields() -> set[str]:
-    from config.platform_registry import im_platform_descriptors
+def _remote_config_payload_is_allowed(payload: Any) -> bool:
+    """Allow explicit UI/message preferences and unchanged config round-trips.
 
-    return set(_CONFIG_EXECUTION_SETTING_FIELDS) | {
-        descriptor.config_key for descriptor in im_platform_descriptors()
+    Every other current or future config field is protected. A full payload from
+    GET /api/config remains valid only while all protected values are unchanged.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    from vibe import api
+
+    current = _load_remote_access_config()
+    if current is None:
+        return False
+    # Compare the request with the same JSON representation the browser received;
+    # catalog tuples become arrays on the wire and must not look like mutations.
+    current_payload = json.loads(json.dumps(api.config_to_payload(current)))
+    for field, value in payload.items():
+        if field in _REMOTE_CONFIG_MUTABLE_FIELDS:
+            continue
+        if field == "ui":
+            if not isinstance(value, dict):
+                return False
+            current_ui = current_payload.get("ui")
+            if not isinstance(current_ui, dict):
+                return False
+            if any(
+                ui_field not in _REMOTE_UI_CONFIG_MUTABLE_FIELDS
+                and (
+                    ui_field not in current_ui
+                    or _payload_changes_values(ui_value, current_ui[ui_field])
+                )
+                for ui_field, ui_value in value.items()
+            ):
+                return False
+            continue
+        if field not in current_payload or _payload_changes_values(
+            value,
+            current_payload[field],
+        ):
+            return False
+    return True
+
+
+def _remote_mutable_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Strip unchanged protected config fields before the persistence boundary."""
+
+    mutable = {
+        field: value
+        for field, value in payload.items()
+        if field in _REMOTE_CONFIG_MUTABLE_FIELDS
     }
+    ui = payload.get("ui")
+    if isinstance(ui, dict):
+        mutable_ui = {
+            field: value
+            for field, value in ui.items()
+            if field in _REMOTE_UI_CONFIG_MUTABLE_FIELDS
+        }
+        if mutable_ui:
+            mutable["ui"] = mutable_ui
+    return mutable
 
 
-def _remote_execution_payload_route(method: str, path: str) -> bool:
-    normalized_method = method.upper()
-    if normalized_method == "POST" and path in {
-        "/api/config",
-        "/api/projects",
-        "/api/sessions",
-        "/api/settings",
-        "/api/settings/thread",
-        "/api/users",
-    }:
-        return True
-    return normalized_method == "PATCH" and bool(
-        re.fullmatch(r"/api/(?:projects|sessions)/[^/]+", path)
+def _remote_scope_collection_is_allowed(
+    payload: Any,
+    *,
+    item_fields: frozenset[str],
+) -> bool:
+    return isinstance(payload, dict) and all(
+        _payload_has_only_fields(item, item_fields) for item in payload.values()
     )
 
 
-def _payload_selects_remote_local_execution(method: str, path: str, payload: Any) -> bool:
+def _remote_settings_payload_is_allowed(payload: Any) -> bool:
+    if not _payload_has_only_fields(payload, _REMOTE_SETTINGS_FIELDS):
+        return False
+    if "channels" in payload and not _remote_scope_collection_is_allowed(
+        payload.get("channels"),
+        item_fields=_REMOTE_CHANNEL_SETTING_FIELDS,
+    ):
+        return False
+    if "guilds" in payload and not _remote_scope_collection_is_allowed(
+        payload.get("guilds"),
+        item_fields=frozenset({"enabled"}),
+    ):
+        return False
+    return True
+
+
+def _remote_payload_is_allowed(method: str, path: str, payload: Any) -> bool:
     normalized_method = method.upper()
     if normalized_method == "POST" and path == "/api/config":
-        if not isinstance(payload, dict):
-            return False
-        sensitive_fields = _config_execution_setting_fields()
-        supplied_sensitive = sensitive_fields.intersection(payload)
-        if not supplied_sensitive:
-            return False
-        from vibe import api
-
-        current = _load_remote_access_config()
-        if current is None:
-            return True
-        current_payload = api.config_to_payload(current)
-        return any(
-            _payload_changes_values(payload[field], current_payload.get(field))
-            for field in supplied_sensitive
-        )
+        return _remote_config_payload_is_allowed(payload)
     if normalized_method == "POST" and path == "/api/sessions":
-        return _payload_has_any_field(payload, _SESSION_EXECUTION_SETTING_FIELDS)
+        return _payload_has_only_fields(payload, {"project_id", "title"})
     if normalized_method == "PATCH" and re.fullmatch(r"/api/sessions/[^/]+", path):
-        return _payload_has_any_field(payload, _SESSION_EXECUTION_SETTING_FIELDS)
+        return _payload_has_only_fields(payload, {"pinned", "title", "visibility"})
     if normalized_method == "PATCH" and re.fullmatch(r"/api/projects/[^/]+", path):
-        return _payload_has_any_field(payload, _PROJECT_EXECUTION_SETTING_FIELDS)
+        return _payload_has_only_fields(payload, {"display_name"})
     if normalized_method == "POST" and path == "/api/settings":
-        channels = payload.get("channels") if isinstance(payload, dict) else None
-        return isinstance(channels, dict) and any(
-            _payload_has_any_field(channel, _SCOPE_EXECUTION_SETTING_FIELDS)
-            for channel in channels.values()
-            if isinstance(channel, dict)
-        )
+        return _remote_settings_payload_is_allowed(payload)
     if normalized_method == "POST" and path == "/api/settings/thread":
-        settings = payload.get("settings") if isinstance(payload, dict) else None
-        return _payload_has_any_field(settings, _SCOPE_EXECUTION_SETTING_FIELDS)
+        if not _payload_has_only_fields(payload, _REMOTE_THREAD_SETTINGS_FIELDS):
+            return False
+        return _payload_has_only_fields(
+            payload.get("settings"),
+            _REMOTE_CHANNEL_SETTING_FIELDS,
+        )
     if normalized_method == "POST" and path == "/api/users":
-        users = payload.get("users") if isinstance(payload, dict) else None
-        return isinstance(users, dict) and any(
-            _payload_has_any_field(user, _SCOPE_EXECUTION_SETTING_FIELDS)
-            for user in users.values()
-            if isinstance(user, dict)
+        if not _payload_has_only_fields(payload, {"platform", "users"}):
+            return False
+        return _remote_scope_collection_is_allowed(
+            payload.get("users"),
+            item_fields=_REMOTE_USER_SETTING_FIELDS,
         )
     if normalized_method == "POST" and path == "/api/projects":
-        return _payload_has_any_field(payload, {"folder_path"})
+        return _payload_has_only_fields(payload, {"display_name"})
     return False
 
 
 def _is_remote_local_execution_request(method: str, path: str, payload: Any = None) -> bool:
-    normalized_method = method.upper()
-    is_mutation = normalized_method not in {"GET", "HEAD", "OPTIONS"}
-    if path.startswith(("/api/files/", "/api/browse")):
+    from vibe.authorization import (
+        REMOTE_HTTP_LOCAL_ONLY,
+        REMOTE_HTTP_PAYLOAD_FILTERED,
+        http_authorization_policy,
+    )
+
+    remote_access = http_authorization_policy(method, path).remote_access
+    if remote_access == REMOTE_HTTP_LOCAL_ONLY:
         return True
-    if path.startswith("/api/terminal/"):
-        return True
-    if is_mutation and path.startswith(("/api/harness/", "/api/models/", "/api/backend/")):
-        return True
-    if normalized_method == "POST" and re.fullmatch(r"/api/show-pages/[^/]+/icon", path):
-        return True
-    if normalized_method == "POST" and path == "/api/running-agents/end":
-        return True
-    if normalized_method == "POST" and path in {
-        "/api/agents",
-        "/api/agents/default",
-        "/api/agents/import",
-        "/api/control",
-        "/api/skills",
-        "/api/skills/update",
-        "/api/skills/upload",
-        "/api/upgrade",
-    }:
-        return True
-    if normalized_method == "POST" and re.fullmatch(
-        r"/api/(?:agent/[^/]+|dependencies/[^/]+)/install",
-        path,
-    ):
-        return True
-    if normalized_method in {"PATCH", "DELETE"} and re.fullmatch(
-        r"/api/agents/[^/]+",
-        path,
-    ):
-        return True
-    if normalized_method == "PUT" and (
-        path == "/api/global-prompts"
-        or re.fullmatch(r"/api/projects/[^/]+/agents-md", path)
-    ):
-        return True
-    if normalized_method == "DELETE" and (
-        re.fullmatch(r"/api/skills/[^/]+", path)
-        or re.fullmatch(r"/api/sessions/[^/]+(?:/queue/[^/]+)?", path)
-        or path == "/api/settings/thread"
-    ):
-        return True
-    if normalized_method == "POST" and bool(
-        re.fullmatch(
-            r"/api/sessions/[^/]+/(?:messages|attachments|cancel|queue/[^/]+/send-now)",
-            path,
-        )
-    ):
-        return True
-    return _payload_selects_remote_local_execution(method, path, payload)
+    if remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
+        return False
+    return not _remote_payload_is_allowed(method, path, payload)
 
 
 @app.before_request
 async def enforce_remote_local_execution_boundary():
-    """Keep shell-capable Workbench surfaces on the trusted-local origin."""
+    """Keep unapproved local-machine capabilities on the trusted-local origin."""
 
     context = getattr(g, "authorization_context", None)
     if context is None or not context.is_remote:
         return None
-    if _is_remote_local_execution_request(request.method, request.path):
+    from vibe.authorization import (
+        REMOTE_HTTP_LOCAL_ONLY,
+        REMOTE_HTTP_PAYLOAD_FILTERED,
+        http_authorization_policy,
+    )
+
+    policy = getattr(g, "http_authorization_policy", None)
+    if policy is None:
+        policy = http_authorization_policy(request.method, request.path)
+    if policy.remote_access == REMOTE_HTTP_LOCAL_ONLY:
         return _remote_execution_disabled_response()
-    if not _remote_execution_payload_route(request.method, request.path):
+    if policy.remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
         return None
     payload = await request.load_json()
     if _is_remote_local_execution_request(request.method, request.path, payload):
         return _remote_execution_disabled_response()
+    if request.method == "POST" and request.path == "/api/config":
+        g.remote_mutable_config_payload = _remote_mutable_config_payload(payload)
     return None
 
 
@@ -5370,7 +5398,12 @@ async def config_post():
     from vibe import internal_client
     from vibe import remote_access
 
-    payload = request.json or {}
+    remote_mutable_payload = getattr(g, "remote_mutable_config_payload", None)
+    payload = (
+        remote_mutable_payload
+        if remote_mutable_payload is not None
+        else request.json or {}
+    )
     remote_access_runtime = None
     try:
         (

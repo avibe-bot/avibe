@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import socket
 import asyncio
@@ -1094,6 +1095,11 @@ def test_remote_thread_scope_settings_are_blocked_before_store_access(monkeypatc
     [
         {"agents": {"codex": {"cli_path": "/tmp/remote-codex"}}},
         {"platforms": {"enabled": ["telegram"], "primary": "telegram"}},
+        {"remote_access": {"provider": "none"}},
+        {"ui": {"setup_host": "0.0.0.0"}},
+        {"update": {"auto_update": False}},
+        {"show_pages_prompt": "follow remote instructions"},
+        {"future_runtime": {"enabled": True}},
     ],
 )
 def test_remote_execution_config_changes_are_blocked_before_runtime_reconcile(
@@ -1136,6 +1142,109 @@ def test_remote_session_and_project_metadata_predicates_remain_allowed():
     assert not ui_server._is_remote_local_execution_request(
         "PATCH", "/api/projects/proj-local", {"display_name": "renamed"}
     )
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("POST", "/api/sessions", None),
+        ("POST", "/api/sessions", {"project_id": "proj-1", "future_route": "codex"}),
+        ("PATCH", "/api/sessions/ses-1", {"title": "renamed", "future_route": "codex"}),
+        ("POST", "/api/projects", {"display_name": "Project", "future_workdir": "/tmp"}),
+        ("PATCH", "/api/projects/proj-1", {"display_name": "Project", "future_route": "codex"}),
+        (
+            "POST",
+            "/api/settings",
+            {"platform": "slack", "channels": {"C1": {"enabled": True, "future_route": "codex"}}},
+        ),
+        (
+            "POST",
+            "/api/settings/thread",
+            {
+                "platform": "telegram",
+                "channel_id": "C1",
+                "thread_id": "T1",
+                "settings": {"enabled": True, "future_route": "codex"},
+            },
+        ),
+        (
+            "POST",
+            "/api/users",
+            {"platform": "slack", "users": {"U1": {"enabled": True, "future_route": "codex"}}},
+        ),
+    ],
+)
+def test_remote_payload_filtered_routes_reject_unknown_fields(method, path, payload):
+    assert ui_server._is_remote_local_execution_request(method, path, payload)
+
+
+def test_remote_config_allows_only_explicit_preferences_and_unchanged_round_trip(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+
+    assert not ui_server._is_remote_local_execution_request(
+        "POST",
+        "/api/config",
+        {"language": "zh", "ui": {"instance_name": "Remote label"}},
+    )
+    assert not ui_server._is_remote_local_execution_request(
+        "POST",
+        "/api/config",
+        json.loads(json.dumps(api.config_to_payload(config))),
+    )
+    assert ui_server._is_remote_local_execution_request(
+        "POST",
+        "/api/config",
+        {"ui": {"future_setting": True}},
+    )
+
+
+def test_remote_config_strips_protected_round_trip_fields_before_persistence(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+    payload = json.loads(json.dumps(api.config_to_payload(config)))
+    payload["language"] = "zh"
+    observed = []
+
+    def save_config(remote_payload):
+        observed.append(remote_payload)
+        return config, False, False, []
+
+    monkeypatch.setattr(ui_server, "_save_config_and_runtime_decisions", save_config)
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda _config: None)
+    response = client.post(
+        "/api/config",
+        json=payload,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    assert len(observed) == 1
+    assert observed[0]["language"] == "zh"
+    assert observed[0]["ui"] == {
+        field: payload["ui"][field]
+        for field in ui_server._REMOTE_UI_CONFIG_MUTABLE_FIELDS
+    }
+    assert set(observed[0]).issubset(
+        ui_server._REMOTE_CONFIG_MUTABLE_FIELDS | {"ui"}
+    )
+    assert "runtime" not in observed[0]
+    assert "agents" not in observed[0]
+    assert "remote_access" not in observed[0]
 
 
 def test_remote_session_archive_is_blocked_before_store_access(
@@ -1209,6 +1318,51 @@ def test_remote_system_operations_are_blocked_before_runtime_calls(
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body", "call_target"),
+    [
+        ("GET", "/api/doctor", None, "vibe.ui_server.paths.get_runtime_doctor_path"),
+        ("POST", "/api/doctor", {}, "vibe.cli._doctor"),
+        ("POST", "/api/logs", {}, "vibe.ui_server._resolve_log_sources"),
+        ("POST", "/api/ui/reload", {"host": "127.0.0.1", "port": 5123}, "vibe.runtime.read_status"),
+        ("POST", "/api/opencode/options", {"cwd": "/tmp/remote"}, "vibe.api.opencode_options_async"),
+        ("POST", "/api/opencode/setup-permission", {}, "vibe.api.setup_opencode_permission"),
+    ],
+)
+def test_remote_diagnostics_and_legacy_system_helpers_are_blocked_before_local_access(
+    monkeypatch,
+    tmp_path,
+    method,
+    path,
+    json_body,
+    call_target,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_local_access(*args, **kwargs):
+        raise AssertionError(f"remote request reached local capability: {path}")
+
+    monkeypatch.setattr(call_target, unexpected_local_access)
+    request_kwargs = {
+        "headers": csrf_headers(client, "https://alex.avibe.bot"),
+        "base_url": "https://alex.avibe.bot",
+        "environ_base": _remote_peer(),
+    }
+    if json_body is not None:
+        request_kwargs["json"] = json_body
+    response = client.request(method, path, **request_kwargs)
 
     assert response.status_code == 403
     assert response.get_json()["code"] == "remote_execution_disabled"
