@@ -777,6 +777,34 @@ def test_remote_generic_config_omits_memory_projection(monkeypatch, tmp_path):
     assert "memory" not in response.get_json()
 
 
+def test_remote_config_uses_the_safe_projection_for_an_instance_owner(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    config.runtime.default_cwd = "/private/local-agent-workdir"
+    config.agents.codex.cli_path = "/opt/avibe/bin/codex"
+    config.save()
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner", role="owner"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        "/api/config",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["mode"] == "self_host"
+    assert payload["ui"]["instance_name"] == config.ui.instance_name
+    assert "runtime" not in payload
+    assert "agents" not in payload
+    assert "memory" not in payload
+
+
 def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -1656,11 +1684,12 @@ def test_remote_im_user_mutations_are_blocked_before_api_calls(
 @pytest.mark.parametrize(
     ("method", "path", "json_body", "api_method"),
     [
+        ("GET", "/api/bind-codes", None, "get_bind_codes"),
         ("POST", "/api/bind-codes", {"type": "one_time"}, "create_bind_code"),
         ("DELETE", "/api/bind-codes/CODE1", None, "delete_bind_code"),
     ],
 )
-def test_remote_bind_code_mutations_are_blocked_before_api_calls(
+def test_remote_bind_code_operations_are_blocked_before_api_calls(
     monkeypatch,
     tmp_path,
     method,
@@ -1678,13 +1707,40 @@ def test_remote_bind_code_mutations_are_blocked_before_api_calls(
     )
 
     def unexpected_bind_code_call(*args, **kwargs):
-        raise AssertionError("remote bind-code mutation reached the local auth store")
+        raise AssertionError("remote bind-code operation reached the local auth store")
 
     monkeypatch.setattr(api, api_method, unexpected_bind_code_call)
     response = client.request(
         method,
         path,
         json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_project_archive_is_blocked_before_project_store(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner", role="owner"),
+        domain="alex.avibe.bot",
+    )
+    monkeypatch.setattr(
+        "storage.projects_service.archive_project",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("remote project archive reached the local project store")
+        ),
+    )
+
+    response = client.delete(
+        "/api/projects/proj-local",
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),

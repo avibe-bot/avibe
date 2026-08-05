@@ -1129,6 +1129,39 @@ def client_config_payload(config: V2Config) -> dict:
     return payload
 
 
+_REMOTE_CONFIG_UI_FIELDS = (
+    "instance_name",
+    "default_instance_name",
+    "chat_message_font_size",
+    "show_agent_activity",
+    "show_tool_calls",
+)
+
+
+def remote_config_payload(config: V2Config) -> dict:
+    """Return the explicit remote-safe projection of generic configuration.
+
+    Instance role determines which remote routes a caller may use, but it does
+    not make the caller trusted to inspect local filesystem layout, executable
+    paths, or runtime configuration. Keep this as an allowlist so new local
+    settings remain local by default.
+    """
+
+    payload = client_config_payload(config)
+    ui_payload = payload.get("ui")
+    return {
+        "mode": payload.get("mode"),
+        "version": payload.get("version"),
+        "setup_state": payload.get("setup_state"),
+        "language": payload.get("language"),
+        "ui": {
+            key: ui_payload[key]
+            for key in _REMOTE_CONFIG_UI_FIELDS
+            if isinstance(ui_payload, dict) and key in ui_payload
+        },
+    }
+
+
 def _merge_legacy_discord_guild_scope_fields(
     merged_payload: dict,
     request_payload: dict,

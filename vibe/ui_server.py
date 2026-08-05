@@ -3626,33 +3626,15 @@ def config_get():
     # default is never mistaken for a completed setup. The write side
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
-    payload = api.client_config_payload(config)
-    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
     authorization_context = getattr(g, "authorization_context", None)
-    if authorization_context is not None and authorization_context.can_manage_instance:
+    if authorization_context is None or not authorization_context.is_remote:
+        payload = api.client_config_payload(config)
+        payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
         return jsonify(payload)
 
-    ui_payload = payload.get("ui")
-    return jsonify(
-        {
-            "mode": payload.get("mode"),
-            "version": payload.get("version"),
-            "setup_state": payload.get("setup_state"),
-            "language": payload.get("language"),
-            "capabilities": payload.get("capabilities"),
-            "ui": {
-                key: ui_payload[key]
-                for key in (
-                    "instance_name",
-                    "default_instance_name",
-                    "chat_message_font_size",
-                    "show_agent_activity",
-                    "show_tool_calls",
-                )
-                if isinstance(ui_payload, dict) and key in ui_payload
-            },
-        }
-    )
+    payload = api.remote_config_payload(config)
+    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
+    return jsonify(payload)
 
 
 _MODEL_HUB_SERVICE = None

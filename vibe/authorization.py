@@ -348,6 +348,8 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
         ("POST", r"^/api/settings$"),
         ("POST", r"^/api/settings/thread$"),
         ("DELETE", r"^/api/settings/thread$"),
+        ("GET", r"^/api/bind-codes$"),
+        ("DELETE", r"^/api/projects/[^/]+$"),
     )
 )
 
@@ -399,7 +401,6 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"PUT"}),
             r"^/api/resource-policies/[^/]+/[^/]+$",
         ),
-        (frozenset({"DELETE"}), r"^/api/projects/[^/]+$"),
         (
             frozenset({"GET", "HEAD"}),
             r"^/api/(?:projects/[^/]+/agents-md|global-prompts)$",
@@ -430,7 +431,6 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             r"^/api/harness/(?:counts|tasks|watches|runs|bootstrap|runs/[^/]+)$",
         ),
         (frozenset({"GET", "HEAD"}), r"^/api/users$"),
-        (frozenset({"GET", "HEAD"}), r"^/api/bind-codes$"),
     )
 )
 
