@@ -2278,8 +2278,8 @@ export const ChatPage: React.FC = () => {
 };
 
 // Pending send-while-busy messages, shown between the transcript and the
-// composer (Codex-GUI style). Each can be dropped; "立即发送" interrupts the
-// running turn and flushes the whole queue now (the queue flushes merged).
+// composer. Queued work is visually grouped, but each Delivery stays
+// independently removable and compatible rows merge only at claim time.
 // One queued message. Its text is a single truncated line by default; clicking
 // it expands to the full wrapped text (and clicking again collapses it) so a
 // long queued prompt can be read without sending it.
@@ -2321,7 +2321,10 @@ export const QueueRow: React.FC<{
   // has none, and would sit here as a title, a separator, and empty space.
   const standIn = annotationView && annotationStandIn(annotationView, item.text, hasAttachments);
   return (
-    <div className="flex items-start gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5">
+    <div
+      data-queue-row="true"
+      className="relative flex items-start gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none"
+    >
       <div
         role="button"
         tabIndex={0}
@@ -2595,7 +2598,7 @@ const ActivityStrip: React.FC<{
   );
 };
 
-const QueueStrip: React.FC<{
+export const QueueStrip: React.FC<{
   queue: WorkbenchMessage[];
   onRemove: (id: string) => void;
   onRecall: (item: WorkbenchMessage) => void;
@@ -2615,7 +2618,10 @@ const QueueStrip: React.FC<{
             {t('chat.queue.sendNow')}
           </Button>
         </div>
-        <div className="flex max-h-32 flex-col gap-1 overflow-y-auto">
+        <div
+          data-queue-batch="true"
+          className="flex max-h-32 flex-col overflow-y-auto rounded-lg bg-surface-2"
+        >
           {queue.map((item) => (
             <QueueRow key={item.id} item={item} onRemove={onRemove} onRecall={onRecall} />
           ))}

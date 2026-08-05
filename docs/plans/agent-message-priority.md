@@ -98,8 +98,8 @@ instead of claiming equivalent durability.
 | Show annotation | P1 | Delivers the annotation to the current Turn when possible. |
 | Session callback | P1 | Delivers each completed child Run independently. |
 | Scheduled Task | P3 | Never interrupts or steers the work a user is already doing. |
-| Stop | Empty P0 | Stops the exact live Turn and establishes the durable queue hold. |
-| Send Now existing head | Empty P1 | Releases the hold and promotes only the exact observed FIFO head. |
+| Stop | Empty P0 | Stops the exact live Turn. Definitive terminal settlement immediately starts the oldest claimable P3 segment. |
+| Send Now existing head | Empty P1 | Promotes only the exact observed FIFO head. |
 
 Attachments remain part of the same Delivery. Because native steer adapters
 accept text only, an attachment-bearing P1 is preserved as P3 and starts a new

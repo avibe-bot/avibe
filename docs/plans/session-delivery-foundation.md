@@ -15,7 +15,9 @@ coherent before dispatch, during a native Turn, and after acceptance.
   identity, and terminal snapshot.
 - `messages` owns accepted communication only. One accepted initial batch
   materializes one Message; every Delivery in that batch links to it.
-- `agent_sessions` owns archive state, queue hold, and composer draft.
+- `agent_sessions` owns archive state and composer draft. Queue liveness is
+  derived: an active Session with no live Turn and a claimable FIFO head is
+  runnable, so no independent hold state can leave queued work idle by policy.
 - `agent_runs` may reference the Delivery created for that Run. It does not own
   queue order and never binds directly to a Message. Each Run has at most one
   Delivery, while one Turn may accept several Deliveries and therefore several

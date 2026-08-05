@@ -56,7 +56,6 @@ def _session(
     anchor: str,
     workdir: str,
     backend: str = "codex",
-    hold: str = "open",
 ) -> None:
     conn.execute(
         agent_sessions.insert().values(
@@ -76,9 +75,6 @@ def _session(
             visibility="foreground",
             pinned=0,
             agent_status="idle",
-            queue_hold_state=hold,
-            queue_hold_version=1,
-            queue_held_at=NOW if hold == "held" else None,
             metadata_json="{}",
             created_at=NOW,
             updated_at=NOW,
@@ -128,41 +124,34 @@ async def test_hfr_131_open_head_wakes_survives_reclaim_and_claims_exact_head(
 
 
 @pytest.mark.anyio
-async def test_hfr_132_held_head_survives_reclaim_then_explicit_release_starts(
+async def test_hfr_132_queued_head_wakes_without_an_explicit_release(
     tmp_path: Path,
 ) -> None:
-    """HFR-132: a durable hold permits reclamation until explicit release."""
+    """HFR-132: runnable backlog needs no Session policy transition."""
     engine = _engine(tmp_path, "hfr-132.sqlite")
     with engine.begin() as conn:
-        _session(
-            conn,
-            "ses-held",
-            anchor="base-held",
-            workdir="/work",
-            hold="held",
-        )
-        _delivery(conn, "delivery-held", "ses-held")
+        _session(conn, "ses-queued", anchor="base-queued", workdir="/work")
+        _delivery(conn, "delivery-queued", "ses-queued")
 
     agent, _manager, stopped, wakes = _codex_reclaimer(
         engine,
-        [("ses-held", "base-held", "/work", "route:held")],
+        [("ses-queued", "base-queued", "/work", "route:queued")],
     )
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("modules.agents.codex.agent.time.monotonic", lambda: 1000.0)
         assert await agent.evict_idle_transports(600) == 1
     assert stopped == ["stop"]
-    assert wakes == []
-    with engine.begin() as conn:
-        durable = delivery_store.get_delivery(conn, "delivery-held")
-        assert durable is not None and durable["state"] == "queued"
-        assert delivery_store.set_queue_hold(conn, "ses-held", held=False)
+    assert any(RuntimeWorkLane.SESSION_DELIVERIES in lanes for lanes in wakes)
+    with engine.connect() as conn:
+        durable = delivery_store.get_delivery(conn, "delivery-queued")
+    assert durable is not None and durable["state"] == "queued"
 
     turn_manager = SessionTurnManager(SimpleNamespace())
     turn_manager._engine = engine
     turn_manager._start_persisted_turn = AsyncMock(return_value=True)
     assert await turn_manager.drain_delivery_queue(
-        "ses-held",
-        expected_head_id="delivery-held",
+        "ses-queued",
+        expected_head_id="delivery-queued",
         expected_head_version=int(durable["version"]),
     )
     engine.dispose()
@@ -258,27 +247,21 @@ async def test_hfr_146_shared_codex_target_and_claude_mapping_use_exact_bindings
             dispatch_text="delivery-active",
             attempt_id="attempt-active",
         )
-        _session(
-            conn,
-            "ses-held",
-            anchor="base-held",
-            workdir="/work",
-            hold="held",
-        )
-        _delivery(conn, "delivery-held", "ses-held")
+        _session(conn, "ses-queued", anchor="base-queued", workdir="/work")
+        _delivery(conn, "delivery-queued", "ses-queued")
 
     agent, manager, stopped, _wakes = _codex_reclaimer(
         engine,
         [
             ("ses-active", "base-active", "/work", "route:active"),
-            ("ses-held", "base-held", "/work", "route:held"),
+            ("ses-queued", "base-queued", "/work", "route:queued"),
         ],
     )
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("modules.agents.codex.agent.time.monotonic", lambda: 1000.0)
         assert await agent.evict_idle_transports(600) == 0
     assert stopped == []
-    assert "base-held" not in agent._session_last_activity
+    assert "base-queued" not in agent._session_last_activity
 
     claude_client = SimpleNamespace(
         _vibe_agent_session_id="ses-active",
@@ -675,7 +658,6 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
                         turn_ids=("turn-a",),
                         active_activity_ids=(),
                         fallback_run_ids=(),
-                        queue_hold_state="open",
                         reasons=("delivery:claimed", "turn:starting"),
                     ),
                 ),
@@ -698,7 +680,6 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
                         turn_ids=("turn-a",),
                         active_activity_ids=(),
                         fallback_run_ids=(),
-                        queue_hold_state="open",
                         reasons=("delivery:claimed", "turn:active"),
                     ),
                 ),

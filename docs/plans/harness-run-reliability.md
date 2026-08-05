@@ -80,12 +80,11 @@ Every remaining change must preserve these rules:
 
 ## 3. Runtime supervision design
 
-Consider one concrete Session. It has an old P3 Delivery `Q1`, queue hold is
-`held`, and no Turn is live. The backend process may be reclaimed because `Q1`
-is durable and policy deliberately forbids autonomous drain. Later the user
-issues send-now: the existing synchronous writer validates the observed head,
-releases the hold, and claims exactly `Q1` in one transaction before returning.
-The backend runtime is recreated only when that Turn starts. A subsequent
+Consider one concrete Session. It has an old P3 Delivery `Q1` and no live Turn.
+That durable fact is `runnable`: the delivery lane must claim `Q1`, while the
+idle backend process remains reclaimable until the Turn actually starts. If an
+empty P1 send-now races the recovery wake, its synchronous writer validates and
+claims exactly the observed head in one transaction. A subsequent
 `queue.updated` hint is for projection and passive recovery, never the authority
 for send-now's stale-head/refusal result. At no point is `last_activity`
 falsified, and neither the hint nor the reclaimer owns `Q1`.
@@ -150,7 +149,6 @@ class SessionRuntimeDisposition(str, Enum):
     ACTIVE = "active"          # an exact live owner needs the runtime
     TRANSITIONING = "transitioning"  # an unresolved handoff forbids reclamation
     RUNNABLE = "runnable"      # durable work should be activated now
-    WAITING = "waiting"        # durable policy intentionally blocks activation
     RECLAIMABLE = "reclaimable"  # no durable or in-process owner remains
     UNKNOWN = "unknown"        # the snapshot could not prove safety
 
@@ -162,7 +160,6 @@ class SessionRuntimeOwnershipSnapshot:
     turn_ids: tuple[str, ...]
     active_activity_ids: tuple[str, ...]
     fallback_run_ids: tuple[str, ...]
-    queue_hold_state: str
     reasons: tuple[str, ...]
 
 @dataclass(frozen=True)
@@ -221,18 +218,17 @@ The exact classification is:
 | `starting|active` Turn with its exact owned Delivery, persisted active Activity, or exact in-process backend operation | `active` | forbid ordinary idle reclamation |
 | exact linked `waiting` Turn plus its initial `interrupt_waiting` Delivery | `transitioning` | fail closed for this pass and reconcile that exact predecessor/successor owner |
 | unresolved Delivery fence or an ownership handoff that cannot yet be classified | `transitioning` | fail closed; reconcile the exact owner |
-| open-hold ownerless FIFO head or queued execution-bearing fallback Run not yet represented by a Delivery | `runnable` | wake its delivery/request lane; it does not itself pin backend resources |
+| ownerless FIFO head or queued execution-bearing fallback Run not yet represented by a Delivery | `runnable` | wake its delivery/request lane; it does not itself pin backend resources |
 | claimed fallback Run in normalized `running` / legacy `processing` with no persisted execution-start marker (`pid IS NULL` or absent) | `transitioning` | preserve the pre-execution handoff until exact recovery requeues or starts it |
 | fallback Run in normalized `running` / legacy `processing` with the persisted execution-start marker (`pid IS NOT NULL`) | `active` | preserve its runtime until #1140's exact terminal/teardown settlement |
-| held FIFO backlog with no live Turn/fence | `waiting` | preserve durable work but allow disposable backend runtime reclamation |
 | terminal Delivery/Turn history and terminal Runs only | `reclaimable` | no pin |
 | read failure, unknown Delivery state or execution-bearing Run type, or an unpaired/mismatched `waiting`/`interrupt_waiting` half | `unknown` | fail closed for this cycle and log the reason |
 
 `queued` therefore does not mean "keep a backend process alive forever". An
-open queue head means "activate it now"; a held queue means "keep it durable but
-do not execute it". Both survive runtime reclamation. This resolves the apparent
-contradiction between an idle runtime and durable queued input without inventing
-fake activity.
+ownerless queue head means "activate it now", while its durable row survives
+runtime reclamation until the delivery lane creates the exact Turn owner. This
+resolves the apparent contradiction between an idle runtime and durable queued
+input without inventing fake activity or a second policy state.
 
 The provider consumes `DELIVERY_STATE_MATRIX` and the current Turn-state
 contract as related facts, not as independent liveness enums. The exact
@@ -303,7 +299,7 @@ refreshes `session_last_activity` or pins the old runtime.
 
 Activation and transition recovery never depend on a runtime target already
 existing or reaching the cleanup loop. The `session_deliveries` lane has two
-bounded indexed eligibility queries: open-hold Session ids with a queued head
+bounded indexed eligibility queries: Session ids with a claimable queued head
 and no live Turn, and unresolved Delivery/Turn fences, starting owners, or
 waiting successors that require exact reconciliation. It invokes a narrow
 `SessionTurnManager` claim/recovery entry for the exact Session plus observed
@@ -688,8 +684,8 @@ Minimum baseline cases:
 
 Make runtime reclamation and durable work activation consume one coherent
 session disposition. Active or transitioning work must not lose its runtime,
-open runnable work must be woken, and held backlog must remain durable without
-keeping a backend process alive forever.
+and ownerless runnable work must be woken without keeping a backend process
+alive forever.
 
 ### Required behavior
 
@@ -709,11 +705,9 @@ keeping a backend process alive forever.
    Session-less fallback Runs from their persisted legacy Session key plus
    backend/agent execution identity to the exact resource target; an unresolved
    nonterminal route fails closed for that backend cycle.
-2. Derive `active`, `transitioning`, `runnable`, `waiting`, `reclaimable`, or
+2. Derive `active`, `transitioning`, `runnable`, `reclaimable`, or
    `unknown` exactly as §3.2 specifies. In particular:
    - an open, ownerless FIFO head is `runnable`, not a permanent runtime pin;
-   - a held backlog with no live owner is `waiting` and may release backend
-     resources without changing durable queue state;
    - a fence or Turn owner forbids reclamation;
    - terminal history and `watch_runtime` do not pin;
    - an execution-bearing Run is considered only when its exact Delivery/Turn
@@ -749,7 +743,7 @@ keeping a backend process alive forever.
    boundary through generation detach/cleanup initiation so no delayed
    old-generation admission can become a new durable pin after the final
    snapshot.
-   The lane itself uses separate bounded indexed queries for open-hold queued
+   The lane itself uses separate bounded indexed queries for claimable queued
    Sessions without live Turns and for unresolved Delivery/Turn fences,
    starting owners, and waiting successors. It invokes a manager entry guarded
    by the observed Session, Delivery, Turn, attempt, and native identity; stale

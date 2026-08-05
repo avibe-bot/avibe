@@ -38,18 +38,16 @@ class SessionRuntimeDisposition(str, Enum):
     ACTIVE = "active"
     TRANSITIONING = "transitioning"
     RUNNABLE = "runnable"
-    WAITING = "waiting"
     RECLAIMABLE = "reclaimable"
     UNKNOWN = "unknown"
 
 
 _DISPOSITION_PRIORITY = {
     SessionRuntimeDisposition.RECLAIMABLE: 0,
-    SessionRuntimeDisposition.WAITING: 1,
-    SessionRuntimeDisposition.RUNNABLE: 2,
-    SessionRuntimeDisposition.TRANSITIONING: 3,
-    SessionRuntimeDisposition.ACTIVE: 4,
-    SessionRuntimeDisposition.UNKNOWN: 5,
+    SessionRuntimeDisposition.RUNNABLE: 1,
+    SessionRuntimeDisposition.TRANSITIONING: 2,
+    SessionRuntimeDisposition.ACTIVE: 3,
+    SessionRuntimeDisposition.UNKNOWN: 4,
 }
 
 _KNOWN_ACTIVITY_PHASES = frozenset(
@@ -101,7 +99,6 @@ class SessionRuntimeOwnershipSnapshot:
     turn_ids: tuple[str, ...]
     active_activity_ids: tuple[str, ...]
     fallback_run_ids: tuple[str, ...]
-    queue_hold_state: str
     reasons: tuple[str, ...]
 
 
@@ -159,8 +156,7 @@ class RuntimeTargetOwnershipSnapshot:
     @property
     def has_runnable_deliveries(self) -> bool:
         return any(
-            session.queue_hold_state == "open"
-            and any(reason == "delivery:queued" for reason in session.reasons)
+            any(reason == "delivery:queued" for reason in session.reasons)
             for session in self.sessions
         )
 
@@ -189,13 +185,10 @@ class RuntimeTargetOwnershipSnapshot:
                             reason.removeprefix("delivery:")
                         ).ordering
                         == "fence"
-                        or (
-                            session.queue_hold_state == "open"
-                            and policy_for(
-                                reason.removeprefix("delivery:")
-                            ).ordering
-                            == "claimable"
-                        )
+                        or policy_for(
+                            reason.removeprefix("delivery:")
+                        ).ordering
+                        == "claimable"
                     )
                 )
                 for reason in session.reasons
@@ -649,12 +642,7 @@ class RuntimeOwnershipProvider:
                 elif ordering == "fence":
                     disposition = SessionRuntimeDisposition.TRANSITIONING
                 elif ordering == "claimable":
-                    held = str(session_by_id[session_id].get("queue_hold_state") or "open")
-                    disposition = (
-                        SessionRuntimeDisposition.WAITING
-                        if held == "held"
-                        else SessionRuntimeDisposition.RUNNABLE
-                    )
+                    disposition = SessionRuntimeDisposition.RUNNABLE
                 else:
                     disposition = SessionRuntimeDisposition.RECLAIMABLE
             facts[session_id].append(disposition)
@@ -854,7 +842,6 @@ class RuntimeOwnershipProvider:
                     turn_ids=tuple(turn_ids[session_id]),
                     active_activity_ids=tuple(activity_ids[session_id]),
                     fallback_run_ids=tuple(run_ids[session_id]),
-                    queue_hold_state=str(row.get("queue_hold_state") or "open"),
                     reasons=tuple(reasons[session_id]),
                 )
             )
