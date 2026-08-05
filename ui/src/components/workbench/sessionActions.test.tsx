@@ -66,20 +66,22 @@ describe('SessionActionMenu', () => {
   });
 
   // ── Codex review (sessionActions.tsx:93) ────────────────────────────────────
-  // A natively ``disabled`` button cannot be focused, so the only place the reason
-  // lived — the ``title`` tooltip — was unreachable by keyboard AND by touch. The
-  // row stays focusable via aria-disabled and states the reason on screen.
-  it('keeps an unforkable session’s fork row focusable and explains it on screen', () => {
+  // A natively ``disabled`` button cannot be focused, so the row uses aria-disabled.
+  // Its reason stays out of the visible menu while remaining available on hover and
+  // to assistive technology.
+  it('keeps an unforkable fork row gray and exposes its reason without visible menu copy', () => {
     const reason = 'This session has no native agent session to fork yet.';
     const html = renderMenu([
       row({ id: 'fork', group: 'continue', label: 'Fork session', icon: GitFork, disabled: true, title: reason }),
     ]);
 
     expect(html).toContain('aria-disabled="true"');
-    expect(html).not.toContain('disabled=""'); // focusable, so the reason is reachable
+    expect(html).not.toContain('disabled=""');
     expect(html).toContain(`title="${reason}"`);
-    // Visible text, not only the tooltip: touch pointers never get a tooltip.
-    expect(html).toContain(`>${reason}</span>`);
+    expect(html).toContain('aria-describedby=');
+    expect(html).toContain('class="sr-only"');
+    expect(html).toContain('cursor-not-allowed text-muted');
+    expect(html).not.toContain('text-[10.5px] leading-tight text-muted');
     expect(html).toContain('Fork session');
   });
 

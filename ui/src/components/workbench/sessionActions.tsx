@@ -26,8 +26,7 @@ export interface SessionActionDescriptor {
   label: string;
   /** Keyboard hint badge (e.g. ``⇧⌘D``), right-aligned in the menu row. */
   hint?: string;
-  /** Why this action is unavailable. Rendered as VISIBLE text under the label (a
-   *  touch user never sees a ``title`` tooltip) as well as the native tooltip. */
+  /** Why this action is unavailable. Exposed as a hover tooltip and an accessible description. */
   title?: string;
   disabled?: boolean;
   /** A write is in flight: the icon becomes a spinner and the row stops accepting clicks. */
@@ -103,6 +102,7 @@ export const SessionActionMenu: React.FC<{
   label?: string;
 }> = ({ actions, onAction, label }) => {
   const itemsRef = useRef<Array<HTMLButtonElement | null>>([]);
+  const menuId = React.useId();
 
   const focusItem = (index: number) => itemsRef.current[index]?.focus();
   const moveFocus = (from: number, delta: number) => {
@@ -118,6 +118,7 @@ export const SessionActionMenu: React.FC<{
         const newGroup =
           previous != null && GROUP_ORDER.indexOf(previous.group) !== GROUP_ORDER.indexOf(action.group);
         const reason = action.disabled ? action.title : undefined;
+        const reasonId = reason ? `${menuId}-${action.id}-reason` : undefined;
         return (
           <div key={action.id} className={clsx(newGroup && 'mt-1 border-t border-border pt-1')}>
             <button
@@ -126,6 +127,7 @@ export const SessionActionMenu: React.FC<{
               }}
               type="button"
               aria-disabled={action.disabled || undefined}
+              aria-describedby={reasonId}
               title={action.title}
               onClick={() => {
                 if (action.disabled) return;
@@ -165,16 +167,18 @@ export const SessionActionMenu: React.FC<{
                   aria-hidden="true"
                 />
               )}
-              <span className="flex flex-1 flex-col gap-0.5 overflow-hidden">
-                <span className="truncate">{action.label}</span>
-                {reason && <span className="text-[10.5px] leading-tight text-muted">{reason}</span>}
-              </span>
+              <span className="flex-1 truncate">{action.label}</span>
               {action.hint && (
                 <span className="shrink-0 font-mono text-[10px] text-muted" aria-hidden="true">
                   {action.hint}
                 </span>
               )}
             </button>
+            {reason && (
+              <span id={reasonId} className="sr-only">
+                {reason}
+              </span>
+            )}
           </div>
         );
       })}
@@ -203,7 +207,7 @@ export const SessionActionMenuContent: React.FC<{
   return (
     <PopoverContent
       align={align}
-      className={clsx('w-[196px] p-1', className)}
+      className={clsx('w-[176px] p-1', className)}
       onCloseAutoFocus={(event) => {
         if (!transferredFocus.current) return;
         transferredFocus.current = false;
