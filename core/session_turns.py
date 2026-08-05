@@ -1193,6 +1193,15 @@ class SessionTurnManager:
                     raise RuntimeError("runtime-rejected Delivery queue fallback lost")
             return None
 
+        unstartable = [
+            delivery
+            for delivery in deliveries
+            if not cls._delivery_agent_runs_can_start(conn, delivery)
+        ]
+        if unstartable:
+            cls._retire_unstartable_deliveries(conn, session_id, unstartable)
+            return None
+
         run_ids = list(
             dict.fromkeys(
                 run_id
@@ -1226,12 +1235,12 @@ class SessionTurnManager:
         conn: Connection,
         delivery: dict[str, Any],
     ) -> bool:
-        """Whether a queued Delivery's linked Agent Runs can still be claimed.
+        """Whether a Delivery's linked Agent Runs can still be claimed.
 
         A Run that already settled terminally (or asked to cancel) leaves its
         Delivery permanently unexecutable: every claim fails the Agent Run guard,
         and because recovery drains the same queue on startup, one such row turns
-        into a controller crash loop. Callers retire the Delivery instead.
+        into a controller crash loop. ``_claim_start_batch`` retires it instead.
         """
 
         from storage.background import inspect_agent_runs_for_turn_in_connection
@@ -1243,6 +1252,49 @@ class SessionTurnManager:
             conn, run_ids
         )
         return not stale_run_ids and eligible_run_ids == run_ids
+
+    @classmethod
+    def _retire_unstartable_deliveries(
+        cls,
+        conn: Connection,
+        session_id: str,
+        deliveries: list[dict[str, Any]],
+    ) -> None:
+        """Retire Deliveries no Agent Run will ever execute, in the claim path.
+
+        Every start claim funnels through ``_claim_start_batch`` — startup drain,
+        live FIFO drain, explicit queue promotion, immediate admission — so
+        retiring here is what keeps one poisoned row from bricking any of them.
+        """
+
+        for delivery in deliveries:
+            if not cls._retire_delivery_not_written(
+                conn,
+                session_id,
+                str(delivery["id"]),
+                reason="terminal_agent_run_before_start_claim",
+            ):
+                raise RuntimeError(
+                    "unstartable Delivery retirement lost: "
+                    f"session={session_id} delivery={delivery['id']}"
+                )
+            logger.warning(
+                "retired Delivery=%s because its Agent Run can no longer start",
+                delivery["id"],
+            )
+
+    @staticmethod
+    def _start_claim_retired_rows(
+        conn: Connection,
+        deliveries: list[dict[str, Any]],
+    ) -> bool:
+        """Whether a refused start claim retired rows, so the queue moved on."""
+
+        for delivery in deliveries:
+            row = delivery_store.get_delivery(conn, str(delivery["id"]))
+            if row is not None and str(row["state"]) == "retired":
+                return True
+        return False
 
     @staticmethod
     def _cancel_runs_for_retired_delivery(
@@ -1355,25 +1407,6 @@ class SessionTurnManager:
                         row["id"],
                     )
                 continue
-            unexecutable_rows = [
-                row
-                for row in delivery_rows
-                if not self._delivery_agent_runs_can_start(conn, row)
-            ]
-            if unexecutable_rows:
-                for row in unexecutable_rows:
-                    if not self._retire_delivery_not_written(
-                        conn,
-                        session_id,
-                        str(row["id"]),
-                        reason="terminal_agent_run_before_fifo_claim",
-                    ):
-                        raise RuntimeError("unexecutable FIFO Delivery retirement lost")
-                    logger.warning(
-                        "retired queued Delivery=%s because its Agent Run can no longer start",
-                        row["id"],
-                    )
-                continue
             turn_id = delivery_store.new_turn_id()
             claimed = self._claim_start_batch(
                 conn,
@@ -1384,7 +1417,11 @@ class SessionTurnManager:
                 deliveries=delivery_rows,
                 dispatch_text=_segment_dispatch_text(segment_payloads),
             )
-            return turn_id if claimed is not None else None
+            if claimed is not None:
+                return turn_id
+            if self._start_claim_retired_rows(conn, delivery_rows):
+                continue
+            return None
 
     def _hydrate_delivery_context(
         self,
@@ -1785,7 +1822,7 @@ class SessionTurnManager:
                     raise RuntimeError("P3 queue claim lost after writer reservation")
                 delivery = queued
             active = delivery_store.active_turn(conn, request.session_id)
-            if active is None and not backend_draining:
+            while active is None and not backend_draining:
                 held = delivery_store.queue_is_held(conn, request.session_id)
                 queued_payloads = delivery_store.claimable_fifo_prefix(
                     conn, request.session_id
@@ -1809,26 +1846,39 @@ class SessionTurnManager:
                     delivery_store.get_delivery(conn, str(row["id"]))
                     for row in segment_payloads
                 ]
-                if segment and all(row is not None for row in segment):
-                    turn_id = delivery_store.new_turn_id()
-                    claimed_batch = self._claim_start_batch(
-                        conn,
-                        owner=start_owner,
-                        turn_id=turn_id,
-                        session_id=request.session_id,
-                        backend=backend,
-                        deliveries=[row for row in segment if row is not None],
-                        dispatch_text=_segment_dispatch_text(segment_payloads),
+                if not segment or any(row is None for row in segment):
+                    break
+                delivery_rows = [row for row in segment if row is not None]
+                turn_id = delivery_store.new_turn_id()
+                claimed_batch = self._claim_start_batch(
+                    conn,
+                    owner=start_owner,
+                    turn_id=turn_id,
+                    session_id=request.session_id,
+                    backend=backend,
+                    deliveries=delivery_rows,
+                    dispatch_text=_segment_dispatch_text(segment_payloads),
+                )
+                if claimed_batch is None:
+                    turn_id = None
+                    # The claim path retired rows no Agent Run can execute; this
+                    # admission still deserves its turn, so re-derive and retry.
+                    if not self._start_claim_retired_rows(conn, delivery_rows):
+                        break
+                    delivery = (
+                        delivery_store.get_delivery(conn, str(delivery["id"])) or delivery
                     )
-                    if claimed_batch is None:
-                        turn_id = None
-                    for claimed in (claimed_batch or {}).get("deliveries", []):
-                        if str(claimed["id"]) == str(delivery["id"]):
-                            delivery = claimed
-                            delivery_turn_id = turn_id
-                            if int(claimed.get("turn_position") or 0) == 0:
-                                start_context = context
-                            break
+                    if delivery["state"] != "queued":
+                        break
+                    continue
+                for claimed in claimed_batch.get("deliveries", []):
+                    if str(claimed["id"]) == str(delivery["id"]):
+                        delivery = claimed
+                        delivery_turn_id = turn_id
+                        if int(claimed.get("turn_position") or 0) == 0:
+                            start_context = context
+                        break
+                break
         if backend_draining:
             self._deferred_restart_sessions.setdefault(backend, set()).add(
                 request.session_id
@@ -2110,6 +2160,15 @@ class SessionTurnManager:
                 )
                 if claimed is None:
                     turn_id = None
+                    # The claim path retired rows no Agent Run can execute, so the
+                    # promoted segment no longer exists as the caller observed it.
+                    if self._start_claim_retired_rows(conn, delivery_rows):
+                        return DeliveryResult(
+                            delivery_id,
+                            None,
+                            "refused",
+                            reason="stale_head",
+                        )
                 else:
                     claimed_rows = claimed["deliveries"]
             elif any(
