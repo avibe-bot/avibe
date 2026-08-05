@@ -162,5 +162,12 @@ scenarios:
     layer: scenario
     backend: codex
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch
+  - id: AUTH-SETUP-904
+    name: Claude relay key uses bearer auth after switching from OAuth
+    status: covered
+    kind: historical_regression
+    layer: scenario_backed_runtime
+    backend: claude
+    test: tests/test_settings_disk_fallback.py::test_save_claude_relay_auth_writes_bearer_token_and_clears_v2_secret
 next_priority:
   - AUTH-SETUP-301

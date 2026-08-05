@@ -8359,6 +8359,18 @@ def restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) -> 
 
 
 _VALID_AUTH_MODES = {"oauth", "api_key"}
+_ANTHROPIC_API_HOST = "api.anthropic.com"
+
+
+def _claude_uses_bearer_auth(base_url: str | None) -> bool:
+    """Return whether Claude should send the credential as a bearer token."""
+    if not base_url:
+        return False
+    try:
+        hostname = urllib.parse.urlsplit(base_url).hostname
+    except ValueError:
+        return True
+    return (hostname or "").lower() != _ANTHROPIC_API_HOST
 
 
 def _mask_api_key(api_key: str | None) -> str | None:
@@ -9199,6 +9211,11 @@ def save_claude_auth(payload: dict) -> dict:
     stored key" — same UX promise as Codex — so callers can PATCH the
     base URL without re-typing the secret. An empty key with no stored
     fallback is rejected.
+
+    Claude Code uses different headers for direct Anthropic API keys and
+    gateway credentials. Direct keys are stored as ``ANTHROPIC_API_KEY``
+    (``x-api-key``), while a non-Anthropic Base URL stores the same user-facing
+    credential as ``ANTHROPIC_AUTH_TOKEN`` (``Authorization: Bearer``).
     """
     if not isinstance(payload, dict):
         return {"ok": False, "message": "Payload must be an object"}
@@ -9280,11 +9297,21 @@ def save_claude_auth(payload: dict) -> dict:
     from vibe.claude_config import apply_claude_auth
 
     try:
+        credential = api_key or settings_auth_token
+        use_auth_token = _claude_uses_bearer_auth(effective_base_url)
         apply_claude_auth(
             auth_mode=auth_mode,
-            api_key=api_key if auth_mode == "api_key" else None,
+            api_key=(
+                credential
+                if auth_mode == "api_key" and not use_auth_token
+                else None
+            ),
             base_url=effective_base_url if auth_mode == "api_key" else None,
-            auth_token=settings_auth_token if auth_mode == "api_key" else None,
+            auth_token=(
+                credential
+                if auth_mode == "api_key" and use_auth_token
+                else None
+            ),
         )
     except ValueError as exc:
         return {"ok": False, "message": str(exc)}
