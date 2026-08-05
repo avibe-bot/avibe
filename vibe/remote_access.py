@@ -32,11 +32,12 @@ from pathlib import Path
 from typing import Any
 
 import jwt
+import psutil
 import requests
 from jwt import PyJWKClient
 
 from config import paths
-from config.v2_config import V2Config
+from config.v2_config import CONFIG_LOCK, V2Config
 from vibe import api, cloudflare_network, runtime
 from vibe import tunnel_quality
 
@@ -89,6 +90,18 @@ _BLOCKED_PAIRING_BACKEND_HOSTS = {
     "metadata.google.internal",
 }
 _PROXY_RESOLVED_PAIRING_BACKEND_HOSTS = {"avibe.bot"}
+_TUNNEL_CONNECTIVITY_HOSTS = (
+    "region1.v2.argotunnel.com",
+    "region2.v2.argotunnel.com",
+)
+_TUNNEL_CONNECTIVITY_PORT = 7844
+_REMOTE_ACCESS_SETTING_FIELDS = {
+    "transport_protocol",
+    "auto_recovery",
+    "optimization_profile",
+    "edge_ip_version",
+    "edge_bind_address",
+}
 
 
 class BackendRequestError(Exception):
@@ -338,6 +351,38 @@ def _configured_protocol(config: V2Config) -> str:
     return protocol if protocol in {"auto", "quic", "http2"} else "auto"
 
 
+def _configured_optimization_profile(config: V2Config) -> str:
+    profile = str(
+        getattr(config.remote_access.vibe_cloud, "optimization_profile", "balanced")
+        or "balanced"
+    ).lower()
+    return profile if profile in {"stable", "balanced", "low_latency"} else "balanced"
+
+
+def _configured_edge_ip_version(config: V2Config) -> str:
+    version = str(
+        getattr(config.remote_access.vibe_cloud, "edge_ip_version", "auto") or "auto"
+    ).lower()
+    return version if version in {"auto", "4", "6"} else "auto"
+
+
+def _configured_edge_bind_address(config: V2Config) -> str:
+    return str(
+        getattr(config.remote_access.vibe_cloud, "edge_bind_address", "") or ""
+    ).strip()
+
+
+def _remote_access_settings(config: V2Config) -> dict[str, Any]:
+    cloud = config.remote_access.vibe_cloud
+    return {
+        "transport_protocol": _configured_protocol(config),
+        "auto_recovery": bool(getattr(cloud, "auto_recovery", True)),
+        "optimization_profile": _configured_optimization_profile(config),
+        "edge_ip_version": _configured_edge_ip_version(config),
+        "edge_bind_address": _configured_edge_bind_address(config),
+    }
+
+
 def _stored_preferred_protocol() -> str | None:
     payload = runtime.read_json(_quality_history_path())
     if not isinstance(payload, dict):
@@ -353,12 +398,20 @@ def _initial_connector_protocol(config: V2Config) -> str:
     return _PREFERRED_PROTOCOL or _stored_preferred_protocol() or "auto"
 
 
-def _connector_environment(token: str, protocol: str) -> dict[str, str]:
-    return {
+def _connector_environment(config: V2Config, protocol: str) -> dict[str, str]:
+    cloud = config.remote_access.vibe_cloud
+    environment = {
         **os.environ,
-        "TUNNEL_TOKEN": token,
+        "TUNNEL_TOKEN": cloud.tunnel_token,
         "TUNNEL_TRANSPORT_PROTOCOL": protocol,
+        "TUNNEL_EDGE_IP_VERSION": _configured_edge_ip_version(config),
     }
+    bind_address = _configured_edge_bind_address(config)
+    if bind_address:
+        environment["TUNNEL_EDGE_BIND_ADDRESS"] = bind_address
+    else:
+        environment.pop("TUNNEL_EDGE_BIND_ADDRESS", None)
+    return environment
 
 
 def _connector_command(binary: str, metrics_url: str) -> list[str]:
@@ -422,6 +475,8 @@ def _runtime_signature(config: V2Config, binary: str) -> dict[str, str]:
         "public_url": cloud.public_url,
         "tunnel_token_sha256": hashlib.sha256((cloud.tunnel_token or "").encode("utf-8")).hexdigest(),
         "transport_protocol": _configured_protocol(config),
+        "edge_ip_version": _configured_edge_ip_version(config),
+        "edge_bind_address": _configured_edge_bind_address(config),
     }
 
 
@@ -524,6 +579,8 @@ def _running_signature(pid: int | None) -> dict[str, str] | None:
         "public_url": str(state.get("public_url") or ""),
         "tunnel_token_sha256": str(state.get("tunnel_token_sha256") or ""),
         "transport_protocol": str(state.get("transport_protocol") or ""),
+        "edge_ip_version": str(state.get("edge_ip_version") or "auto"),
+        "edge_bind_address": str(state.get("edge_bind_address") or ""),
     }
 
 
@@ -600,6 +657,13 @@ def status(
         "binary_path": binary,
         "binary_version": _version(binary) if binary else None,
         "transport_protocol": _configured_protocol(config) if config is not None else "auto",
+        "settings": _remote_access_settings(config) if config is not None else {
+            "transport_protocol": "auto",
+            "auto_recovery": True,
+            "optimization_profile": "balanced",
+            "edge_ip_version": "auto",
+            "edge_bind_address": "",
+        },
     }
     quality = tunnel_quality_snapshot()
     if quality is not None:
@@ -613,6 +677,290 @@ def status(
             client_access=client_access,
         )
     return result
+
+
+def network_interfaces() -> dict[str, Any]:
+    """Return live, non-loopback source addresses that cloudflared can bind."""
+
+    try:
+        stats = psutil.net_if_stats()
+        interface_addresses = psutil.net_if_addrs()
+    except (OSError, psutil.Error):
+        logger.debug("Could not enumerate Tunnel source addresses", exc_info=True)
+        return {"ok": True, "interfaces": []}
+    interfaces: list[dict[str, Any]] = []
+    for name, addresses in interface_addresses.items():
+        interface_stats = stats.get(name)
+        if interface_stats is not None and not interface_stats.isup:
+            continue
+        for address in addresses:
+            if address.family not in {socket.AF_INET, socket.AF_INET6}:
+                continue
+            raw_address = str(address.address or "").split("%", 1)[0]
+            try:
+                parsed = ipaddress.ip_address(raw_address)
+            except ValueError:
+                continue
+            if (
+                parsed.is_loopback
+                or parsed.is_link_local
+                or parsed.is_multicast
+                or parsed.is_unspecified
+            ):
+                continue
+            interfaces.append(
+                {
+                    "id": f"{name}:{parsed}",
+                    "name": name,
+                    "address": str(parsed),
+                    "ip_version": str(parsed.version),
+                }
+            )
+    interfaces.sort(key=lambda item: (item["name"], item["ip_version"], item["address"]))
+    return {"ok": True, "interfaces": interfaces}
+
+
+def _bounded_tunnel_addresses(timeout_seconds: float = 2.0) -> list[tuple[int, str]]:
+    completed = threading.Event()
+    resolved: list[tuple[int, str]] = []
+
+    def resolve() -> None:
+        for hostname in _TUNNEL_CONNECTIVITY_HOSTS:
+            try:
+                for family, _socktype, _protocol, _canonname, sockaddr in socket.getaddrinfo(
+                    hostname,
+                    _TUNNEL_CONNECTIVITY_PORT,
+                    type=socket.SOCK_STREAM,
+                ):
+                    if family not in {socket.AF_INET, socket.AF_INET6}:
+                        continue
+                    item = (family, str(sockaddr[0]))
+                    if item not in resolved:
+                        resolved.append(item)
+            except OSError:
+                logger.debug("Tunnel connectivity DNS lookup failed for %s", hostname, exc_info=True)
+        completed.set()
+
+    threading.Thread(target=resolve, name="vibe-tunnel-dns", daemon=True).start()
+    completed.wait(max(0.1, timeout_seconds))
+    return list(resolved)
+
+
+def _tcp_tunnel_reachable(
+    addresses: list[tuple[int, str]],
+    *,
+    bind_address: str = "",
+    timeout_seconds: float = 2.0,
+) -> bool:
+    bind_ip = ipaddress.ip_address(bind_address) if bind_address else None
+    deadline = time.monotonic() + max(0.1, timeout_seconds)
+    for family, address in addresses:
+        if bind_ip is not None and (
+            (family == socket.AF_INET and bind_ip.version != 4)
+            or (family == socket.AF_INET6 and bind_ip.version != 6)
+        ):
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.settimeout(min(0.5, remaining))
+                if bind_ip is not None:
+                    probe.bind((str(bind_ip), 0))
+                target = (
+                    (address, _TUNNEL_CONNECTIVITY_PORT, 0, 0)
+                    if family == socket.AF_INET6
+                    else (address, _TUNNEL_CONNECTIVITY_PORT)
+                )
+                probe.connect(target)
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def connectivity_diagnostics(config: V2Config | None = None) -> dict[str, Any]:
+    config = config or V2Config.load()
+    current = status(config)
+    requested_family = _configured_edge_ip_version(config)
+    resolved_addresses = _bounded_tunnel_addresses()
+    addresses = resolved_addresses
+    if requested_family in {"4", "6"}:
+        expected_family = socket.AF_INET if requested_family == "4" else socket.AF_INET6
+        addresses = [item for item in addresses if item[0] == expected_family]
+    tcp_available = _tcp_tunnel_reachable(
+        addresses,
+        bind_address=_configured_edge_bind_address(config),
+    ) if addresses else False
+    quality = current.get("tunnel_quality") or {}
+    effective_protocol = str(
+        (quality.get("transport") or {}).get("effective")
+        or quality.get("protocol")
+        or "unknown"
+    )
+    quic_status = "available" if current.get("running") and effective_protocol == "quic" else "unknown"
+    http2_status = (
+        "available"
+        if tcp_available or (current.get("running") and effective_protocol == "http2")
+        else "unavailable" if addresses else "unknown"
+    )
+    return {
+        "ok": True,
+        "sampled_at": tunnel_quality.utc_timestamp(time.time()),
+        "effective_protocol": effective_protocol,
+        "dns": {"status": "available" if resolved_addresses else "unavailable"},
+        "quic": {
+            "status": quic_status,
+            "source": "active_connector" if quic_status == "available" else "not_observed",
+        },
+        "http2": {
+            "status": http2_status,
+            "source": "tcp_probe" if tcp_available else "active_connector" if http2_status == "available" else "tcp_probe",
+        },
+        "cloudflared_version": current.get("binary_version"),
+    }
+
+
+def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist Tunnel controls, replacing a live Connector without an outage."""
+
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "remote_access_settings_invalid"}
+    unknown = set(payload) - _REMOTE_ACCESS_SETTING_FIELDS
+    if unknown:
+        return {"ok": False, "error": "remote_access_settings_invalid"}
+    current_config = V2Config.load()
+    candidate_payload = api.config_to_payload(current_config, include_secrets=True)
+    cloud_payload = candidate_payload["remote_access"]["vibe_cloud"]
+    cloud_payload.update(payload)
+    try:
+        candidate_config = V2Config.from_payload(candidate_payload)
+    except ValueError as exc:
+        return {
+            **status(current_config),
+            "ok": False,
+            "error": "remote_access_settings_invalid",
+            "detail": str(exc),
+        }
+
+    bind_address = _configured_edge_bind_address(candidate_config)
+    if bind_address:
+        live_addresses = {
+            item["address"] for item in network_interfaces()["interfaces"]
+        }
+        if bind_address not in live_addresses:
+            return {
+                **status(current_config),
+                "ok": False,
+                "error": "edge_bind_address_unavailable",
+            }
+        bind_version = str(ipaddress.ip_address(bind_address).version)
+        configured_version = _configured_edge_ip_version(candidate_config)
+        if configured_version != "auto" and configured_version != bind_version:
+            return {
+                **status(current_config),
+                "ok": False,
+                "error": "edge_bind_address_family_mismatch",
+            }
+
+    previous_settings = _remote_access_settings(current_config)
+    candidate_settings = _remote_access_settings(candidate_config)
+    if previous_settings == candidate_settings:
+        return {**status(current_config), "ok": True, "settings_applied": False}
+    connector_fields = {
+        "transport_protocol",
+        "edge_ip_version",
+        "edge_bind_address",
+    }
+    connector_changed = any(
+        previous_settings[field] != candidate_settings[field]
+        for field in connector_fields
+    )
+    current_status = status(current_config)
+    if not connector_changed or not current_status.get("running"):
+        candidate_config = api.save_config(
+            {"remote_access": {"vibe_cloud": payload}}
+        )
+        return {
+            **status(candidate_config),
+            "ok": True,
+            "settings_applied": True,
+            "connector_replaced": False,
+        }
+
+    binary = _resolve_binary(candidate_config)
+    if not binary:
+        return {**current_status, "ok": False, "error": "cloudflared_not_found"}
+    previous_runtime_signature = _runtime_signature(current_config, binary)
+
+    candidate_pid: int | None = None
+    try:
+        # Reserve the candidate lane atomically with automatic recovery. Once the
+        # candidate record exists, later recovery reservations will reject it.
+        with _RECOVERY_LOCK:
+            if _RECOVERY_THREAD is not None and _RECOVERY_THREAD.is_alive():
+                return {
+                    **current_status,
+                    "ok": False,
+                    "error": "remote_access_settings_unavailable",
+                }
+            with _CONNECTOR_LOCK:
+                if _state_connector("candidate") or _state_connector("draining"):
+                    return {
+                        **current_status,
+                        "ok": False,
+                        "error": "remote_access_settings_unavailable",
+                    }
+                candidate_pid, metrics_url = _start_candidate_connector(
+                    candidate_config,
+                    binary,
+                    _initial_connector_protocol(candidate_config),
+                )
+        if not _wait_candidate_ready(candidate_pid, metrics_url):
+            raise RuntimeError("candidate_not_ready")
+        with CONFIG_LOCK:
+            live_config = V2Config.load()
+            live_binary = _resolve_binary(live_config)
+            if (
+                live_binary != binary
+                or live_config.remote_access.vibe_cloud.enabled
+                != current_config.remote_access.vibe_cloud.enabled
+                or _runtime_signature(live_config, binary) != previous_runtime_signature
+                or _remote_access_settings(live_config) != previous_settings
+            ):
+                raise RuntimeError("remote_access_settings_changed")
+            candidate_config = api.save_config(
+                {"remote_access": {"vibe_cloud": payload}}
+            )
+            try:
+                replaced = _promote_candidate_connector(
+                    candidate_pid,
+                    runtime_signature=_runtime_signature(candidate_config, binary),
+                )
+            except Exception:
+                api.save_config(
+                    {"remote_access": {"vibe_cloud": previous_settings}}
+                )
+                raise
+    except Exception as exc:
+        if candidate_pid is not None:
+            _discard_candidate_connector(candidate_pid)
+        return {
+            **status(current_config),
+            "ok": False,
+            "error": "remote_access_settings_apply_failed",
+            "detail": str(exc),
+        }
+
+    drained = _drain_tracked_connector(replaced)
+    return {
+        **status(candidate_config),
+        "ok": True,
+        "settings_applied": True,
+        "connector_replaced": True,
+        "previous_connector_drained": drained,
+    }
 
 
 def _local_ui_healthy(config: V2Config) -> bool:
@@ -928,8 +1276,16 @@ def _recovery_backoff_seconds(attempt_count: int) -> int:
     return 6 * 60 * 60
 
 
-def _automatic_recovery_enabled() -> bool:
-    return os.environ.get("AVIBE_TUNNEL_AUTO_RECOVERY", "1").strip().lower() not in {"0", "false", "no", "off"}
+def _automatic_recovery_enabled(config: V2Config | None = None) -> bool:
+    override = os.environ.get("AVIBE_TUNNEL_AUTO_RECOVERY")
+    if override is not None:
+        return override.strip().lower() not in {"0", "false", "no", "off"}
+    if config is None:
+        try:
+            config = V2Config.load()
+        except Exception:
+            return True
+    return bool(getattr(config.remote_access.vibe_cloud, "auto_recovery", True))
 
 
 def _public_health_url(config: V2Config) -> str | None:
@@ -1048,7 +1404,13 @@ def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -
     global _RECOVERY_THREAD
     now = time.time()
     manual = trigger == "manual"
-    current = status(config)
+    loaded_config = config
+    if loaded_config is None:
+        try:
+            loaded_config = V2Config.load()
+        except Exception:
+            loaded_config = None
+    current = status(loaded_config)
     if not current.get("running"):
         return {**current, "ok": False, "error": "remote_access_not_running"}
     previous = _fresh_active_comparison_snapshot(current, trigger=trigger, now=now)
@@ -1056,7 +1418,14 @@ def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -
         return {**current, "ok": False, "error": "route_optimization_unavailable"}
     effective_trigger = trigger
     if manual:
-        effective_trigger = _QUALITY_EVALUATOR.recovery_trigger(previous) or "manual"
+        effective_trigger = _QUALITY_EVALUATOR.recovery_trigger(
+            previous,
+            profile=(
+                _configured_optimization_profile(loaded_config)
+                if loaded_config is not None
+                else "balanced"
+            ),
+        ) or "manual"
         if effective_trigger == "manual" and not isinstance(previous.get("rtt_ms"), dict):
             request_path = previous.get("request_path")
             if isinstance(request_path, dict) and request_path.get("confidence") in {"medium", "high"}:
@@ -1140,7 +1509,7 @@ def _start_candidate_connector(
         _candidate_pid_path(),
         _candidate_cloudflared_stdout_path().name,
         _candidate_cloudflared_stderr_path().name,
-        env=_connector_environment(config.remote_access.vibe_cloud.tunnel_token, requested_protocol),
+        env=_connector_environment(config, requested_protocol),
     )
     candidate = _connector_record(
         candidate_pid,
@@ -1172,6 +1541,7 @@ def _promote_candidate_connector(
     pid: int,
     *,
     pending_tail_rollback: dict[str, Any] | None = None,
+    runtime_signature: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     with _CONNECTOR_LOCK:
         state = _read_state() or {}
@@ -1188,6 +1558,8 @@ def _promote_candidate_connector(
         state["draining"] = active if isinstance(old_pid, int) and old_pid != pid else None
         state["pending_tail_rollback"] = pending_tail_rollback
         state["pid"] = pid
+        if runtime_signature is not None:
+            state.update(runtime_signature)
         runtime.write_json(_state_path(), state)
         _pid_path().write_text(str(pid), encoding="utf-8")
         _candidate_pid_path().unlink(missing_ok=True)
@@ -1709,10 +2081,18 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
                         _RECOVERY_MANUAL_BYPASS_USED = False
                         _RECOVERY_EMERGENCY_BYPASS_USED = False
                     _set_recovery_state(state="idle", next_attempt_at=None, attempt_count_window=0)
-            trigger = _QUALITY_EVALUATOR.recovery_trigger(snapshot)
+            optimization_profile = (
+                _configured_optimization_profile(loaded)
+                if loaded is not None
+                else "balanced"
+            )
+            trigger = _QUALITY_EVALUATOR.recovery_trigger(
+                snapshot,
+                profile=optimization_profile,
+            )
             if running and not metrics_url:
                 trigger = "availability"
-            if trigger and _automatic_recovery_enabled():
+            if trigger and _automatic_recovery_enabled(loaded):
                 optimize_route(trigger=trigger)
             now = time.monotonic()
             if now - last_report_at >= QUALITY_REPORT_SECONDS:
@@ -2143,7 +2523,7 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
                 _pid_path(),
                 "remote_access_cloudflared_stdout.log",
                 "remote_access_cloudflared_stderr.log",
-                env=_connector_environment(cloud.tunnel_token, protocol),
+                env=_connector_environment(config, protocol),
             )
             _write_state(
                 pid,

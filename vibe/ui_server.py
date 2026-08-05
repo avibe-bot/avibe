@@ -4776,6 +4776,42 @@ def remote_access_optimize_route():
     return jsonify(result), 202 if result.get("ok") else 409
 
 
+@app.route("/api/remote-access/network-interfaces", methods=["GET"])
+def remote_access_network_interfaces():
+    from vibe import remote_access
+
+    return jsonify(remote_access.network_interfaces())
+
+
+@app.route("/api/remote-access/settings", methods=["POST"])
+async def remote_access_settings():
+    from vibe import remote_access
+
+    payload = request.json or {}
+    result = await asyncio.to_thread(remote_access.apply_settings, payload)
+    if result.get("ok"):
+        await asyncio.to_thread(_ensure_remote_access_monitoring)
+        return jsonify(result)
+    status_code = 400 if result.get("error") == "remote_access_settings_invalid" else 409
+    return jsonify(result), status_code
+
+
+@app.route("/api/remote-access/diagnostics", methods=["POST"])
+async def remote_access_diagnostics():
+    from vibe import remote_access
+
+    try:
+        result = await asyncio.to_thread(remote_access.connectivity_diagnostics)
+    except Exception as exc:
+        logger.warning("Tunnel connectivity diagnostics failed", exc_info=True)
+        result = {
+            "ok": False,
+            "error": "remote_access_diagnostics_failed",
+            "detail": str(exc),
+        }
+    return jsonify(result), 200 if result.get("ok") else 409
+
+
 @app.route("/auth/callback", methods=["GET"])
 def remote_access_auth_callback():
     from vibe import remote_access

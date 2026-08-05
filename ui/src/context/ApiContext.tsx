@@ -438,10 +438,37 @@ export type RemoteAccessStatus = {
   public_url?: string;
   pid_state?: string;
   transport_protocol?: 'auto' | 'quic' | 'http2';
+  settings?: RemoteAccessSettings;
   tunnel_quality?: TunnelQualitySnapshot;
   network_path?: TunnelNetworkPath;
   error?: string;
   optimization_started?: boolean;
+};
+
+export type RemoteAccessSettings = {
+  transport_protocol: 'auto' | 'quic' | 'http2';
+  auto_recovery: boolean;
+  optimization_profile: 'stable' | 'balanced' | 'low_latency';
+  edge_ip_version: 'auto' | '4' | '6';
+  edge_bind_address: string;
+};
+
+export type TunnelNetworkInterface = {
+  id: string;
+  name: string;
+  address: string;
+  ip_version: '4' | '6';
+};
+
+export type TunnelConnectivityDiagnostics = {
+  ok: boolean;
+  sampled_at: string;
+  effective_protocol: 'quic' | 'http2' | 'unknown';
+  dns: { status: 'available' | 'unavailable' | 'unknown' };
+  quic: { status: 'available' | 'unavailable' | 'unknown'; source: string };
+  http2: { status: 'available' | 'unavailable' | 'unknown'; source: string };
+  cloudflared_version?: string | null;
+  error?: string;
 };
 
 export type ApiContextType = {
@@ -776,6 +803,9 @@ export type ApiContextType = {
   startRemoteAccess: () => Promise<RemoteAccessStatus>;
   stopRemoteAccess: () => Promise<RemoteAccessStatus>;
   optimizeRemoteAccessRoute: () => Promise<RemoteAccessStatus>;
+  getRemoteAccessNetworkInterfaces: () => Promise<{ ok: boolean; interfaces: TunnelNetworkInterface[] }>;
+  saveRemoteAccessSettings: (settings: RemoteAccessSettings) => Promise<RemoteAccessStatus>;
+  diagnoseRemoteAccess: () => Promise<TunnelConnectivityDiagnostics>;
   getAuthSession: () => Promise<SessionInfo>;
   signOut: () => Promise<{ ok: boolean }>;
 };
@@ -3203,6 +3233,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     startRemoteAccess: () => postJson('/api/remote-access/start', {}),
     stopRemoteAccess: () => postJson('/api/remote-access/stop', {}),
     optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}),
+    getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
+    saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
+    diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
     getAuthSession: () => getJson('/api/session'),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps

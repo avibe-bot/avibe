@@ -174,14 +174,36 @@ def test_save_config_accepts_typing_ack_mode(monkeypatch, tmp_path):
 
 def test_remote_access_transport_protocol_is_normalized_and_validated() -> None:
     payload = _full_config_payload()
-    payload["remote_access"] = {"vibe_cloud": {"transport_protocol": " HTTP2 "}}
+    payload["remote_access"] = {
+        "vibe_cloud": {
+            "transport_protocol": " HTTP2 ",
+            "auto_recovery": "false",
+            "optimization_profile": " LOW_LATENCY ",
+            "edge_ip_version": " 4 ",
+            "edge_bind_address": " 192.0.2.10 ",
+        }
+    }
 
     config = V2Config.from_payload(payload)
 
     assert config.remote_access.vibe_cloud.transport_protocol == "http2"
+    assert config.remote_access.vibe_cloud.auto_recovery is False
+    assert config.remote_access.vibe_cloud.optimization_profile == "low_latency"
+    assert config.remote_access.vibe_cloud.edge_ip_version == "4"
+    assert config.remote_access.vibe_cloud.edge_bind_address == "192.0.2.10"
 
     payload["remote_access"]["vibe_cloud"]["transport_protocol"] = "tcp"
     with pytest.raises(ValueError, match="transport_protocol"):
+        V2Config.from_payload(payload)
+
+    payload["remote_access"]["vibe_cloud"]["transport_protocol"] = "auto"
+    payload["remote_access"]["vibe_cloud"]["optimization_profile"] = "fastest"
+    with pytest.raises(ValueError, match="optimization_profile"):
+        V2Config.from_payload(payload)
+
+    payload["remote_access"]["vibe_cloud"]["optimization_profile"] = "balanced"
+    payload["remote_access"]["vibe_cloud"]["edge_bind_address"] = "wifi"
+    with pytest.raises(ValueError, match="edge_bind_address"):
         V2Config.from_payload(payload)
 
 

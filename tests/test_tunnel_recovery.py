@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from config.v2_config import V2Config
 from tests.test_remote_access_vibe_cloud import _config
 from vibe import remote_access, runtime
 
@@ -140,6 +141,76 @@ def test_ra_tq_005_non_improving_candidate_keeps_active(monkeypatch, tmp_path) -
     assert state["candidate"] is None
     assert stopped == [candidate_pid]
     assert results[0]["result"] == "no_improvement"
+
+
+def test_ra_tq_028_settings_candidate_failure_keeps_active_config(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    events = []
+    monkeypatch.setattr(remote_access, "status", lambda loaded=None: {"running": True})
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda loaded: "/usr/bin/cloudflared")
+    monkeypatch.setattr(
+        remote_access,
+        "_start_candidate_connector",
+        lambda loaded, binary, protocol: events.append(("start", protocol)) or (222, "http://metrics"),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_wait_candidate_ready",
+        lambda pid, metrics: events.append(("ready", pid)) or False,
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_discard_candidate_connector",
+        lambda pid: events.append(("discard", pid)),
+    )
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = None
+
+    result = remote_access.apply_settings({"transport_protocol": "http2"})
+
+    assert result["ok"] is False
+    assert result["error"] == "remote_access_settings_apply_failed"
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "auto"
+    assert events == [("start", "http2"), ("ready", 222), ("discard", 222)]
+
+
+def test_ra_tq_028_settings_promote_before_draining_previous_connector(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    events = []
+    monkeypatch.setattr(remote_access, "status", lambda loaded=None: {"running": True})
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda loaded: "/usr/bin/cloudflared")
+    monkeypatch.setattr(
+        remote_access,
+        "_start_candidate_connector",
+        lambda loaded, binary, protocol: events.append(("start", protocol)) or (222, "http://metrics"),
+    )
+    monkeypatch.setattr(remote_access, "_wait_candidate_ready", lambda pid, metrics: True)
+
+    def promote(pid, **kwargs):
+        events.append(("promote", kwargs["runtime_signature"]["transport_protocol"]))
+        return {"pid": 111}
+
+    monkeypatch.setattr(remote_access, "_promote_candidate_connector", promote)
+    monkeypatch.setattr(
+        remote_access,
+        "_drain_tracked_connector",
+        lambda connector: events.append(("drain", connector["pid"])) or True,
+    )
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = None
+
+    result = remote_access.apply_settings({"transport_protocol": "http2"})
+
+    assert result["ok"] is True
+    assert result["connector_replaced"] is True
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "http2"
+    assert events == [("start", "http2"), ("promote", "http2"), ("drain", 111)]
 
 
 def test_ra_tq_012_tail_recovery_keeps_better_alternate_protocol(monkeypatch, tmp_path) -> None:

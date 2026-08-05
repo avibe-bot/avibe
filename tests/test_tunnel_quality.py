@@ -336,6 +336,43 @@ def test_ra_tq_015_sustained_request_failures_trigger_recovery() -> None:
     assert evaluator.recovery_trigger(snapshot) == "tail_latency"
 
 
+def test_ra_tq_027_optimization_profiles_change_only_recovery_sensitivity() -> None:
+    evaluator = tunnel_quality.QualityEvaluator()
+    request_path = {
+        "status": "healthy",
+        "confidence": "high",
+        "success_count": 30,
+        "latency_ms": {"p50": 180, "p95": 560, "p99": 900, "max": 900},
+        "slow_request_rate": {
+            "over_500_ms": 0.25,
+            "over_1000_ms": 0.0,
+            "over_2000_ms": 0.0,
+        },
+        "failure_rate": 0.0,
+        "baseline_p95_ms": 400,
+    }
+    snapshot = {
+        "state": "healthy",
+        "ha_connections": 4,
+        "request_errors_per_minute": 0,
+        "packet_loss_per_minute": 0,
+        "request_path": request_path,
+        "rtt_ms": {"median": 100, "max": 150},
+        "baseline_median_rtt_ms": 90,
+    }
+
+    assert evaluator.recovery_trigger(snapshot, profile="low_latency") == "tail_latency"
+    assert evaluator.recovery_trigger(snapshot, profile="balanced") is None
+    assert evaluator.recovery_trigger(snapshot, profile="stable") is None
+
+    snapshot["state"] = "degraded"
+    request_path["latency_ms"] = {"p50": 200, "p95": 800, "p99": 1300, "max": 1300}
+    request_path["slow_request_rate"]["over_1000_ms"] = 0.06
+
+    assert evaluator.recovery_trigger(snapshot, profile="balanced") == "tail_latency"
+    assert evaluator.recovery_trigger(snapshot, profile="stable") is None
+
+
 def test_ra_tq_011_http2_uses_request_path_grade_without_rtt() -> None:
     evaluator = tunnel_quality.QualityEvaluator()
     snapshot = None
