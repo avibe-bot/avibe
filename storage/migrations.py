@@ -115,9 +115,6 @@ PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS = {
 HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     "agent_sessions": PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS["agent_sessions"]
     | {
-        "queue_hold_state",
-        "queue_hold_version",
-        "queue_held_at",
         "composer_draft_text",
         "composer_draft_updated_at",
     },

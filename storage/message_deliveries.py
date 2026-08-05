@@ -1602,8 +1602,6 @@ def message_for_delivery(conn: Connection, delivery: dict[str, Any]) -> dict[str
 def queued_session_ids_without_live_turns(
     conn: Connection,
     session_id: str | None = None,
-    *,
-    include_held: bool = False,
 ) -> list[str]:
     live = select(session_turns.c.id).where(
         session_turns.c.session_id == message_deliveries.c.session_id,
@@ -1616,8 +1614,6 @@ def queued_session_ids_without_live_turns(
         .where(agent_sessions.c.status == "active")
         .where(~live)
     )
-    if not include_held:
-        query = query.where(agent_sessions.c.queue_hold_state == "open")
     if session_id:
         query = query.where(message_deliveries.c.session_id == session_id)
     return [str(value) for value in conn.execute(query.distinct()).scalars()]
@@ -1912,33 +1908,6 @@ def retire_for_archive(conn: Connection, session_id: str) -> dict[str, Any]:
         "retired": retired,
         "delivery_ids": retired_delivery_ids,
     }
-
-
-def set_queue_hold(conn: Connection, session_id: str, *, held: bool) -> bool:
-    row = conn.execute(
-        select(agent_sessions.c.queue_hold_version).where(agent_sessions.c.id == session_id)
-    ).first()
-    if row is None:
-        return False
-    version = int(row[0])
-    result = conn.execute(
-        update(agent_sessions)
-        .where(agent_sessions.c.id == session_id)
-        .where(agent_sessions.c.queue_hold_version == version)
-        .values(
-            queue_hold_state="held" if held else "open",
-            queue_hold_version=version + 1,
-            queue_held_at=utc_now_iso() if held else None,
-        )
-    )
-    return result.rowcount == 1
-
-
-def queue_is_held(conn: Connection, session_id: str) -> bool:
-    value = conn.execute(
-        select(agent_sessions.c.queue_hold_state).where(agent_sessions.c.id == session_id)
-    ).scalar_one_or_none()
-    return value == "held"
 
 
 def set_draft(conn: Connection, session_id: str, text: str | None) -> bool:
