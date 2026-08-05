@@ -565,6 +565,47 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
     assert "slack/U456" not in first_client.options.system_prompt["append"]
 
 
+def test_session_handler_recreates_terminated_cached_client_before_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    composite_key = f"slack_C123:{tmp_path}"
+
+    first_client = _run_session(handler, context)
+    first_client._transport._process.returncode = -6
+    first_client._vibe_stderr_lines.extend(["fatal: Claude CLI aborted", "transport closed"])
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert controller.claude_sessions[composite_key] is second_client
+    assert len(captured["clients"]) == 2
+    assert "SIGABRT (signal 6)" in caplog.text
+    assert "Claude stderr tail:\nfatal: Claude CLI aborted\ntransport closed" in caplog.text
+
+
 def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
     registered: list[dict[str, Any]] = []
@@ -1177,6 +1218,65 @@ def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env
     assert len(captured["clients"]) == 1
     assert first_client.options.env["AVIBE_SESSION_ID"] == "ses-subagent"
     assert second_context.platform_specific["agent_session_id"] == "ses-subagent"
+
+
+def test_session_handler_recreates_terminated_cached_subagent_before_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _RoutingSessions(_Sessions):
+        @staticmethod
+        def get_agent_session_id(settings_key, base_session_id, agent_name):
+            return None
+
+        @staticmethod
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
+            return "ses-subagent"
+
+    class _RoutingSettingsManager(_SettingsManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sessions = _RoutingSessions()
+
+        @staticmethod
+        def get_channel_routing(settings_key):
+            return type("Routing", (), {"claude_agent": "reviewer", "model": None, "reasoning_effort": None})()
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.settings_manager = _RoutingSettingsManager()
+    controller.platform_settings_managers = {"slack": controller.settings_manager}
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"routing_subagent": "reviewer", "task_trigger_kind": "agent_run"},
+    )
+
+    first_client = _run_session(handler, context)
+    first_client._transport._process.returncode = -6
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
 
 
 def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypatch, tmp_path: Path) -> None:

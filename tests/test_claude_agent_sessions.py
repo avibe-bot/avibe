@@ -143,6 +143,21 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key=runtime_key,
         ) == "❌ process terminated: SIGABRT (signal 6)"
 
+    def test_process_termination_notify_uses_shared_i18n_fallback(self):
+        controller = _StubController()
+        controller.config.language = "zh"
+        runtime_key = "wechat_o9:/tmp/work"
+        controller.claude_sessions[runtime_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
+        )
+        controller.session_handler = SimpleNamespace()
+        agent = ClaudeAgent(controller)
+
+        assert agent._format_error_notify(
+            RuntimeError("Cannot write to terminated process (exit code: -6)"),
+            composite_key=runtime_key,
+        ) == "❌ Claude Code 进程已终止（SIGABRT (signal 6)）；会话已重置，请重试。"
+
     async def test_handle_message_serializes_queries_for_same_runtime_session(self):
         controller = _StubController()
         runtime_key = "wechat_o9:/tmp/work"

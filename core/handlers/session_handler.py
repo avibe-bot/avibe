@@ -253,6 +253,32 @@ class SessionHandler(BaseHandler):
         )
         return env["PATH"] if "PATH" in env else os.environ.get("PATH", "")
 
+    async def _evict_terminated_cached_claude_session(
+        self,
+        composite_key: str,
+        client: ClaudeSDKClient,
+        *,
+        retire_model_hub_scope: bool,
+    ) -> bool:
+        returncode = get_claude_client_returncode(client)
+        if returncode is None:
+            return False
+
+        reason = claude_process_exit_reason(returncode)
+        stderr_tail = get_claude_client_stderr_tail(client)
+        diagnostic = f"\nClaude stderr tail:\n{stderr_tail}" if stderr_tail else ""
+        logger.warning(
+            "Recreating cached Claude SDK client for %s because its process terminated (%s)%s",
+            composite_key,
+            reason,
+            diagnostic,
+        )
+        await self._cleanup_session_locked(
+            composite_key,
+            retire_model_hub_scope=retire_model_hub_scope,
+        )
+        return True
+
     async def _reuse_cached_claude_session_if_available(
         self,
         *,
@@ -268,6 +294,12 @@ class SessionHandler(BaseHandler):
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
+            return None
+        if await self._evict_terminated_cached_claude_session(
+            composite_key,
+            client,
+            retire_model_hub_scope=model_hub_launch.channel == "direct",
+        ):
             return None
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude SDK client because Model Hub channel changed")
@@ -358,6 +390,12 @@ class SessionHandler(BaseHandler):
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
+            return None
+        if await self._evict_terminated_cached_claude_session(
+            composite_key,
+            client,
+            retire_model_hub_scope=model_hub_launch.channel == "direct",
+        ):
             return None
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude subagent SDK client because Model Hub channel changed")

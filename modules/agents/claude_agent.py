@@ -33,6 +33,7 @@ from modules.agents.claude_process_reaper import (
     get_claude_client_returncode,
     register_claude_owned_process,
 )
+from vibe.i18n import t as i18n_t
 
 from modules.agents.base import (
     AGENT_RUNTIME_TURN_KEY,
@@ -119,30 +120,25 @@ class ClaudeAgent(BaseAgent):
                 logger.debug("claude: failed to build error diagnostic", exc_info=True)
         return str(error)
 
+    def _translate_error(self, key: str, **kwargs) -> str:
+        translator = getattr(self.session_handler, "_t", None) or getattr(self.controller, "_t", None)
+        if callable(translator):
+            try:
+                return str(translator(key, **kwargs))
+            except Exception:
+                logger.debug("claude: failed to translate error notify", exc_info=True)
+        lang = getattr(getattr(self.controller, "config", None), "language", "en")
+        return str(i18n_t(key, lang, **kwargs))
+
     def _format_error_notify(self, error: Exception, *, composite_key: str | None = None) -> str:
         """Return the durable notify text for Claude terminal errors."""
         if is_claude_sdk_buffer_error(error):
-            translator = getattr(self.session_handler, "_t", None) or getattr(self.controller, "_t", None)
-            if callable(translator):
-                try:
-                    return f"❌ {translator('error.sessionConnectionLost')}"
-                except Exception:
-                    logger.debug("claude: failed to translate buffer-error notify", exc_info=True)
-            return "❌ Connection to Claude was lost. Please try your message again."
+            return f"❌ {self._translate_error('error.sessionConnectionLost')}"
         client = self.claude_sessions.get(composite_key) if composite_key else None
         returncode = get_claude_client_returncode(client)
         if returncode is not None:
             reason = claude_process_exit_reason(returncode)
-            translator = getattr(self.session_handler, "_t", None) or getattr(self.controller, "_t", None)
-            if callable(translator):
-                try:
-                    return f"❌ {translator('error.claudeProcessTerminated', reason=reason)}"
-                except Exception:
-                    logger.debug("claude: failed to translate process-termination notify", exc_info=True)
-            return (
-                f"❌ Claude Code process terminated ({reason}); the session was reset. "
-                "Please try your message again."
-            )
+            return f"❌ {self._translate_error('error.claudeProcessTerminated', reason=reason)}"
         return f"❌ Claude error: {error}"
 
     async def handle_message(self, request: AgentRequest) -> None:
