@@ -2313,11 +2313,11 @@ class SlackBot(BaseIMClient):
                                 fallback_selected_backend="",
                             )
                             await self._on_routing_modal_update(
-                                user.get("id"),
-                                effective_channel,
-                                view.get("id"),
-                                view.get("hash"),
-                                selection,
+                                user_id=user.get("id"),
+                                channel_id=effective_channel,
+                                view_id=view.get("id"),
+                                view_hash=view.get("hash"),
+                                selection=selection,
                                 is_dm=isinstance(effective_channel, str) and effective_channel.startswith("D"),
                             )
                 elif action_type == "plain_text_input":
@@ -2374,11 +2374,11 @@ class SlackBot(BaseIMClient):
             # Update settings - need access to settings manager
             if hasattr(self, "_on_settings_update"):
                 await self._on_settings_update(
-                    user_id,
-                    show_types,
-                    channel_id,
-                    require_mention,
-                    language,
+                    user_id=user_id,
+                    show_message_types=show_types,
+                    channel_id=channel_id,
+                    require_mention=require_mention,
+                    language=language,
                     is_dm=isinstance(channel_id, str) and channel_id.startswith("D"),
                 )
 
@@ -2605,18 +2605,18 @@ class SlackBot(BaseIMClient):
             # Update routing via callback
             if hasattr(self, "_on_routing_update"):
                 await self._on_routing_update(
-                    user_id,
-                    channel_id,
-                    backend,
-                    oc_agent,
-                    oc_model,
-                    oc_reasoning,
-                    claude_agent,
-                    claude_model,
-                    claude_reasoning,
-                    codex_agent,
-                    codex_model,
-                    codex_reasoning,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    backend=backend,
+                    opencode_agent=oc_agent,
+                    opencode_model=oc_model,
+                    opencode_reasoning_effort=oc_reasoning,
+                    claude_agent=claude_agent,
+                    claude_model=claude_model,
+                    claude_reasoning_effort=claude_reasoning,
+                    codex_agent=codex_agent,
+                    codex_model=codex_model,
+                    codex_reasoning_effort=codex_reasoning,
                     is_dm=isinstance(channel_id, str) and channel_id.startswith("D"),
                 )
 

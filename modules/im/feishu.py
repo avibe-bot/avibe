@@ -1968,11 +1968,11 @@ class FeishuBot(BaseIMClient):
 
         if self._on_settings_update:
             await self._on_settings_update(
-                context.user_id,
-                show_message_types,
-                context.channel_id,
-                require_mention,
-                language,
+                user_id=context.user_id,
+                show_message_types=show_message_types,
+                channel_id=context.channel_id,
+                require_mention=require_mention,
+                language=language,
                 is_dm=context.platform_specific.get("is_dm", False),
             )
 
@@ -2154,18 +2154,18 @@ class FeishuBot(BaseIMClient):
 
         if self._on_routing_update:
             await self._on_routing_update(
-                context.user_id,
-                context.channel_id,
-                backend,
-                opencode_agent,
-                opencode_model,
-                opencode_reasoning,
-                claude_agent,
-                claude_model,
-                claude_reasoning,
-                codex_agent,
-                codex_model,
-                codex_reasoning,
+                user_id=context.user_id,
+                channel_id=context.channel_id,
+                backend=backend,
+                opencode_agent=opencode_agent,
+                opencode_model=opencode_model,
+                opencode_reasoning_effort=opencode_reasoning,
+                claude_agent=claude_agent,
+                claude_model=claude_model,
+                claude_reasoning_effort=claude_reasoning,
+                codex_agent=codex_agent,
+                codex_model=codex_model,
+                codex_reasoning_effort=codex_reasoning,
                 is_dm=context.platform_specific.get("is_dm", False),
             )
 
