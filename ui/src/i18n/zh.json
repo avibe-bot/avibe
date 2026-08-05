@@ -1158,7 +1158,7 @@
     "optimizeRoute": "优化线路",
     "optimizingRoute": "优化中...",
     "optimizeStarted": "第二条 Connector 正在评估更优线路",
-    "controls": "Tunnel 控制",
+    "controls": "Tunnel 控制（高级）",
     "protocol": "传输协议",
     "protocolAuto": "自动",
     "protocolAutoActive": "自动 · 当前 {{protocol}}",
@@ -1185,6 +1185,8 @@
     "diagnosticAvailable": "可用",
     "diagnosticUnavailable": "不可用",
     "diagnosticUnknown": "尚未观测",
+    "diagnosticQuicInactive": "未验证 · 当前 {{protocol}}",
+    "diagnosticQuicInactiveHelp": "Avibe 只会在当前 Connector 实际使用 QUIC 后确认该路径；当前 Connector 正在使用 {{protocol}}。",
     "diagnosticVersion": "{{version}}"
   },
   "models": {
