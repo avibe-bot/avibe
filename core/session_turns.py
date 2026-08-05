@@ -1205,7 +1205,12 @@ class SessionTurnManager:
 
             claimed_run_ids = claim_agent_runs_for_turn_in_connection(conn, run_ids)
             if claimed_run_ids != run_ids:
-                raise RuntimeError("Delivery batch contains an unclaimable Agent Run")
+                raise RuntimeError(
+                    "Delivery batch contains an unclaimable Agent Run: "
+                    f"session={session_id} deliveries="
+                    f"{','.join(str(delivery.get('id')) for delivery in deliveries)} "
+                    f"runs={','.join(run_ids)}"
+                )
         return delivery_store.claim_start_batch(
             conn,
             turn_id=turn_id,
@@ -1215,6 +1220,29 @@ class SessionTurnManager:
             dispatch_text=dispatch_text,
             attempt_id=attempt_id,
         )
+
+    @staticmethod
+    def _delivery_agent_runs_can_start(
+        conn: Connection,
+        delivery: dict[str, Any],
+    ) -> bool:
+        """Whether a queued Delivery's linked Agent Runs can still be claimed.
+
+        A Run that already settled terminally (or asked to cancel) leaves its
+        Delivery permanently unexecutable: every claim fails the Agent Run guard,
+        and because recovery drains the same queue on startup, one such row turns
+        into a controller crash loop. Callers retire the Delivery instead.
+        """
+
+        from storage.background import inspect_agent_runs_for_turn_in_connection
+
+        run_ids = delivery_store.agent_run_ids_for_delivery(conn, delivery)
+        if not run_ids:
+            return True
+        eligible_run_ids, stale_run_ids = inspect_agent_runs_for_turn_in_connection(
+            conn, run_ids
+        )
+        return not stale_run_ids and eligible_run_ids == run_ids
 
     @staticmethod
     def _cancel_runs_for_retired_delivery(
@@ -1324,6 +1352,25 @@ class SessionTurnManager:
                         raise RuntimeError("invalid FIFO Delivery retirement lost")
                     logger.warning(
                         "retired queued Delivery=%s because it has no resolvable input",
+                        row["id"],
+                    )
+                continue
+            unexecutable_rows = [
+                row
+                for row in delivery_rows
+                if not self._delivery_agent_runs_can_start(conn, row)
+            ]
+            if unexecutable_rows:
+                for row in unexecutable_rows:
+                    if not self._retire_delivery_not_written(
+                        conn,
+                        session_id,
+                        str(row["id"]),
+                        reason="terminal_agent_run_before_fifo_claim",
+                    ):
+                        raise RuntimeError("unexecutable FIFO Delivery retirement lost")
+                    logger.warning(
+                        "retired queued Delivery=%s because its Agent Run can no longer start",
                         row["id"],
                     )
                 continue
