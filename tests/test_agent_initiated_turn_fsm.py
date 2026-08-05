@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import session_turns
+from core.message_context import build_context_turn_sink_key
 
 
 def _ctx(session_id: str = "s1"):
@@ -36,6 +37,10 @@ def _manager():
     controller = SimpleNamespace(
         _session_id_from_context=lambda ctx: (getattr(ctx, "platform_specific", None) or {}).get("agent_session_id"),
         _get_session_key=lambda ctx: f"avibe::{(getattr(ctx, 'platform_specific', None) or {}).get('agent_session_id')}",
+        _get_turn_sink_key=lambda ctx: build_context_turn_sink_key(
+            ctx,
+            session_key=f"avibe::{(getattr(ctx, 'platform_specific', None) or {}).get('agent_session_id')}",
+        ),
         set_agent_status=lambda sid, status: None,
         command_handler=SimpleNamespace(handle_stop=AsyncMock(return_value=True)),
     )

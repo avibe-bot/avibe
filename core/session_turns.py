@@ -396,10 +396,11 @@ class Turn:
     Queue policy is deliberately absent. The durable Session hold and Turn control
     slot decide whether backlog may drain across both process lifetime and restart.
 
-    The streaming SINK is deliberately NOT held here: it is keyed by ``session_key``
-    (platform-prefixed ``avibe::<id>``) not ``session_id``, is registered from the
-    dispatcher on the emit path, and is platform-agnostic (a future IM stream has a
-    sink but no avibe ``session_id``). See ``SessionTurnManager.active_turn_sinks``.
+    The streaming SINK is deliberately NOT held here: it is keyed by the
+    thread-scoped turn-sink key (platform-prefixed, e.g. ``avibe::<id>``) not
+    ``session_id``, is registered from the dispatcher on the emit path, and is
+    platform-agnostic (an IM stream has a sink but no avibe ``session_id``). See
+    ``SessionTurnManager.active_turn_sinks``.
     """
 
     task: asyncio.Task
@@ -486,7 +487,7 @@ class SessionTurnManager:
 
     - ``in_flight``: ``session_id -> Turn`` for the active turn — the Stop target
       (``/internal/cancel``) and the ``/turn-state`` projection.
-    - ``active_turn_sinks``: the live streaming sink per ``session_key`` — the
+    - ``active_turn_sinks``: the live streaming sink per turn-sink key — the
       streaming half, kept separate on purpose (see ``Turn``).
 
     ``controller`` reaches the backends + the outbound chokepoint
@@ -508,11 +509,18 @@ class SessionTurnManager:
         self._draining_backends: set[str] = set()
         self._deferred_restart_sessions: dict[str, set[str]] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
-        # The live streaming turn sink per SESSION KEY (avibe/web-Chat only; IM/CLI
-        # turns register none). Each is ``{on_chunk, done_event, turn_token}`` — the
-        # turn's stream callback + completion event + correlation token. Keyed by
-        # session_key (stable across a session's turns) so a reused agent receiver
-        # carrying a stale per-turn context still resolves the current turn's sink.
+        # The live turn sink per TURN SINK KEY. Each is
+        # ``{on_chunk, done_event, turn_token}`` — the turn's stream callback +
+        # completion event + correlation token. Every dispatched turn registers one,
+        # IM/CLI included (``_run`` always passes ``_noop_chunk`` so the turn stays
+        # open until the backend's terminal result), which makes this map the
+        # turn-concurrency slot for ALL surfaces, not just web Chat.
+        #
+        # Keyed by ``controller._get_turn_sink_key`` — the THREAD-scoped key, not the
+        # channel-scoped ``_get_session_key``. Stable across a session's turns, so a
+        # reused agent receiver carrying a stale per-turn context still resolves the
+        # current turn's sink; distinct per thread, so a busy forum topic no longer
+        # occupies its siblings' slots.
         self.active_turn_sinks: dict[str, dict] = {}
 
     def _sqlite_engine(self) -> Engine:
@@ -4146,7 +4154,7 @@ class SessionTurnManager:
             return None
         if outcome == "terminal":
             get_sink = getattr(self.controller, "get_turn_sink", None)
-            get_key = getattr(self.controller, "_get_session_key", None)
+            get_key = getattr(self.controller, "_get_turn_sink_key", None)
             if callable(get_sink) and callable(get_key):
                 try:
                     sink = get_sink(get_key(context))
@@ -6408,7 +6416,7 @@ class SessionTurnManager:
         if not callable(runtime_started) or runtime_started(context) is not True:
             return False
         session_id = self.controller._session_id_from_context(context)
-        get_key = getattr(self.controller, "_get_session_key", None)
+        get_key = getattr(self.controller, "_get_turn_sink_key", None)
         if not session_id or not callable(get_key):
             return False
         session_key = get_key(context)
@@ -6504,7 +6512,7 @@ class SessionTurnManager:
             if current is not None and current.logical_turn_id == logical_turn_id:
                 current.terminal_is_error = current.terminal_is_error or is_error
             sink = None
-            get_key = getattr(self.controller, "_get_session_key", None)
+            get_key = getattr(self.controller, "_get_turn_sink_key", None)
             if callable(get_key):
                 try:
                     sink = self.get_turn_sink(get_key(context))
@@ -6557,7 +6565,7 @@ class SessionTurnManager:
             return
         current = self.in_flight.get(session_id)
         sink = None
-        get_key = getattr(self.controller, "_get_session_key", None)
+        get_key = getattr(self.controller, "_get_turn_sink_key", None)
         if callable(get_key):
             try:
                 sink = self.get_turn_sink(get_key(context))
@@ -6604,7 +6612,7 @@ class SessionTurnManager:
         session_id = self.controller._session_id_from_context(context)
         if not session_id:
             return False
-        get_key = getattr(self.controller, "_get_session_key", None)
+        get_key = getattr(self.controller, "_get_turn_sink_key", None)
         if not callable(get_key):
             return False
         session_key = get_key(context)
@@ -6854,7 +6862,7 @@ class SessionTurnManager:
         settle), else apply the one token rule. Centralizes the old
         ``ConsolidatedMessageDispatcher._is_active_turn``."""
         get_sink = getattr(self.controller, "get_turn_sink", None)
-        get_key = getattr(self.controller, "_get_session_key", None)
+        get_key = getattr(self.controller, "_get_turn_sink_key", None)
         if not callable(get_sink) or not callable(get_key):
             return True
         try:
@@ -6959,7 +6967,7 @@ class SessionTurnManager:
         """
         if self.controller is None:
             return None
-        get_key = getattr(self.controller, "_get_session_key", None)
+        get_key = getattr(self.controller, "_get_turn_sink_key", None)
         if not callable(get_key):
             return None
         try:

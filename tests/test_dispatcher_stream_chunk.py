@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.message_context import build_context_turn_sink_key
 from core.message_dispatcher import _stream_chunk
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from modules.im import MessageContext
@@ -32,6 +33,9 @@ class _ControllerDouble:
 
     def _get_session_key(self, ctx):
         return f"{ctx.platform}::{ctx.channel_id}"
+
+    def _get_turn_sink_key(self, ctx):
+        return build_context_turn_sink_key(ctx, session_key=self._get_session_key(ctx))
 
     def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None, context=None):
         self.active_turn_sinks[session_key] = {
