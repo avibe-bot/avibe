@@ -4,6 +4,7 @@ from typing import Optional
 from config.v2_config import (
     DEFAULT_AGENT_BACKEND,
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
     DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
     V2Config,
     SlackConfig,
@@ -54,6 +55,7 @@ class OpenCodeCompatConfig:
     request_timeout_seconds: int
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
+    active_turn_timeout_seconds: int = DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
     # User's saved default provider from Settings → Backends → OpenCode.
     # Used as the ``providerID`` when a routed model string has no ``provider/``
     # prefix (most agents.opencode model entries are bare model IDs).
@@ -133,6 +135,7 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
             request_timeout_seconds=60,
             default_reasoning_effort=v2.agents.opencode.default_reasoning_effort,
             error_retry_limit=v2.agents.opencode.error_retry_limit,
+            active_turn_timeout_seconds=v2.agents.opencode.active_turn_timeout_seconds,
             # Surface the user's saved provider choice so the OpenCode agent
             # adapter can prepend it as ``providerID`` for bare-model strings.
             default_provider=v2.agents.opencode.default_provider,

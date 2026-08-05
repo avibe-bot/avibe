@@ -383,6 +383,38 @@ export const SettingsMessagingPage: React.FC = () => {
         />
 
         <SettingsRow
+          title={t('dashboard.opencodeActiveTurnTimeout')}
+          description={t('dashboard.opencodeActiveTurnTimeoutHint')}
+          control={
+            <CompactField
+              type="number"
+              min={1}
+              max={1440}
+              value={Math.round(
+                (config.agents?.opencode?.active_turn_timeout_seconds ?? 5400) / 60
+              )}
+              onChange={(event) => {
+                const minutes = Math.max(
+                  1,
+                  Math.min(1440, Number(event.target.value) || 1)
+                );
+                void persist({
+                  ...config,
+                  agents: {
+                    ...(config.agents || {}),
+                    opencode: {
+                      ...(config.agents?.opencode || {}),
+                      active_turn_timeout_seconds: Math.round(minutes * 60),
+                    },
+                  },
+                });
+              }}
+              className="w-24 text-center font-mono"
+            />
+          }
+        />
+
+        <SettingsRow
           title={t('dashboard.showDuration')}
           description={t('dashboard.showDurationHint')}
           control={

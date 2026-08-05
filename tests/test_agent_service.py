@@ -18,6 +18,9 @@ from core.session_activities import SessionActivityRegistry
 from modules.agents import service as service_module
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
+from modules.agents.base import AgentRequest
+from modules.agents.opencode.poll_loop import OpenCodePollLoop
+from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.session_activities import SQLiteSessionActivityStore
@@ -1478,6 +1481,176 @@ def test_agent_service_recovers_accepted_turn_when_owned_backend_dies() -> None:
                 successor.cancel()
                 await asyncio.gather(successor, return_exceptions=True)
             service.release_runtime_turn(second.context)
+
+    asyncio.run(_run())
+
+
+def test_hfr_432_opencode_timeout_releases_fifo_and_shared_runtime() -> None:
+    """HFR-432: one stuck native Turn cannot retain either OpenCode lane forever."""
+
+    async def _run() -> None:
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        emitted: list[tuple[str, str, bool, str | None]] = []
+
+        class _Server:
+            def __init__(self) -> None:
+                self.poll_started = asyncio.Event()
+                self.aborted = asyncio.Event()
+                self.abort_calls: list[tuple[str, str]] = []
+
+            async def list_messages(self, session_id: str, directory: str):
+                self.poll_started.set()
+                return [
+                    {
+                        "info": {
+                            "id": "msg-stuck",
+                            "role": "assistant",
+                            "time": {},
+                        },
+                        "parts": [],
+                    }
+                ]
+
+            async def abort_session(self, session_id: str, directory: str) -> bool:
+                self.abort_calls.append((session_id, directory))
+                self.aborted.set()
+                return True
+
+        server = _Server()
+
+        class _OpenCodeTimeoutAgent(_RuntimeAgent):
+            name = "opencode"
+            opencode_config = SimpleNamespace(
+                error_retry_limit=0,
+                active_turn_timeout_seconds=0.05,
+            )
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.poll_loop = OpenCodePollLoop(self)
+                self.other_finished = asyncio.Event()
+
+            @staticmethod
+            def _extract_response_text(_message) -> str:
+                return ""
+
+            @staticmethod
+            def _to_relative_path(path: str, _working_path: str) -> str:
+                return path
+
+            async def record_model_hub_native_failure(self, _context, _diagnostic):
+                return False
+
+            async def handle_message(self, request) -> None:
+                self.started.append(request.message)
+                service.mark_runtime_turn_started(request.context)
+                if request.message == "first":
+                    final_text, should_emit = await self.poll_loop.run_prompt_poll(
+                        request,
+                        server,
+                        "oc-stuck",
+                        agent_to_use=None,
+                        model_dict=None,
+                        reasoning_effort=None,
+                        baseline_message_ids=set(),
+                    )
+                    assert final_text is None
+                    assert should_emit is False
+                    return
+                if request.message == "other-agent":
+                    # Different runtime key, but the shared provider lane cannot
+                    # progress until the stuck native Turn is actually aborted.
+                    await server.aborted.wait()
+                    self.other_finished.set()
+                await controller.emit_agent_message(
+                    request.context,
+                    "result",
+                    f"{request.message} complete",
+                )
+
+        agent = _OpenCodeTimeoutAgent()
+        agent.controller = controller
+        service.register(agent)
+        controller._t = lambda key, **kwargs: f"{key}:{kwargs.get('seconds')}"
+
+        async def _emit(context, message_type, text, **kwargs):
+            emitted.append(
+                (
+                    message_type,
+                    text,
+                    bool(kwargs.get("is_error")),
+                    kwargs.get("terminal_error"),
+                )
+            )
+            if message_type == "result":
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message = _emit
+
+        def _opencode_request(message: str, runtime_key: str, run_id: str) -> AgentRequest:
+            return AgentRequest(
+                context=MessageContext(
+                    user_id=run_id,
+                    channel_id=run_id,
+                    platform="avibe",
+                    platform_specific={"task_execution_id": run_id},
+                ),
+                message=message,
+                user_message=message,
+                working_path="/tmp/work",
+                base_session_id=runtime_key,
+                composite_session_id=runtime_key,
+                session_key=f"avibe::{runtime_key}",
+            )
+
+        first = asyncio.create_task(
+            service.handle_message(
+                "opencode",
+                _opencode_request("first", "agent-a:/tmp/work", "run-first"),
+            )
+        )
+        await asyncio.wait_for(server.poll_started.wait(), timeout=0.5)
+        same_session_successor = asyncio.create_task(
+            service.handle_message(
+                "opencode",
+                _opencode_request(
+                    "same-session-successor",
+                    "agent-a:/tmp/work",
+                    "run-successor",
+                ),
+            )
+        )
+        other_agent = asyncio.create_task(
+            service.handle_message(
+                "opencode",
+                _opencode_request("other-agent", "agent-b:/tmp/work", "run-other"),
+            )
+        )
+
+        await asyncio.sleep(0)
+        assert "same-session-successor" not in agent.started
+        assert "other-agent" in agent.started
+
+        await asyncio.wait_for(
+            asyncio.gather(first, same_session_successor, other_agent),
+            timeout=1,
+        )
+
+        assert server.abort_calls == [("oc-stuck", "/tmp/work")]
+        assert agent.other_finished.is_set()
+        assert agent.started.index("same-session-successor") > agent.started.index("first")
+        timeout_results = [item for item in emitted if item[2]]
+        assert timeout_results == [
+            (
+                "result",
+                "",
+                True,
+                "OpenCode active turn exceeded the configured 0.05-second wall-clock limit",
+            )
+        ]
+        assert all("No response from OpenCode" not in item[1] for item in emitted)
 
     asyncio.run(_run())
 

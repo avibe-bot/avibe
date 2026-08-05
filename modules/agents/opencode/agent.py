@@ -1088,6 +1088,32 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 system=system_prompt_injection,
                 tools={"question": False},
             )
+            try:
+                read_prompt_started_at = getattr(server, "get_last_prompt_started_at", None)
+                prompt_started_at = (
+                    read_prompt_started_at(session_id)
+                    if callable(read_prompt_started_at)
+                    else None
+                ) or time.time()
+                update_active_poll = getattr(
+                    self.sessions,
+                    "update_active_poll_state",
+                    None,
+                )
+                if callable(update_active_poll):
+                    update_active_poll(
+                        session_id,
+                        prompt_started_at=prompt_started_at,
+                    )
+            except Exception:
+                # The pre-write active-poll record remains a safe recovery fallback:
+                # its started_at is only moments older than native acceptance. Do not
+                # fail a live accepted Turn because this timestamp refinement failed.
+                logger.warning(
+                    "Failed to persist OpenCode prompt start time for %s",
+                    session_id,
+                    exc_info=True,
+                )
             current_task = asyncio.current_task()
             if current_task is None:
                 raise RuntimeError("OpenCode runner task is unavailable")

@@ -54,6 +54,7 @@ def _full_config_payload() -> dict:
                 "default_model": None,
                 "default_reasoning_effort": None,
                 "error_retry_limit": 1,
+                "active_turn_timeout_seconds": 7200,
             },
             "claude": {
                 "enabled": True,
@@ -1067,6 +1068,7 @@ def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path)
         assert top_level <= set(payload), f"{label} top-level missing: {top_level - set(payload)}"
         assert ui_field_names <= set(payload["ui"]), f"{label} ui missing: {ui_field_names - set(payload['ui'])}"
         assert agents <= set(payload["agents"]), f"{label} agents missing: {agents - set(payload['agents'])}"
+        assert payload["agents"]["opencode"]["active_turn_timeout_seconds"] == 7200
 
     _assert_complete("config_to_payload", api.config_to_payload(config))
 

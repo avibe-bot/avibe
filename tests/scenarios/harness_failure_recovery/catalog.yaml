@@ -3861,6 +3861,18 @@ scenarios:
     # than the late receipt and must clear stale UI working state, not surface a
     # false transport failure banner. A genuinely unresolved Stop remains 409.
     test: tests/test_internal_server.py::test_cancel_accepts_terminal_settlement_that_races_the_stop_receipt
+  - id: HFR-432
+    name: a timed-out OpenCode Turn releases its Session FIFO and the shared provider lane
+    status: covered
+    kind: recovery
+    layer: scenario
+    backend: opencode
+    # OpenCode may accept a prompt while its provider runtime retries forever. The
+    # accepted Turn has a bounded wall-clock owner: expiry aborts the exact native
+    # session, emits one failed terminal result, admits the same-Session successor,
+    # and lets a different OpenCode Agent waiting on that shared provider continue.
+    # The timeout never enters the empty successful-result fallback.
+    test: tests/test_agent_service.py::test_hfr_432_opencode_timeout_releases_fifo_and_shared_runtime
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
