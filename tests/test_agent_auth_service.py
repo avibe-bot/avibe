@@ -2028,6 +2028,17 @@ class ClassifyAuthErrorTests(unittest.TestCase):
     def test_opencode_credential_error_requires_reset(self):
         self.assertTrue(classify_auth_error("opencode", "OpenCode error: missing provider credential"))
 
+    def test_opencode_provider_mentions_without_auth_evidence_are_ignored(self):
+        diagnostics = (
+            "NativeSessionEndedBeforeResult - OpenCode ended without a model reply. "
+            "Provider: openai; model: gpt-5.6-terra.",
+            "ProviderError - rate limited",
+            "Provider model is unavailable",
+        )
+        for diagnostic in diagnostics:
+            with self.subTest(diagnostic=diagnostic):
+                self.assertFalse(classify_auth_error("opencode", diagnostic))
+
 
 class VerifyOpenCodeAuthListOutputTests(unittest.TestCase):
     def test_target_provider_must_exist_in_output(self):
