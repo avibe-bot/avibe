@@ -741,6 +741,24 @@ def network_interfaces() -> dict[str, Any]:
     return {"ok": True, "interfaces": interfaces}
 
 
+def edge_binding_error(config: V2Config) -> str | None:
+    """Validate a configured source address against the host's live interfaces."""
+
+    bind_address = _configured_edge_bind_address(config)
+    if not bind_address:
+        return None
+    live_addresses = {
+        item["address"] for item in network_interfaces()["interfaces"]
+    }
+    if bind_address not in live_addresses:
+        return "edge_bind_address_unavailable"
+    bind_version = str(ipaddress.ip_address(bind_address).version)
+    configured_version = _configured_edge_ip_version(config)
+    if configured_version != "auto" and configured_version != bind_version:
+        return "edge_bind_address_family_mismatch"
+    return None
+
+
 def _bounded_tunnel_addresses(timeout_seconds: float = 2.0) -> list[tuple[int, str]]:
     completed = threading.Event()
     resolved: list[tuple[int, str]] = []
@@ -845,7 +863,7 @@ def connectivity_diagnostics(config: V2Config | None = None) -> dict[str, Any]:
         "ok": True,
         "sampled_at": tunnel_quality.utc_timestamp(time.time()),
         "effective_protocol": effective_protocol,
-        "dns": {"status": "available" if resolved_addresses else "unavailable"},
+        "dns": {"status": "available" if addresses else "unavailable"},
         "quic": {
             "status": quic_status,
             "source": "active_connector" if quic_status == "available" else "not_observed",
@@ -880,25 +898,13 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
             "detail": str(exc),
         }
 
-    bind_address = _configured_edge_bind_address(candidate_config)
-    if bind_address:
-        live_addresses = {
-            item["address"] for item in network_interfaces()["interfaces"]
+    binding_error = edge_binding_error(candidate_config)
+    if binding_error is not None:
+        return {
+            **status(current_config),
+            "ok": False,
+            "error": binding_error,
         }
-        if bind_address not in live_addresses:
-            return {
-                **status(current_config),
-                "ok": False,
-                "error": "edge_bind_address_unavailable",
-            }
-        bind_version = str(ipaddress.ip_address(bind_address).version)
-        configured_version = _configured_edge_ip_version(candidate_config)
-        if configured_version != "auto" and configured_version != bind_version:
-            return {
-                **status(current_config),
-                "ok": False,
-                "error": "edge_bind_address_family_mismatch",
-            }
 
     previous_settings = _remote_access_settings(current_config)
     candidate_settings = _remote_access_settings(candidate_config)
@@ -914,6 +920,12 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
         for field in connector_fields
     )
     current_status = status(current_config)
+    if connector_changed and current_status.get("pid_state") == "unknown":
+        return {
+            **current_status,
+            "ok": False,
+            "error": "remote_access_settings_unavailable",
+        }
     if not connector_changed or not current_status.get("running"):
         if connector_changed:
             with _RECOVERY_LOCK:
@@ -983,29 +995,32 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
             candidate_pid, metrics_url = started_candidate
             if not _wait_candidate_ready(candidate_pid, metrics_url):
                 raise RuntimeError("candidate_not_ready")
-        with CONFIG_LOCK:
-            live_config = V2Config.load()
-            live_binary = _resolve_binary(live_config)
-            if (
-                live_binary != binary
-                or live_config.remote_access.vibe_cloud.enabled
-                != current_config.remote_access.vibe_cloud.enabled
-                or _runtime_signature(live_config, binary) != previous_runtime_signature
-                or _remote_access_settings(live_config) != previous_settings
-            ):
-                raise RuntimeError("remote_access_settings_changed")
-            candidate_config = api.save_config(
-                {"remote_access": {"vibe_cloud": payload}}
-            )
+        with _CONNECTOR_LOCK:
+            with CONFIG_LOCK:
+                live_config = V2Config.load()
+                live_binary = _resolve_binary(live_config)
+                if (
+                    live_binary != binary
+                    or live_config.remote_access.vibe_cloud.enabled
+                    != current_config.remote_access.vibe_cloud.enabled
+                    or _runtime_signature(live_config, binary) != previous_runtime_signature
+                    or _remote_access_settings(live_config) != previous_settings
+                ):
+                    raise RuntimeError("remote_access_settings_changed")
+                candidate_config = api.save_config(
+                    {"remote_access": {"vibe_cloud": payload}}
+                )
             try:
                 replaced = _promote_candidate_connector(
                     candidate_pid,
                     runtime_signature=_runtime_signature(candidate_config, binary),
                 )
             except Exception:
-                api.save_config(
-                    {"remote_access": {"vibe_cloud": previous_settings}}
-                )
+                with CONFIG_LOCK:
+                    api.save_config(
+                        {"remote_access": {"vibe_cloud": previous_settings}},
+                        validate_remote_access_network=False,
+                    )
                 raise
     except Exception as exc:
         if candidate_pid is not None:

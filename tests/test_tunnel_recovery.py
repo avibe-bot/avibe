@@ -194,6 +194,7 @@ def test_ra_tq_028_settings_promote_before_draining_previous_connector(monkeypat
     monkeypatch.setattr(remote_access, "_wait_candidate_ready", lambda pid, metrics: True)
 
     def promote(pid, **kwargs):
+        assert not remote_access.CONFIG_LOCK._is_owned()
         events.append(("promote", kwargs["runtime_signature"]["transport_protocol"]))
         return {"pid": 111}
 
@@ -261,6 +262,32 @@ def test_ra_tq_028_settings_wait_for_every_candidate_lane_owner(
     assert result["ok"] is False
     assert result["error"] == "remote_access_settings_unavailable"
     assert V2Config.load().remote_access.vibe_cloud.edge_ip_version == "4"
+
+
+def test_ra_tq_028_settings_do_not_persist_for_unknown_connector_pid(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda loaded=None: {"running": False, "pid": 111, "pid_state": "unknown"},
+    )
+    monkeypatch.setattr(
+        remote_access.api,
+        "save_config",
+        lambda *args, **kwargs: pytest.fail("unknown connector must keep persisted settings"),
+    )
+
+    result = remote_access.apply_settings({"transport_protocol": "http2"})
+
+    assert result["ok"] is False
+    assert result["error"] == "remote_access_settings_unavailable"
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "auto"
 
 
 @pytest.mark.parametrize(

@@ -2137,3 +2137,33 @@ def test_ra_tq_030_connectivity_diagnostics_requires_fresh_active_protocol(
     assert result["effective_protocol"] == "unknown"
     assert result["quic"] == {"status": "unknown", "source": "not_observed"}
     assert result["http2"] == {"status": "unavailable", "source": "tcp_probe"}
+
+
+def test_ra_tq_030_connectivity_diagnostics_filters_dns_by_selected_family(
+    monkeypatch,
+) -> None:
+    config = _config()
+    config.remote_access.vibe_cloud.edge_ip_version = "6"
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda loaded=None: {
+            "running": False,
+            "binary_version": "2026.3.0",
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_bounded_tunnel_addresses",
+        lambda: [(remote_access.socket.AF_INET, "198.51.100.10")],
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_tcp_tunnel_reachable",
+        lambda *args, **kwargs: pytest.fail("no selected-family address is available"),
+    )
+
+    result = remote_access.connectivity_diagnostics(config)
+
+    assert result["dns"]["status"] == "unavailable"
+    assert result["http2"]["status"] == "unknown"

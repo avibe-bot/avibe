@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_config import UiConfig, V2Config
-from vibe import api
+from vibe import api, remote_access
 
 
 def _full_config_payload() -> dict:
@@ -214,6 +214,82 @@ def test_remote_access_legacy_config_keeps_cloudflared_ipv4_default() -> None:
     config = V2Config.from_payload(payload)
 
     assert config.remote_access.vibe_cloud.edge_ip_version == "4"
+
+
+def test_save_config_rejects_unassigned_remote_access_bind_address(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+    monkeypatch.setattr(
+        remote_access,
+        "network_interfaces",
+        lambda: {
+            "ok": True,
+            "interfaces": [
+                {
+                    "id": "en0:192.0.2.10",
+                    "name": "en0",
+                    "address": "192.0.2.10",
+                    "ip_version": "4",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="active network interface"):
+        api.save_config(
+            {
+                "remote_access": {
+                    "vibe_cloud": {
+                        "edge_ip_version": "4",
+                        "edge_bind_address": "192.0.2.20",
+                    }
+                }
+            }
+        )
+
+    assert V2Config.load().remote_access.vibe_cloud.edge_bind_address == ""
+
+
+def test_save_config_rejects_remote_access_bind_family_mismatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+    monkeypatch.setattr(
+        remote_access,
+        "network_interfaces",
+        lambda: {
+            "ok": True,
+            "interfaces": [
+                {
+                    "id": "en0:192.0.2.10",
+                    "name": "en0",
+                    "address": "192.0.2.10",
+                    "ip_version": "4",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="must match"):
+        api.save_config(
+            {
+                "remote_access": {
+                    "vibe_cloud": {
+                        "edge_ip_version": "6",
+                        "edge_bind_address": "192.0.2.10",
+                    }
+                }
+            }
+        )
+
+    saved = V2Config.load().remote_access.vibe_cloud
+    assert saved.edge_ip_version == "4"
+    assert saved.edge_bind_address == ""
 
 
 def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path):

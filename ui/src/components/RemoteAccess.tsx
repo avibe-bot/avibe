@@ -86,6 +86,16 @@ export const RemoteAccess: React.FC = () => {
     try {
       const remoteStatus = await api.remoteAccessStatus();
       setStatus(remoteStatus);
+      if (remoteStatus.paired) {
+        try {
+          const result = await api.getRemoteAccessNetworkInterfaces();
+          setNetworkInterfaces(result.interfaces || []);
+        } catch {
+          setNetworkInterfaces([]);
+        }
+      } else {
+        setNetworkInterfaces([]);
+      }
     } finally {
       if (!silent) setLoading(false);
     }
@@ -117,13 +127,6 @@ export const RemoteAccess: React.FC = () => {
       setSettingsDraft(status.settings);
     }
   }, [settingsDirty, status?.settings]);
-
-  useEffect(() => {
-    if (!status?.paired) return;
-    api.getRemoteAccessNetworkInterfaces()
-      .then((result) => setNetworkInterfaces(result.interfaces || []))
-      .catch(() => setNetworkInterfaces([]));
-  }, [api, status?.paired]);
 
   const pair = async () => {
     setPairing(true);

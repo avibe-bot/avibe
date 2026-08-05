@@ -832,7 +832,42 @@ def _validate_enabled_platform_runtime_credentials(
             raise ValueError(f"Config '{fields_text}' must be provided when {platform} is enabled")
 
 
-def save_config(payload: dict) -> V2Config:
+def _remote_access_network_signature(config: V2Config | None) -> tuple[str, str]:
+    if config is None:
+        return ("4", "")
+    cloud = config.remote_access.vibe_cloud
+    return (
+        str(cloud.edge_ip_version or "4").strip().lower(),
+        str(cloud.edge_bind_address or "").strip(),
+    )
+
+
+def _validate_remote_access_network_change(
+    config: V2Config,
+    base_config: V2Config | None,
+) -> None:
+    if _remote_access_network_signature(config) == _remote_access_network_signature(base_config):
+        return
+    from vibe import remote_access
+
+    error = remote_access.edge_binding_error(config)
+    if error == "edge_bind_address_unavailable":
+        raise ValueError(
+            "Config 'remote_access.vibe_cloud.edge_bind_address' must be assigned "
+            "to an active network interface"
+        )
+    if error == "edge_bind_address_family_mismatch":
+        raise ValueError(
+            "Config 'remote_access.vibe_cloud.edge_bind_address' must match "
+            "'remote_access.vibe_cloud.edge_ip_version'"
+        )
+
+
+def save_config(
+    payload: dict,
+    *,
+    validate_remote_access_network: bool = True,
+) -> V2Config:
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
 
@@ -879,6 +914,8 @@ def save_config(payload: dict) -> V2Config:
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        if validate_remote_access_network:
+            _validate_remote_access_network_change(config, base_config)
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         if guild_scope_update is not None:
             _save_discord_guild_scope_update(*guild_scope_update)
