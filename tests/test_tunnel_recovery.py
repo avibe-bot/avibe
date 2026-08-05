@@ -263,6 +263,54 @@ def test_ra_tq_028_settings_wait_for_every_candidate_lane_owner(
     assert V2Config.load().remote_access.vibe_cloud.edge_ip_version == "4"
 
 
+@pytest.mark.parametrize(
+    "lane_owner",
+    ["reserved_recovery", "pending_tail_rollback", "candidate_pid"],
+)
+def test_ra_tq_028_settings_do_not_persist_when_connector_lane_is_owned_and_down(
+    monkeypatch,
+    tmp_path,
+    lane_owner,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    monkeypatch.setattr(remote_access, "status", lambda loaded=None: {"running": False})
+    monkeypatch.setattr(
+        remote_access.api,
+        "save_config",
+        lambda *args, **kwargs: pytest.fail("owned connector lane must not persist settings"),
+    )
+
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = (
+            threading.Thread() if lane_owner == "reserved_recovery" else None
+        )
+    if lane_owner == "pending_tail_rollback":
+        runtime.write_json(
+            remote_access._state_path(),
+            {
+                "pending_tail_rollback": {
+                    "active_pid": 111,
+                    "previous_protocol": "quic",
+                }
+            },
+        )
+    elif lane_owner == "candidate_pid":
+        remote_access._candidate_pid_path().write_text("222", encoding="utf-8")
+
+    try:
+        result = remote_access.apply_settings({"edge_ip_version": "6"})
+    finally:
+        with remote_access._RECOVERY_LOCK:
+            remote_access._RECOVERY_THREAD = None
+
+    assert result["ok"] is False
+    assert result["error"] == "remote_access_settings_unavailable"
+    assert V2Config.load().remote_access.vibe_cloud.edge_ip_version == "4"
+
+
 def test_ra_tq_028_settings_auto_protocol_falls_back_after_preference_fails(
     monkeypatch,
     tmp_path,

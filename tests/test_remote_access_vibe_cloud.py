@@ -2092,3 +2092,48 @@ def test_ra_tq_030_connectivity_diagnostics_do_not_guess_quic_reachability(monke
     assert result["dns"]["status"] == "available"
     assert result["http2"]["status"] == "available"
     assert result["quic"] == {"status": "unknown", "source": "not_observed"}
+
+
+@pytest.mark.parametrize(
+    "sample_age_before_restart",
+    [remote_access.QUALITY_COMPARISON_MAX_AGE_SECONDS + 1, 1],
+)
+def test_ra_tq_030_connectivity_diagnostics_requires_fresh_active_protocol(
+    monkeypatch,
+    sample_age_before_restart,
+) -> None:
+    config = _config()
+    now = time.time()
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda loaded=None: {
+            "running": True,
+            "pid": 222,
+            "binary_version": "2026.3.0",
+            "tunnel_quality": {
+                "protocol": "quic",
+                "transport": {"effective": "quic"},
+                "sampled_at": remote_access.tunnel_quality.utc_timestamp(
+                    now - sample_age_before_restart
+                ),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_state_connector",
+        lambda name: {"pid": 222, "started_at": now} if name == "active" else None,
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_bounded_tunnel_addresses",
+        lambda: [(remote_access.socket.AF_INET, "198.51.100.10")],
+    )
+    monkeypatch.setattr(remote_access, "_tcp_tunnel_reachable", lambda *args, **kwargs: False)
+
+    result = remote_access.connectivity_diagnostics(config)
+
+    assert result["effective_protocol"] == "unknown"
+    assert result["quic"] == {"status": "unknown", "source": "not_observed"}
+    assert result["http2"] == {"status": "unavailable", "source": "tcp_probe"}

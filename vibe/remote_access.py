@@ -512,6 +512,27 @@ def _pending_tail_rollback() -> dict[str, Any] | None:
     return pending
 
 
+def _connector_lane_reserved_locked() -> bool:
+    """Return whether recovery or connector lifecycle state owns the candidate lane.
+
+    Callers must hold ``_RECOVERY_LOCK``. Connector state and the candidate PID
+    file are checked under ``_CONNECTOR_LOCK`` so settings and recovery observe
+    one ownership boundary.
+    """
+
+    if _RECOVERY_THREAD is not None:
+        return True
+    with _CONNECTOR_LOCK:
+        return any(
+            (
+                _state_connector("candidate"),
+                _state_connector("draining"),
+                _pending_tail_rollback(),
+                _read_pid_file(_candidate_pid_path()),
+            )
+        )
+
+
 def _clear_pending_tail_rollback(*, force: bool = False) -> None:
     with _CONNECTOR_LOCK:
         state = _read_state() or {}
@@ -794,6 +815,21 @@ def connectivity_diagnostics(config: V2Config | None = None) -> dict[str, Any]:
         bind_address=_configured_edge_bind_address(config),
     ) if addresses else False
     quality = current.get("tunnel_quality") or {}
+    active = _state_connector("active") or {}
+    sampled_at = _parse_timestamp(quality.get("sampled_at")) if isinstance(quality, dict) else None
+    now = time.time()
+    quality_is_fresh = (
+        isinstance(quality, dict)
+        and isinstance(active.get("pid"), int)
+        and sampled_at is not None
+        and -5 <= now - sampled_at <= QUALITY_COMPARISON_MAX_AGE_SECONDS
+        and (
+            not isinstance(active.get("started_at"), (int, float))
+            or sampled_at >= float(active["started_at"])
+        )
+    )
+    if not quality_is_fresh:
+        quality = {}
     effective_protocol = str(
         (quality.get("transport") or {}).get("effective")
         or quality.get("protocol")
@@ -879,9 +915,21 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
     )
     current_status = status(current_config)
     if not connector_changed or not current_status.get("running"):
-        candidate_config = api.save_config(
-            {"remote_access": {"vibe_cloud": payload}}
-        )
+        if connector_changed:
+            with _RECOVERY_LOCK:
+                if _connector_lane_reserved_locked():
+                    return {
+                        **current_status,
+                        "ok": False,
+                        "error": "remote_access_settings_unavailable",
+                    }
+                candidate_config = api.save_config(
+                    {"remote_access": {"vibe_cloud": payload}}
+                )
+        else:
+            candidate_config = api.save_config(
+                {"remote_access": {"vibe_cloud": payload}}
+            )
         return {
             **status(candidate_config),
             "ok": True,
@@ -896,16 +944,9 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
     def start_settings_candidate(protocol: str) -> tuple[int, str] | None:
         with _RECOVERY_LOCK:
-            if _RECOVERY_THREAD is not None:
+            if _connector_lane_reserved_locked():
                 return None
             with _CONNECTOR_LOCK:
-                if (
-                    _state_connector("candidate")
-                    or _state_connector("draining")
-                    or _pending_tail_rollback()
-                    or _read_pid_file(_candidate_pid_path()) is not None
-                ):
-                    return None
                 return _start_candidate_connector(
                     candidate_config,
                     binary,
@@ -1264,13 +1305,7 @@ def _parse_timestamp(value: Any) -> float | None:
 def _reserve_recovery(thread: threading.Thread, *, manual: bool, emergency: bool, now: float) -> bool:
     global _RECOVERY_THREAD, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
     with _RECOVERY_LOCK:
-        if (
-            _RECOVERY_THREAD is not None
-            or _state_connector("candidate") is not None
-            or _state_connector("draining") is not None
-            or _pending_tail_rollback() is not None
-            or _read_pid_file(_candidate_pid_path()) is not None
-        ):
+        if _connector_lane_reserved_locked():
             return False
         next_attempt = _parse_timestamp(_RECOVERY_STATE.get("next_attempt_at"))
         cooling_down = next_attempt is not None and now < next_attempt
