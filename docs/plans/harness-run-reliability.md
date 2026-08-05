@@ -129,9 +129,9 @@ a Run instead of a Turn or Activity.
 
 ### 3.2 Derived session disposition
 
-The runtime ownership provider reads Delivery, Turn, Session hold, active
-Activity, and fallback Run facts from one SQLite read transaction and returns
-one immutable snapshot. It does not persist a new state or maintain an
+The runtime ownership provider reads Delivery, Turn, active Activity, and
+fallback Run facts from one SQLite read transaction and returns one immutable
+snapshot. It does not persist a new state or maintain an
 in-memory shadow ledger. It is strictly side-effect free: ownership reads must
 not release locks, repair projections, settle Runs, or call helpers such as
 `owned_agent_run_ids()` that mutate while answering.

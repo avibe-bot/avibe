@@ -4502,7 +4502,14 @@ def test_stop_terminalization_resumes_oldest_queued_segment(managers) -> None:
     assert [text for _, text in starts].count("queued-after-stop") == 1
 
 
-def test_canceled_shutdown_runner_preserves_deferred_queue(managers) -> None:
+@pytest.mark.parametrize(
+    "settled_by",
+    [SETTLED_BY_RESTARTED, SETTLED_BY_STOPPED],
+)
+def test_canceled_shutdown_runner_preserves_deferred_queue(
+    managers,
+    settled_by: str,
+) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     turn_id, _context_value = asyncio.run(_activate(manager))
     queued = asyncio.run(
@@ -4517,9 +4524,13 @@ def test_canceled_shutdown_runner_preserves_deferred_queue(managers) -> None:
     )
     terminal = manager._terminalize_durable_turn(
         turn_id,
-        "failed",
-        settled_by=SETTLED_BY_RESTARTED,
-        evidence_kind="service_shutdown",
+        "canceled" if settled_by == SETTLED_BY_STOPPED else "failed",
+        settled_by=settled_by,
+        evidence_kind=(
+            "service_shutdown_after_user_stop"
+            if settled_by == SETTLED_BY_STOPPED
+            else "service_shutdown"
+        ),
         resume_successors=False,
     )
     assert terminal["changed"] is True
@@ -4530,8 +4541,9 @@ def test_canceled_shutdown_runner_preserves_deferred_queue(managers) -> None:
         failed=False,
         prewrite_refused=False,
         definitive_prewrite_exit=False,
-        settled_by=SETTLED_BY_RESTARTED,
+        settled_by=settled_by,
         terminal_is_error=True,
+        cancel_defers_queue_resume=True,
     )
 
     assert released["defer_queue_resume"] is True

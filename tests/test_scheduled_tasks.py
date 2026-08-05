@@ -3199,6 +3199,7 @@ def test_service_teardown_terminalizes_transferred_turn_without_starting_queued_
     service.scheduler = _StubScheduler()
     manager = SessionTurnManager(controller)
     manager._engine = engine
+    manager._resume_post_terminal = AsyncMock()
     controller.session_turns = manager
     controller.scheduled_task_service = service
     context = MessageContext(
@@ -3290,6 +3291,7 @@ def test_service_teardown_terminalizes_transferred_turn_without_starting_queued_
         assert successor_delivery["priority"] == "p3"
         assert successor_delivery["turn_id"] is None
     assert manager.in_flight == {}
+    manager._resume_post_terminal.assert_not_awaited()
     assert prompts == ["durable prompt interrupted by shutdown"]
 
 

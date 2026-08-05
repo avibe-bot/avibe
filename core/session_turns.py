@@ -395,8 +395,8 @@ class Turn:
       turn STARTED under (so Stop interrupts the backend it actually ran on, even if
       the Chat header later swapped agent/model). ``task`` is the Stop target
       (``/internal/cancel``) and the ``/turn-state`` source.
-    Queue policy is deliberately absent. The durable Session hold and Turn control
-    slot decide whether backlog may drain across both process lifetime and restart.
+    Persistent queue policy is deliberately absent. Durable Delivery/Turn ownership
+    decides whether backlog may drain across both process lifetime and restart.
 
     The streaming SINK is deliberately NOT held here: it is keyed by the
     thread-scoped turn-sink key (platform-prefixed, e.g. ``avibe::<id>``) not
@@ -417,6 +417,11 @@ class Turn:
     #: reconciliation is not reported as if the user pressed Stop (Codex P1). It
     #: rides on the Turn so it retires when the turn is popped.
     cancel_settled_by: Optional[str] = None
+    #: Transient instruction from the cancellation owner. Service teardown and
+    #: backend drain must not start replacement work in the process they are
+    #: stopping, even when the semantic outcome is a user Stop. This is Turn-local
+    #: cancellation state, not a persistent Session queue hold.
+    cancel_defers_queue_resume: bool = False
     logical_turn_id: Optional[str] = None
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
@@ -4238,12 +4243,17 @@ class SessionTurnManager:
         definitive_prewrite_exit: bool,
         settled_by: str | None,
         terminal_is_error: bool,
+        cancel_defers_queue_resume: bool = False,
     ) -> dict[str, Any]:
         """Contain post-native ownership writes so runner cleanup always finishes."""
 
         try:
             if cancelled:
                 interruption = settled_by or SETTLED_BY_NO_TERMINAL_RESULT
+                resume_after_cancel = bool(
+                    interruption == SETTLED_BY_STOPPED
+                    and not cancel_defers_queue_resume
+                )
                 result = self._terminalize_durable_turn(
                     turn_id,
                     "canceled" if interruption == SETTLED_BY_STOPPED else "failed",
@@ -4258,9 +4268,9 @@ class SessionTurnManager:
                         if interruption == SETTLED_BY_RESTARTED
                         else None
                     ),
-                    resume_successors=interruption == SETTLED_BY_STOPPED,
+                    resume_successors=resume_after_cancel,
                 )
-                if interruption != SETTLED_BY_STOPPED:
+                if not resume_after_cancel:
                     result["defer_queue_resume"] = True
                 return result
             if failed:
@@ -6048,6 +6058,9 @@ class SessionTurnManager:
                     terminal_is_error = bool(
                         turn is not None and turn.terminal_is_error
                     )
+                    cancel_defers_queue_resume = bool(
+                        turn is not None and turn.cancel_defers_queue_resume
+                    )
                     if turn is not None:
                         self.in_flight.pop(session_id, None)
                     if turn is not None:
@@ -6073,6 +6086,7 @@ class SessionTurnManager:
                             definitive_prewrite_exit=definitive_prewrite_exit,
                             settled_by=settled_by,
                             terminal_is_error=terminal_is_error,
+                            cancel_defers_queue_resume=cancel_defers_queue_resume,
                         )
                     # Only definitive pre-write failure may synthesize an empty
                     # terminal result. Once native work may have produced output, a
@@ -6540,6 +6554,7 @@ class SessionTurnManager:
             )
             if terminal.get("changed"):
                 released_sessions.add(session_id)
+            projected.cancel_defers_queue_resume = True
             if not projected.task.done():
                 projected.cancel_settled_by = settled_by
                 projected.task.cancel()
@@ -6599,6 +6614,7 @@ class SessionTurnManager:
             # ``canceled`` with the user-stop explanation (Codex P1). ``_run`` reads
             # it off the Turn when it pops it.
             turn.cancel_settled_by = SETTLED_BY_BACKEND_REFRESH
+            turn.cancel_defers_queue_resume = True
             if turn.task.done():
                 self.in_flight.pop(session_id, None)
                 from core.inbox_events import bus
@@ -7210,6 +7226,13 @@ class SessionTurnManager:
                 terminal_is_error = bool(
                     turn is not None and turn.terminal_is_error
                 )
+                cancel_defers_queue_resume = bool(
+                    turn is not None and turn.cancel_defers_queue_resume
+                )
+                queue_resume_deferred = bool(
+                    cancel_defers_queue_resume
+                    or effective_settled_by == SETTLED_BY_RESTARTED
+                )
                 if turn is not None:
                     self.in_flight.pop(session_id, None)
                 if turn is not None:
@@ -7242,11 +7265,9 @@ class SessionTurnManager:
                                 if isinstance(terminal_evidence, dict)
                                 else None
                             ),
-                            resume_successors=(
-                                effective_settled_by != SETTLED_BY_RESTARTED
-                            ),
+                            resume_successors=not queue_resume_deferred,
                         )
-                        if effective_settled_by == SETTLED_BY_RESTARTED:
+                        if queue_resume_deferred:
                             durable_terminal_result["defer_queue_resume"] = True
                     except Exception:
                         logger.exception(
@@ -7255,8 +7276,9 @@ class SessionTurnManager:
                             turn_token,
                         )
                         durable_terminal_result = {"defer_queue_resume": True}
-                should_flush = not bool(
-                    durable_terminal_result.get("defer_queue_resume")
+                should_flush = not (
+                    queue_resume_deferred
+                    or bool(durable_terminal_result.get("defer_queue_resume"))
                 )
                 if should_flush:
                     try:
