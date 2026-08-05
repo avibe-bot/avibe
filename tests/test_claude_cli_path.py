@@ -597,6 +597,7 @@ def test_session_handler_recreates_terminated_cached_client_before_dispatch(
     composite_key = f"slack_C123:{tmp_path}"
 
     first_client = _run_session(handler, context)
+    first_client.options.stderr("sandbox warning")
     first_client._transport._process.returncode = -6
     first_client._vibe_stderr_lines.extend(["fatal: Claude CLI aborted", "transport closed"])
     second_client = _run_session(handler, context)
@@ -607,7 +608,74 @@ def test_session_handler_recreates_terminated_cached_client_before_dispatch(
     assert len(captured["clients"]) == 2
     idle_wait.assert_awaited_once_with(composite_key)
     assert "SIGABRT (signal 6)" in caplog.text
-    assert "Claude stderr tail:\nfatal: Claude CLI aborted\ntransport closed" in caplog.text
+    assert "Claude CLI stderr for slack_C123:" in caplog.text
+    assert "Claude stderr tail:\nsandbox warning\nfatal: Claude CLI aborted\ntransport closed" in caplog.text
+
+
+def test_session_handler_waits_for_receiver_cleanup_before_evicting_dead_client(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        controller = _Controller(tmp_path)
+        handler = SessionHandler(controller)
+        composite_key = f"slack_C123:{tmp_path}"
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+
+        async def receiver() -> None:
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+        receiver_task = asyncio.create_task(receiver())
+        await cleanup_started.wait()
+        handler.receiver_tasks[composite_key] = receiver_task
+        client = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
+        )
+        handler.claude_sessions[composite_key] = client
+        handler._cleanup_session_locked = AsyncMock()
+        handler._wait_for_claude_session_idle = AsyncMock()
+
+        eviction = asyncio.create_task(
+            handler._evict_terminated_cached_claude_session(composite_key, client)
+        )
+        await asyncio.sleep(0)
+        assert not eviction.done()
+        release_cleanup.set()
+        assert await eviction is True
+        handler._cleanup_session_locked.assert_awaited_once_with(
+            composite_key,
+            retire_model_hub_scope=True,
+        )
+        handler._wait_for_claude_session_idle.assert_awaited_once_with(composite_key)
+        await receiver_task
+
+    asyncio.run(exercise())
+
+
+def test_session_handler_retires_model_hub_scope_for_dead_cached_client(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        controller = _Controller(tmp_path)
+        handler = SessionHandler(controller)
+        composite_key = f"slack_C123:{tmp_path}"
+        client = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=1)),
+            _vibe_model_hub_fingerprint="hub:http://127.0.0.1:18443:token",
+        )
+        handler.claude_sessions[composite_key] = client
+        handler._wait_for_claude_receiver_cleanup = AsyncMock()
+        handler._wait_for_claude_session_idle = AsyncMock()
+        handler._cleanup_session_locked = AsyncMock()
+
+        assert await handler._evict_terminated_cached_claude_session(composite_key, client)
+        handler._cleanup_session_locked.assert_awaited_once_with(
+            composite_key,
+            retire_model_hub_scope=True,
+        )
+
+    asyncio.run(exercise())
 
 
 def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp_path: Path) -> None:

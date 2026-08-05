@@ -157,6 +157,26 @@ class SessionHandler(BaseHandler):
         while composite_key in self.active_sessions:
             await asyncio.sleep(0.05)
 
+    async def _wait_for_claude_receiver_cleanup(self, composite_key: str) -> None:
+        """Wait for the receiver task to finish its post-error cleanup."""
+        receiver_task = self.receiver_tasks.get(composite_key)
+        if receiver_task is None or receiver_task is asyncio.current_task():
+            return
+        try:
+            await asyncio.shield(receiver_task)
+        except asyncio.CancelledError:
+            if receiver_task.cancelled():
+                return
+            raise
+        except Exception:
+            # The receiver already reported its failure; cleanup must still retire
+            # the cached client and drain the task without masking that failure.
+            logger.debug(
+                "Claude receiver task ended with an error while waiting for cleanup: %s",
+                composite_key,
+                exc_info=True,
+            )
+
     def bind_claude_runtime_session(
         self,
         client: ClaudeSDKClient,
@@ -258,8 +278,6 @@ class SessionHandler(BaseHandler):
         self,
         composite_key: str,
         client: ClaudeSDKClient,
-        *,
-        retire_model_hub_scope: bool,
     ) -> bool:
         returncode = get_claude_client_returncode(client)
         if returncode is None:
@@ -274,10 +292,14 @@ class SessionHandler(BaseHandler):
             reason,
             diagnostic,
         )
+        await self._wait_for_claude_receiver_cleanup(composite_key)
         await self._wait_for_claude_session_idle(composite_key)
         await self._cleanup_session_locked(
             composite_key,
-            retire_model_hub_scope=retire_model_hub_scope,
+            # A dead cached client may have been launched through Model Hub even
+            # when the current turn resolves to a different channel. Retire the
+            # cached generation's process credential before recreating it.
+            retire_model_hub_scope=True,
         )
         return True
 
@@ -300,7 +322,6 @@ class SessionHandler(BaseHandler):
         if await self._evict_terminated_cached_claude_session(
             composite_key,
             client,
-            retire_model_hub_scope=model_hub_launch.channel == "direct",
         ):
             return None
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
@@ -396,7 +417,6 @@ class SessionHandler(BaseHandler):
         if await self._evict_terminated_cached_claude_session(
             composite_key,
             client,
-            retire_model_hub_scope=model_hub_launch.channel == "direct",
         ):
             return None
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
@@ -1250,6 +1270,7 @@ class SessionHandler(BaseHandler):
             claude_stderr_lines.append(text)
             if len(claude_stderr_lines) > 40:
                 del claude_stderr_lines[:-40]
+            logger.warning("Claude CLI stderr for %s: %s", composite_key, text)
 
         # V2Config-driven Anthropic env composition, centralised so the
         # control-channel client (``agent_auth_service``) cannot drift
