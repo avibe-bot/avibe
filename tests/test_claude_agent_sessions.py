@@ -1035,6 +1035,62 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             persist.call_args.kwargs["native_message_id"].startswith("backend-failure:")
         )
 
+    async def test_handle_message_terminated_auth_failure_cleans_cached_runtime(self):
+        controller = _StubController()
+        controller.agent_auth_service.maybe_emit_auth_recovery_message = AsyncMock(return_value=True)
+        runtime_key = "wechat_o9:reviewer:/tmp/work"
+        queued_request = SimpleNamespace()
+        client = SimpleNamespace(
+            query=AsyncMock(
+                side_effect=RuntimeError(
+                    "Failed to authenticate: OAuth login required",
+                )
+            ),
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
+            _vibe_runtime_base_session_id="wechat_o9:reviewer",
+            _vibe_runtime_session_key=runtime_key,
+        )
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(return_value=client),
+            mark_session_active=lambda _composite_key: None,
+            mark_session_idle=lambda _composite_key: None,
+            handle_session_error=AsyncMock(),
+            cleanup_session=AsyncMock(),
+            capture_session_id=lambda *_: None,
+        )
+        agent = ClaudeAgent(controller)
+        agent._prepare_message_with_files = lambda request: request.message
+        agent._delete_ack = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent._pending_requests[runtime_key] = [queued_request]
+
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="hello",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id="wechat_o9:/tmp/work",
+            session_key="wechat-user",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            ack_message_id=None,
+            ack_reaction_message_id="m1",
+            ack_reaction_emoji="eyes",
+            files=None,
+        )
+
+        await agent.handle_message(request)
+
+        controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
+        controller.session_handler.cleanup_session.assert_awaited_once_with(
+            runtime_key,
+            current_receiver_task=None,
+            activation_retired=False,
+        )
+        self.assertEqual(agent._pending_requests[runtime_key], [queued_request])
+        controller.session_handler.handle_session_error.assert_not_awaited()
+
     async def test_clear_sessions_cancels_receiver_tasks_for_cleared_session(self):
         controller = _StubController()
         agent = ClaudeAgent(controller)
@@ -1460,6 +1516,68 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Claude Code process terminated", persist.call_args.args[2])
         terminal_call = controller.emit_agent_message.await_args
         self.assertIn("SIGABRT", terminal_call.kwargs["terminal_error"])
+        self.assertFalse(agent._pending_requests.get(composite_key))
+
+    async def test_receiver_eof_terminated_auth_adopts_turn_before_recovery(self):
+        controller = _StubController()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        recovery_contexts = []
+
+        async def _recover(context, *_args, **_kwargs):
+            recovery_contexts.append(context)
+            self.assertEqual(context.platform_specific["turn_token"], "eof-auth-turn")
+            self.assertEqual(
+                context.platform_specific["agent_runtime_turn_token"],
+                "eof-auth-runtime",
+            )
+            return True
+
+        controller.agent_auth_service.maybe_emit_auth_recovery_message = AsyncMock(
+            side_effect=_recover,
+        )
+        agent = ClaudeAgent(controller)
+        composite_key = "session-eof-auth:/tmp/work"
+        stale_context = SimpleNamespace(
+            platform_specific={
+                "turn_token": "old-turn",
+                "agent_runtime_turn_token": "old-runtime",
+            }
+        )
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-auth-turn",
+                    "agent_runtime_turn_token": "eof-auth-runtime",
+                }
+            ),
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._pending_reactions[composite_key] = [("m1", "eyes")]
+        agent._remove_ack_reaction = AsyncMock()
+        agent._clear_pending_reactions = AsyncMock()
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(),
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: (
+                "OAuth login failed; Claude process terminated: SIGABRT"
+            ),
+        )
+        controller.claude_sessions[composite_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
+        )
+        controller.receiver_tasks[composite_key] = asyncio.current_task()
+
+        await agent._handle_receiver_eof(composite_key, stale_context)
+
+        self.assertEqual(recovery_contexts, [stale_context])
+        agent.session_handler.handle_session_error.assert_not_awaited()
+        agent.session_handler.cleanup_session.assert_awaited_once_with(
+            composite_key,
+            current_receiver_task=asyncio.current_task(),
+            activation_retired=False,
+        )
         self.assertFalse(agent._pending_requests.get(composite_key))
 
     async def test_receiver_non_auth_error_settles_dot_and_persists(self):

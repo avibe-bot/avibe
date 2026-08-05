@@ -245,6 +245,16 @@ class ClaudeAgent(BaseAgent):
                     output=terminal_output_for(request),
                     terminal_error=diagnostic,
                 )
+                if handled and get_claude_client_returncode(client) is not None:
+                    # Auth recovery owns the visible settlement, but a query can
+                    # fail after the cached CLI has already exited. Retire that
+                    # runtime here so its client and Model Hub credential cannot
+                    # survive until a later retry; preserve newer queued turns.
+                    self._requeue_request_activity(request)
+                    await self._cleanup_runtime_session(
+                        runtime_session_key,
+                        preserve_pending_request_state=True,
+                    )
                 if not handled:
                     await self.session_handler.handle_session_error(runtime_session_key, context, e)
                     # ``handle_session_error`` sends through the IM client, which doesn't
@@ -1849,53 +1859,82 @@ class ClaudeAgent(BaseAgent):
             if not pending_token:
                 self._pending_requests.setdefault(composite_key, []).insert(0, pending_request)
                 return
-        self._requeue_request_activity(pending_request)
+        # The receiver context may belong to an earlier turn. Adopt the FIFO
+        # owner's identity before any visible or durable failure output.
+        self._adopt_pending_turn_token(context, pending_request)
         terminal_error = "Claude receiver ended without a terminal result"
         client = self.claude_sessions.get(composite_key)
         returncode = get_claude_client_returncode(client)
-        cleanup_handled = False
+        auth_handled = False
         if returncode is not None:
             eof_error = RuntimeError(terminal_error)
             error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
             diagnostic = self._claude_error_diagnostic(composite_key, eof_error)
-            handle_session_error = getattr(self.session_handler, "handle_session_error", None)
-            if callable(handle_session_error):
-                await handle_session_error(composite_key, context, eof_error)
-                cleanup_handled = True
-                try:
-                    from core.message_mirror import persist_agent_message
-
-                    notification = backend_failure_notification_output(
-                        context,
-                        "claude",
-                        request=pending_request,
-                        output=terminal_output_for(pending_request),
-                    )
-                    persist_agent_message(
-                        context,
-                        "notify",
-                        error_notify,
-                        metadata=notification.metadata,
-                        native_message_id=notification.idempotency_key,
-                    )
-                except Exception:
-                    logger.debug(
-                        "claude: failed to persist terminated EOF notification",
-                        exc_info=True,
-                    )
+            auth_handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                context,
+                "claude",
+                error_notify,
+                output=terminal_output_for(pending_request),
+                terminal_error=diagnostic,
+            )
+            if auth_handled:
+                self._retire_failed_auth_turn(
+                    composite_key,
+                    context,
+                    failed_request=pending_request,
+                )
+                await self._cleanup_runtime_session(
+                    composite_key,
+                    current_receiver_task=asyncio.current_task(),
+                    preserve_pending_request_state=True,
+                )
+                if pending_request is not None:
+                    await self._remove_ack_reaction(pending_request)
+                self._discard_pending_reaction(composite_key)
+                await self._clear_pending_reactions(composite_key, context)
+                self._mark_session_idle_if_no_pending_requests(composite_key)
             else:
-                diagnostic = terminal_error
+                self._requeue_request_activity(pending_request)
+                handle_session_error = getattr(self.session_handler, "handle_session_error", None)
+                if callable(handle_session_error):
+                    await handle_session_error(composite_key, context, eof_error)
+                    try:
+                        from core.message_mirror import persist_agent_message
+
+                        notification = backend_failure_notification_output(
+                            context,
+                            "claude",
+                            request=pending_request,
+                            output=terminal_output_for(pending_request),
+                        )
+                        persist_agent_message(
+                            context,
+                            "notify",
+                            error_notify,
+                            metadata=notification.metadata,
+                            native_message_id=notification.idempotency_key,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "claude: failed to persist terminated EOF notification",
+                            exc_info=True,
+                        )
+                else:
+                    diagnostic = terminal_error
         else:
+            self._requeue_request_activity(pending_request)
             diagnostic = terminal_error
+        if auth_handled:
+            self._release_service_runtime_turn(context)
+            return
         logger.warning("Claude receiver ended without a result for session %s", composite_key)
-        self._adopt_pending_turn_token(context, pending_request)
         await self._remove_specific_pending_reaction(composite_key, context, pending_request)
         await self._remove_ack_reaction(pending_request)
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
         self._mark_session_idle_if_no_pending_requests(composite_key)
 
-        if not cleanup_handled:
+        if returncode is None or not callable(getattr(self.session_handler, "handle_session_error", None)):
             await self._cleanup_runtime_session(
                 composite_key,
                 current_receiver_task=asyncio.current_task(),
@@ -2227,7 +2266,13 @@ class ClaudeAgent(BaseAgent):
                     value["execution_ids"] = list(execution_ids)
             context.platform_specific[key] = value
 
-    def _retire_failed_auth_turn(self, composite_key: str, context: MessageContext) -> None:
+    def _retire_failed_auth_turn(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        *,
+        failed_request: AgentRequest | None = None,
+    ) -> None:
         """Retire a terminal auth-failure turn from the pending FIFO.
 
         The auth error IS this turn's (failed) result, so pop its pending request:
@@ -2236,7 +2281,8 @@ class ClaudeAgent(BaseAgent):
         and Stop sticks until the safety timeout. Adopt the failed turn's own token
         and release its Chat stream now. Called from auth-failure terminal paths
         after the recovery notify has been persisted."""
-        failed_request = self._pop_pending_request(composite_key)
+        if failed_request is None:
+            failed_request = self._pop_pending_request(composite_key)
         self._requeue_request_activity(failed_request)
         self._adopt_pending_turn_token(context, failed_request)
         _mark = getattr(self.controller, "mark_turn_complete", None)
