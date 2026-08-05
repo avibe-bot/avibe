@@ -292,11 +292,12 @@ def apply_claude_auth(
 ) -> Dict[str, Any]:
     """Persist Claude auth into ``settings.json``.
 
-    ``api_key`` mode writes ``env.ANTHROPIC_API_KEY`` and removes
-    ``ANTHROPIC_AUTH_TOKEN`` so header semantics cannot conflict. ``oauth``
-    mode removes all Anthropic credential/base-url overrides from the env
-    block and leaves Claude's OAuth credentials untouched. Both modes upsert
-    Avibe's non-secret Claude Code env defaults.
+    In ``api_key`` mode the caller selects exactly one credential variable:
+    ``ANTHROPIC_API_KEY`` for Anthropic's direct ``x-api-key`` header or
+    ``ANTHROPIC_AUTH_TOKEN`` for a gateway's ``Authorization: Bearer`` header.
+    ``oauth`` mode removes all Anthropic credential/base-url overrides from the
+    env block and leaves Claude's OAuth credentials untouched. Both modes
+    upsert Avibe's non-secret Claude Code env defaults.
     """
     if auth_mode not in {"oauth", "api_key"}:
         raise ValueError(f"Unsupported claude auth_mode: {auth_mode!r}")
@@ -423,13 +424,10 @@ def read_claude_api_key_from_settings(home: Path | None = None) -> Optional[str]
     blanking the live key.
 
     Restricted to ``ANTHROPIC_API_KEY`` on purpose. ``ANTHROPIC_AUTH_TOKEN``
-    is the bearer-token relay variant — Claude Code applies it from
-    ``settings.json`` directly, and our ``api_key`` field always injects
-    ``ANTHROPIC_API_KEY`` at launch (see ``session_handler``). Pulling an
-    auth-token value into V2Config.api_key would silently switch the
-    header semantics on the next save and break bearer-token gateways.
-    Bearer-token users should rely on the existing settings.json path or
-    re-enter their key into the form.
+    is the bearer-token relay variant and must not be returned through a helper
+    whose callers assume ``x-api-key`` semantics. ``save_claude_auth`` reads
+    the bearer token separately, preserves the credential, and chooses the
+    header from the effective Base URL.
     """
     env_block = read_claude_settings_env(home)
     return env_block.get("ANTHROPIC_API_KEY")

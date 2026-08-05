@@ -104,7 +104,12 @@ def _pick_probe_response_excerpt(stdout_text: str) -> str:
     return candidate
 
 
-def _classify_test_failure(stdout: str, stderr: str) -> str:
+def _classify_test_failure(
+    stdout: str,
+    stderr: str,
+    *,
+    auth_mode: str | None = None,
+) -> str:
     """Map a backend CLI's failure output to a specific UI error code.
 
     The Settings → Backends "Test connection" panel routes the returned
@@ -122,7 +127,10 @@ def _classify_test_failure(stdout: str, stderr: str) -> str:
         return "cli_failed"
 
     if "not logged in" in text:
-        return "not_logged_in"
+        # Gateways sometimes use this wording when an API credential was
+        # missing or arrived in the wrong header. In explicit API-key mode,
+        # sending the user through OAuth login is the wrong recovery path.
+        return "invalid_credentials" if auth_mode == "api_key" else "not_logged_in"
 
     # Auth-side rejections (key wrong / revoked / rejected).
     auth_needles = (
@@ -2242,6 +2250,7 @@ class AgentAuthService:
         binary = self._get_cli_binary(backend)
         prompt = "Hi"
         probe_cwd = None
+        auth_mode = None
         if backend == "claude":
             probe_cwd = self._resolve_claude_probe_cwd()
             # ``-p`` switches Claude Code into non-interactive print mode
@@ -2335,7 +2344,11 @@ class AgentAuthService:
                     pass
                 stdout_partial = (partial_stdout or b"").decode("utf-8", errors="replace").strip()
                 stderr_partial = (partial_stderr or b"").decode("utf-8", errors="replace").strip()
-                classified = _classify_test_failure(stdout_partial, stderr_partial)
+                classified = _classify_test_failure(
+                    stdout_partial,
+                    stderr_partial,
+                    auth_mode=auth_mode,
+                )
                 result = {
                     "ok": False,
                     "error": classified if classified != "cli_failed" else "timed_out",
@@ -2354,7 +2367,11 @@ class AgentAuthService:
         stderr_text = (stderr or b"").decode("utf-8", errors="replace").strip()
 
         if process.returncode != 0:
-            classified = _classify_test_failure(stdout_text, stderr_text)
+            classified = _classify_test_failure(
+                stdout_text,
+                stderr_text,
+                auth_mode=auth_mode,
+            )
             return {
                 "ok": False,
                 "error": classified,
