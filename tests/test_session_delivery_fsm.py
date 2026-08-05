@@ -18,7 +18,11 @@ from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
 )
-from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import (
+    SETTLED_BY_RESTARTED,
+    SETTLED_BY_STOPPED,
+    SETTLED_BY_TERMINAL_RESULT,
+)
 from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
@@ -4496,6 +4500,75 @@ def test_stop_terminalization_resumes_oldest_queued_segment(managers) -> None:
     queued = next(row for row in rows if row["dispatch_text"] == "queued-after-stop")
     assert queued["state"] == "claimed"
     assert [text for _, text in starts].count("queued-after-stop") == 1
+
+
+def test_canceled_shutdown_runner_preserves_deferred_queue(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+    queued = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="resume after service restart",
+            ),
+            context=_context(),
+        )
+    )
+    terminal = manager._terminalize_durable_turn(
+        turn_id,
+        "failed",
+        settled_by=SETTLED_BY_RESTARTED,
+        evidence_kind="service_shutdown",
+        resume_successors=False,
+    )
+    assert terminal["changed"] is True
+
+    released = manager._reconcile_durable_runner_release(
+        turn_id,
+        cancelled=True,
+        failed=False,
+        prewrite_refused=False,
+        definitive_prewrite_exit=False,
+        settled_by=SETTLED_BY_RESTARTED,
+        terminal_is_error=True,
+    )
+
+    assert released["defer_queue_resume"] is True
+    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+
+
+def test_ambiguous_start_failure_defers_runner_queue_resume(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="start exactly once",
+            ),
+            context=_context(),
+        )
+    )
+    assert admitted.turn_id
+
+    released = manager._reconcile_durable_runner_release(
+        admitted.turn_id,
+        cancelled=False,
+        failed=True,
+        prewrite_refused=False,
+        definitive_prewrite_exit=False,
+        settled_by=None,
+        terminal_is_error=True,
+    )
+
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, admitted.turn_id)
+    assert released["defer_queue_resume"] is True
+    assert turn is not None
+    assert turn["state"] == "starting"
+    assert turn["start_receipt_outcome"] == "unknown"
+    assert [text for _turn_id, text in starts] == ["start exactly once"]
 
 
 def test_open_backlog_starts_oldest_before_new_idle_p3(managers) -> None:

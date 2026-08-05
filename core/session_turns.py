@@ -4244,7 +4244,7 @@ class SessionTurnManager:
         try:
             if cancelled:
                 interruption = settled_by or SETTLED_BY_NO_TERMINAL_RESULT
-                return self._terminalize_durable_turn(
+                result = self._terminalize_durable_turn(
                     turn_id,
                     "canceled" if interruption == SETTLED_BY_STOPPED else "failed",
                     settled_by=interruption,
@@ -4260,6 +4260,9 @@ class SessionTurnManager:
                     ),
                     resume_successors=interruption == SETTLED_BY_STOPPED,
                 )
+                if interruption != SETTLED_BY_STOPPED:
+                    result["defer_queue_resume"] = True
+                return result
             if failed:
                 # Dispatch may have written before raising. Preserve starting work
                 # for exact-evidence recovery instead of replaying it.
@@ -4273,7 +4276,7 @@ class SessionTurnManager:
                             expected_version=int(turn["version"]),
                             receipt={"reason": "runner_dispatch_failure"},
                         )
-                return {}
+                return {"defer_queue_resume": True}
             if prewrite_refused:
                 return self._settle_durable_prewrite_failure(
                     turn_id,
@@ -4299,7 +4302,7 @@ class SessionTurnManager:
                 "normal turn durable terminal reconciliation deferred for Turn=%s",
                 turn_id,
             )
-        return {}
+        return {"defer_queue_resume": True}
 
     async def terminalize_turn(self, turn_id: str, *, outcome: str = "completed") -> bool:
         result = self._terminalize_durable_turn(
@@ -7239,13 +7242,19 @@ class SessionTurnManager:
                                 if isinstance(terminal_evidence, dict)
                                 else None
                             ),
+                            resume_successors=(
+                                effective_settled_by != SETTLED_BY_RESTARTED
+                            ),
                         )
+                        if effective_settled_by == SETTLED_BY_RESTARTED:
+                            durable_terminal_result["defer_queue_resume"] = True
                     except Exception:
                         logger.exception(
                             "agent-initiated durable terminal reconciliation deferred "
                             "for Turn=%s",
                             turn_token,
                         )
+                        durable_terminal_result = {"defer_queue_resume": True}
                 should_flush = not bool(
                     durable_terminal_result.get("defer_queue_resume")
                 )

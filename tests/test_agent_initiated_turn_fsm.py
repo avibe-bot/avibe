@@ -83,7 +83,7 @@ class RegisterAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         # Natural completion flushes the send-while-busy queue (mirrors _run).
         mgr.flush_queue.assert_awaited()
 
-    async def test_cancel_interrupts_backend_and_settles_without_flush(self):
+    async def test_cancel_interrupts_backend_and_resumes_queue(self):
         mgr, controller = _manager()
         ctx = _ctx("s2")
         with patch("core.inbox_events.bus.publish"):
@@ -99,8 +99,8 @@ class RegisterAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             controller.command_handler.handle_stop.assert_awaited()
             self.assertTrue(result.get("ok"))
             self.assertNotIn("s2", mgr.in_flight)
-            # A plain Stop keeps the queue (no flush on cancellation).
-            mgr.flush_queue.assert_not_awaited()
+            # Stop ends the active turn, so an idle Session resumes its queue.
+            mgr.flush_queue.assert_awaited_once_with("s2")
 
     async def test_noop_without_workbench_session_id(self):
         mgr, _ = _manager()
