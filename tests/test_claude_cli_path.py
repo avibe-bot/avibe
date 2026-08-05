@@ -7,6 +7,7 @@ import sys
 import threading
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -590,6 +591,8 @@ def test_session_handler_recreates_terminated_cached_client_before_dispatch(
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
+    idle_wait = AsyncMock()
+    handler._wait_for_claude_session_idle = idle_wait
     context = MessageContext(user_id="U123", channel_id="C123")
     composite_key = f"slack_C123:{tmp_path}"
 
@@ -602,6 +605,7 @@ def test_session_handler_recreates_terminated_cached_client_before_dispatch(
     assert first_client.disconnects == 1
     assert controller.claude_sessions[composite_key] is second_client
     assert len(captured["clients"]) == 2
+    idle_wait.assert_awaited_once_with(composite_key)
     assert "SIGABRT (signal 6)" in caplog.text
     assert "Claude stderr tail:\nfatal: Claude CLI aborted\ntransport closed" in caplog.text
 

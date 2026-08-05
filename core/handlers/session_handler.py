@@ -26,6 +26,7 @@ from modules.agents.claude_process_reaper import (
     get_claude_client_returncode,
     get_claude_client_stderr_tail,
     claude_process_exit_reason,
+    claude_process_exit_reason_i18n,
     register_claude_owned_process,
     reap_duplicate_claude_resume_processes,
     reap_orphaned_claude_processes,
@@ -273,6 +274,7 @@ class SessionHandler(BaseHandler):
             reason,
             diagnostic,
         )
+        await self._wait_for_claude_session_idle(composite_key)
         await self._cleanup_session_locked(
             composite_key,
             retire_model_hub_scope=retire_model_hub_scope,
@@ -2265,7 +2267,8 @@ class SessionHandler(BaseHandler):
         client = self.claude_sessions.get(composite_key)
         returncode = get_claude_client_returncode(client)
         if returncode is not None:
-            reason = claude_process_exit_reason(returncode)
+            reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
+            reason = self._t(reason_key, **reason_values)
             diagnostic = self.claude_error_diagnostic(composite_key, error)
             logger.error(
                 "Claude process for session %s terminated (%s): %s",

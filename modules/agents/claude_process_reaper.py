@@ -64,6 +64,18 @@ def claude_process_exit_reason(returncode: int) -> str:
     return f"exit code {returncode}"
 
 
+def claude_process_exit_reason_i18n(returncode: int) -> tuple[str, dict[str, str | int]]:
+    """Return the i18n key and values for a user-facing exit reason."""
+    if returncode < 0:
+        signal_number = -returncode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"SIG{signal_number}"
+        return "error.claudeProcessSignal", {"signal": signal_name, "number": signal_number}
+    return "error.claudeProcessExitCode", {"code": returncode}
+
+
 def get_claude_client_stderr_tail(client: object | None) -> str:
     """Return the stderr ring buffer captured for a Claude SDK client."""
     lines = getattr(client, "_vibe_stderr_lines", None)

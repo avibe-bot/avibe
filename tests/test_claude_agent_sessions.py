@@ -133,6 +133,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             _t=lambda key, **kwargs: (
                 f"process terminated: {kwargs['reason']}"
                 if key == "error.claudeProcessTerminated"
+                else f"{kwargs['signal']} (signal {kwargs['number']})"
+                if key == "error.claudeProcessSignal"
                 else key
             ),
         )
@@ -156,7 +158,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         assert agent._format_error_notify(
             RuntimeError("Cannot write to terminated process (exit code: -6)"),
             composite_key=runtime_key,
-        ) == "❌ Claude Code 进程已终止（SIGABRT (signal 6)）；会话已重置，请重试。"
+        ) == "❌ Claude Code 进程已终止（SIGABRT（信号 6））；会话已重置，请重试。"
 
     async def test_handle_message_serializes_queries_for_same_runtime_session(self):
         controller = _StubController()

@@ -15,6 +15,10 @@ def test_claude_process_state_helpers_report_signal_and_stderr_tail():
 
     assert claude_process_reaper.get_claude_client_returncode(client) == -6
     assert claude_process_reaper.claude_process_exit_reason(-6) == "SIGABRT (signal 6)"
+    assert claude_process_reaper.claude_process_exit_reason_i18n(-6) == (
+        "error.claudeProcessSignal",
+        {"signal": "SIGABRT", "number": 6},
+    )
     assert claude_process_reaper.get_claude_client_stderr_tail(client) == "first\nfatal Claude error"
 
 

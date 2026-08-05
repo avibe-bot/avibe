@@ -29,7 +29,7 @@ from core.session_activities import SessionActivity, activity_completion_output
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_SESSION_OWNER,
-    claude_process_exit_reason,
+    claude_process_exit_reason_i18n,
     get_claude_client_returncode,
     register_claude_owned_process,
 )
@@ -137,7 +137,8 @@ class ClaudeAgent(BaseAgent):
         client = self.claude_sessions.get(composite_key) if composite_key else None
         returncode = get_claude_client_returncode(client)
         if returncode is not None:
-            reason = claude_process_exit_reason(returncode)
+            reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
+            reason = self._translate_error(reason_key, **reason_values)
             return f"❌ {self._translate_error('error.claudeProcessTerminated', reason=reason)}"
         return f"❌ Claude error: {error}"
 
