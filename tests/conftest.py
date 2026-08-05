@@ -83,8 +83,13 @@ def _module_uses_default_sqlite_state(request: pytest.FixtureRequest) -> bool:
 
 
 def _is_default_sqlite_call(node: ast.Call) -> bool:
-    function_name = node.func.id if isinstance(node.func, ast.Name) else None
-    if function_name == "get_sqlite_state_path":
+    if isinstance(node.func, ast.Name):
+        function_name = node.func.id
+    elif isinstance(node.func, ast.Attribute):
+        function_name = node.func.attr
+    else:
+        function_name = None
+    if function_name in {"get_sqlite_state_path", "_vault_engine", "_open_vault_engine"}:
         return True
     if function_name not in {"ensure_sqlite_state", "create_sqlite_engine"}:
         return False
