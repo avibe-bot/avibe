@@ -123,6 +123,26 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal_call.kwargs["level"], "silent")
         self.assertEqual(terminal_call.kwargs["terminal_error"], diagnostic)
 
+    def test_process_termination_notify_is_localized(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        controller.claude_sessions[runtime_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
+        )
+        controller.session_handler = SimpleNamespace(
+            _t=lambda key, **kwargs: (
+                f"process terminated: {kwargs['reason']}"
+                if key == "error.claudeProcessTerminated"
+                else key
+            ),
+        )
+        agent = ClaudeAgent(controller)
+
+        assert agent._format_error_notify(
+            RuntimeError("Cannot write to terminated process (exit code: -6)"),
+            composite_key=runtime_key,
+        ) == "❌ process terminated: SIGABRT (signal 6)"
+
     async def test_handle_message_serializes_queries_for_same_runtime_session(self):
         controller = _StubController()
         runtime_key = "wechat_o9:/tmp/work"

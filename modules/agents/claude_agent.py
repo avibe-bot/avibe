@@ -29,6 +29,8 @@ from core.session_activities import SessionActivity, activity_completion_output
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_SESSION_OWNER,
+    claude_process_exit_reason,
+    get_claude_client_returncode,
     register_claude_owned_process,
 )
 
@@ -108,7 +110,16 @@ class ClaudeAgent(BaseAgent):
         # )
         self._question_handler = None
 
-    def _format_error_notify(self, error: Exception) -> str:
+    def _claude_error_diagnostic(self, composite_key: str, error: Exception) -> str:
+        diagnostic = getattr(self.session_handler, "claude_error_diagnostic", None)
+        if callable(diagnostic):
+            try:
+                return diagnostic(composite_key, error)
+            except Exception:
+                logger.debug("claude: failed to build error diagnostic", exc_info=True)
+        return str(error)
+
+    def _format_error_notify(self, error: Exception, *, composite_key: str | None = None) -> str:
         """Return the durable notify text for Claude terminal errors."""
         if is_claude_sdk_buffer_error(error):
             translator = getattr(self.session_handler, "_t", None) or getattr(self.controller, "_t", None)
@@ -118,6 +129,20 @@ class ClaudeAgent(BaseAgent):
                 except Exception:
                     logger.debug("claude: failed to translate buffer-error notify", exc_info=True)
             return "❌ Connection to Claude was lost. Please try your message again."
+        client = self.claude_sessions.get(composite_key) if composite_key else None
+        returncode = get_claude_client_returncode(client)
+        if returncode is not None:
+            reason = claude_process_exit_reason(returncode)
+            translator = getattr(self.session_handler, "_t", None) or getattr(self.controller, "_t", None)
+            if callable(translator):
+                try:
+                    return f"❌ {translator('error.claudeProcessTerminated', reason=reason)}"
+                except Exception:
+                    logger.debug("claude: failed to translate process-termination notify", exc_info=True)
+            return (
+                f"❌ Claude Code process terminated ({reason}); the session was reset. "
+                "Please try your message again."
+            )
         return f"❌ Claude error: {error}"
 
     async def handle_message(self, request: AgentRequest) -> None:
@@ -207,20 +232,21 @@ class ClaudeAgent(BaseAgent):
             raise
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
-            await self.record_model_hub_native_failure(context, str(e))
+            diagnostic = self._claude_error_diagnostic(runtime_session_key, e)
+            await self.record_model_hub_native_failure(context, diagnostic)
             # Clean up the specific reaction for this request (not FIFO)
             await self._remove_specific_pending_reaction(runtime_session_key, context, request)
             self._remove_pending_request(runtime_session_key, request)
             self._mark_session_idle_if_no_pending_requests(runtime_session_key)
             await self._remove_ack_reaction(request)
-            error_notify = self._format_error_notify(e)
+            error_notify = self._format_error_notify(e, composite_key=runtime_session_key)
             try:
                 handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                     context,
                     "claude",
                     error_notify,
                     output=terminal_output_for(request),
-                    terminal_error=str(e),
+                    terminal_error=diagnostic,
                 )
                 if not handled:
                     await self.session_handler.handle_session_error(runtime_session_key, context, e)
@@ -254,7 +280,7 @@ class ClaudeAgent(BaseAgent):
                         is_error=True,
                         level="silent",
                         output=terminal_output_for(request),
-                        terminal_error=str(e),
+                        terminal_error=diagnostic,
                     )
             finally:
                 self._release_service_runtime_turn(context)
@@ -1870,15 +1896,16 @@ class ClaudeAgent(BaseAgent):
             pending_request = pending[0] if pending else None
             self._adopt_pending_turn_token(context, pending_request)
             await self._clear_pending_reactions(composite_key, context)
-            error_notify = self._format_error_notify(error)
+            diagnostic = self._claude_error_diagnostic(composite_key, error)
+            error_notify = self._format_error_notify(error, composite_key=composite_key)
             failure_context = getattr(pending_request, "context", context)
-            await self.record_model_hub_native_failure(failure_context, str(error))
+            await self.record_model_hub_native_failure(failure_context, diagnostic)
             handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                 context,
                 "claude",
                 error_notify,
                 output=terminal_output_for(pending_request),
-                terminal_error=str(error),
+                terminal_error=diagnostic,
             )
             if not handled:
                 await self.session_handler.handle_session_error(
@@ -1914,7 +1941,7 @@ class ClaudeAgent(BaseAgent):
                     is_error=True,
                     level="silent",
                     output=terminal_output_for(pending_request),
-                    terminal_error=str(error),
+                    terminal_error=diagnostic,
                 )
             self._release_service_runtime_turn(context)
 

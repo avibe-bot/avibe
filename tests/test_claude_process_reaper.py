@@ -2,8 +2,28 @@ import asyncio
 import logging
 import os
 import signal
+from types import SimpleNamespace
 
 from modules.agents import claude_process_reaper
+
+
+def test_claude_process_state_helpers_report_signal_and_stderr_tail():
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-signal.SIGABRT)),
+        _vibe_stderr_lines=["first", "", "fatal Claude error"],
+    )
+
+    assert claude_process_reaper.get_claude_client_returncode(client) == -6
+    assert claude_process_reaper.claude_process_exit_reason(-6) == "SIGABRT (signal 6)"
+    assert claude_process_reaper.get_claude_client_stderr_tail(client) == "first\nfatal Claude error"
+
+
+def test_claude_process_state_helpers_ignore_running_process():
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
+    )
+
+    assert claude_process_reaper.get_claude_client_returncode(client) is None
 
 
 def test_find_claude_resume_processes_matches_exact_resume_id(monkeypatch):

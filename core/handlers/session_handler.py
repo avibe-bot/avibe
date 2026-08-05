@@ -23,6 +23,9 @@ from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_PROCESS_OWNER_ENV,
     AVIBE_CLAUDE_SESSION_OWNER,
     get_claude_client_pid,
+    get_claude_client_returncode,
+    get_claude_client_stderr_tail,
+    claude_process_exit_reason,
     register_claude_owned_process,
     reap_duplicate_claude_resume_processes,
     reap_orphaned_claude_processes,
@@ -1284,6 +1287,7 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
+        setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
         setattr(client, "_vibe_git_path_state", git_path_state)
         setattr(
@@ -2218,7 +2222,28 @@ class SessionHandler(BaseHandler):
                     )
                 ),
             )
-        elif "read() called while another coroutine" in error_msg:
+            return
+
+        client = self.claude_sessions.get(composite_key)
+        returncode = get_claude_client_returncode(client)
+        if returncode is not None:
+            reason = claude_process_exit_reason(returncode)
+            diagnostic = self.claude_error_diagnostic(composite_key, error)
+            logger.error(
+                "Claude process for session %s terminated (%s): %s",
+                composite_key,
+                reason,
+                diagnostic,
+            )
+            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            await self._get_im_client(context).send_message(
+                context,
+                self._get_formatter(context).format_error(
+                    self._t("error.claudeProcessTerminated", reason=reason)
+                ),
+            )
+            return
+        if "read() called while another coroutine" in error_msg:
             logger.error(f"Session {composite_key} has concurrent read error - cleaning up")
             await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
 
@@ -2250,6 +2275,18 @@ class SessionHandler(BaseHandler):
                 context,
                 self._get_formatter(context).format_error(self._t("error.sessionGeneric", error=error_msg)),
             )
+
+    def claude_error_diagnostic(self, composite_key: str, error: Exception) -> str:
+        """Add process state and captured stderr to a Claude failure diagnostic."""
+        diagnostic = str(error)
+        client = self.claude_sessions.get(composite_key)
+        returncode = get_claude_client_returncode(client)
+        if returncode is not None:
+            diagnostic = f"{diagnostic}\nClaude process terminated: {claude_process_exit_reason(returncode)}"
+        stderr_tail = get_claude_client_stderr_tail(client)
+        if stderr_tail:
+            diagnostic = f"{diagnostic}\nClaude stderr tail:\n{stderr_tail}"
+        return diagnostic
 
     def capture_session_id(
         self,
