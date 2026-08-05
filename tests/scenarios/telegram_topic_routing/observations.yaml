@@ -20,3 +20,17 @@ observations:
     required_updates:
       - resolve settings from thread then channel
       - preserve the existing group session key and Telegram reply anchor
+  - id: OBS-TELEGRAM-TOPIC-003
+    source: field_incident
+    related_scenarios:
+      - TELEGRAM-TOPIC-005
+    summary: >-
+      The group-level session key must not be reused for per-turn runtime slots.
+      A topic that ran a 15-minute agent held the only turn sink for its whole
+      group, so three sibling topics' first turns were settled
+      refused_concurrent_turn before reaching a backend, silently, until that
+      unrelated topic finished.
+    required_updates:
+      - key the turn sink at thread scope, not channel scope
+      - keep the group session key unchanged for settings, polls, and consolidation
+      - assert sibling-topic turn independence at the dispatch contract layer

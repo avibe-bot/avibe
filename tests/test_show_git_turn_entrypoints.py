@@ -12,6 +12,7 @@ from config import paths
 from core import inbox_events, internal_server, show_git
 from core.git_binary import ResolvedGit
 from core.inbox_events import InboxEventBus
+from core.message_context import build_context_turn_sink_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
 from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
@@ -139,6 +140,9 @@ class _Controller:
     @staticmethod
     def _get_session_key(context) -> str:
         return f"{context.platform}::{context.channel_id}"
+
+    def _get_turn_sink_key(self, context) -> str:
+        return build_context_turn_sink_key(context, session_key=self._get_session_key(context))
 
     def register_turn_sink(self, session_key: str, **kwargs) -> None:
         self.session_turns.register_turn_sink(session_key, **kwargs)

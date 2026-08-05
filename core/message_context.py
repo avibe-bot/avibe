@@ -109,3 +109,62 @@ def build_context_session_key(
     if requires_typed_user_session_key(context):
         return f"{resolved_platform}::user::{resolved_settings_key}"
     return f"{resolved_platform}::{resolved_settings_key}"
+
+
+def build_context_turn_sink_key(
+    context: MessageContext,
+    *,
+    session_key: Optional[str] = None,
+) -> str:
+    """Build the key that identifies ONE agent session's live turn sink.
+
+    Distinct from ``build_context_session_key`` on purpose. That key is
+    channel-scoped (``resolve_context_settings_key`` deliberately drops the
+    thread), which is right for polls, settings lookup, and message
+    consolidation — they are channel-wide concerns. The turn sink is not: it
+    is the concurrency slot for a SINGLE agent session, and
+    ``dispatch_turn_with_outcome`` refuses any turn that finds the slot taken.
+
+    Keying the sink at channel scope therefore made the refusal channel-wide:
+    a long-running Telegram forum topic held the only slot for its whole group,
+    so every OTHER topic's turn was refused with ``refused_concurrent_turn``
+    before reaching a backend, silently, until that unrelated topic finished.
+
+    The thread scope is resolved the same way every session-anchor caller
+    resolves it (``resolve_context_thread_id(context) or context.thread_id``),
+    so the key is derived purely from context fields that are already pinned
+    before dispatch and carried by every context in a turn's lifetime — the
+    dispatch context, the backend receiver's stale per-turn context, and an
+    external stop's rebuilt context all land on the same key.
+    """
+
+    base = session_key if session_key is not None else build_context_session_key(context)
+    # ``getattr`` because this is reached from every turn-lifecycle context, including
+    # the lookalike namespaces the workbench/stop paths build. A context without the
+    # attribute has no thread, which is the unthreaded case — not an error.
+    thread_id = resolve_context_thread_id(context) or getattr(context, "thread_id", None)
+    if not thread_id:
+        return base
+    return f"{base}::thread::{thread_id}"
+
+
+def resolve_turn_sink_key(controller: object, context: MessageContext) -> str:
+    """Resolve ``context``'s turn-sink key, preferring ``controller``'s own accessor.
+
+    Falls back to ``_get_session_key`` and then to the context alone, applying the
+    same thread-scoping rule at every step. Never degrades to the bare channel key:
+    that scope is what made one busy thread refuse its siblings' turns, so a
+    controller without the accessor must still land on a thread-scoped key rather
+    than silently reintroduce the collision.
+
+    Always returns a key. A key with no sink registered simply misses in
+    ``get_turn_sink``, which is what every caller already handles.
+    """
+
+    getter = getattr(controller, "_get_turn_sink_key", None)
+    if callable(getter):
+        return getter(context)
+    base_getter = getattr(controller, "_get_session_key", None)
+    if callable(base_getter):
+        return build_context_turn_sink_key(context, session_key=base_getter(context))
+    return build_context_turn_sink_key(context)

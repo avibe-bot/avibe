@@ -851,7 +851,8 @@ def _build_session_row_stop_context(
     ``avibe::<session_id>``, which can stop the backend when backend ids are
     patched in, but cannot find the dispatch sink registered under the original
     scope key. Rebuild the same scope context that ``_execute_agent_run`` used so
-    ``controller._get_session_key`` resolves to the live sink.
+    ``controller._get_turn_sink_key`` resolves to the live sink — including the
+    row's ``thread_id``, which that key is scoped by.
     """
     if not session_id:
         return None

@@ -6,6 +6,8 @@ capability:
     - tests/test_ui_api.py
     - tests/test_auth_pipeline.py
     - tests/test_agent_run_target.py
+    - tests/test_core_services_dispatch.py
+    - tests/test_message_context_helpers.py
 status_legend:
   covered: automated scenario or contract coverage exists
   manual: currently validated by human regression
@@ -34,3 +36,9 @@ scenarios:
     kind: ui
     layer: manual
     evidence: output/playwright/telegram-topic-settings.png
+  - id: TELEGRAM-TOPIC-005
+    name: A topic running a long turn does not block a sibling topic's turn
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_core_services_dispatch.py::test_busy_sibling_thread_does_not_refuse_this_threads_turn
