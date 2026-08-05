@@ -43,12 +43,12 @@ describe('SessionPinAction', () => {
   it('uses the compact rounded rail geometry shared with the session action menu', () => {
     const html = renderAction(false);
 
-    expect(html).toContain('absolute inset-y-0 flex items-center right-6');
+    expect(html).toContain('absolute inset-y-0 flex items-center right-5');
     expect(html).toContain('grid shrink-0 place-items-center');
     expect(html).toContain('size-5 rounded-md');
     expect(SESSION_ROW_ACTION_BUTTON_CLASS).toBe('size-5 rounded-md');
-    expect(SESSION_ROW_PIN_POSITION_CLASS).toBe('right-6');
-    expect(SESSION_ROW_MENU_POSITION_CLASS).toBe('right-0.5');
+    expect(SESSION_ROW_PIN_POSITION_CLASS).toBe('right-5');
+    expect(SESSION_ROW_MENU_POSITION_CLASS).toBe('right-0');
   });
 
   it('reveals an unpinned action on row hover, keyboard focus, and coarse pointers', () => {
@@ -84,13 +84,13 @@ describe('sessionRowActionPaddingClass', () => {
     const className = sessionRowActionPaddingClass(false, false);
 
     expect(className).toContain('pr-2.5');
-    expect(className).toContain('hover:pr-12');
-    expect(className).toContain('focus-within:pr-12');
-    expect(className).toContain('pointer-coarse:pr-12');
+    expect(className).toContain('hover:pr-11');
+    expect(className).toContain('focus-within:pr-11');
+    expect(className).toContain('pointer-coarse:pr-11');
   });
 
   it('reserves the rail while the menu is open or the pin stays visible', () => {
-    expect(sessionRowActionPaddingClass(true, false)).toBe('pr-12');
-    expect(sessionRowActionPaddingClass(false, true)).toBe('pr-12');
+    expect(sessionRowActionPaddingClass(true, false)).toBe('pr-11');
+    expect(sessionRowActionPaddingClass(false, true)).toBe('pr-11');
   });
 });

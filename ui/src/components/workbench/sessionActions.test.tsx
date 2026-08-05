@@ -9,7 +9,7 @@ import {
   SessionActionsTrigger,
   type SessionActionDescriptor,
 } from './sessionActions';
-import { mobileChatSessionActions } from './chatSessionActions';
+import { mobileChatSessionActions, mobileSessionActions } from './chatSessionActions';
 
 const row = (over: Partial<SessionActionDescriptor> & Pick<SessionActionDescriptor, 'id' | 'group' | 'label'>) =>
   ({ icon: Pin, onSelect: () => undefined, ...over }) as SessionActionDescriptor;
@@ -160,15 +160,13 @@ describe('SessionActionsTrigger', () => {
 });
 
 describe('MobileChatSessionActionMenu', () => {
-  it('removes rename from the Chat surface while preserving the remaining descriptors', () => {
+  it('removes rename and the archive shortcut hint from the mobile Chat surface', () => {
     const actions = fullMenu();
+    const visibleActions = mobileChatSessionActions(actions);
 
-    expect(mobileChatSessionActions(actions).map((action) => action.id)).toEqual([
-      'pin',
-      'fork',
-      'hide',
-      'archive',
-    ]);
+    expect(visibleActions.map((action) => action.id)).toEqual(['pin', 'fork', 'hide', 'archive']);
+    expect(visibleActions.find((action) => action.id === 'archive')?.hint).toBeUndefined();
+    expect(actions.find((action) => action.id === 'archive')?.hint).toBe('⇧⌘D');
   });
 
   it('renders the chat trigger only below the desktop breakpoint', () => {
@@ -182,5 +180,17 @@ describe('MobileChatSessionActionMenu', () => {
 
   it('withdraws the trigger when the surface offers no actions', () => {
     expect(renderToStaticMarkup(<MobileChatSessionActionMenu actions={[]} label="Session actions" />)).toBe('');
+  });
+});
+
+describe('mobileSessionActions', () => {
+  it('removes only the archive shortcut hint from mobile session menus', () => {
+    const actions = fullMenu();
+    const visibleActions = mobileSessionActions(actions);
+
+    expect(visibleActions.map((action) => action.id)).toEqual(actions.map((action) => action.id));
+    expect(visibleActions.find((action) => action.id === 'archive')?.hint).toBeUndefined();
+    expect(visibleActions.find((action) => action.id === 'fork')).toBe(actions.find((action) => action.id === 'fork'));
+    expect(actions.find((action) => action.id === 'archive')?.hint).toBe('⇧⌘D');
   });
 });
