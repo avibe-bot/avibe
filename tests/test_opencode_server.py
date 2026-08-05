@@ -469,7 +469,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         body = fake_session.posts[0]["json"]
         self.assertEqual(body["tools"], {"question": False})
 
-    async def test_prompt_async_uses_durable_attempt_as_native_message_id(self):
+    async def test_prompt_async_uses_opencode_native_message_id(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()
 
@@ -482,12 +482,28 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             session_id="ses-1",
             directory="/tmp/work",
             text="hello",
-            message_id="atm_exact_evidence",
+            message_id="msg_exact_evidence",
         )
 
         self.assertEqual(
             fake_session.posts[0]["json"]["messageID"],
-            "atm_exact_evidence",
+            "msg_exact_evidence",
+        )
+
+    def test_durable_attempt_maps_to_opencode_message_namespace(self):
+        self.assertEqual(
+            SERVER_MODULE.native_message_id_for_attempt("atm_exact_evidence"),
+            "msg_exact_evidence",
+        )
+
+    def test_attempt_evidence_accepts_current_and_legacy_native_ids(self):
+        self.assertEqual(
+            SERVER_MODULE.native_message_ids_for_attempt("atm_exact_evidence"),
+            ("msg_exact_evidence", "atm_exact_evidence"),
+        )
+        self.assertEqual(
+            SERVER_MODULE.native_message_ids_for_attempt("legacy-evidence"),
+            ("legacy-evidence",),
         )
 
     async def test_prompt_async_exposes_definitive_http_rejection(self):

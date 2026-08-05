@@ -638,7 +638,7 @@ async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> 
             ),
         )
         assert receipt.outcome is SteerOutcome.ACCEPTED
-        assert server.prompt_calls[0]["message_id"] == attempt_id
+        assert server.prompt_calls[0]["message_id"] == "msg_exact_restart_evidence"
 
         reconciled = await reconcile_steer_attempt(
             controller,
@@ -652,8 +652,41 @@ async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> 
         )
 
         assert reconciled.outcome is SteerOutcome.ACCEPTED
-        assert reconciled.details["native_message_id"] == attempt_id
+        assert reconciled.details["native_message_id"] == "msg_exact_restart_evidence"
         assert len(server.prompt_calls) == 1
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_reconciles_legacy_native_attempt_without_resteering() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    attempt_id = "atm_legacy_restart_evidence"
+    server = _OpenCodeServer(
+        messages=[
+            {"info": {"id": attempt_id, "role": "user"}, "parts": []},
+        ]
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        reconciled = await reconcile_steer_attempt(
+            controller,
+            "opencode",
+            SteerReconcileRequest(
+                target_session_id="avibe-session",
+                expected_logical_turn_id=identity[0],
+                expected_native_turn_id=identity[1],
+                attempt_id=attempt_id,
+            ),
+        )
+
+        assert reconciled.outcome is SteerOutcome.ACCEPTED
+        assert reconciled.details["native_message_id"] == attempt_id
+        assert server.prompt_calls == []
     finally:
         await _cancel_tasks(gate_task)
 
@@ -914,9 +947,11 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("status", [400, 409])
 @pytest.mark.parametrize("reconciliation_fails", [False, True])
 async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanup(
     monkeypatch,
+    status: int,
     reconciliation_fails: bool,
 ) -> None:
     primary = _primary_request(backend="opencode")
@@ -932,7 +967,7 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
 
         async def prompt_async(self, **kwargs):
             events.append("prompt")
-            raise OpenCodePromptRejectedError(409, "prompt refused")
+            raise OpenCodePromptRejectedError(status, "prompt refused")
 
         async def abort_session(self, session_id, directory):
             events.append("abort")
@@ -982,6 +1017,12 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
             raise RuntimeError("storage unavailable")
         return True
 
+    def settle_start_attempt_invalid_input(turn_id, attempt_id, *, backend):
+        events.append(f"invalid:{turn_id}:{attempt_id}:{backend}")
+        if reconciliation_fails:
+            raise RuntimeError("storage unavailable")
+        return True
+
     server = _Server()
     controller = SimpleNamespace(
         config=SimpleNamespace(
@@ -1001,6 +1042,7 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
         get_opencode_overrides=lambda context: (None, None, None),
         session_turns=SimpleNamespace(
             reconcile_start_attempt_not_written=reconcile_start_attempt_not_written,
+            settle_start_attempt_invalid_input=settle_start_attempt_invalid_input,
         ),
     )
     agent = object.__new__(OpenCodeAgent)
@@ -1033,10 +1075,15 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
 
     await agent._process_message(primary)
 
+    expected_reconciliation = (
+        "invalid:logical-turn:atm-start:opencode"
+        if status == 400
+        else "reconcile:logical-turn:atm-start:opencode"
+    )
     assert events[:3] == [
         "persist_poll",
         "prompt",
-        "reconcile:logical-turn:atm-start:opencode",
+        expected_reconciliation,
     ]
     assert "abort" not in events
     assert ("remove_poll" in events) is not reconciliation_fails
