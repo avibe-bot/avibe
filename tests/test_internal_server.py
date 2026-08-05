@@ -2795,6 +2795,7 @@ def test_backend_drain_resolves_inherited_default_agent_backend(tmp_path, monkey
     assert manager._deferred_restart_sessions == {"codex": {session_id}}
 
 
+@pytest.mark.no_sqlite_template
 def test_backend_drain_flushes_deferred_session_after_cutover():
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)

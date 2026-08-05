@@ -165,12 +165,14 @@ def _seed_sqlite_state_template(
 
     Migration/bootstrap tests opt out with ``no_sqlite_template`` because their
     purpose is to exercise the real upgrade/import path from an unseeded DB.
+    Real-path tests are always read-only and must never receive a template copy.
     Every other test keeps its per-test database copy, so writes and schema
     mutations remain isolated without replaying all migrations per test.
     """
 
     if (
-        request.node.get_closest_marker("no_sqlite_template")
+        request.node.get_closest_marker("uses_real_paths")
+        or request.node.get_closest_marker("no_sqlite_template")
         or not _module_uses_default_sqlite_state(request)
     ):
         yield

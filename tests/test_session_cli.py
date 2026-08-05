@@ -116,11 +116,13 @@ def test_list_uses_shared_pagination_contract(monkeypatch, tmp_path, capsys):
     assert page2["pagination"]["has_more"] is False
 
 
+@pytest.mark.no_sqlite_template
 def test_list_on_fresh_home_returns_empty(monkeypatch, tmp_path, capsys):
     # No ensure_sqlite_state(): _open_session_engine must bootstrap the DB itself,
     # so a fresh Avibe home returns a clean empty list, not "no such table" (Codex P2).
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
+    assert not paths.get_sqlite_state_path().exists()
     code, payload = _run(cli.cmd_session_list, ["session", "list"], capsys)
     assert code == 0
     assert payload["sessions"] == []
