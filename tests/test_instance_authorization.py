@@ -113,6 +113,7 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("PUT", "/api/resource-policies/agent/agent-1") == "owner"
     assert required_instance_role("GET", "/api/sessions/ses-1/draft") == "editor"
     assert required_instance_role("POST", "/api/sessions/ses-1/messages") == "editor"
+    assert required_instance_role("POST", "/api/sessions/ses-1/fork") == "editor"
     assert required_instance_role("POST", "/api/projects") == "owner"
     assert required_instance_role("GET", "/api/new-management-surface") == "owner"
     assert required_instance_role("GET", "/show/ses-1/") == "viewer"
@@ -177,9 +178,15 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("GET", "/api/harness/runs/run-1", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/users", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/bind-codes", REMOTE_HTTP_ALLOWED),
+        ("GET", "/show/ses-1/", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/config", REMOTE_HTTP_PAYLOAD_FILTERED),
         ("PATCH", "/api/projects/proj-1", REMOTE_HTTP_PAYLOAD_FILTERED),
         ("PATCH", "/api/sessions/ses-1", REMOTE_HTTP_PAYLOAD_FILTERED),
+        ("POST", "/api/settings", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/settings/thread", REMOTE_HTTP_LOCAL_ONLY),
+        ("DELETE", "/api/settings/thread", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/sessions/ses-1/fork", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/show/ses-1/api/action", REMOTE_HTTP_LOCAL_ONLY),
     ],
 )
 def test_remote_http_policy_keeps_approved_management_and_read_surfaces(

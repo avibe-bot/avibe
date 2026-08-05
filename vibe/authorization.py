@@ -338,12 +338,16 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
         ("DELETE", r"^/api/sessions/[^/]+(?:/queue/[^/]+)?$"),
+        ("POST", r"^/api/sessions/[^/]+/fork$"),
         (
             "POST",
             r"^/api/sessions/[^/]+/(?:messages|attachments|cancel|queue/[^/]+/send-now)$",
         ),
         ("POST", r"^/api/asr/transcribe$"),
         ("POST", r"^/api/show/sessions/[^/]+/(?:events|prewarm)$"),
+        ("POST", r"^/api/settings$"),
+        ("POST", r"^/api/settings/thread$"),
+        ("DELETE", r"^/api/settings/thread$"),
     )
 )
 
@@ -352,7 +356,7 @@ _REMOTE_PAYLOAD_FILTERED_HTTP_RULES = tuple(
     for method, pattern in (
         (
             "POST",
-            r"^/api/(?:config|projects|sessions|settings|settings/thread)$",
+            r"^/api/(?:config|projects|sessions)$",
         ),
         ("PATCH", r"^/api/(?:projects|sessions)/[^/]+$"),
     )
@@ -463,7 +467,12 @@ def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy
         minimum_role = (
             "viewer" if normalized_method in {"GET", "HEAD", "OPTIONS"} else "editor"
         )
-        return HttpAuthorizationPolicy(minimum_role)
+        remote_access = (
+            REMOTE_HTTP_ALLOWED
+            if normalized_method in {"GET", "HEAD", "OPTIONS"}
+            else REMOTE_HTTP_LOCAL_ONLY
+        )
+        return HttpAuthorizationPolicy(minimum_role, remote_access)
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
 

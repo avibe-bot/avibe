@@ -20,6 +20,11 @@ entitlement mirror before remote recurring execution can be enabled.
 - Keep trusted-local Workbench, CLI, Task, Watch, Agent, terminal, and file
   behavior unchanged.
 - Keep IM-triggered Agent behavior unchanged.
+- This phase provides no remote authorization for Harness execution or
+  definition writes, Vault secret-bearing operations, IM ingress configuration,
+  native Agent session forks, or non-read private Show Runtime routes; these
+  capabilities remain trusted-local. Public `/p/<share_id>/...` flows are a
+  separate sharing surface, not remote Workbench authorization.
 - Make every remote Workbench capability read-only with respect to local Agent,
   terminal, file, and Harness execution.
 - Reject remote Task and Watch creation or update at the definition service
@@ -46,12 +51,15 @@ entitlement mirror before remote recurring execution can be enabled.
    process state, prompts, command output, and potentially credentials. The same
    policy payload-filters routes that persist future execution choices with
    explicit safe-field allowlists: Session Agent/model overrides, Project
-   creation/workdir/default Agent, channel/thread/user cwd or routing, and
-   Agent/platform/runtime config sections. Unknown fields fail closed. Complete
-   config round-trips may preserve protected values but cannot change them, and
-   protected fields are stripped before persistence so a concurrent local update
-   cannot be overwritten by a stale remote round-trip. Explicit Session/Project
-   display fields and explicit UI/config preferences remain available.
+   creation/workdir/default Agent, and Agent/platform/runtime config sections.
+   IM channel and thread settings, native Agent session forks, and non-read
+   private Show Runtime routes are explicitly trusted-local because they can
+   alter future Agent ingress or invoke local runtime code. Unknown fields fail
+   closed. Complete config round-trips may preserve protected values but cannot
+   change them, and protected fields are stripped before persistence so a
+   concurrent local update cannot be overwritten by a stale remote round-trip.
+   Explicit Session/Project display fields and explicit UI/config preferences
+   remain available.
 3. The durable Delivery owner retires remote-origin queue entries before the
    FIFO claim that starts an Agent turn.
 4. Task and Watch stores reject explicit remote definition writes.
@@ -88,10 +96,11 @@ substitute for either dependency.
 - An unknown owner-only API route is trusted-local by default; remote exposure
   requires an exact method/path policy entry and regression evidence. A new path
   under an already approved namespace does not inherit remote access.
-- Remote execution-setting writes through Session, Project, channel, thread,
+- Remote execution-setting writes through Session, Project, IM channel/thread,
   user, and config routes fail before any store save, runtime reconciliation, or
-  restart scheduling; unknown payload fields fail closed, while Session titles,
-  Project display names, and explicitly allowlisted UI preferences remain writable.
+  restart scheduling. Remote native Agent forks and private Show Runtime writes
+  fail before session persistence or runtime invocation; Session titles, Project
+  display names, and explicitly allowlisted UI preferences remain writable.
 - Paired Project synchronization never forwards the device secret through an
   HTTP redirect.
 - Remote Task and Watch add/update calls produce no definition write.

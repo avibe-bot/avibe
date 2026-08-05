@@ -2256,21 +2256,8 @@ _REMOTE_UI_CONFIG_MUTABLE_FIELDS = frozenset(
         "show_tool_calls",
     }
 )
-_REMOTE_CHANNEL_SETTING_FIELDS = frozenset(
-    {"enabled", "require_bind", "require_mention", "show_message_types"}
-)
-_REMOTE_SETTINGS_FIELDS = frozenset(
-    {
-        "channels",
-        "guild_allowlist",
-        "guild_default_enabled",
-        "guilds",
-        "platform",
-    }
-)
-_REMOTE_THREAD_SETTINGS_FIELDS = frozenset(
-    {"channel_id", "platform", "settings", "thread_id"}
-)
+
+
 def _payload_has_only_fields(payload: Any, fields: frozenset[str] | set[str]) -> bool:
     return isinstance(payload, dict) and set(payload).issubset(fields)
 
@@ -2357,32 +2344,6 @@ def _remote_mutable_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return mutable
 
 
-def _remote_scope_collection_is_allowed(
-    payload: Any,
-    *,
-    item_fields: frozenset[str],
-) -> bool:
-    return isinstance(payload, dict) and all(
-        _payload_has_only_fields(item, item_fields) for item in payload.values()
-    )
-
-
-def _remote_settings_payload_is_allowed(payload: Any) -> bool:
-    if not _payload_has_only_fields(payload, _REMOTE_SETTINGS_FIELDS):
-        return False
-    if "channels" in payload and not _remote_scope_collection_is_allowed(
-        payload.get("channels"),
-        item_fields=_REMOTE_CHANNEL_SETTING_FIELDS,
-    ):
-        return False
-    if "guilds" in payload and not _remote_scope_collection_is_allowed(
-        payload.get("guilds"),
-        item_fields=frozenset({"enabled"}),
-    ):
-        return False
-    return True
-
-
 def _remote_payload_is_allowed(method: str, path: str, payload: Any) -> bool:
     normalized_method = method.upper()
     if normalized_method == "POST" and path == "/api/config":
@@ -2393,15 +2354,6 @@ def _remote_payload_is_allowed(method: str, path: str, payload: Any) -> bool:
         return _payload_has_only_fields(payload, {"pinned", "title", "visibility"})
     if normalized_method == "PATCH" and re.fullmatch(r"/api/projects/[^/]+", path):
         return _payload_has_only_fields(payload, {"display_name"})
-    if normalized_method == "POST" and path == "/api/settings":
-        return _remote_settings_payload_is_allowed(payload)
-    if normalized_method == "POST" and path == "/api/settings/thread":
-        if not _payload_has_only_fields(payload, _REMOTE_THREAD_SETTINGS_FIELDS):
-            return False
-        return _payload_has_only_fields(
-            payload.get("settings"),
-            _REMOTE_CHANNEL_SETTING_FIELDS,
-        )
     if normalized_method == "POST" and path == "/api/projects":
         return _payload_has_only_fields(payload, {"display_name"})
     return False

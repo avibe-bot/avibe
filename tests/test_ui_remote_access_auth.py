@@ -1022,7 +1022,7 @@ def test_remote_project_execution_settings_are_blocked_before_store_access(
     assert response.get_json()["code"] == "remote_execution_disabled"
 
 
-def test_remote_scope_settings_block_execution_fields_but_allow_metadata(monkeypatch, tmp_path):
+def test_remote_im_settings_are_rejected_before_store_access(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
@@ -1032,28 +1032,22 @@ def test_remote_scope_settings_block_execution_fields_but_allow_metadata(monkeyp
         domain="alex.avibe.bot",
     )
 
-    monkeypatch.setattr(api, "save_settings", lambda payload: {"ok": True, "payload": payload})
-    allowed = client.post(
+    monkeypatch.setattr(
+        api,
+        "save_settings",
+        lambda payload: (_ for _ in ()).throw(
+            AssertionError("remote IM configuration reached the local settings store")
+        ),
+    )
+    response = client.post(
         "/api/settings",
         json={"platform": "slack", "channels": {"C1": {"enabled": False}}},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert allowed.status_code == 200
-
-    blocked = client.post(
-        "/api/settings",
-        json={
-            "platform": "slack",
-            "channels": {"C1": {"custom_cwd": "/tmp/remote"}},
-        },
-        headers=csrf_headers(client, "https://alex.avibe.bot"),
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
-    )
-    assert blocked.status_code == 403
-    assert blocked.get_json()["code"] == "remote_execution_disabled"
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
 
 
 def test_remote_thread_scope_settings_are_blocked_before_store_access(monkeypatch, tmp_path):
@@ -1079,8 +1073,41 @@ def test_remote_thread_scope_settings_are_blocked_before_store_access(monkeypatc
             "platform": "telegram",
             "channel_id": "channel-1",
             "thread_id": "thread-1",
-            "settings": {"routing": {"agent_name": "codex"}},
+            "settings": {"enabled": True},
         },
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_session_fork_is_rejected_before_fork_reservation(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    async def unexpected_turn_state(session_id):
+        raise AssertionError(f"remote fork reached turn-state lookup for {session_id}")
+
+    monkeypatch.setattr(ui_server, "_session_turn_state_for_fork", unexpected_turn_state)
+    monkeypatch.setattr(
+        ui_server,
+        "_reserve_forked_session_for_ui",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("remote fork reached the local session store")
+        ),
+    )
+
+    response = client.post(
+        "/api/sessions/ses-local/fork",
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
@@ -1816,6 +1843,35 @@ def test_remote_show_dispatch_is_rejected_before_event_reservation(
             "actor": "human",
             "payload": {"intent": "choose", "dispatch": True},
         },
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_show_runtime_write_is_rejected_before_runtime_invocation(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    async def unexpected_runtime(*args, **kwargs):
+        raise AssertionError("remote Show write reached the local Show Runtime")
+
+    monkeypatch.setattr(ui_server, "_show_page_runtime_response", unexpected_runtime)
+    response = client.post(
+        "/show/ses-remote/api/example",
+        json={"input": "remote"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
