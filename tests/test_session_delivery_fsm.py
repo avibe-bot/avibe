@@ -687,6 +687,98 @@ def test_first_delivery_keeps_concurrent_session_binding_winner(managers) -> Non
     assert turn is not None and turn["backend"] == "claude"
 
 
+def test_first_delivery_honors_context_agent_override_when_binding(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(
+                agent_id=None,
+                agent_name=None,
+                agent_backend="",
+                agent_variant="default",
+            )
+        )
+    context = _agentless_context()
+    context.platform_specific.update(
+        {"vibe_agent_id": "agent-selected", "vibe_agent_name": "selected"}
+    )
+    resolved_kwargs: dict[str, object] = {}
+
+    def resolve(_context, **kwargs):
+        resolved_kwargs.update(kwargs)
+        return SimpleNamespace(
+            id="agent-selected",
+            name="selected",
+            backend="claude",
+        )
+
+    manager.controller.resolve_vibe_agent_for_context = resolve
+
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="use selected"),
+            context=context,
+        )
+    )
+
+    assert result.state == "claimed"
+    assert resolved_kwargs["override_agent_id"] == "agent-selected"
+    assert resolved_kwargs["override_agent_name"] == "selected"
+    with engine.connect() as conn:
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == "ses_fsm")
+        ).one()
+    assert binding == ("agent-selected", "selected", "claude")
+
+
+def test_binding_refreshes_all_cached_route_projections(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    context = _agentless_context()
+    context.platform_specific.update(
+        {
+            "vibe_agent_id": "stale-agent",
+            "vibe_agent_name": "stale",
+            "agent_run_target": {
+                "agent_session_id": "ses_fsm",
+                "agent_id": "stale-agent",
+                "agent_name": "stale",
+                "agent_backend": "claude",
+                "agent_variant": "claude",
+                "model": "old-model",
+                "reasoning_effort": "low",
+                "workdir": "/tmp",
+            },
+        }
+    )
+
+    manager._apply_session_binding_to_context(
+        context,
+        {
+            "id": "ses_fsm",
+            "agent_id": None,
+            "agent_name": None,
+            "agent_backend": "codex",
+            "agent_variant": "codex",
+            "model": None,
+            "reasoning_effort": None,
+        },
+    )
+
+    spec = context.platform_specific
+    assert spec["vibe_agent_id"] is None
+    assert spec["vibe_agent_name"] is None
+    assert spec["agent_session_target"]["agent_backend"] == "codex"
+    assert spec["agent_run_target"]["agent_backend"] == "codex"
+    assert spec["agent_run_target"]["agent_name"] is None
+    assert spec["agent_run_target"]["model"] is None
+
+
 def test_im_p1_materializes_only_after_exact_native_acceptance(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 

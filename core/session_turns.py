@@ -938,8 +938,19 @@ class SessionTurnManager:
         resolver = getattr(self.controller, "resolve_vibe_agent_for_context", None)
         agent = None
         if callable(resolver):
+            override_agent_id = str(spec.get("vibe_agent_id") or "").strip()
+            override_agent_name = str(
+                spec.get("vibe_agent_name")
+                or spec.get(SCHEDULED_TARGET_AGENT_KEY)
+                or ""
+            ).strip()
+            resolve_kwargs: dict[str, Any] = {"required": False}
+            if override_agent_id:
+                resolve_kwargs["override_agent_id"] = override_agent_id
+            if override_agent_name:
+                resolve_kwargs["override_agent_name"] = override_agent_name
             try:
-                agent = resolver(context, required=False)
+                agent = resolver(context, **resolve_kwargs)
             except Exception:
                 logger.debug(
                     "Failed to resolve inherited Vibe Agent before Session binding",
@@ -980,8 +991,26 @@ class SessionTurnManager:
             }
         )
         spec["agent_session_target"] = target
-        if binding.get("agent_name"):
-            spec["vibe_agent_name"] = binding["agent_name"]
+        # Keep every routing projection on the same durable winner. MessageHandler
+        # and Controller prefer these cached fields over agent_session_target, so
+        # leaving an old top-level value would route a newly bound turn elsewhere.
+        spec["vibe_agent_id"] = binding.get("agent_id")
+        spec["vibe_agent_name"] = binding.get("agent_name")
+        run_target = spec.get("agent_run_target")
+        if isinstance(run_target, dict):
+            run_target = dict(run_target)
+            run_target.update(
+                {
+                    "agent_session_id": binding.get("id"),
+                    "agent_id": binding.get("agent_id"),
+                    "agent_name": binding.get("agent_name"),
+                    "agent_backend": binding.get("agent_backend"),
+                    "agent_variant": binding.get("agent_variant"),
+                    "model": binding.get("model"),
+                    "reasoning_effort": binding.get("reasoning_effort"),
+                }
+            )
+            spec["agent_run_target"] = run_target
         context.platform_specific = spec
 
     def _delivery_backend(
