@@ -28,6 +28,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
+from core.message_context import resolve_turn_sink_key
 from core.native_dispatch_phase import backend_dispatch_attempted
 from core.run_settlement import (
     SETTLEMENTS_WITHOUT_RESULT,
@@ -4154,10 +4155,9 @@ class SessionTurnManager:
             return None
         if outcome == "terminal":
             get_sink = getattr(self.controller, "get_turn_sink", None)
-            get_key = getattr(self.controller, "_get_turn_sink_key", None)
-            if callable(get_sink) and callable(get_key):
+            if callable(get_sink):
                 try:
-                    sink = get_sink(get_key(context))
+                    sink = get_sink(resolve_turn_sink_key(self.controller, context))
                 except Exception:
                     logger.debug("failed to inspect native terminal Turn sink", exc_info=True)
                 else:
@@ -6416,10 +6416,9 @@ class SessionTurnManager:
         if not callable(runtime_started) or runtime_started(context) is not True:
             return False
         session_id = self.controller._session_id_from_context(context)
-        get_key = getattr(self.controller, "_get_turn_sink_key", None)
-        if not session_id or not callable(get_key):
+        if not session_id:
             return False
-        session_key = get_key(context)
+        session_key = resolve_turn_sink_key(self.controller, context)
         return session_id not in self.in_flight and self.get_turn_sink(session_key) is None
 
     def on_running(self, context: "MessageContext") -> None:
@@ -6512,12 +6511,10 @@ class SessionTurnManager:
             if current is not None and current.logical_turn_id == logical_turn_id:
                 current.terminal_is_error = current.terminal_is_error or is_error
             sink = None
-            get_key = getattr(self.controller, "_get_turn_sink_key", None)
-            if callable(get_key):
-                try:
-                    sink = self.get_turn_sink(get_key(context))
-                except Exception:
-                    logger.debug("failed to inspect terminal Turn sink", exc_info=True)
+            try:
+                sink = self.get_turn_sink(resolve_turn_sink_key(self.controller, context))
+            except Exception:
+                logger.debug("failed to inspect terminal Turn sink", exc_info=True)
             if isinstance(sink, dict):
                 sink["terminal_evidence"] = dict(terminal_evidence or {})
         payload = dict(getattr(context, "platform_specific", None) or {})
@@ -6565,12 +6562,10 @@ class SessionTurnManager:
             return
         current = self.in_flight.get(session_id)
         sink = None
-        get_key = getattr(self.controller, "_get_turn_sink_key", None)
-        if callable(get_key):
-            try:
-                sink = self.get_turn_sink(get_key(context))
-            except Exception:
-                logger.debug("failed to inspect delivered terminal Turn sink", exc_info=True)
+        try:
+            sink = self.get_turn_sink(resolve_turn_sink_key(self.controller, context))
+        except Exception:
+            logger.debug("failed to inspect delivered terminal Turn sink", exc_info=True)
         self._finish_durable_terminal_result(
             session_id,
             logical_turn_id,
@@ -6612,10 +6607,7 @@ class SessionTurnManager:
         session_id = self.controller._session_id_from_context(context)
         if not session_id:
             return False
-        get_key = getattr(self.controller, "_get_turn_sink_key", None)
-        if not callable(get_key):
-            return False
-        session_key = get_key(context)
+        session_key = resolve_turn_sink_key(self.controller, context)
         # Defensive: ``begin_agent_initiated_turn`` only opens on a free gate, so a
         # turn shouldn't already be tracked/streaming — but never clobber one.
         if session_id in self.in_flight or self.get_turn_sink(session_key) is not None:
@@ -6862,11 +6854,10 @@ class SessionTurnManager:
         settle), else apply the one token rule. Centralizes the old
         ``ConsolidatedMessageDispatcher._is_active_turn``."""
         get_sink = getattr(self.controller, "get_turn_sink", None)
-        get_key = getattr(self.controller, "_get_turn_sink_key", None)
-        if not callable(get_sink) or not callable(get_key):
+        if not callable(get_sink):
             return True
         try:
-            sink = get_sink(get_key(context))
+            sink = get_sink(resolve_turn_sink_key(self.controller, context))
         except Exception:
             return True
         if sink is None:
@@ -6967,11 +6958,8 @@ class SessionTurnManager:
         """
         if self.controller is None:
             return None
-        get_key = getattr(self.controller, "_get_turn_sink_key", None)
-        if not callable(get_key):
-            return None
         try:
-            session_key = get_key(context)
+            session_key = resolve_turn_sink_key(self.controller, context)
         except Exception:
             logger.debug("turn sink bind: failed to derive session key", exc_info=True)
             return None

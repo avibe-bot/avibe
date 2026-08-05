@@ -146,3 +146,25 @@ def build_context_turn_sink_key(
     if not thread_id:
         return base
     return f"{base}::thread::{thread_id}"
+
+
+def resolve_turn_sink_key(controller: object, context: MessageContext) -> str:
+    """Resolve ``context``'s turn-sink key, preferring ``controller``'s own accessor.
+
+    Falls back to ``_get_session_key`` and then to the context alone, applying the
+    same thread-scoping rule at every step. Never degrades to the bare channel key:
+    that scope is what made one busy thread refuse its siblings' turns, so a
+    controller without the accessor must still land on a thread-scoped key rather
+    than silently reintroduce the collision.
+
+    Always returns a key. A key with no sink registered simply misses in
+    ``get_turn_sink``, which is what every caller already handles.
+    """
+
+    getter = getattr(controller, "_get_turn_sink_key", None)
+    if callable(getter):
+        return getter(context)
+    base_getter = getattr(controller, "_get_session_key", None)
+    if callable(base_getter):
+        return build_context_turn_sink_key(context, session_key=base_getter(context))
+    return build_context_turn_sink_key(context)

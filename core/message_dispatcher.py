@@ -22,6 +22,7 @@ from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
+from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
@@ -176,12 +177,11 @@ async def _stream_chunk(
     """
 
     get_sink = getattr(controller, "get_turn_sink", None)
-    get_key = getattr(controller, "_get_turn_sink_key", None)
-    if not callable(get_sink) or not callable(get_key):
+    if not callable(get_sink):
         # Controller has no streaming turn-sink registry (IM/CLI stubs, older
         # controllers) => nothing to stream to; stay a no-op.
         return
-    sink = get_sink(get_key(context))
+    sink = get_sink(resolve_turn_sink_key(controller, context))
     if sink is None:
         return
     # NB: we deliberately do NOT gate forwarding on a per-turn token here.
