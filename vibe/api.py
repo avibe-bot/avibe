@@ -9234,10 +9234,7 @@ def save_claude_auth(payload: dict) -> dict:
     ):
         return {
             "ok": False,
-            "message": (
-                "credential_type must be one of "
-                f"{sorted(_VALID_CLAUDE_CREDENTIAL_TYPES)}"
-            ),
+            "message": backend_t("error.claudeCredentialTypeInvalid"),
         }
 
     # Three-state ``base_url`` payload semantics (matches Codex/OpenCode):

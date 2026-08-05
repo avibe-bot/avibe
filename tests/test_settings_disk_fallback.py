@@ -862,7 +862,7 @@ def test_save_claude_auth_rejects_unknown_credential_type() -> None:
 
         assert result == {
             "ok": False,
-            "message": "credential_type must be one of ['api_key', 'auth_token']",
+            "message": "Choose either API key or auth token for the Claude Code credential.",
         }
 
 
