@@ -73,7 +73,7 @@ class _CodexProviderBindingSessions:
 
 
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
-    async def test_claude_oauth_to_relay_key_reaches_next_turn_with_bearer_auth(self):
+    async def test_claude_oauth_to_explicit_auth_token_reaches_next_turn(self):
         """Scenario: AUTH-SETUP-904"""
         state_dir = tempfile.TemporaryDirectory()
         self.addCleanup(state_dir.cleanup)
@@ -109,11 +109,12 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         def capture_oauth_state(current):
             current.before_switch = get_claude_auth()
 
-        def save_relay_key(current):
+        def save_auth_token(current):
             current.save_result = save_claude_auth(
                 {
                     "auth_mode": "api_key",
                     "api_key": "relay-secret",
+                    "credential_type": "auth_token",
                     "base_url": "https://relay.example/v1",
                 }
             )
@@ -154,12 +155,13 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
             await runner.run(
                 ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
-                ScenarioStep("save_relay_key", save_relay_key),
+                ScenarioStep("save_auth_token", save_auth_token),
                 ScenarioStep("launch_next_turn", capture_next_turn_env),
             )
 
         self.assertEqual(harness.before_switch["active_auth_mode"], "oauth")
         self.assertEqual(harness.save_result["active_auth_mode"], "api_key")
+        self.assertEqual(harness.save_result["credential_type"], "auth_token")
         self.assertEqual(
             harness.save_result["settings_env_key_var"],
             "ANTHROPIC_AUTH_TOKEN",
@@ -186,7 +188,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         ScenarioExpect.step_history(
             runner,
-            ["confirm_oauth_is_active", "save_relay_key", "launch_next_turn"],
+            ["confirm_oauth_is_active", "save_auth_token", "launch_next_turn"],
         )
 
     async def test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch(self):

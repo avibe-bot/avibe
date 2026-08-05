@@ -8359,18 +8359,7 @@ def restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) -> 
 
 
 _VALID_AUTH_MODES = {"oauth", "api_key"}
-_ANTHROPIC_API_HOST = "api.anthropic.com"
-
-
-def _claude_uses_bearer_auth(base_url: str | None) -> bool:
-    """Return whether Claude should send the credential as a bearer token."""
-    if not base_url:
-        return False
-    try:
-        hostname = urllib.parse.urlsplit(base_url).hostname
-    except ValueError:
-        return True
-    return (hostname or "").lower() != _ANTHROPIC_API_HOST
+_VALID_CLAUDE_CREDENTIAL_TYPES = {"api_key", "auth_token"}
 
 
 def _mask_api_key(api_key: str | None) -> str | None:
@@ -9195,6 +9184,11 @@ def get_claude_auth() -> dict:
         "settings_env_has_key": bool(disk_state.get("settings_env_has_key")),
         "settings_env_key_length": int(disk_state.get("settings_env_key_length") or 0),
         "settings_env_key_var": disk_state.get("settings_env_key_var"),
+        "credential_type": (
+            disk_state.get("credential_type")
+            if settings_key
+            else ("api_key" if configured_key else None)
+        ),
         "settings_env_base_url": disk_state.get("settings_env_base_url"),
         "settings_conflict": settings_conflict,
     }
@@ -9207,15 +9201,16 @@ def save_claude_auth(payload: dict) -> dict:
     not carry the API key because Claude Code's ``settings.json`` env block
     wins at launch anyway.
 
-    Empty ``api_key`` while in ``api_key`` mode is treated as "keep the
-    stored key" — same UX promise as Codex — so callers can PATCH the
-    base URL without re-typing the secret. An empty key with no stored
-    fallback is rejected.
+    ``credential_type`` selects Claude Code's native credential variable:
+    ``api_key`` writes ``ANTHROPIC_API_KEY`` and ``auth_token`` writes
+    ``ANTHROPIC_AUTH_TOKEN``. The Base URL is independent and never changes
+    that selection. When callers omit ``credential_type``, an existing
+    settings variable is preserved; new and legacy credentials default to
+    ``api_key`` for backwards compatibility.
 
-    Claude Code uses different headers for direct Anthropic API keys and
-    gateway credentials. Direct keys are stored as ``ANTHROPIC_API_KEY``
-    (``x-api-key``), while a non-Anthropic Base URL stores the same user-facing
-    credential as ``ANTHROPIC_AUTH_TOKEN`` (``Authorization: Bearer``).
+    Empty ``api_key`` while in ``api_key`` mode means "keep the stored
+    credential", so callers can update the Base URL or credential type without
+    re-typing the secret. An empty value with no stored fallback is rejected.
     """
     if not isinstance(payload, dict):
         return {"ok": False, "message": "Payload must be an object"}
@@ -9229,6 +9224,22 @@ def save_claude_auth(payload: dict) -> dict:
         return {"ok": False, "message": "api_key must be a string"}
     api_key = raw_api_key.strip() if isinstance(raw_api_key, str) else None
 
+    raw_credential_type = payload.get("credential_type")
+    if (
+        raw_credential_type is not None
+        and (
+            not isinstance(raw_credential_type, str)
+            or raw_credential_type not in _VALID_CLAUDE_CREDENTIAL_TYPES
+        )
+    ):
+        return {
+            "ok": False,
+            "message": (
+                "credential_type must be one of "
+                f"{sorted(_VALID_CLAUDE_CREDENTIAL_TYPES)}"
+            ),
+        }
+
     # Three-state ``base_url`` payload semantics (matches Codex/OpenCode):
     # absent key → keep stored value; null/blank → clear; non-blank → set.
     base_url_present = "base_url" in payload
@@ -9241,45 +9252,43 @@ def save_claude_auth(payload: dict) -> dict:
         if base_url_change == "":
             base_url_change = None
 
-    settings_auth_token = None
-    if auth_mode == "api_key" and not api_key:
-        # Reuse the live Claude settings key for base-URL-only updates.
-        # Fall back to legacy V2Config only for older installs that have
-        # not yet been migrated through this save path.
+    settings_env: dict[str, str] = {}
+    existing_credential_type: str | None = None
+    existing_credential: str | None = None
+    if auth_mode == "api_key":
         try:
             from vibe.claude_config import (
-                read_claude_api_key_from_settings,
+                read_claude_credential_from_settings,
                 read_claude_settings_env,
             )
 
-            api_key = read_claude_api_key_from_settings()
-            if not api_key:
-                env = read_claude_settings_env()
-                token = env.get("ANTHROPIC_AUTH_TOKEN")
-                settings_auth_token = token if isinstance(token, str) and token.strip() else None
+            settings_env = read_claude_settings_env()
+            existing_credential_type, existing_credential = (
+                read_claude_credential_from_settings()
+            )
         except Exception:
-            api_key = None
-            settings_auth_token = None
-        if not api_key and not settings_auth_token:
-            with CONFIG_LOCK:
-                try:
-                    existing = load_config()
-                    stored = getattr(getattr(existing, "agents", None), "claude", None)
-                    api_key = getattr(stored, "api_key", None) or None
-                except Exception:
-                    pass
-        if not api_key and not settings_auth_token:
+            settings_env = {}
+
+    credential_type = None
+    if auth_mode == "api_key":
+        credential_type = raw_credential_type or existing_credential_type or "api_key"
+    credential = api_key or existing_credential
+
+    if auth_mode == "api_key" and not credential:
+        # Fall back to legacy V2Config only for older installs that have not
+        # yet migrated their credential into Claude Code settings.
+        with CONFIG_LOCK:
+            try:
+                existing = load_config()
+                stored = getattr(getattr(existing, "agents", None), "claude", None)
+                credential = getattr(stored, "api_key", None) or None
+            except Exception:
+                pass
+        if not credential:
             return {"ok": False, "message": "api_key is required when auth_mode='api_key'"}
 
     effective_base_url = base_url_change if base_url_present else None
     if not base_url_present and auth_mode == "api_key":
-        settings_env = {}
-        try:
-            from vibe.claude_config import read_claude_settings_env
-
-            settings_env = read_claude_settings_env()
-        except Exception:
-            settings_env = {}
         existing_base = settings_env.get("ANTHROPIC_BASE_URL")
         if isinstance(existing_base, str) and existing_base.strip():
             effective_base_url = existing_base.strip()
@@ -9297,19 +9306,17 @@ def save_claude_auth(payload: dict) -> dict:
     from vibe.claude_config import apply_claude_auth
 
     try:
-        credential = api_key or settings_auth_token
-        use_auth_token = _claude_uses_bearer_auth(effective_base_url)
         apply_claude_auth(
             auth_mode=auth_mode,
             api_key=(
                 credential
-                if auth_mode == "api_key" and not use_auth_token
+                if auth_mode == "api_key" and credential_type == "api_key"
                 else None
             ),
             base_url=effective_base_url if auth_mode == "api_key" else None,
             auth_token=(
                 credential
-                if auth_mode == "api_key" and use_auth_token
+                if auth_mode == "api_key" and credential_type == "auth_token"
                 else None
             ),
         )

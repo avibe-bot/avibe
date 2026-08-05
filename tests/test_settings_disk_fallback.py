@@ -408,6 +408,7 @@ def test_claude_settings_json_auth_token_surfaces_in_get_claude_auth(
     assert masked.endswith("738a")
     assert "xxxxxxxx" not in masked  # plaintext middle must not leak
     assert state["base_url"] == "https://ai-relay.chainbot.io"
+    assert state["credential_type"] == "auth_token"
     assert state["active_auth_mode"] == "api_key"
     # settings.json alone is not a *conflict*; it's only a conflict when
     # BOTH V2Config and settings.json carry a key.
@@ -506,10 +507,11 @@ def test_claude_settings_json_takes_precedence_over_legacy_v2config(
     assert masked is not None
     assert masked.endswith("ings")
     assert state["base_url"] == "https://v2config.example.io"
+    assert state["credential_type"] == "api_key"
     assert state["settings_conflict"] is False
 
 
-def test_save_claude_relay_auth_writes_bearer_token_and_clears_v2_secret(
+def test_save_claude_explicit_auth_token_clears_v2_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     claude_restart_calls: list[dict],
@@ -543,6 +545,7 @@ def test_save_claude_relay_auth_writes_bearer_token_and_clears_v2_secret(
         {
             "auth_mode": "api_key",
             "api_key": "sk-ant-new-settings-key",
+            "credential_type": "auth_token",
             "base_url": "https://relay.example.invalid",
         }
     )
@@ -608,6 +611,7 @@ def test_save_claude_auth_reports_partial_when_oauth_cleanup_fails(
         {
             "auth_mode": "api_key",
             "api_key": "sk-ant-new-settings-key",
+            "credential_type": "auth_token",
             "base_url": "https://relay.example.invalid",
         }
     )
@@ -665,6 +669,7 @@ def test_save_claude_auth_restores_pending_oauth_backup_before_writing_new_key(
         {
             "auth_mode": "api_key",
             "api_key": "sk-new-key",
+            "credential_type": "auth_token",
             "base_url": "https://new-relay.example.invalid",
         }
     )
@@ -679,9 +684,14 @@ def test_save_claude_auth_restores_pending_oauth_backup_before_writing_new_key(
 
 @pytest.mark.parametrize(
     "base_url",
-    [None, "https://api.anthropic.com", "https://api.anthropic.com/"],
+    [
+        None,
+        "https://api.anthropic.com",
+        "https://api.anthropic.com/",
+        "https://relay.example.invalid",
+    ],
 )
-def test_save_claude_direct_auth_writes_anthropic_api_key(
+def test_save_claude_explicit_api_key_is_independent_from_base_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     claude_restart_calls: list[dict],
@@ -710,6 +720,7 @@ def test_save_claude_direct_auth_writes_anthropic_api_key(
         {
             "auth_mode": "api_key",
             "api_key": "sk-ant-direct-key",
+            "credential_type": "api_key",
             "base_url": base_url,
         }
     )
@@ -731,7 +742,7 @@ def test_save_claude_direct_auth_writes_anthropic_api_key(
     ]
 
 
-def test_save_claude_base_url_update_switches_header_without_retyping_key(
+def test_save_claude_base_url_update_preserves_credential_type(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     claude_restart_calls: list[dict],
@@ -767,9 +778,10 @@ def test_save_claude_base_url_update_switches_header_without_retyping_key(
         }
     )
 
-    assert relay_result["settings_env_key_var"] == "ANTHROPIC_AUTH_TOKEN"
+    assert relay_result["settings_env_key_var"] == "ANTHROPIC_API_KEY"
+    assert relay_result["credential_type"] == "api_key"
     assert read_claude_settings_env() == {
-        "ANTHROPIC_AUTH_TOKEN": "sk-ant-preserved",
+        "ANTHROPIC_API_KEY": "sk-ant-preserved",
         "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
     }
 
@@ -783,6 +795,75 @@ def test_save_claude_base_url_update_switches_header_without_retyping_key(
     assert direct_result["settings_env_key_var"] == "ANTHROPIC_API_KEY"
     assert read_claude_settings_env() == {"ANTHROPIC_API_KEY": "sk-ant-preserved"}
     assert len(claude_restart_calls) == 2
+
+
+def test_save_claude_credential_type_switch_reuses_stored_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    claude_restart_calls: list[dict],
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+    monkeypatch.setattr(
+        "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
+        lambda _service=None: {"ok": True},
+    )
+    _write_claude_settings(
+        tmp_path,
+        {
+            "ANTHROPIC_API_KEY": "shared-credential",
+            "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
+        },
+    )
+
+    from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
+    from vibe.api import save_claude_auth
+    from vibe.claude_config import read_claude_settings_env
+
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    config.agents.claude.auth_mode = "api_key"
+    config.agents.claude.auth_mode_set = True
+    config.save()
+
+    result = save_claude_auth(
+        {
+            "auth_mode": "api_key",
+            "credential_type": "auth_token",
+        }
+    )
+
+    assert result["credential_type"] == "auth_token"
+    assert result["settings_env_key_var"] == "ANTHROPIC_AUTH_TOKEN"
+    assert read_claude_settings_env() == {
+        "ANTHROPIC_AUTH_TOKEN": "shared-credential",
+        "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
+    }
+    assert len(claude_restart_calls) == 1
+
+
+def test_save_claude_auth_rejects_unknown_credential_type() -> None:
+    from vibe.api import save_claude_auth
+
+    for invalid_type in ("automatic", ["api_key"]):
+        result = save_claude_auth(
+            {
+                "auth_mode": "api_key",
+                "api_key": "credential",
+                "credential_type": invalid_type,
+            }
+        )
+
+        assert result == {
+            "ok": False,
+            "message": "credential_type must be one of ['api_key', 'auth_token']",
+        }
 
 
 def test_save_claude_auth_keeps_settings_token_over_legacy_v2_key(
