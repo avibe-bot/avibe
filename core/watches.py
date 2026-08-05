@@ -39,6 +39,7 @@ from core.runtime_work import (
 from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
     DEFINITION_CYCLE_COLUMNS,
+    NO_EVENT_EXIT_CODE,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
     SQLiteBackgroundTaskStore,
@@ -50,6 +51,53 @@ from vibe.i18n import t as i18n_t
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETRY_EXIT_CODE = 75
+# ``NO_EVENT_EXIT_CODE`` (imported above) marks a waiter that ran to completion and
+# decided the cycle is not worth waking the Agent for. It is neither an event (exit 0,
+# which authorises a hook) nor a failure (any other non-zero, which authorises a
+# failure hook): the cycle is recorded, no hook is built, and the watch ends or
+# re-arms quietly. Without it every terminal outcome costs an Agent turn, so waiters
+# that can only report "nothing happened" -- green CI, filtered-out review chatter --
+# had to either fire a useless turn or spin in forever mode.
+#
+# It lives in ``storage.background`` because the lifecycle projections there have to
+# agree that this code is a CLEAN ending. A second literal here is exactly how the
+# supervisor and those projections disagreed about it before.
+#
+# The code alone is NOT the signal. 64 is BSD ``sysexits`` EX_USAGE, so any watched
+# command that rejects its own arguments or configuration exits with it -- and reading
+# that as "nothing to report" would swallow the failure notice and, in forever mode,
+# rerun the broken command indefinitely. A quiet cycle therefore has to say so: the
+# waiter prints this marker, which a command that never heard of the protocol cannot
+# emit by accident, and everything else keeps failing loudly.
+NO_EVENT_MARKER = "avibe-watch: no-event"
+# A quiet cycle's own output is logged rather than stored: it is diagnostic detail, not
+# state, and the whole point of the code is that it costs nothing to reach. The limit is
+# wider than an error squash because a suppressed summary lists every watched workflow.
+NO_EVENT_SUMMARY_LOG_LIMIT = 1000
+# The watch id, handed to every waiter through its environment. Waiters that keep
+# per-watch state on disk use it as the owner of that state, so two identically
+# configured watches cannot silently share one file.
+WATCH_ID_ENV = "AVIBE_WATCH_ID"
+# How many event reports of this watch have been durably queued as a follow-up, or
+# empty for none. A waiter cannot see delivery for itself -- its output only reaches
+# the service once the process has exited -- so a waiter that stages the cursors
+# covering a reported event records this value alongside them, and a later cycle that
+# reads a DIFFERENT value knows the report was delivered and the staged cursors are
+# safe to promote. The value is opaque to the waiter, which only ever compares it.
+LAST_DELIVERY_ENV = "AVIBE_WATCH_LAST_DELIVERY"
+#: The count behind that value, on the watch's own ``metadata``, bumped in the same
+#: transaction as the follow-up it acknowledges. Entry: a positive ``int``, absent
+#: until the first report is queued.
+#:
+#: Metadata rather than a lifecycle column because a delivery acknowledgement has a
+#: DIFFERENT LIFETIME from cycle history: ``definition_resume_clear_columns`` clears
+#: ``last_event_at`` when a ``once`` watch is resumed, correctly -- the resumed watch
+#: begins a distinct cycle and its row must not claim an event it has not seen yet --
+#: and a stamp that resets there tells the resumed waiter that the report it staged
+#: cursors for was never delivered, so it reports the same activity again. What the
+#: waiter needs is the one fact a resume must NOT rewrite: that the earlier report
+#: left. This count only ever moves forward, for the life of the watch.
+DELIVERY_ACK_METADATA_KEY = "delivered_reports"
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
@@ -170,6 +218,20 @@ class ManagedWatch:
             last_exit_code=(int(payload["last_exit_code"]) if payload.get("last_exit_code") is not None else None),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
+
+
+def _delivered_reports(watch: ManagedWatch) -> int:
+    """How many of this watch's event reports have been queued as a follow-up.
+
+    Anything that is not a positive ``int`` reads as none: a row from before the count
+    existed, or metadata some other writer corrupted. That direction is the safe one --
+    a waiter comparing against a count that went backwards reports its staged event a
+    second time, where one that went forwards would advance past activity it never
+    delivered.
+    """
+
+    value = watch.metadata.get(DELIVERY_ACK_METADATA_KEY)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
 def _missing_watch_cwd_error(watch: ManagedWatch) -> Optional[str]:
@@ -697,6 +759,12 @@ class ManagedWatchStore:
         watch.last_error = error
         if event_detected:
             watch.last_event_at = now
+            # A NEW dict: ``expect`` above was derived from the stored one and has to
+            # keep describing the row as it was read.
+            watch.metadata = {
+                **watch.metadata,
+                DELIVERY_ACK_METADATA_KEY: _delivered_reports(watch) + 1,
+            }
         if disable:
             watch.enabled = False
         watch.updated_at = _utc_now_iso()
@@ -788,6 +856,18 @@ class _CycleResult:
     stdout: str
     stderr: str
     timed_out: bool
+
+
+def _cycle_env(watch: ManagedWatch) -> dict[str, str]:
+    """What one waiter cycle is told about itself.
+
+    The watch id lets a waiter own its on-disk state, so two identically configured
+    watches cannot silently share a state file. The delivery count lets a waiter that
+    staged cursors for a reported event tell whether that report was delivered.
+    """
+
+    delivered = _delivered_reports(watch)
+    return {WATCH_ID_ENV: watch.id, LAST_DELIVERY_ENV: str(delivered) if delivered else ""}
 
 
 @dataclass(frozen=True)
@@ -1736,8 +1816,51 @@ class ManagedWatchService:
                     prompt=_build_prompt(watch.message or watch.prefix, result.stdout),
                 ):
                     return
+                # The delivery count moved in the same transaction as the hook, so the
+                # report is durable and every later cycle can see that it was -- after a
+                # restart, and after a resume, which is the only reason it lives outside
+                # the lifecycle columns. Nothing to carry in memory: the next iteration
+                # re-reads the watch.
                 if watch.mode != "forever":
                     return
+                continue
+
+            if _is_quiet_cycle(result):
+                # A quiet cycle still has to leave a trace. Its output is the ONLY
+                # record of what the waiter saw and chose not to report -- a green CI
+                # summary, the review comments a filter swallowed -- and no hook
+                # carries it, so without this line it is discarded with the process.
+                # The stamp says a cycle ran and found nothing; the log says what.
+                summary = _squash_tail(result.stderr, limit=NO_EVENT_SUMMARY_LOG_LIMIT) or _squash_tail(
+                    result.stdout, limit=NO_EVENT_SUMMARY_LOG_LIMIT
+                )
+                logger.info(
+                    "Watch cycle found nothing to report watch_id=%s name=%s%s",
+                    watch.id,
+                    watch.name or "-",
+                    f": {summary}" if summary else "",
+                )
+                # No prompt, prefix or body: ``_hook_request`` returns None, so this
+                # commits the cycle WITHOUT authorising a hook. The stamp still lands,
+                # so ``vibe watch show`` can say the cycle ran and found nothing.
+                #
+                # Through the async wrapper like every other result branch: a store
+                # failure here must fuse the store and stop the watch, not escape
+                # ``_run_cycle`` and kill the task silently -- reconcile would restart
+                # the same quiet cycle and hide the storage problem instead of
+                # surfacing it.
+                if not await self._commit_cycle_result_async(
+                    watch,
+                    exit_code=NO_EVENT_EXIT_CODE,
+                    error=None,
+                    disable=watch.mode == "once",
+                ):
+                    return
+                if watch.mode != "forever":
+                    return
+                # The waiter decides its own polling cadence; the retry delay only
+                # keeps a waiter that returns immediately from spinning the cycle loop.
+                await asyncio.sleep(watch.retry_delay_seconds)
                 continue
 
             if result.timed_out or result.exit_code == 124:
@@ -1790,7 +1913,12 @@ class ManagedWatchService:
             )
             return
 
-    async def _run_cycle(self, watch: ManagedWatch, *, timeout_seconds: float) -> _CycleResult:
+    async def _run_cycle(
+        self,
+        watch: ManagedWatch,
+        *,
+        timeout_seconds: float,
+    ) -> _CycleResult:
         """Run one waiter cycle through the shared supervised-command runner.
 
         The runner owns the process mechanics; this method owns watch policy:
@@ -1823,6 +1951,11 @@ class ManagedWatchService:
                 label=f"watch {watch.id}",
                 on_spawn=_register_spawn,
                 max_output_bytes=None,
+                # Which watch this waiter belongs to. A waiter that keeps persistent
+                # state per watch -- cursor files, locks -- cannot otherwise tell
+                # itself apart from an identically configured sibling watch, and two
+                # of them sharing one file lose whichever events the other reports.
+                extra_env=_cycle_env(watch),
             )
         except SupervisedCommandStartupError as exc:
             detail = self._localize_watch_worker_error(exc.detail)
@@ -2025,8 +2158,48 @@ def _build_prompt(prefix: Optional[str], body: Optional[str]) -> str:
     return "\n\n".join(parts).strip()
 
 
+def _is_quiet_cycle(result: "_CycleResult") -> bool:
+    """Did the waiter finish and say, in so many words, that nothing happened?
+
+    Both halves are required. The exit code cannot carry this on its own because it
+    is also ``sysexits`` EX_USAGE, and the marker cannot carry it on its own because
+    a waiter that reports an event prints its findings and exits 0.
+    """
+
+    if result.exit_code != NO_EVENT_EXIT_CODE:
+        return False
+    return _has_no_event_marker(result.stderr) or _has_no_event_marker(result.stdout)
+
+
+def _has_no_event_marker(text: Optional[str]) -> bool:
+    """Is the marker a line of its own in ``text``?
+
+    A whole line, not a substring: an EX_USAGE failure that merely mentions the
+    protocol -- "missing avibe-watch: no-event marker" -- would otherwise be read as
+    a quiet cycle, and its failure notice swallowed and, in forever mode, its broken
+    command rerun forever.
+    """
+
+    return any(line.strip() == NO_EVENT_MARKER for line in (text or "").splitlines())
+
+
 def _squash_error(text: str, *, limit: int = 240) -> str:
     compact = " ".join((text or "").split())
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "…"
+
+
+def _squash_tail(text: str, *, limit: int) -> str:
+    """The END of ``text``, squashed to ``limit``.
+
+    A quiet cycle's point is its last words. ``wait_action.py --only-on-failure``
+    prints its green workflow summary just before exiting, after however many
+    "still waiting" lines the poll took, so head-first truncation logs the waiting
+    and drops the summary this log line exists to preserve.
+    """
+
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return "…" + compact[-(limit - 1) :].lstrip()
