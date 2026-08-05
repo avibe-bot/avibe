@@ -7,9 +7,8 @@ interface SessionPinIndicatorProps {
   className?: string;
 }
 
-// Passive "this row is pinned" status. Not a button: pinning moved into the row's
-// ⋯ action menu (see sessionActions.tsx), so this glyph only has to keep the state
-// visible at a glance — including when the row is not hovered.
+// Passive pinned-state marker for mobile project rows, where the row action menu
+// remains the mutation surface.
 export const SessionPinIndicator: React.FC<SessionPinIndicatorProps> = ({ pinned, label, className }) => {
   if (!pinned) return null;
 

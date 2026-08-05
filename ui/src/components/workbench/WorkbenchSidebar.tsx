@@ -31,7 +31,7 @@ import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
-import { SessionPinIndicator } from './SessionPinIndicator';
+import { SessionPinAction } from './SessionPinAction';
 import { sessionRowActionPaddingClass } from './sessionRowLayout';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
@@ -238,6 +238,7 @@ const SessionRow: React.FC<{
       if (active) navigate('/inbox');
     },
   });
+  const pinAction = actions.find((action) => action.id === 'pin');
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -299,7 +300,7 @@ const SessionRow: React.FC<{
           }}
           className={clsx(
             'group/sess relative flex items-center gap-2 rounded-md py-1.5 pl-[26px] text-left transition-[background-color,padding-right] duration-150 ease-out motion-reduce:transition-none',
-            sessionRowActionPaddingClass(menuOpen),
+            sessionRowActionPaddingClass(menuOpen, session.pinned),
             active
               ? 'border-l-2 border-mint bg-mint-soft pl-[24px] font-semibold text-foreground'
               : 'hover:bg-foreground/[0.04]',
@@ -325,16 +326,21 @@ const SessionRow: React.FC<{
             >
               {displayName}
             </span>
-            {/* Pinned state is a passive glyph now that pin/unpin lives in the ⋯
-                menu — inline with the title so it stays visible unhovered and
-                nothing shifts when the trigger appears. */}
-            <SessionPinIndicator pinned={session.pinned} label={t('workbench.sessionPinned')} />
             {unread > 0 && (
               <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-[#080812]">
                 {unread > 99 ? '99+' : unread}
               </span>
             )}
           </button>
+          {pinAction && (
+            <SessionPinAction
+              pinned={session.pinned}
+              pending={Boolean(pinAction.pending)}
+              pinLabel={t('workbench.sessionPin')}
+              unpinLabel={t('workbench.sessionUnpin')}
+              onToggle={pinAction.onSelect}
+            />
+          )}
           <span className="absolute inset-y-0 right-2 flex items-center">
             <PopoverTrigger asChild>
               <SessionActionsTrigger label={t('workbench.sessionActions')} open={menuOpen} />

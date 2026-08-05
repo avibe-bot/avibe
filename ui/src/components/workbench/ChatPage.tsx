@@ -1,4 +1,4 @@
-import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
@@ -60,8 +60,7 @@ import {
 } from './chatShortcuts';
 import { bindFrameChord } from '../apps/windowChords';
 import {
-  SessionActionMenuContent,
-  SessionActionsTrigger,
+  MobileChatSessionActionMenu,
   type SessionActionDescriptor,
 } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
@@ -1899,13 +1898,12 @@ export const ChatPage: React.FC = () => {
     [api, session, t],
   );
 
-  // Session-level actions (pin / rename / fork / hide / archive) — the same model
-  // the sidebar rows and the mobile projects rows render, so the chat no longer
-  // sends the user back to the tree to act on the session they're reading. A
-  // read-only session yields no actions and an inert requestArchive: every one of
+  // Session-level actions share the sidebar/mobile row model. The chat header
+  // exposes them only on mobile and intentionally supplies no rename editor, so
+  // Rename is absent from this surface. A read-only session yields no actions and
+  // an inert requestArchive: every one of
   // them is refused server-side (409 archived / 403 reserved_session), so the
   // header withdraws the ⋯ rather than offering guaranteed failures.
-  const titleFieldRef = useRef<TitleFieldHandle | null>(null);
   const {
     actions: sessionActions,
     archiveDialog: sessionArchiveDialog,
@@ -1913,9 +1911,6 @@ export const ChatPage: React.FC = () => {
     canArchive,
   } = useSessionActions({
     session: readOnly ? null : session,
-    // Rename focuses the header's existing click-to-edit title instead of adding
-    // a second editor for the same field.
-    onRenameStart: () => titleFieldRef.current?.startEditing(),
     onOpenSession: (id) => navigate(`/chat/${encodeURIComponent(id)}`),
     onArchived: () => navigate('/inbox'),
     // The provider cache feeds the sidebar, not this page's own session copy. The
@@ -2147,7 +2142,6 @@ export const ChatPage: React.FC = () => {
           onAnnotateOpenChange={setAnnotateOpen}
           readOnlyReason={readOnlyReason}
           sessionActions={sessionActions}
-          titleFieldRef={titleFieldRef}
         />
 
       {showPageActive && showPageUrl && (
@@ -2694,12 +2688,6 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, se
   );
 };
 
-// Imperative handle on the header's click-to-edit title, so Rename can be one
-// menu row instead of a duplicate dialog.
-interface TitleFieldHandle {
-  startEditing: () => void;
-}
-
 interface ChatHeaderBarProps {
   session: WorkbenchSession;
   agents: VibeAgentBrief[];
@@ -2722,27 +2710,25 @@ interface ChatHeaderBarProps {
   // cluster is withdrawn entirely (see showPageControlActions). The REASON, not a
   // boolean, because it also picks the badge: a runtime-owned row is not "Archived".
   readOnlyReason: SessionReadOnlyReason | null;
-  // Shared session actions (pin / rename / fork / hide / archive), rendered behind
-  // the ⋯ at the far right. Empty (or absent) withdraws the trigger — which is what
-  // a read-only session yields, since every one of those writes is refused.
+  // Shared session actions, rendered behind the mobile-only ⋯ at the far right.
+  // Empty (or absent) withdraws the trigger — which is what a read-only session
+  // yields, since every one of those writes is refused.
   sessionActions?: SessionActionDescriptor[];
-  // Lets the menu's Rename row focus the title field that already lives here.
-  titleFieldRef?: React.Ref<TitleFieldHandle>;
 }
 
 // Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
 // which renders the header alone rather than mounting the whole page. Note the
 // live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
 // read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, sessionActions, titleFieldRef }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, sessionActions }) => {
   const { t } = useTranslation();
   const readOnly = readOnlyReason !== null;
   const showPageActions = showPageControlActions(readOnly, showPageMode);
-  const [actionsOpen, setActionsOpen] = useState(false);
   // ``!readOnly`` twice over: useSessionActions already yields an empty list for a
   // read-only session, and the withdrawal is re-stated here so this header cannot
   // grow a ⋯ full of guaranteed-409 rows if a future caller passes actions anyway.
-  const hasSessionActions = !readOnly && (sessionActions?.length ?? 0) > 0;
+  const mobileSessionActions = sessionActions ?? [];
+  const hasMobileSessionActions = !readOnly && mobileSessionActions.length > 0;
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   const sessionAgentLabel = sessionAgentDisplayName(session, agents);
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -2799,7 +2785,6 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
         </Button>
         <TitleField
           key={session.id}
-          ref={titleFieldRef}
           title={session.title}
           onCommit={(title) => onPatch({ title })}
           readOnly={readOnly}
@@ -2860,7 +2845,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             the three can do anything but 409 or frame a dead page. There is no
             read-only page-serving path to offer instead; see
             showPageControlActions for the per-control reasoning. */}
-        {(showPageActions.visualize || hasSessionActions) && (
+        {(showPageActions.visualize || hasMobileSessionActions) && (
           <div className="ml-auto flex items-center gap-1.5">
             {showPageActions.annotate && (
               <ShowPageAnnotateControl
@@ -2888,25 +2873,14 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 onOpenChange={onShareOpenChange}
               />
             )}
-            {/* Rightmost: the same session action menu the sidebar row uses, so
-                pin / rename / fork / hide / archive are reachable from the chat
-                without going back to the drawer. */}
-            {hasSessionActions && (
-              <Popover open={actionsOpen} onOpenChange={setActionsOpen}>
-                <PopoverTrigger asChild>
-                  <SessionActionsTrigger
-                    label={t('workbench.sessionActions')}
-                    open={actionsOpen}
-                    variant="bar"
-                  />
-                </PopoverTrigger>
-                <SessionActionMenuContent
-                  actions={sessionActions ?? []}
-                  label={t('workbench.sessionActions')}
-                  align="end"
-                  onClose={() => setActionsOpen(false)}
-                />
-              </Popover>
+            {/* The chat-level session menu is a compact-mobile affordance. Desktop
+                keeps these operations in the sidebar instead of duplicating a
+                second ⋯ in the page header. */}
+            {hasMobileSessionActions && (
+              <MobileChatSessionActionMenu
+                actions={mobileSessionActions}
+                label={t('workbench.sessionActions')}
+              />
             )}
           </div>
         )}
@@ -2922,7 +2896,7 @@ interface TitleFieldProps {
   readOnly?: boolean;
 }
 
-const TitleField = forwardRef<TitleFieldHandle, TitleFieldProps>(({ title, onCommit, readOnly }, ref) => {
+const TitleField: React.FC<TitleFieldProps> = ({ title, onCommit, readOnly }) => {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(title ?? '');
@@ -2935,21 +2909,6 @@ const TitleField = forwardRef<TitleFieldHandle, TitleFieldProps>(({ title, onCom
   useEffect(() => {
     if (editing) inputRef.current?.focus();
   }, [editing]);
-
-  // The ⋯ menu's Rename row drives the header title the user already sees
-  // instead of opening a second dialog for the same field. Inert while
-  // read-only, where the title is static text with no input to focus.
-  useImperativeHandle(
-    ref,
-    () => ({
-      startEditing: () => {
-        if (readOnly) return;
-        setEditing(true);
-        inputRef.current?.focus();
-      },
-    }),
-    [readOnly],
-  );
 
   if (readOnly) {
     return (
@@ -2999,8 +2958,7 @@ const TitleField = forwardRef<TitleFieldHandle, TitleFieldProps>(({ title, onCom
       className="h-8 flex-1 px-2 text-[15px] font-bold"
     />
   );
-});
-TitleField.displayName = 'TitleField';
+};
 
 interface TranscriptProps {
   messages: WorkbenchMessage[];

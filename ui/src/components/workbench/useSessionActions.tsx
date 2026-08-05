@@ -16,12 +16,12 @@ import type { SessionActionDescriptor } from './sessionActions';
 
 // ── One session action model, four render sites ───────────────────────────────
 // The desktop sidebar row, its right-click menu, the mobile projects row and the
-// chat header all offer the SAME six actions. They used to be written out three
-// times (and had already drifted: fork was disabled-with-tooltip on desktop but
-// hidden on mobile, and "reference" existed only on desktop). This hook owns the
-// list, the writes and the pending state; each surface owns only where the
-// trigger sits and what "rename" / "open" / "archived" mean locally. The rows
-// themselves render through SessionActionMenu (sessionActions.tsx).
+// chat header share one action model. They used to be written out three times
+// (and had already drifted: fork was disabled-with-tooltip on desktop but hidden
+// on mobile, and "reference" existed only on desktop). This hook owns the list,
+// the writes and the pending state; each surface owns only where the trigger sits
+// and which local capabilities it supplies. The rows themselves render through
+// SessionActionMenu (sessionActions.tsx).
 
 export interface SessionActionsOptions {
   /** ``null`` (no session yet, or a read-only one) yields no actions and an inert
@@ -31,8 +31,9 @@ export interface SessionActionsOptions {
    *  Defaults to ``session.project_id``, which is ``null`` for a standalone session
    *  (no project-bound scope); the writes run either way. */
   projectId?: string | null;
-  /** Start the surface's own rename editor (inline input / chat header title). */
-  onRenameStart: () => void;
+  /** Start the surface's own rename editor. Omit when that surface intentionally
+   *  does not expose Rename, such as the compact Chat header menu. */
+  onRenameStart?: () => void;
   /** Navigate to a session (the fork target). Always called inside the
    *  unsaved-changes authorization's runner (see below). */
   onOpenSession: (sessionId: string) => void;
@@ -180,14 +181,16 @@ export const useSessionActions = ({
         disabled: pinning,
         onSelect: () => void togglePinned(),
       },
-      {
+    ];
+    if (onRenameStart) {
+      rows.push({
         id: 'rename',
         group: 'organize',
         icon: Pencil,
         label: t('workbench.sessionRename'),
         onSelect: onRenameStart,
-      },
-    ];
+      });
+    }
     if (canReference) {
       rows.push({
         id: 'reference',
