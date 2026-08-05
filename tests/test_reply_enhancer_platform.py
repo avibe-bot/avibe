@@ -305,8 +305,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         controller = SimpleNamespace(
             config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
             _memory_principals_by_session={},
-            memory_principal_for_context=lambda _context: "u-11111111111111111111111111111111",
+            memory_runtime=SimpleNamespace(
+                principal_for_user_key=lambda _user_key: "u-11111111111111111111111111111111",
+            ),
+            platform_settings_managers={},
         )
+        controller._memory_admission = Controller._memory_admission.__get__(controller)
+        controller._memory_turn_facts = Controller._memory_turn_facts.__get__(controller)
+        controller._memory_cli_session_admitted = Controller._memory_cli_session_admitted.__get__(controller)
         controller.configure_memory_cli_session = Controller.configure_memory_cli_session.__get__(controller)
         controller.memory_principal_for_cli_session = Controller.memory_principal_for_cli_session.__get__(controller)
         context = MessageContext(

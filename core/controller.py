@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -68,6 +69,23 @@ class _SettingsUserBindings:
         store.maybe_reload()
         user = store.get_user(user_id, platform=platform)
         return bool(user is not None and user.enabled)
+
+
+@dataclass(frozen=True)
+class _MemoryCliSessionAdmission:
+    """Immutable facts needed to revalidate one Agent session's Memory access."""
+
+    principal_id: str
+    platform: str | None
+    user_id: str | None
+    is_dm: bool
+
+    def admission_facts(self) -> InboundTurnFacts:
+        return InboundTurnFacts(
+            platform=self.platform,
+            user_id=self.user_id,
+            is_dm=self.is_dm,
+        )
 
 
 class RemovedPlatformIMClient(BaseIMClient):
@@ -229,7 +247,7 @@ class Controller:
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
         self._reconcile_lock: Optional[asyncio.Lock] = None
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
-        self._memory_principals_by_session: Dict[str, str] = {}
+        self._memory_principals_by_session: Dict[str, _MemoryCliSessionAdmission] = {}
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -1445,6 +1463,10 @@ class Controller:
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
         return self._memory_admission().principal_for(self._memory_turn_facts(context))
 
+    def _memory_cli_session_admitted(self, facts: InboundTurnFacts) -> bool:
+        memory = getattr(getattr(self, "config", None), "memory", None)
+        return bool(getattr(memory, "enabled", False)) and self._memory_admission().admits(facts)
+
     def configure_memory_cli_session(self, context: MessageContext, *, admitted: bool) -> bool:
         """Associate an admitted Agent session with its Memory principal."""
 
@@ -1454,20 +1476,41 @@ class Controller:
         caller = caller_context_from_platform_payload(payload)
         if caller is None:
             return False
-        principal_id = self.memory_principal_for_context(context) if admitted else None
+        facts = self._memory_turn_facts(context, session_id=caller.session_id)
+        admission = self._memory_admission()
+        principal_id = admission.principal_for(facts) if admitted and self._memory_cli_session_admitted(facts) else None
         if principal_id is None:
             self._memory_principals_by_session.pop(caller.session_id, None)
             return False
-        self._memory_principals_by_session[caller.session_id] = principal_id
+        self._memory_principals_by_session[caller.session_id] = _MemoryCliSessionAdmission(
+            principal_id=principal_id,
+            platform=facts.platform,
+            user_id=facts.user_id,
+            is_dm=facts.is_dm,
+        )
         return True
 
     def memory_principal_for_cli_session(self, session_id: str) -> Optional[str]:
-        """Return the principal associated with an admitted Agent session."""
+        """Revalidate and return the principal for an admitted Agent session."""
 
         from core.memory.store import is_principal_id
 
-        principal_id = self._memory_principals_by_session.get(str(session_id or "").strip())
-        return principal_id if is_principal_id(principal_id) else None
+        normalized_session_id = str(session_id or "").strip()
+        record = self._memory_principals_by_session.get(normalized_session_id)
+        if not isinstance(record, _MemoryCliSessionAdmission):
+            return None
+
+        facts = record.admission_facts()
+        admission = self._memory_admission()
+        if not self._memory_cli_session_admitted(facts):
+            self._memory_principals_by_session.pop(normalized_session_id, None)
+            return None
+
+        principal_id = admission.principal_for(facts)
+        if not is_principal_id(principal_id) or principal_id != record.principal_id:
+            self._memory_principals_by_session.pop(normalized_session_id, None)
+            return None
+        return principal_id
 
     async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
         """Submit one eligible attributed human turn after session resolution.

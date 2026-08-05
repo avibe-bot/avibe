@@ -123,6 +123,36 @@ def test_capture_admits_every_enabled_bound_dm_user(platform: str) -> None:
     assert controller.memory_capture_admitted(_context(platform, is_dm=False)) is False
 
 
+def test_memory_cli_session_revalidates_an_im_binding_before_each_request() -> None:
+    user = SimpleNamespace(enabled=True, is_admin=False)
+    controller = _controller(user=user)
+    controller._memory_principals_by_session = {}
+    context = _context("slack")
+    context.platform_specific["agent_session_target"] = {
+        "id": "ses-memory-user",
+        "agent_backend": "codex",
+    }
+
+    assert controller.configure_memory_cli_session(context, admitted=True) is True
+    assert (
+        controller.memory_principal_for_cli_session("ses-memory-user")
+        == "u-11111111111111111111111111111111"
+    )
+
+    controller.config.memory.enabled = False
+
+    assert controller.memory_principal_for_cli_session("ses-memory-user") is None
+    assert controller._memory_principals_by_session == {}
+
+    controller.config.memory.enabled = True
+    assert controller.configure_memory_cli_session(context, admitted=True) is True
+
+    user.enabled = False
+
+    assert controller.memory_principal_for_cli_session("ses-memory-user") is None
+    assert controller._memory_principals_by_session == {}
+
+
 @pytest.mark.parametrize(
     "context,text,enabled",
     [
