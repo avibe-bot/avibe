@@ -1498,6 +1498,7 @@ def test_remote_agent_definition_mutations_are_blocked_before_api_calls(
 @pytest.mark.parametrize(
     ("method", "path", "json_body", "api_method"),
     [
+        ("POST", "/api/skills/preview", {"source": "./local-skill"}, "preview_skill_source"),
         ("POST", "/api/skills", {"source": "gh:owner/repo"}, "add_skill"),
         ("POST", "/api/skills/update", {"name": "demo"}, "update_skill"),
         ("POST", "/api/skills/upload", {"content_base64": ""}, "upload_skill_zip"),
@@ -1525,6 +1526,134 @@ def test_remote_skill_mutations_are_blocked_before_api_calls(
         raise AssertionError("remote skill mutation reached the local Skills API")
 
     monkeypatch.setattr(api, api_method, unexpected_skill_call)
+    response = client.request(
+        method,
+        path,
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body", "api_method"),
+    [
+        ("POST", "/api/vault/secrets", {"name": "REMOTE_SECRET"}, "create_vault_secret"),
+        ("PATCH", "/api/vault/secrets/REMOTE_SECRET", {"description": "changed"}, "update_vault_secret"),
+        ("DELETE", "/api/vault/secrets/REMOTE_SECRET", None, "delete_vault_secret"),
+        ("POST", "/api/vault/grants", {"secret_name": "REMOTE_SECRET"}, "create_vault_grant"),
+        ("DELETE", "/api/vault/grants/grant-1", None, "revoke_vault_grant"),
+        ("POST", "/api/vault/sign", {"secret_name": "REMOTE_SECRET"}, "vault_sign"),
+    ],
+)
+def test_remote_vault_mutations_are_blocked_before_api_calls(
+    monkeypatch,
+    tmp_path,
+    method,
+    path,
+    json_body,
+    api_method,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_vault_call(*args, **kwargs):
+        raise AssertionError("remote Vault mutation reached the local Vault API")
+
+    monkeypatch.setattr(api, api_method, unexpected_vault_call)
+    response = client.request(
+        method,
+        path,
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body", "api_method"),
+    [
+        ("POST", "/api/users", {"platform": "slack", "users": {"U1": {"enabled": True}}}, "save_users"),
+        ("POST", "/api/users/U1/admin", {"platform": "slack", "is_admin": True}, "toggle_admin"),
+        ("DELETE", "/api/users/U1", None, "remove_user"),
+    ],
+)
+def test_remote_im_user_mutations_are_blocked_before_api_calls(
+    monkeypatch,
+    tmp_path,
+    method,
+    path,
+    json_body,
+    api_method,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_user_call(*args, **kwargs):
+        raise AssertionError("remote IM user mutation reached the local user store")
+
+    monkeypatch.setattr(api, api_method, unexpected_user_call)
+    response = client.request(
+        method,
+        path,
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body", "api_method"),
+    [
+        ("POST", "/api/bind-codes", {"type": "one_time"}, "create_bind_code"),
+        ("DELETE", "/api/bind-codes/CODE1", None, "delete_bind_code"),
+    ],
+)
+def test_remote_bind_code_mutations_are_blocked_before_api_calls(
+    monkeypatch,
+    tmp_path,
+    method,
+    path,
+    json_body,
+    api_method,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_bind_code_call(*args, **kwargs):
+        raise AssertionError("remote bind-code mutation reached the local auth store")
+
+    monkeypatch.setattr(api, api_method, unexpected_bind_code_call)
     response = client.request(
         method,
         path,
@@ -1659,7 +1788,7 @@ def test_remote_owner_can_still_read_agent_instructions_and_queue(
     assert global_response.get_json() == {"backends": []}
     assert queue_response.status_code == 200
     assert queue_response.get_json() == {"queued": []}
-    assert not ui_server._is_remote_local_execution_request("POST", "/api/skills/preview")
+    assert ui_server._is_remote_local_execution_request("POST", "/api/skills/preview")
 
 
 def test_remote_show_dispatch_is_rejected_before_event_reservation(

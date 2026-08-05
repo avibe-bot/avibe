@@ -78,6 +78,8 @@ substitute for either dependency.
 - Remote Workbench message and Show dispatch do not reserve or start a turn.
 - Remote terminal and file requests fail closed; trusted-local requests retain
   existing behavior.
+- Remote Vault secret/grant/sign mutations, IM user and bind-code mutations, and
+  Skill source previews fail before reaching local stores or tooling.
 - Remote service control, installers, Agent-definition mutations, model/backend
   mutations and probes, and Show Page icon writes fail before reaching their
   local runtime or filesystem services.

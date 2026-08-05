@@ -2271,17 +2271,6 @@ _REMOTE_SETTINGS_FIELDS = frozenset(
 _REMOTE_THREAD_SETTINGS_FIELDS = frozenset(
     {"channel_id", "platform", "settings", "thread_id"}
 )
-_REMOTE_USER_SETTING_FIELDS = frozenset(
-    {
-        "bound_at",
-        "display_name",
-        "enabled",
-        "is_admin",
-        "show_message_types",
-    }
-)
-
-
 def _payload_has_only_fields(payload: Any, fields: frozenset[str] | set[str]) -> bool:
     return isinstance(payload, dict) and set(payload).issubset(fields)
 
@@ -2412,13 +2401,6 @@ def _remote_payload_is_allowed(method: str, path: str, payload: Any) -> bool:
         return _payload_has_only_fields(
             payload.get("settings"),
             _REMOTE_CHANNEL_SETTING_FIELDS,
-        )
-    if normalized_method == "POST" and path == "/api/users":
-        if not _payload_has_only_fields(payload, {"platform", "users"}):
-            return False
-        return _remote_scope_collection_is_allowed(
-            payload.get("users"),
-            item_fields=_REMOTE_USER_SETTING_FIELDS,
         )
     if normalized_method == "POST" and path == "/api/projects":
         return _payload_has_only_fields(payload, {"display_name"})

@@ -352,12 +352,15 @@ _REMOTE_PAYLOAD_FILTERED_HTTP_RULES = tuple(
     for method, pattern in (
         (
             "POST",
-            r"^/api/(?:config|projects|sessions|settings|settings/thread|users)$",
+            r"^/api/(?:config|projects|sessions|settings|settings/thread)$",
         ),
         ("PATCH", r"^/api/(?:projects|sessions)/[^/]+$"),
     )
 )
 
+# Positive allowlist for remote-safe owner surfaces. Any route that mutates
+# local Agent, IM, Vault, or other execution state must stay absent here and
+# therefore use the fail-closed local-only default below.
 _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
     (methods, re.compile(pattern))
     for methods, pattern in (
@@ -369,18 +372,6 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         (
             frozenset({"GET", "HEAD"}),
             r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|settings|vmk|requests|requests/[^/]+|provision-requests/[^/]+|provision-requests/by-id/[^/]+|grants|audit)$",
-        ),
-        (
-            frozenset({"POST"}),
-            r"^/api/vault/(?:agent-bindings:batch|agent-binding|authz/factors/webauthn/options|authz/factors/webauthn|signing-addresses|secrets|secrets/[^/]+/reveal-context|requests/[^/]+/deny|requests/[^/]+/fulfill-access|grants|sign|pubkey-pin)$",
-        ),
-        (
-            frozenset({"PATCH"}),
-            r"^/api/vault/(?:settings|secrets/[^/]+)$",
-        ),
-        (
-            frozenset({"DELETE"}),
-            r"^/api/vault/(?:secrets/[^/]+|grants/[^/]+)$",
         ),
         (
             frozenset({"POST"}),
@@ -409,7 +400,6 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"GET", "HEAD"}),
             r"^/api/(?:projects/[^/]+/agents-md|global-prompts)$",
         ),
-        (frozenset({"POST"}), r"^/api/skills/preview$"),
         (frozenset({"GET", "HEAD"}), r"^/api/skills/(?:check|find)$"),
         (
             frozenset({"GET", "HEAD"}),
@@ -436,10 +426,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             r"^/api/harness/(?:counts|tasks|watches|runs|bootstrap|runs/[^/]+)$",
         ),
         (frozenset({"GET", "HEAD"}), r"^/api/users$"),
-        (frozenset({"POST"}), r"^/api/users/[^/]+/admin$"),
-        (frozenset({"DELETE"}), r"^/api/users/[^/]+$"),
-        (frozenset({"GET", "HEAD", "POST"}), r"^/api/bind-codes$"),
-        (frozenset({"DELETE"}), r"^/api/bind-codes/[^/]+$"),
+        (frozenset({"GET", "HEAD"}), r"^/api/bind-codes$"),
     )
 )
 
