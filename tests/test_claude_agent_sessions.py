@@ -1388,9 +1388,20 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.agent_auth_service.maybe_emit_auth_recovery_message = AsyncMock(return_value=True)
         controller._get_session_key = lambda context: "telegram::user::U1"
         agent = ClaudeAgent(controller)
-        agent.session_handler = SimpleNamespace(handle_session_error=AsyncMock())
+        composite_key = "session-1:/tmp/work"
+        failed_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={"turn_token": "auth-turn"}),
+        )
+        agent._pending_requests[composite_key] = [failed_request]
+        controller.receiver_tasks[composite_key] = asyncio.current_task()
+        controller.claude_sessions[composite_key] = _StubClient()
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(),
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: "Claude process terminated: SIGABRT",
+        )
         agent._clear_pending_reactions = AsyncMock()
-        context = SimpleNamespace()
+        context = SimpleNamespace(platform_specific={})
 
         class _FailingClient:
             def receive_messages(self):
@@ -1406,6 +1417,50 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
         agent.session_handler.handle_session_error.assert_not_awaited()
+        agent.session_handler.cleanup_session.assert_awaited_once_with(
+            composite_key,
+            current_receiver_task=asyncio.current_task(),
+            activation_retired=False,
+        )
+        self.assertFalse(agent._pending_requests.get(composite_key))
+
+    async def test_receiver_eof_with_terminated_process_reports_localized_failure(self):
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        composite_key = "session-eof:/tmp/work"
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-turn",
+                    "agent_runtime_turn_token": "eof-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(),
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: "Claude process terminated: SIGABRT",
+        )
+        controller.claude_sessions[composite_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
+        )
+        controller.receiver_tasks[composite_key] = asyncio.current_task()
+
+        with patch("core.message_mirror.persist_agent_message") as persist:
+            await agent._handle_receiver_eof(composite_key, pending_request.context)
+
+        agent.session_handler.handle_session_error.assert_awaited_once()
+        agent.session_handler.cleanup_session.assert_not_awaited()
+        persist.assert_called_once()
+        self.assertIn("Claude Code process terminated", persist.call_args.args[2])
+        terminal_call = controller.emit_agent_message.await_args
+        self.assertIn("SIGABRT", terminal_call.kwargs["terminal_error"])
+        self.assertFalse(agent._pending_requests.get(composite_key))
 
     async def test_receiver_non_auth_error_settles_dot_and_persists(self):
         # A non-auth receiver error (connection loss, concurrent read, …) is NOT

@@ -77,6 +77,14 @@ class ClaudeSessionNotFoundError(RuntimeError):
         )
 
 
+class _ClaudeReceiverCleanupRequired(RuntimeError):
+    """Signal that a dead generation must be retried after receiver cleanup."""
+
+    def __init__(self, composite_key: str):
+        self.composite_key = composite_key
+        super().__init__(f"Claude receiver cleanup is still pending for {composite_key}")
+
+
 class SessionHandler(BaseHandler):
     """Handles all session-related operations"""
 
@@ -292,6 +300,16 @@ class SessionHandler(BaseHandler):
             reason,
             diagnostic,
         )
+        receiver_task = self.receiver_tasks.get(composite_key)
+        if (
+            receiver_task is not None
+            and receiver_task is not asyncio.current_task()
+            and not receiver_task.done()
+        ):
+            # This method runs under the generation lock. Let the receiver
+            # release that lock through its normal error cleanup before waiting
+            # for the task, otherwise both sides wait on one another.
+            raise _ClaudeReceiverCleanupRequired(composite_key)
         await self._wait_for_claude_receiver_cleanup(composite_key)
         await self._wait_for_claude_session_idle(composite_key)
         await self._cleanup_session_locked(
@@ -978,14 +996,20 @@ class SessionHandler(BaseHandler):
         """Resolve or create one Claude runtime generation under its exact lock."""
 
         composite_key = self._claude_runtime_generation_key(context, subagent_name)
-        async with self._claude_runtime_generation_lock(composite_key):
-            return await self._get_or_create_claude_session_locked(
-                context,
-                subagent_name=subagent_name,
-                subagent_model=subagent_model,
-                subagent_reasoning_effort=subagent_reasoning_effort,
-                agent_system_prompt=agent_system_prompt,
-            )
+        while True:
+            try:
+                async with self._claude_runtime_generation_lock(composite_key):
+                    return await self._get_or_create_claude_session_locked(
+                        context,
+                        subagent_name=subagent_name,
+                        subagent_model=subagent_model,
+                        subagent_reasoning_effort=subagent_reasoning_effort,
+                        agent_system_prompt=agent_system_prompt,
+                    )
+            except _ClaudeReceiverCleanupRequired as retry:
+                # Receiver error handling may need the same generation lock. Wait
+                # only after the lock has been released, then retry resolution.
+                await self._wait_for_claude_receiver_cleanup(retry.composite_key)
 
     async def _get_or_create_claude_session_locked(
         self,

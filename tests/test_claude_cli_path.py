@@ -612,42 +612,57 @@ def test_session_handler_recreates_terminated_cached_client_before_dispatch(
     assert "Claude stderr tail:\nsandbox warning\nfatal: Claude CLI aborted\ntransport closed" in caplog.text
 
 
-def test_session_handler_waits_for_receiver_cleanup_before_evicting_dead_client(
+def test_session_handler_waits_for_receiver_cleanup_outside_generation_lock(
+    monkeypatch,
     tmp_path: Path,
 ) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
     async def exercise() -> None:
         controller = _Controller(tmp_path)
         handler = SessionHandler(controller)
         composite_key = f"slack_C123:{tmp_path}"
-        cleanup_started = asyncio.Event()
         release_cleanup = asyncio.Event()
 
+        class _StubClaudeSDKClient:
+            def __init__(self, options):
+                self.options = options
+                self.disconnects = 0
+                self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+                captured["clients"].append(self)
+
+            async def connect(self) -> None:
+                return None
+
+            async def disconnect(self) -> None:
+                self.disconnects += 1
+
+        monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+        monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+        context = MessageContext(user_id="U123", channel_id="C123")
+        first_client = await handler.get_or_create_claude_session(context)
+        first_client._transport._process.returncode = -6
+
         async def receiver() -> None:
-            cleanup_started.set()
             await release_cleanup.wait()
+            await handler.cleanup_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+            )
 
         receiver_task = asyncio.create_task(receiver())
-        await cleanup_started.wait()
         handler.receiver_tasks[composite_key] = receiver_task
-        client = SimpleNamespace(
-            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
-        )
-        handler.claude_sessions[composite_key] = client
-        handler._cleanup_session_locked = AsyncMock()
-        handler._wait_for_claude_session_idle = AsyncMock()
 
         eviction = asyncio.create_task(
-            handler._evict_terminated_cached_claude_session(composite_key, client)
+            handler.get_or_create_claude_session(context)
         )
         await asyncio.sleep(0)
         assert not eviction.done()
         release_cleanup.set()
-        assert await eviction is True
-        handler._cleanup_session_locked.assert_awaited_once_with(
-            composite_key,
-            retire_model_hub_scope=True,
-        )
-        handler._wait_for_claude_session_idle.assert_awaited_once_with(composite_key)
+        second_client = await asyncio.wait_for(eviction, timeout=1)
+        assert second_client is not first_client
+        assert first_client.disconnects == 1
+        assert len(captured["clients"]) == 2
         await receiver_task
 
     asyncio.run(exercise())

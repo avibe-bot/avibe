@@ -1850,6 +1850,43 @@ class ClaudeAgent(BaseAgent):
                 self._pending_requests.setdefault(composite_key, []).insert(0, pending_request)
                 return
         self._requeue_request_activity(pending_request)
+        terminal_error = "Claude receiver ended without a terminal result"
+        client = self.claude_sessions.get(composite_key)
+        returncode = get_claude_client_returncode(client)
+        cleanup_handled = False
+        if returncode is not None:
+            eof_error = RuntimeError(terminal_error)
+            error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
+            diagnostic = self._claude_error_diagnostic(composite_key, eof_error)
+            handle_session_error = getattr(self.session_handler, "handle_session_error", None)
+            if callable(handle_session_error):
+                await handle_session_error(composite_key, context, eof_error)
+                cleanup_handled = True
+                try:
+                    from core.message_mirror import persist_agent_message
+
+                    notification = backend_failure_notification_output(
+                        context,
+                        "claude",
+                        request=pending_request,
+                        output=terminal_output_for(pending_request),
+                    )
+                    persist_agent_message(
+                        context,
+                        "notify",
+                        error_notify,
+                        metadata=notification.metadata,
+                        native_message_id=notification.idempotency_key,
+                    )
+                except Exception:
+                    logger.debug(
+                        "claude: failed to persist terminated EOF notification",
+                        exc_info=True,
+                    )
+            else:
+                diagnostic = terminal_error
+        else:
+            diagnostic = terminal_error
         logger.warning("Claude receiver ended without a result for session %s", composite_key)
         self._adopt_pending_turn_token(context, pending_request)
         await self._remove_specific_pending_reaction(composite_key, context, pending_request)
@@ -1858,11 +1895,12 @@ class ClaudeAgent(BaseAgent):
         self._pending_assistant_message.pop(composite_key, None)
         self._mark_session_idle_if_no_pending_requests(composite_key)
 
-        await self._cleanup_runtime_session(
-            composite_key,
-            current_receiver_task=asyncio.current_task(),
-            preserve_pending_request_state=True,
-        )
+        if not cleanup_handled:
+            await self._cleanup_runtime_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+                preserve_pending_request_state=True,
+            )
         try:
             await self.controller.emit_agent_message(
                 context,
@@ -1871,7 +1909,7 @@ class ClaudeAgent(BaseAgent):
                 is_error=True,
                 level="silent",
                 output=terminal_output_for(pending_request),
-                terminal_error="Claude receiver ended without a terminal result",
+                terminal_error=diagnostic,
             )
         finally:
             self._release_service_runtime_turn(context)
@@ -1904,7 +1942,19 @@ class ClaudeAgent(BaseAgent):
                 output=terminal_output_for(pending_request),
                 terminal_error=diagnostic,
             )
-            if not handled:
+            if handled:
+                self._retire_failed_auth_turn(composite_key, context)
+                await self._cleanup_runtime_session(
+                    composite_key,
+                    current_receiver_task=asyncio.current_task(),
+                    preserve_pending_request_state=True,
+                )
+                if pending_request is not None:
+                    await self._remove_ack_reaction(pending_request)
+                self._discard_pending_reaction(composite_key)
+                await self._clear_pending_reactions(composite_key, context)
+                self._mark_session_idle_if_no_pending_requests(composite_key)
+            else:
                 await self.session_handler.handle_session_error(
                     composite_key,
                     context,
