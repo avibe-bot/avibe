@@ -933,10 +933,37 @@ class SessionTurnManager:
             raise RuntimeError("Session delivery context builder is not bound")
         return self._build_context(session_id)
 
+    def _delivery_context_for_binding(self, session_id: str) -> "MessageContext":
+        """Build binding context with the queued head's scheduled Agent identity."""
+        context = self._delivery_context(session_id)
+        with self._sqlite_engine().connect() as conn:
+            head = delivery_store.claimable_fifo_head(conn, session_id)
+        if head is None:
+            return context
+        provenance = (
+            delivery_store.delivery_payload(head).get("metadata") or {}
+        ).get(SCHEDULED_PROVENANCE_KEY)
+        preserved = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+        if not isinstance(preserved, dict):
+            return context
+        spec = dict(getattr(context, "platform_specific", None) or {})
+        for key in (
+            "vibe_agent_id",
+            "vibe_agent_name",
+            SCHEDULED_TARGET_AGENT_KEY,
+            "resolved_vibe_agent",
+            "agent_run_target",
+        ):
+            if key in preserved:
+                spec[key] = preserved[key]
+        context.platform_specific = spec
+        return context
+
     def _context_vibe_agent_binding(self, context: "MessageContext") -> dict[str, str]:
         spec = getattr(context, "platform_specific", None) or {}
         resolver = getattr(self.controller, "resolve_vibe_agent_for_context", None)
         agent = None
+        has_explicit_override = False
         if callable(resolver):
             override_agent_id = str(spec.get("vibe_agent_id") or "").strip()
             override_agent_name = str(
@@ -944,7 +971,8 @@ class SessionTurnManager:
                 or spec.get(SCHEDULED_TARGET_AGENT_KEY)
                 or ""
             ).strip()
-            resolve_kwargs: dict[str, Any] = {"required": False}
+            has_explicit_override = bool(override_agent_id or override_agent_name)
+            resolve_kwargs: dict[str, Any] = {"required": has_explicit_override}
             if override_agent_id:
                 resolve_kwargs["override_agent_id"] = override_agent_id
             if override_agent_name:
@@ -952,10 +980,14 @@ class SessionTurnManager:
             try:
                 agent = resolver(context, **resolve_kwargs)
             except Exception:
+                if has_explicit_override:
+                    raise
                 logger.debug(
                     "Failed to resolve inherited Vibe Agent before Session binding",
                     exc_info=True,
                 )
+            if has_explicit_override and agent is None:
+                raise RuntimeError("Explicit Vibe Agent override could not be resolved")
         if agent is not None:
             return {
                 "agent_id": str(getattr(agent, "id", None) or "").strip(),
@@ -988,8 +1020,11 @@ class SessionTurnManager:
         ) and any(spec.get(key) for key in ("vibe_agent_id", "vibe_agent_name")):
             if any(
                 str(spec.get(key) or "").strip()
-                != str(binding.get(key) or "").strip()
-                for key in ("vibe_agent_id", "vibe_agent_name")
+                != str(binding.get(binding_key) or "").strip()
+                for key, binding_key in (
+                    ("vibe_agent_id", "agent_id"),
+                    ("vibe_agent_name", "agent_name"),
+                )
             ):
                 return False
 
@@ -1046,8 +1081,13 @@ class SessionTurnManager:
                 (run_target, "agent_session_id"),
             )
         ):
-            for key in ("vibe_agent_id", "vibe_agent_name"):
-                if spec.get(key) and str(spec.get(key)).strip() != str(binding.get(key) or "").strip():
+            for key, binding_key in (
+                ("vibe_agent_id", "agent_id"),
+                ("vibe_agent_name", "agent_name"),
+            ):
+                if spec.get(key) and str(spec.get(key)).strip() != str(
+                    binding.get(binding_key) or ""
+                ).strip():
                     return True
         return False
 
@@ -3469,7 +3509,12 @@ class SessionTurnManager:
                 or ""
             ).strip()
         if not backend:
-            backend, _context = self._delivery_backend(session_id, None)
+            binding_context = (
+                self._delivery_context_for_binding(session_id)
+                if self._build_context is not None
+                else None
+            )
+            backend, _context = self._delivery_backend(session_id, binding_context)
         with self._runtime_start_owner(session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             if backend in self._draining_backends:
