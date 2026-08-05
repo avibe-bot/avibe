@@ -3,6 +3,10 @@
 Status: **design / pre-implementation**. Branch `refactor/avibe-turn-state-machine` (off master @ e324cc0, which includes #367 `2c88c7b`).
 Author: refactor follow-up to PR #367. Tracks task #85; folds in #84 + Codex #3336001455.
 
+> Historical design record. The current message-priority and Send now contract is
+> defined in `docs/plans/agent-message-priority.md`; where this document describes
+> Send now as Stop/cancel, the current contract supersedes it.
+
 > Read this top-to-bottom before touching code. Part 1 is the EXHAUSTIVE current
 > behavior (so nothing is lost). Part 2 is the target. Part 3 is the migration.
 > Part 4 is the edge-case catalog = the regression suite. Part 5 = open decisions.

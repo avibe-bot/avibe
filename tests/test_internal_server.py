@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
+from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
     SOURCE_HUMAN,
     SOURCE_SCHEDULED,
@@ -3077,13 +3078,8 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     assert ("queue.updated", {"session_id": session_id}) in published
 
 
-def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch, tmp_path):
-    """HFR-430 — Agent-to-Agent send-now reuses the Workbench turn transition.
-
-    The Agent Run row and queued message must exist before Stop is attempted. The
-    active turn is then canceled once, and the durable successor claim starts
-    the durable Agent Run as a new scheduled turn.
-    """
+def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, tmp_path):
+    """Agent-to-Agent send-now persists first, then steers the exact FIFO head."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
@@ -3124,8 +3120,6 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
     )
     assert request_store.claim(request.id) is not None
     original_started = asyncio.Event()
-    replacement_started = asyncio.Event()
-    original_cancelled = asyncio.Event()
     seen: list[tuple[str, str]] = []
 
     async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
@@ -3133,12 +3127,7 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
         if text == "original work":
             _bind_test_native_start(engine, ctx)
             original_started.set()
-            try:
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                original_cancelled.set()
-                raise
-        replacement_started.set()
+            await asyncio.sleep(60)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
     monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _dispatch)
@@ -3146,14 +3135,9 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
-
-    async def _stop_original(_context):
-        active = app.state.in_flight_dispatches.get(session_id)
-        assert active is not None
-        active.task.cancel()
-        return True
-
-    controller.command_handler.handle_stop.side_effect = _stop_original
+    controller.session_turns._steer = AsyncMock(
+        return_value=steer_result(SteerOutcome.ACCEPTED)
+    )
 
     async def _go():
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -3184,35 +3168,32 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
                 request.message or "",
                 delivery_intent="send_now",
             )
-            await asyncio.wait_for(original_cancelled.wait(), timeout=3)
-            await asyncio.wait_for(replacement_started.wait(), timeout=3)
-            for _ in range(200):
-                if session_id not in app.state.in_flight_dispatches:
-                    break
-                await asyncio.sleep(0.01)
+            active = app.state.in_flight_dispatches[session_id]
+            assert not active.task.done()
+            active.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await active.task
             return result
 
     result = asyncio.run(_go())
 
     assert result == session_turns.TurnSubmissionResult(
-        route="enqueued",
+        route="ran",
         queue_persisted=True,
         target_was_busy=True,
-        delivery_status="waiting_terminal",
+        delivery_status="accepted",
         delivery_owner_transferred=True,
     )
-    controller.command_handler.handle_stop.assert_awaited_once()
-    assert seen == [
-        ("original work", SOURCE_HUMAN),
-        ("apply the correction", SOURCE_SCHEDULED),
-    ]
+    controller.command_handler.handle_stop.assert_not_awaited()
+    controller.session_turns._steer.assert_awaited_once()
+    assert seen == [("original work", SOURCE_HUMAN)]
     with engine.connect() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
     stored = request_store.get_run(request.id)
     assert stored is not None
     assert stored["metadata"]["delivery_outcome"] == {
         "intent": "send_now",
-        "status": "waiting_terminal",
+        "status": "accepted",
         "target_was_busy": True,
     }
 
@@ -3302,11 +3283,75 @@ def test_agent_run_send_now_refusal_keeps_the_turn_and_queue(monkeypatch, tmp_pa
     }
 
 
-def test_concurrent_agent_run_send_now_callers_share_one_interrupt_and_drain_fifo(
+def test_agent_run_send_now_retry_promotes_its_persisted_queue_head(monkeypatch, tmp_path):
+    """A retry reuses the owned P3 Delivery instead of losing send-now intent."""
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, _owner_turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_agent_send_now_retry",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="retry this correction",
+        agent_name="worker",
+        delivery_intent="send_now",
+    )
+    assert request_store.claim(request.id) is not None
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    controller.session_turns._steer = AsyncMock(
+        side_effect=(
+            steer_result(SteerOutcome.REFUSED, reason="temporarily_unavailable"),
+            steer_result(SteerOutcome.ACCEPTED),
+        )
+    )
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{request.id}",
+        platform_specific={
+            "task_execution_id": request.id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    async def _go():
+        first = await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            context,
+            request.message or "",
+            delivery_intent="send_now",
+        )
+        second = await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            context,
+            request.message or "",
+            delivery_intent="send_now",
+        )
+        return first, second
+
+    first, second = asyncio.run(_go())
+
+    assert first.delivery_status == "queued"
+    assert second.delivery_status == "accepted"
+    assert controller.session_turns._steer.await_count == 2
+    with engine.connect() as conn:
+        assert message_deliveries.list_queued(conn, session_id) == []
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["metadata"]["delivery_outcome"]["status"] == "accepted"
+
+
+def test_concurrent_agent_run_send_now_callers_steer_in_fifo_order(
     monkeypatch,
     tmp_path,
 ):
-    """Two admitted Runs share one Stop, then drain the joined FIFO in order."""
+    """Concurrent send-now callers preserve FIFO and never invoke Stop."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage import messages_service
@@ -3353,9 +3398,6 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt_and_drain_fif
         assert request_store.claim(request.id) is not None
 
     original_started = asyncio.Event()
-    original_cancelled = asyncio.Event()
-    stop_entered = asyncio.Event()
-    release_stop = asyncio.Event()
     seen: list[str] = []
 
     async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
@@ -3363,28 +3405,18 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt_and_drain_fif
         _bind_test_native_start(engine, ctx)
         if text == "original work":
             original_started.set()
-            try:
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                original_cancelled.set()
-                raise
+            await asyncio.sleep(60)
         return TurnDispatchOutcome(
             error=None,
             settled_by=SETTLED_BY_TERMINAL_RESULT,
         )
 
-    async def _stop(_context):
-        stop_entered.set()
-        await release_stop.wait()
-        active = app.state.in_flight_dispatches.get(session_id)
-        assert active is not None
-        active.task.cancel()
-        return True
-
     monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _dispatch)
     controller = _build_controller_double()
-    controller.command_handler.handle_stop = AsyncMock(side_effect=_stop)
     app = internal_server.create_app(controller)
+    controller.session_turns._steer = AsyncMock(
+        return_value=steer_result(SteerOutcome.ACCEPTED)
+    )
     transport = httpx.ASGITransport(app=app)
 
     def _context(request):
@@ -3425,41 +3457,32 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt_and_drain_fif
                 )
                 for request in requests
             ]
-            await asyncio.wait_for(stop_entered.wait(), timeout=3)
-            for _ in range(100):
-                with engine.connect() as conn:
-                    queued = message_deliveries.list_queued(conn, session_id)
-                    owner = message_deliveries.active_turn(conn, session_id)
-                    if len(queued) == 1 and owner and owner["control_successor_turn_id"]:
-                        break
-                await asyncio.sleep(0.01)
-            assert controller.command_handler.handle_stop.await_count == 1
-            release_stop.set()
             results = await asyncio.gather(*submissions)
-            await asyncio.wait_for(original_cancelled.wait(), timeout=3)
-            for _ in range(300):
-                if len(seen) == 3 and session_id not in app.state.in_flight_dispatches:
-                    break
-                await asyncio.sleep(0.01)
+            active = app.state.in_flight_dispatches[session_id]
+            assert not active.task.done()
+            active.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await active.task
             return results
 
     results = asyncio.run(_go())
 
-    assert controller.command_handler.handle_stop.await_count == 1
+    controller.command_handler.handle_stop.assert_not_awaited()
+    assert controller.session_turns._steer.await_count == 2
     assert [result.delivery_status for result in results] == [
-        "waiting_terminal",
-        "queued",
+        "accepted",
+        "accepted",
     ]
-    assert all(result.route == "enqueued" for result in results)
+    assert all(result.route == "ran" for result in results)
     assert all(result.queue_persisted is True for result in results)
     assert all(result.target_was_busy is True for result in results)
     assert all(result.delivery_owner_transferred is True for result in results)
-    assert seen == ["original work", "first correction", "second correction"]
+    assert seen == ["original work"]
     with engine.connect() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
     for request, expected_status in zip(
         requests,
-        ("waiting_terminal", "queued"),
+        ("accepted", "accepted"),
         strict=True,
     ):
         stored = request_store.get_run(request.id)
@@ -3651,7 +3674,7 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
             delivery_intent="send_now",
         )
         for _ in range(300):
-            if len(seen) == 1 and session_id not in app.state.in_flight_dispatches:
+            if len(seen) == 1:
                 break
             await asyncio.sleep(0.01)
         return result
@@ -3659,16 +3682,16 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
     result = asyncio.run(_go())
 
     assert result == session_turns.TurnSubmissionResult(
-        route="ran",
+        route="enqueued",
         queue_persisted=True,
         target_was_busy=False,
-        delivery_status="claimed",
+        delivery_status="queued",
         delivery_owner_transferred=True,
     )
-    assert seen == ["new urgent input"]
+    assert seen == ["older queued input"]
     with engine.connect() as conn:
         assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
-            "older queued input"
+            "new urgent input"
         ]
     controller.command_handler.handle_stop.assert_not_awaited()
 

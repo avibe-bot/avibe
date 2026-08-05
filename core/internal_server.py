@@ -135,7 +135,9 @@ def create_app(controller: "Controller") -> FastAPI:
     ) -> Any:
         """Run a Harness input through the same durable owner as interactive Chat.
 
-        The explicit source intent decides whether it queues, steers, or replaces.
+        The explicit source intent decides whether it queues or steers. Send-now
+        persists the new input at P3, then promotes the exact FIFO head through
+        empty P1; it never stops the active Turn or jumps older queued work.
         The submission remains a Delivery until exact native acceptance materializes
         the harness Message.
         """
@@ -239,24 +241,30 @@ def create_app(controller: "Controller") -> FastAPI:
                                 target_was_busy=target_was_busy,
                                 delivery_status="canceled",
                             )
-                        return TurnSubmissionResult(
-                            route=(
-                                "enqueued"
-                                if existing_state
-                                in {
-                                    "queued",
-                                    "interrupt_waiting",
-                                    "waiting_terminal",
-                                    "reconciling_steer",
-                                }
-                                else "ran"
-                            ),
-                            queue_persisted=True,
-                            target_was_busy=target_was_busy,
-                            delivery_status=existing_state,
-                            delivery_owner_transferred=True,
-                        )
-                return "duplicate"
+                        if not (
+                            delivery_intent == "send_now"
+                            and existing_state == "queued"
+                        ):
+                            return TurnSubmissionResult(
+                                route=(
+                                    "enqueued"
+                                    if existing_state
+                                    in {
+                                        "queued",
+                                        "interrupt_waiting",
+                                        "waiting_terminal",
+                                        "reconciling_steer",
+                                    }
+                                    else "ran"
+                                ),
+                                queue_persisted=True,
+                                target_was_busy=target_was_busy,
+                                delivery_status=existing_state,
+                                delivery_owner_transferred=True,
+                            )
+                        delivery_owner_transferred = True
+                if not delivery_owner_transferred:
+                    return "duplicate"
             if legacy_accepted:
                 return "duplicate"
             status = conn.execute(
@@ -270,8 +278,14 @@ def create_app(controller: "Controller") -> FastAPI:
                 scope_id = delivery_request.scope_id
                 from core.message_priority import delivery_intent_for_priority
 
-                effective_delivery_intent = delivery_intent_for_priority(
+                persisted_intent = delivery_intent_for_priority(
                     delivery_request.priority
+                )
+                effective_delivery_intent = (
+                    "send_now"
+                    if delivery_intent == "send_now"
+                    and delivery_request.priority == "p3"
+                    else persisted_intent
                 )
                 provenance = (delivery_request.metadata or {}).get(
                     SCHEDULED_PROVENANCE_KEY
@@ -290,7 +304,11 @@ def create_app(controller: "Controller") -> FastAPI:
 
                 delivery_id = message_deliveries.new_delivery_id()
                 admitted_state = "reserved"
-                priority = priority_for_delivery_intent(delivery_intent)
+                priority = (
+                    "p3"
+                    if delivery_intent == "send_now"
+                    else priority_for_delivery_intent(delivery_intent)
+                )
                 message_deliveries.insert_delivery(
                     conn,
                     delivery_id=delivery_id,
@@ -322,7 +340,7 @@ def create_app(controller: "Controller") -> FastAPI:
                         "state": admitted_state,
                     },
                 )
-            if execution_id:
+            if execution_id and not delivery_owner_transferred:
                 if not attach_agent_run_delivery_in_connection(
                     conn,
                     execution_id,
@@ -354,7 +372,11 @@ def create_app(controller: "Controller") -> FastAPI:
 
             delivery_request = DeliveryRequest(
                 session_id=session_id,
-                priority=priority_for_delivery_intent(delivery_intent),
+                priority=(
+                    "p3"
+                    if delivery_intent == "send_now"
+                    else priority_for_delivery_intent(delivery_intent)
+                ),
                 content=text,
                 delivery_id=delivery_id,
                 scope_id=scope_id,
@@ -436,8 +458,24 @@ def create_app(controller: "Controller") -> FastAPI:
                 delivery_status=delivery_status,
                 delivery_owner_transferred=True,
             )
-        route = "enqueued" if result.state in {
+        delivery_state = str(result.state)
+        if effective_delivery_intent == "send_now" and target_was_busy:
+            with get_cached_sqlite_engine().connect() as conn:
+                observed_head = message_deliveries.ordering_head(conn, session_id)
+            if observed_head is not None:
+                await manager.send_now(
+                    session_id,
+                    expected_delivery_id=str(observed_head["id"]),
+                )
+                with get_cached_sqlite_engine().connect() as conn:
+                    latest = message_deliveries.get_delivery(conn, delivery_id)
+                if latest is not None:
+                    delivery_state = str(latest["state"])
+
+        route = "enqueued" if delivery_state in {
             "queued",
+            "pending_steer",
+            "steering",
             "interrupt_waiting",
             "waiting_terminal",
             "reconciling_steer",
@@ -447,11 +485,11 @@ def create_app(controller: "Controller") -> FastAPI:
             queue_persisted=True,
             target_was_busy=target_was_busy,
             delivery_status=(
-                result.state if effective_delivery_intent == "send_now" else None
+                delivery_state if effective_delivery_intent == "send_now" else None
             ),
             delivery_owner_transferred=delivery_owner_transferred,
         )
-        _publish_scheduled_queue_growth(session_id, str(result.state))
+        _publish_scheduled_queue_growth(session_id, delivery_state)
         if effective_delivery_intent == "send_now":
             try:
                 with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
@@ -460,7 +498,7 @@ def create_app(controller: "Controller") -> FastAPI:
                         execution_id,
                         {
                             "intent": "send_now",
-                            "status": result.state,
+                            "status": delivery_state,
                             "target_was_busy": submission.target_was_busy,
                         },
                     )

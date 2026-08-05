@@ -5861,7 +5861,7 @@ class SessionTurnManager:
         text: str,
         *,
         source: str = SOURCE_HUMAN,
-        delivery_intent: Literal["queue", "send_now", "steer"] = "queue",
+        delivery_intent: Literal["queue", "replace", "steer"] = "queue",
     ) -> TurnSubmissionResult:
         """Admit one caller through the durable Delivery owner."""
         from core.message_priority import priority_for_delivery_intent
@@ -5872,7 +5872,7 @@ class SessionTurnManager:
             await self._run(None, context, text, source=source)
             return TurnSubmissionResult(
                 route="ran",
-                delivery_status="ran" if delivery_intent == "send_now" else None,
+                delivery_status="ran" if delivery_intent == "replace" else None,
             )
 
         spec = dict(getattr(context, "platform_specific", None) or {})
@@ -5933,7 +5933,7 @@ class SessionTurnManager:
             route="enqueued" if enqueued else "ran",
             queue_persisted=True,
             target_was_busy=busy,
-            delivery_status=result.state if delivery_intent == "send_now" else None,
+            delivery_status=result.state if delivery_intent == "replace" else None,
         )
 
     async def _run(

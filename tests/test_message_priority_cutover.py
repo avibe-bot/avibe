@@ -31,7 +31,7 @@ def test_source_policy_has_one_explicit_delivery_intent(
 @pytest.mark.parametrize(
     ("intent", "expected_priority"),
     [
-        ("send_now", "p0"),
+        ("replace", "p0"),
         ("steer", "p1"),
         ("queue", "p3"),
     ],
@@ -47,7 +47,7 @@ def test_delivery_intent_maps_to_exact_priority(
 
 @pytest.mark.parametrize(
     ("priority", "expected_intent"),
-    [("p0", "send_now"), ("p1", "steer"), ("p3", "queue")],
+    [("p0", "replace"), ("p1", "steer"), ("p3", "queue")],
 )
 def test_delivery_priority_maps_to_exact_intent(
     priority: str,

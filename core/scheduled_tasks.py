@@ -8485,34 +8485,6 @@ class ScheduledTaskService:
         delivery_intent = normalize_agent_run_delivery_intent(
             (metadata or {}).get(AGENT_RUN_DELIVERY_INTENT_METADATA_KEY)
         )
-        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and (
-            target.platform != "avibe" or not session_id or gate is None
-        ):
-            target_label = target.platform or "unknown"
-            delivery_outcome = {
-                "intent": delivery_intent,
-                "status": "unsupported_target",
-                "target_was_busy": False,
-            }
-            from storage.background import (
-                record_agent_run_delivery_outcome_in_connection,
-                run_update_event_transaction,
-            )
-
-            with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
-                record_agent_run_delivery_outcome_in_connection(
-                    conn,
-                    execution_id,
-                    delivery_outcome,
-                )
-            return AgentRunExecutionResult(
-                error=(
-                    "send-now requires a live Web/Workbench Agent Session; "
-                    f"target platform is '{target_label}'"
-                ),
-                complete_on_return=True,
-                delivery_outcome=delivery_outcome,
-            )
         if session_id and gate is not None:
             if delivery_intent != AGENT_RUN_DELIVERY_STEER:
                 state = await gate.submit_scheduled(

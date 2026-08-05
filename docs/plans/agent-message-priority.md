@@ -8,10 +8,8 @@ P2 and P4 remain reserved for a separate Mailbox design.
 
 ## Priority Semantics
 
-- **P0 interrupt** is an explicit action, never a default for ordinary input.
-  Without content it stops the active Turn. With content, the delivery owner
-  first persists the replacement Delivery and waiting successor Turn, then
-  stops the active Turn and starts the successor.
+- **P0 Stop** is an explicit content-free action. It stops the exact active
+  Turn; no message-producing surface may use P0 to replace that Turn.
 - **P1 steer** delivers content into the expected currently active Turn without
   stopping it. A content-free P1 request atomically promotes the current
   P3 queue head. A definitive steering failure may transfer the same Delivery to
@@ -93,7 +91,7 @@ instead of claiming equivalent durability.
 | --- | --- | --- |
 | Web composer | P3 | Starts when idle; otherwise joins the FIFO backlog. |
 | Ordinary IM message | P1 | Steers the active Turn or starts when idle; a definitive refusal falls back to P3. |
-| Existing-Session Agent Run | P1 | Same as ordinary IM. `--queue` selects P3 and `--send-now` selects content P0 for Workbench Sessions. |
+| Existing-Session Agent Run | P1 | Same as ordinary IM. `--queue` selects P3. `--send-now` first persists the new Run at P3, then promotes the exact FIFO head through P1; it never stops the active Turn or jumps older work. |
 | Watch, Hook, Webhook | P1 | Continues the target Session without interrupting it. |
 | Show annotation | P1 | Delivers the annotation to the current Turn when possible. |
 | Session callback | P1 | Delivers each completed child Run independently. |
