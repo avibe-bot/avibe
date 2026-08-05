@@ -738,25 +738,31 @@ def test_memory_internal_reads_accept_an_associated_agent_session():
     controller.memory_runtime.profile_payload.assert_awaited_once_with(principal_id, PROJECT)
 
 
-def test_memory_log_internal_routes_validate_query_and_keep_scope(monkeypatch):
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+def test_memory_log_internal_routes_validate_query_and_use_admin_scope(monkeypatch):
+    from core.memory.http_headers import CALLER_SESSION_HEADER, MEMORY_USER_KEY_HEADER
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
-    principal_id = "u-11111111111111111111111111111111"
     runtime = types.SimpleNamespace(
-        principal_for_user_key=Mock(return_value=principal_id),
-        log_entries_payload=AsyncMock(
+        admin_log_entries_payload=AsyncMock(
             return_value={"status": "ok", "entries": [], "next_cursor": None}
         ),
-        log_entry_payload=AsyncMock(
+        admin_log_entry_payload=AsyncMock(
             side_effect=(
                 {"status": "ok", "entry": {"memcell_id": "mc_1"}},
                 {"status": "not_found"},
             )
         ),
+        log_entries_payload=AsyncMock(
+            return_value={"status": "ok", "entries": [], "next_cursor": None}
+        ),
+        log_entry_payload=AsyncMock(
+            return_value={"status": "ok", "entry": {"memcell_id": "mc_cli"}}
+        ),
     )
     controller = _build_controller_double()
     controller.memory_runtime = runtime
+    principal_id = "u-11111111111111111111111111111111"
+    _set_memory_cli_sessions(controller, {"ses-owner": principal_id})
     secret = "test-ui-controller-secret"
     app = internal_server.create_app(controller, memory_ui_secret=secret)
 
@@ -799,12 +805,24 @@ def test_memory_log_internal_routes_validate_query_and_keep_scope(monkeypatch):
                     "/internal/memory/log/entry?memcell_id=../secret",
                     headers=headers("/internal/memory/log/entry"),
                 ),
+                await client.get(
+                    "/internal/memory/log?limit=4",
+                    headers={CALLER_SESSION_HEADER: "ses-owner"},
+                ),
+                await client.get(
+                    "/internal/memory/log/entry?memcell_id=mc_cli",
+                    headers={CALLER_SESSION_HEADER: "ses-owner"},
+                ),
             )
 
-    listed, detail, missing, duplicate, long_cursor, invalid_id = asyncio.run(_go())
+    listed, detail, missing, duplicate, long_cursor, invalid_id, cli_list, cli_detail = asyncio.run(
+        _go()
+    )
 
     assert listed.status_code == 200
     assert detail.status_code == 200
+    assert cli_list.status_code == 200
+    assert cli_detail.status_code == 200
     assert missing.status_code == 404
     assert missing.json() == {
         "status": "failed",
@@ -813,11 +831,22 @@ def test_memory_log_internal_routes_validate_query_and_keep_scope(monkeypatch):
     for response in (duplicate, long_cursor, invalid_id):
         assert response.status_code == 400
         assert response.json() == {"status": "failed", "error": "memory_invalid_input"}
-    runtime.log_entries_payload.assert_awaited_once_with(principal_id, PROJECT, "abc", 3)
-    assert runtime.log_entry_payload.await_args_list == [
-        ((principal_id, PROJECT, "mc_1"),),
-        ((principal_id, PROJECT, "mc_missing"),),
+    runtime.admin_log_entries_payload.assert_awaited_once_with("abc", 3)
+    assert runtime.admin_log_entry_payload.await_args_list == [
+        (("mc_1",),),
+        (("mc_missing",),),
     ]
+    runtime.log_entries_payload.assert_awaited_once_with(
+        principal_id,
+        PROJECT,
+        None,
+        4,
+    )
+    runtime.log_entry_payload.assert_awaited_once_with(
+        principal_id,
+        PROJECT,
+        "mc_cli",
+    )
 
 
 def test_memory_ui_reads_use_the_default_agent_session_project(tmp_path: Path):

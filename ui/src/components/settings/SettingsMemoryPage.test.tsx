@@ -100,7 +100,6 @@ beforeEach(() => {
     status: 'ok',
     enabled: true,
     processing: { llm: endpoint, embedding: endpoint },
-    diagnostics: { log_provider_calls: true, mutable: true },
   });
   api.getMemoryStatus.mockResolvedValue({ status: 'failed', error: 'memory_status_failed' });
   api.getMemoryFailures.mockResolvedValue({ items: [], retention_days: 90 });
@@ -187,7 +186,6 @@ describe('SettingsMemoryPage disabled recorder health', () => {
       status: 'ok',
       enabled: false,
       processing: { llm: endpoint, embedding: endpoint },
-      diagnostics: { log_provider_calls: false, mutable: true },
     });
   });
 
@@ -227,7 +225,6 @@ describe('SettingsMemoryPage disabled recorder health', () => {
       status: 'ok',
       enabled: true,
       processing: { llm: endpoint, embedding: endpoint },
-      diagnostics: { log_provider_calls: true, mutable: true },
     });
     api.getMemoryStatus.mockResolvedValue({
       status: 'ok',

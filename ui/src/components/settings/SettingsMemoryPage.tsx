@@ -21,7 +21,7 @@ import type {
   MemoryStatus,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { memoryDiagnostics, memoryRuntimeRecoveryAvailable, memorySetupStage } from '../../lib/memorySettings';
+import { memoryRuntimeRecoveryAvailable, memorySetupStage } from '../../lib/memorySettings';
 import { memoryErrorMessage } from '../../lib/memoryRead';
 
 type MemoryTab = 'status' | 'profile' | 'search' | 'log' | 'settings';
@@ -287,7 +287,6 @@ export const SettingsMemoryPage: React.FC = () => {
             <MemoryLogPanel
               key={logGeneration}
               enabled={settings.enabled}
-              loggingEnabled={memoryDiagnostics(settings).logProviderCalls}
               status={status}
               onClearAll={() => setClearOpen(true)}
             />

@@ -106,22 +106,19 @@ async def _memory_internal_response(call: Callable[[], Any]) -> Response:
     return _memory_response(body, status_code=status_code)
 
 
-def _memory_settings_projection(memory: object, *, diagnostics_mutable: bool) -> dict:
+def _memory_settings_projection(memory: object) -> dict:
     from config.v2_config import memory_config_to_payload
 
     payload = memory_config_to_payload(memory)
-    payload["diagnostics"]["mutable"] = diagnostics_mutable
+    payload.pop("diagnostics", None)
     return payload
 
 
-def _memory_settings_payload(*, diagnostics_mutable: bool) -> dict:
+def _memory_settings_payload() -> dict:
     # Tag the response, not `memory_config_to_payload` itself: the same helper
     # feeds the persisted config, which must stay free of result envelopes.
     return {
-        **_memory_settings_projection(
-            V2Config.load().memory,
-            diagnostics_mutable=diagnostics_mutable,
-        ),
+        **_memory_settings_projection(V2Config.load().memory),
         "status": "ok",
     }
 
@@ -132,7 +129,7 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
     from config.v2_config import memory_config_to_payload
 
     if not isinstance(patch_payload, dict) or not set(patch_payload).issubset(
-        {"enabled", "processing", "diagnostics"}
+        {"enabled", "processing"}
     ):
         raise ValueError("invalid_memory_patch")
     target = memory_config_to_payload(current.memory, include_secrets=True)
@@ -153,18 +150,6 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
             if not isinstance(endpoint_patch, dict) or not set(endpoint_patch).issubset({"base_url", "model", "api_key"}):
                 raise ValueError("invalid_memory_patch")
             target["processing"][endpoint].update(endpoint_patch)
-
-    diagnostics_patch = patch_payload.get("diagnostics")
-    if diagnostics_patch is not None:
-        if not isinstance(diagnostics_patch, dict) or not set(diagnostics_patch).issubset(
-            {"log_provider_calls"}
-        ):
-            raise ValueError("invalid_memory_patch")
-        if "log_provider_calls" in diagnostics_patch:
-            value = diagnostics_patch["log_provider_calls"]
-            if not isinstance(value, bool):
-                raise ValueError("invalid_memory_patch")
-            target["diagnostics"]["log_provider_calls"] = value
 
     explicit_key_clear = any(
         endpoint_patch.get("api_key") in {None, ""}
@@ -258,8 +243,6 @@ def _memory_restart_request_task() -> asyncio.Task[tuple[dict, int]]:
 
 async def _apply_memory_settings_patch(
     patch_payload: object,
-    *,
-    diagnostics_mutable: bool = True,
 ) -> Response:
     """Persist one Memory settings patch, reconcile it, or roll the save back.
 
@@ -280,11 +263,6 @@ async def _apply_memory_settings_patch(
             current = await asyncio.to_thread(V2Config.load)
             target_payload = _memory_settings_patch(current, patch_payload)
             candidate = _memory_candidate_config(current, target_payload)
-            disable_diagnostics = bool(
-                isinstance(patch_payload, dict)
-                and isinstance(patch_payload.get("diagnostics"), dict)
-                and patch_payload["diagnostics"].get("log_provider_calls") is False
-            )
             embedding_change_pending = (
                 current.memory.embedding_change_pending
                 or _memory_embedding_configuration_changed(current, candidate)
@@ -316,8 +294,6 @@ async def _apply_memory_settings_patch(
                     current.memory,
                     include_secrets=True,
                 )
-                if disable_diagnostics:
-                    rollback_payload["diagnostics"]["log_provider_calls"] = False
                 await asyncio.to_thread(
                     api.save_memory_config,
                     rollback_payload,
@@ -335,10 +311,7 @@ async def _apply_memory_settings_patch(
             )
         if response.status_code >= 500:
             return response
-        payload = _memory_settings_projection(
-            saved.memory,
-            diagnostics_mutable=diagnostics_mutable,
-        )
+        payload = _memory_settings_projection(saved.memory)
         payload["runtime"] = runtime_payload
         payload["status"] = "ok"
         return _memory_response(payload)
@@ -353,14 +326,8 @@ def register_memory_routes(app) -> None:
             if _memory_ui_user_key() is None:
                 return _memory_forbidden_response()
             try:
-                from vibe import ui_server
-
-                diagnostics_mutable = ui_server.is_direct_loopback_memory_request()
                 return _memory_response(
-                    await asyncio.to_thread(
-                        _memory_settings_payload,
-                        diagnostics_mutable=diagnostics_mutable,
-                    )
+                    await asyncio.to_thread(_memory_settings_payload)
                 )
             except Exception:
                 return _memory_response({"status": "failed", "error": "memory_store_unavailable"}, status_code=503)
@@ -376,22 +343,7 @@ def register_memory_routes(app) -> None:
                 patch_payload = await starlette_request.json()
             except (TypeError, ValueError):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            from vibe import ui_server
-
-            diagnostics_mutable = ui_server.is_direct_loopback_memory_request()
-            if (
-                isinstance(patch_payload, dict)
-                and "diagnostics" in patch_payload
-                and not diagnostics_mutable
-            ):
-                return _memory_response(
-                    {"status": "failed", "error": "memory_access_denied"},
-                    status_code=403,
-                )
-            return await _apply_memory_settings_patch(
-                patch_payload,
-                diagnostics_mutable=diagnostics_mutable,
-            )
+            return await _apply_memory_settings_patch(patch_payload)
 
         return await app.dispatch_native_request(starlette_request, handler)
 

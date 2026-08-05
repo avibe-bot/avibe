@@ -1,7 +1,6 @@
 import type {
   MemoryEndpointConfig,
   MemoryEndpointPatch,
-  MemorySettings,
   MemorySettingsResult,
 } from '../context/ApiContext';
 import { isMemoryOk } from './memoryRead';
@@ -23,12 +22,6 @@ export const memoryRuntimeRecoveryAvailable = (
 
 export const memoryNavShouldBeVisible = (settings: MemorySettingsResult): boolean =>
   isMemoryOk(settings) && settings.enabled;
-
-export const memoryDiagnostics = (settings: Pick<MemorySettings, 'diagnostics'>) => ({
-  logProviderCalls: settings.diagnostics?.log_provider_calls === true,
-  // Missing authority metadata must fail closed during a rolling upgrade.
-  mutable: settings.diagnostics?.mutable === true,
-});
 
 export const draftFromConfig = (config: MemoryEndpointConfig): EndpointDraft => ({
   baseUrl: config.base_url ?? '',

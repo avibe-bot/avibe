@@ -364,30 +364,6 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Reconcile while both controller and module lifecycle locks are held."""
 
-        capture_revoked = (
-            self._config.diagnostics.log_provider_calls
-            and not config.diagnostics.log_provider_calls
-        )
-        if capture_revoked:
-            # Revocation precedes every candidate probe. A failed endpoint or
-            # artifact replacement may retain the old functional settings, but
-            # it must never retain a child that can append diagnostic payloads.
-            await self._stop_worker()
-            stopped_process = self._process is not None
-            if stopped_process:
-                await self._process.stop()
-                self._process = None
-            self._process_records_calls = False
-            self._config = replace(self._config, diagnostics=config.diagnostics)
-            self._restart_config = replace(
-                self._restart_config,
-                diagnostics=config.diagnostics,
-            )
-            self._configure_insight_reader(self._config)
-            self._reset_recorder_health_unless_corrupt()
-            if stopped_process:
-                self._ensure_call_log_retention()
-
         embedding_changed = not skip_embedding_guard and (
             config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
         )
@@ -510,7 +486,6 @@ class MemoryRuntime:
                 self.module._worker.resume_claims()
             return {"ok": False, "error": self._runtime_error}
 
-        records_calls = config.diagnostics.log_provider_calls
         await self._stop_call_log_retention()
         sidecar: EverOSProcessPort | None = None
 
@@ -531,7 +506,7 @@ class MemoryRuntime:
 
         settings = _process_settings(
             config,
-            call_log_db_path=self._call_log_db_path if records_calls else None,
+            call_log_db_path=self._call_log_db_path,
         )
         sidecar = self._process_factory(
             python,
@@ -540,11 +515,11 @@ class MemoryRuntime:
             settings=settings,
             socket_path=self._socket_path,
             on_ready=sidecar_ready,
-            before_start=before_recorder_start if records_calls else None,
-            on_reaped=recorder_reaped if records_calls else None,
+            before_start=before_recorder_start,
+            on_reaped=recorder_reaped,
         )
         self._process = sidecar
-        self._process_records_calls = records_calls
+        self._process_records_calls = True
         try:
             started = await self._process.start()
         except BaseException:
@@ -558,11 +533,7 @@ class MemoryRuntime:
             return {"ok": False, "error": self._runtime_error}
         if self._ready_event is sidecar:
             self._ready_event = None
-        if records_calls:
-            self._recorder_health = dict(_RECORDER_DEGRADED)
-        else:
-            self._reset_recorder_health_unless_corrupt()
-            self._ensure_call_log_retention()
+        self._recorder_health = dict(_RECORDER_DEGRADED)
         self._runtime_error = None
         self.module._worker.resume_claims()
         self._ensure_worker()
@@ -589,10 +560,7 @@ class MemoryRuntime:
     async def _recorder_status_payload(self) -> dict[str, str | None]:
         if self._recorder_health.get("reason") == "call_log_corrupt":
             return dict(self._recorder_health)
-        if not (
-            self._config.enabled
-            and self._config.diagnostics.log_provider_calls
-        ):
+        if not self._config.enabled:
             return dict(self._recorder_health)
         if not (
             self._process_records_calls
@@ -605,8 +573,8 @@ class MemoryRuntime:
         except Exception:
             health = dict(_RECORDER_DEGRADED)
         if health.get("state") == "disabled":
-            # Diagnostics was explicitly enabled. A live sidecar with its
-            # recorder off is a writer failure, not an intentional disable.
+            # Recording is always enabled. A live sidecar with its recorder
+            # off is a writer failure, not an intentional state.
             health = dict(_RECORDER_DEGRADED)
         self._recorder_health = dict(health)
         return dict(self._recorder_health)
@@ -686,6 +654,26 @@ class MemoryRuntime:
             return {"status": "failed", "error": "memory_store_unavailable"}
         return await self._run_insight_read(
             lambda: reader.entry_detail((principal_id, project_id), memcell_id)
+        )
+
+    async def admin_log_entries_payload(
+        self,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        reader = self._insight_reader
+        if not self.available or reader is None:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        return await self._run_insight_read(
+            lambda: reader.list_admin_entries(cursor, limit)
+        )
+
+    async def admin_log_entry_payload(self, memcell_id: str) -> dict[str, Any]:
+        reader = self._insight_reader
+        if not self.available or reader is None:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        return await self._run_insight_read(
+            lambda: reader.admin_entry_detail(memcell_id)
         )
 
     async def _run_insight_read(
@@ -930,7 +918,6 @@ class MemoryRuntime:
                 self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": self._runtime_error}
 
-            records_calls = self._config.diagnostics.log_provider_calls
             await self._stop_call_log_retention()
             sidecar: EverOSProcessPort | None = None
 
@@ -955,15 +942,15 @@ class MemoryRuntime:
                 effective_home=self._effective_home,
                 settings=_process_settings(
                     self._config,
-                    call_log_db_path=self._call_log_db_path if records_calls else None,
+                    call_log_db_path=self._call_log_db_path,
                 ),
                 socket_path=self._socket_path,
                 on_ready=sidecar_ready,
-                before_start=before_recorder_start if records_calls else None,
-                on_reaped=recorder_reaped if records_calls else None,
+                before_start=before_recorder_start,
+                on_reaped=recorder_reaped,
             )
             self._process = sidecar
-            self._process_records_calls = records_calls
+            self._process_records_calls = True
             worker.begin_new_lease_activation()
             try:
                 started = await sidecar.start()
@@ -980,11 +967,7 @@ class MemoryRuntime:
             if self._ready_event is sidecar:
                 self._ready_event = None
 
-            if records_calls:
-                self._recorder_health = dict(_RECORDER_DEGRADED)
-            else:
-                self._reset_recorder_health_unless_corrupt()
-                self._ensure_call_log_retention()
+            self._recorder_health = dict(_RECORDER_DEGRADED)
             self._runtime_error = None
             worker.resume_claims()
             self._ensure_worker()
@@ -1226,12 +1209,8 @@ class MemoryRuntime:
                         continue
                     if not self._ready_event_is_current(process):
                         continue
-                    if self._config.diagnostics.log_provider_calls:
-                        self._process_records_calls = True
-                        await self._stop_call_log_retention()
-                    else:
-                        self._process_records_calls = False
-                        self._ensure_call_log_retention()
+                    self._process_records_calls = True
+                    await self._stop_call_log_retention()
                     if not self._ready_event_is_current(process):
                         continue
                     self._runtime_error = None

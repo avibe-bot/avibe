@@ -121,7 +121,7 @@ def test_memory_enable_requires_complete_authenticated_processing_config() -> No
         V2Config.from_payload(_payload({"enabled": True, "processing": processing}))
 
 
-def test_memory_config_defaults_disabled_for_legacy_payload() -> None:
+def test_memory_config_defaults_provider_logging_on_for_legacy_payload() -> None:
     config = V2Config(
         mode="self_host",
         version="v2",
@@ -130,7 +130,24 @@ def test_memory_config_defaults_disabled_for_legacy_payload() -> None:
         agents=AgentsConfig(),
     )
     assert config.memory == MemoryConfig()
-    assert config.memory.diagnostics.log_provider_calls is False
+    assert config.memory.diagnostics.log_provider_calls is True
+
+
+def test_memory_config_upgrades_disabled_provider_logging_to_always_on() -> None:
+    config = V2Config.from_payload(
+        _payload(
+            {
+                "enabled": False,
+                "processing": {},
+                "diagnostics": {"log_provider_calls": False},
+            }
+        )
+    )
+
+    assert config.memory.diagnostics.log_provider_calls is True
+    assert config_to_payload(config)["memory"]["diagnostics"] == {
+        "log_provider_calls": True,
+    }
 
 
 @pytest.mark.parametrize(
