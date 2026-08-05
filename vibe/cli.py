@@ -52,6 +52,7 @@ from core.command_runner import command_line_preview
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
+    NO_EVENT_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
     WATCH_RECONCILE_INTERVAL_SECONDS,
     ManagedWatchStore,
@@ -1204,6 +1205,11 @@ def _watch_add_examples_text() -> str:
           Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
           Terminal failures also send a follow-up and disable the watch.
           In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
+          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and sends a timeout follow-up;
+          64 PLUS the line 'avibe-watch: no-event' on stderr means the cycle ran and found nothing worth reporting,
+          so the watch ends or re-arms WITHOUT an Agent turn; any other non-zero is a failure.
+          The marker is required: 64 alone is also sysexits EX_USAGE, so a bare 64 stays a failure and stops the watch.
+          Use it in waiters whose normal outcome is uninteresting, such as green CI.
           Pass either --shell '<command>' or a command after '--'.
           --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
 
@@ -3058,7 +3064,14 @@ def _wait_for_watch_startup(
                 help_command=inspect_command,
                 details={"watch": _watch_mutation_payload(watch, runtime_entry)},
             )
-        if watch.mode == "once" and watch.last_finished_at and not watch.last_error and watch.last_exit_code == 0:
+        # NO_EVENT_EXIT_CODE is a clean finish too: a once watch whose first cycle
+        # already decided there is nothing to report has completed, not hung.
+        if (
+            watch.mode == "once"
+            and watch.last_finished_at
+            and not watch.last_error
+            and watch.last_exit_code in (0, NO_EVENT_EXIT_CODE)
+        ):
             return watch, runtime_entry
         if runtime_entry and runtime_entry.get("running"):
             stable_for = _seconds_since_iso(runtime_entry.get("started_at")) or _seconds_since_iso(watch.last_started_at)
