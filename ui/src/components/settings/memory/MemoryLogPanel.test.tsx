@@ -49,6 +49,8 @@ afterEach(() => {
 
 const entry = (memcellId: string, preview = memcellId): MemoryLogEntry => ({
   memcell_id: memcellId,
+  project_id: 'p-11111111111111111111111111111111',
+  principal_id: 'u-11111111111111111111111111111111',
   timestamp_ms: 1_722_816_000_000,
   preview,
   message_count: 1,
@@ -152,7 +154,6 @@ const renderPanel = (props?: Partial<React.ComponentProps<typeof MemoryLogPanel>
   render(
     <MemoryLogPanel
       enabled
-      loggingEnabled
       status={null}
       onClearAll={() => undefined}
       {...props}
@@ -208,6 +209,10 @@ describe('MemoryLogPanel', () => {
     renderPanel();
     await user.click(await screen.findByText('Alpha'));
     expect(await screen.findByText('memory.log.timeline')).toBeTruthy();
+    expect(screen.getByText(/memory\.log\.projectId/)).toBeTruthy();
+    expect(screen.getByText('p-11111111111111111111111111111111')).toBeTruthy();
+    expect(screen.getByText(/memory\.log\.userId/)).toBeTruthy();
+    expect(screen.getByText('u-11111111111111111111111111111111')).toBeTruthy();
     expect(screen.getByText('memory.log.omittedSteps:4')).toBeTruthy();
     expect(screen.getByText('memory.log.omittedCalls:2')).toBeTruthy();
     expect(screen.getByText('memory.log.droppedCalls:3')).toBeTruthy();
@@ -276,26 +281,17 @@ describe('MemoryLogPanel', () => {
 
   it('leaves transient recorder recovery to the page-level restart action', async () => {
     api.getMemoryLog.mockResolvedValue(listResult([]));
-    renderPanel({ loggingEnabled: false, status: status('writer_failures') });
+    renderPanel({ status: status('writer_failures') });
 
     expect(await screen.findByText('memory.log.recorderDegraded')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
-    expect(screen.getByText('memory.log.loggingOff')).toBeTruthy();
-  });
-
-  it('keeps the normal timeline visible when provider payload logging is off', async () => {
-    api.getMemoryLog.mockResolvedValue(listResult([entry('mc-alpha', 'Alpha')]));
-    renderPanel({ loggingEnabled: false });
-
-    expect(await screen.findByText('Alpha')).toBeTruthy();
-    expect(screen.getByText('memory.log.loggingOff')).toBeTruthy();
   });
 
   it('guides corrupt logs to the existing Clear confirmation', async () => {
     api.getMemoryLog.mockResolvedValue(listResult([]));
     const clear = vi.fn();
     const user = userEvent.setup();
-    renderPanel({ loggingEnabled: false, status: status('call_log_corrupt'), onClearAll: clear });
+    renderPanel({ status: status('call_log_corrupt'), onClearAll: clear });
 
     await user.click(await screen.findByRole('button', { name: 'memory.log.clearAction' }));
     expect(clear).toHaveBeenCalledTimes(1);
@@ -317,7 +313,6 @@ describe('MemoryLogPanel', () => {
           <MemoryLogPanel
             key={generation}
             enabled
-            loggingEnabled
             status={null}
             onClearAll={() => undefined}
           />

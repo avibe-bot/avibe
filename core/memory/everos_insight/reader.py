@@ -43,6 +43,8 @@ _CURSOR_RE = re.compile(r"[A-Za-z0-9_-]+")
 _ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}")
 _PRINCIPAL_RE = re.compile(r"u-[0-9a-f]{32}")
 _PROJECT_RE = re.compile(r"p-[0-9a-f]{32}")
+_PRINCIPAL_GLOB = "u-" + "[0-9a-f]" * 32
+_PROJECT_GLOB = "p-" + "[0-9a-f]" * 32
 _ATTACHMENT_TYPES = frozenset(
     {
         "attachment",
@@ -87,7 +89,7 @@ class _Unavailable(Exception):
 
 
 class MemoryInsightReader:
-    """Synchronous, owner-scoped projection over pinned EverOS diagnostics."""
+    """Synchronous projections over pinned EverOS diagnostics."""
 
     def __init__(
         self,
@@ -133,15 +135,9 @@ class MemoryInsightReader:
         )
         capture_section = self._capture_status()
         page = (memcells or [])[:limit]
-        run_summaries, runs_section = self._read_run_summaries(
-            page,
-            principal_id=principal_id,
-            project_id=project_id,
-        )
+        run_summaries, runs_section = self._read_run_summaries(page)
         call_counts, call_section = self._read_call_counts(
             page,
-            principal_id=principal_id,
-            project_id=project_id,
             capture_available=capture_section["status"] == "available",
             runs_available=runs_section["status"] == "available",
         )
@@ -188,6 +184,64 @@ class MemoryInsightReader:
             "sections": sections,
         }
 
+    def list_admin_entries(
+        self,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
+            raise ValueError("limit must be between 1 and 50")
+        cursor_key = _decode_cursor(cursor) if cursor is not None else None
+
+        memcells, everos_section = self._read_admin_memcell_page(
+            cursor_key=cursor_key,
+            limit=limit + 1,
+        )
+        capture_section = self._capture_status()
+        page = (memcells or [])[:limit]
+        run_summaries, runs_section = self._read_run_summaries(page)
+        call_counts, call_section = self._read_call_counts(
+            page,
+            capture_available=capture_section["status"] == "available",
+            runs_available=runs_section["status"] == "available",
+        )
+
+        sections = {
+            "everos": _combine_everos_section(everos_section, runs_section),
+            "capture": capture_section,
+            "calls": call_section,
+        }
+        if memcells is None:
+            return {
+                "status": "ok",
+                "entries": [],
+                "next_cursor": None,
+                "sections": sections,
+            }
+
+        page = [row for row in page if _memcell_scope(row) is not None]
+        entries = [
+            self._list_entry(
+                row,
+                run_summary=(run_summaries or {}).get(str(row["memcell_id"])),
+                calls_available=call_counts is not None,
+                authorized_call_count=(call_counts or {}).get(str(row["memcell_id"]), 0),
+                base_urls=self._provider_base_urls,
+                exact_values=self._exact_redaction_values,
+            )
+            for row in page
+        ]
+        next_cursor = None
+        if len(memcells) > limit and page:
+            last = page[-1]
+            next_cursor = _encode_cursor(_memcell_timestamp_ms(last), str(last["memcell_id"]))
+        return {
+            "status": "ok",
+            "entries": entries,
+            "next_cursor": next_cursor,
+            "sections": sections,
+        }
+
     def entry_detail(self, scope: MemoryReadScope, memcell_id: str) -> dict[str, Any]:
         principal_id, project_id = _validated_scope(scope)
         if not isinstance(memcell_id, str) or not _ID_RE.fullmatch(memcell_id):
@@ -198,6 +252,38 @@ class MemoryInsightReader:
             project_id=project_id,
             memcell_id=memcell_id,
         )
+        return self._entry_detail_result(
+            row,
+            principal_id=principal_id,
+            project_id=project_id,
+            everos_section=everos_section,
+        )
+
+    def admin_entry_detail(self, memcell_id: str) -> dict[str, Any]:
+        if not isinstance(memcell_id, str) or not _ID_RE.fullmatch(memcell_id):
+            raise ValueError("invalid memcell id")
+        row, everos_section = self._read_admin_detail_memcell(memcell_id=memcell_id)
+        scope = _memcell_scope(row) if row is not None else None
+        if scope is None:
+            row = None
+            principal_id, project_id = "", ""
+        else:
+            principal_id, project_id = scope
+        return self._entry_detail_result(
+            row,
+            principal_id=principal_id,
+            project_id=project_id,
+            everos_section=everos_section,
+        )
+
+    def _entry_detail_result(
+        self,
+        row: sqlite3.Row | None,
+        *,
+        principal_id: str,
+        project_id: str,
+        everos_section: dict[str, str],
+    ) -> dict[str, Any]:
         if row is None:
             if everos_section["status"] == "available":
                 return {"status": "not_found"}
@@ -215,7 +301,7 @@ class MemoryInsightReader:
             project_id=project_id,
         )
         runs, owned_run_count, runs_section = self._read_detail_runs(
-            memcell_id=memcell_id,
+            memcell_id=str(row["memcell_id"]),
             principal_id=principal_id,
             project_id=project_id,
         )
@@ -397,6 +483,52 @@ class MemoryInsightReader:
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}
 
+    def _read_admin_memcell_page(
+        self,
+        *,
+        cursor_key: tuple[int, str] | None,
+        limit: int,
+    ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
+        try:
+            with _read_only(self._paths.system_db_path) as conn:
+                sql = f"""
+                    SELECT memcell_id, app_id, project_id, message_ids_json,
+                           sender_ids_json, payload_json, timestamp, timestamp_ms
+                    FROM (
+                        SELECT memcell_id, app_id, project_id,
+                               CASE WHEN length(CAST(message_ids_json AS BLOB))
+                                             <= {_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES}
+                                    THEN message_ids_json ELSE '[]' END AS message_ids_json,
+                               CASE WHEN length(CAST(sender_ids_json AS BLOB))
+                                             <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
+                                    THEN sender_ids_json ELSE '[]' END AS sender_ids_json,
+                               CASE WHEN length(CAST(payload_json AS BLOB))
+                                             <= {_MAX_MEMCELL_PAYLOAD_JSON_BYTES}
+                                    THEN payload_json ELSE NULL END AS payload_json,
+                               timestamp,
+                               {_MEMCELL_TIMESTAMP_SQL} AS timestamp_ms
+                        FROM memcell
+                        WHERE app_id = ? AND project_id GLOB ?
+                          AND length(CAST(sender_ids_json AS BLOB))
+                                <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
+                          AND CASE WHEN json_valid(sender_ids_json) THEN
+                                json_type(sender_ids_json) = 'array'
+                                AND json_array_length(sender_ids_json) = 1
+                                AND json_type(sender_ids_json, '$[0]') = 'text'
+                                AND json_extract(sender_ids_json, '$[0]') GLOB ?
+                              ELSE 0 END
+                    )
+                """
+                args: list[object] = [_APP_ID, _PROJECT_GLOB, _PRINCIPAL_GLOB]
+                if cursor_key is not None:
+                    sql += " WHERE timestamp_ms < ? OR (timestamp_ms = ? AND memcell_id < ?)"
+                    args.extend((cursor_key[0], cursor_key[0], cursor_key[1]))
+                sql += " ORDER BY timestamp_ms DESC, memcell_id DESC LIMIT ?"
+                args.append(limit)
+                return list(conn.execute(sql, args)), {"status": "available"}
+        except _Unavailable as unavailable:
+            return None, {"status": "unavailable", "reason": unavailable.reason}
+
     def _capture_status(self) -> dict[str, str]:
         try:
             with _read_only(self._paths.capture_db_path) as conn:
@@ -411,42 +543,57 @@ class MemoryInsightReader:
     def _read_run_summaries(
         self,
         memcells: list[sqlite3.Row],
-        *,
-        principal_id: str,
-        project_id: str,
     ) -> tuple[dict[str, dict[str, Any]] | None, dict[str, str]]:
         try:
             with _read_only(self._paths.ome_db_path) as conn:
                 if not memcells:
                     conn.execute("SELECT 1 FROM run_record LIMIT 1").fetchone()
                     return {}, {"status": "available"}
-                memcell_ids = [str(row["memcell_id"]) for row in memcells]
-                placeholders = ",".join("?" for _ in memcell_ids)
+                page = [
+                    {
+                        "memcell_id": str(row["memcell_id"]),
+                        "project_id": scope[1],
+                        "owner_id": scope[0],
+                    }
+                    for row in memcells
+                    if (scope := _memcell_scope(row)) is not None
+                ]
+                if not page:
+                    conn.execute("SELECT 1 FROM run_record LIMIT 1").fetchone()
+                    return {}, {"status": "available"}
+                page_json = json.dumps(page, separators=(",", ":"))
                 status_columns = ", ".join(
-                    f"SUM(status = '{status}') AS {status}" for status in _LIST_RUN_STATUSES
+                    f"SUM(rr.status = '{status}') AS {status}"
+                    for status in _LIST_RUN_STATUSES
                 )
                 rows = conn.execute(
                     f"""
-                    SELECT json_extract(event_payload, '$.memcell_id') AS memcell_id,
+                    WITH page AS MATERIALIZED (
+                        SELECT json_extract(value, '$.memcell_id') AS memcell_id,
+                               json_extract(value, '$.project_id') AS project_id,
+                               json_extract(value, '$.owner_id') AS owner_id
+                        FROM json_each(:page_json)
+                    )
+                    SELECT page.memcell_id AS memcell_id,
                            COUNT(*) AS total, {status_columns}
-                    FROM run_record
-                    WHERE CASE WHEN json_valid(event_payload) THEN
-                            json_type(event_payload) = 'object'
-                            AND json_type(event_payload, '$.memcell_id') = 'text'
-                            AND json_extract(event_payload, '$.memcell_id') IN ({placeholders})
-                            AND json_extract(event_payload, '$.app_id') = ?
-                            AND json_extract(event_payload, '$.project_id') = ?
+                    FROM run_record AS rr
+                    JOIN page ON CASE WHEN json_valid(rr.event_payload) THEN
+                            json_type(rr.event_payload) = 'object'
+                            AND json_type(rr.event_payload, '$.memcell_id') = 'text'
+                            AND json_extract(rr.event_payload, '$.memcell_id') = page.memcell_id
+                            AND json_extract(rr.event_payload, '$.app_id') = :app_id
+                            AND json_extract(rr.event_payload, '$.project_id') = page.project_id
                             AND (
-                                json_type(event_payload, '$.owner_id') IS NULL
+                                json_type(rr.event_payload, '$.owner_id') IS NULL
                                 OR (
-                                    json_type(event_payload, '$.owner_id') = 'text'
-                                    AND json_extract(event_payload, '$.owner_id') = ?
+                                    json_type(rr.event_payload, '$.owner_id') = 'text'
+                                    AND json_extract(rr.event_payload, '$.owner_id') = page.owner_id
                                 )
                             )
                           ELSE 0 END
-                    GROUP BY json_extract(event_payload, '$.memcell_id')
+                    GROUP BY page.memcell_id
                     """,
-                    (*memcell_ids, _APP_ID, project_id, principal_id),
+                    {"page_json": page_json, "app_id": _APP_ID},
                 )
                 summaries: dict[str, dict[str, Any]] = {}
                 for row in rows:
@@ -463,8 +610,8 @@ class MemoryInsightReader:
                         "total": total,
                         "statuses": statuses,
                     }
-                for memcell_id in memcell_ids:
-                    summaries.setdefault(memcell_id, {"total": 0, "statuses": {}})
+                for item in page:
+                    summaries.setdefault(item["memcell_id"], {"total": 0, "statuses": {}})
                 return summaries, {"status": "available"}
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}
@@ -473,8 +620,6 @@ class MemoryInsightReader:
         self,
         memcells: list[sqlite3.Row],
         *,
-        principal_id: str,
-        project_id: str,
         capture_available: bool,
         runs_available: bool,
     ) -> tuple[dict[str, int] | None, dict[str, str]]:
@@ -493,8 +638,11 @@ class MemoryInsightReader:
                         {
                             "memcell_id": str(memcell["memcell_id"]),
                             "message_ids": sorted(_message_ids(memcell)),
+                            "project_id": scope[1],
+                            "owner_id": scope[0],
                         }
                         for memcell in memcells
+                        if (scope := _memcell_scope(memcell)) is not None
                     ],
                     separators=(",", ":"),
                 )
@@ -502,7 +650,9 @@ class MemoryInsightReader:
                     """
                     page AS MATERIALIZED (
                         SELECT json_extract(page_item.value, '$.memcell_id') AS memcell_id,
-                               json_extract(page_item.value, '$.message_ids') AS message_ids_json
+                               json_extract(page_item.value, '$.message_ids') AS message_ids_json,
+                               json_extract(page_item.value, '$.project_id') AS project_id,
+                               json_extract(page_item.value, '$.owner_id') AS owner_id
                         FROM json_each(:page_json) AS page_item
                     )
                     """
@@ -520,7 +670,7 @@ class MemoryInsightReader:
                     CROSS JOIN provider_call AS pc INDEXED BY provider_call_parent_idx
                     WHERE pc.parent_type = 'memcell' AND pc.parent_id = page.memcell_id
                       AND pc.stage = 'cascade' AND pc.app_id = :app_id
-                      AND pc.project_id = :project_id AND pc.owner_id = :owner_id
+                      AND pc.project_id = page.project_id AND pc.owner_id = page.owner_id
                     """,
                 ]
                 if capture_available:
@@ -529,8 +679,8 @@ class MemoryInsightReader:
                         SELECT page.memcell_id, owned_queue.{request_column} AS request_id
                         FROM page
                         JOIN capture.memory_capture_queue AS owned_queue
-                          ON owned_queue.principal_id = :owner_id
-                         AND owned_queue.project_ref = :project_id
+                          ON owned_queue.principal_id = page.owner_id
+                         AND owned_queue.project_ref = page.project_id
                         WHERE typeof(owned_queue.{request_column}) = 'text'
                           AND owned_queue.{request_column} != ''
                           AND EXISTS (
@@ -546,8 +696,8 @@ class MemoryInsightReader:
                                   any_queue.add_request_id = owned_queue.{request_column}
                                   OR any_queue.flush_request_id = owned_queue.{request_column}
                               ) AND (
-                                  any_queue.principal_id IS NOT :owner_id
-                                  OR any_queue.project_ref IS NOT :project_id
+                                  any_queue.principal_id IS NOT page.owner_id
+                                  OR any_queue.project_ref IS NOT page.project_id
                               )
                           )
                         """
@@ -570,12 +720,12 @@ class MemoryInsightReader:
                             AND json_type(rr.event_payload, '$.memcell_id') = 'text'
                             AND json_extract(rr.event_payload, '$.memcell_id') = page.memcell_id
                             AND json_extract(rr.event_payload, '$.app_id') = :app_id
-                            AND json_extract(rr.event_payload, '$.project_id') = :project_id
+                            AND json_extract(rr.event_payload, '$.project_id') = page.project_id
                             AND (
                                 json_type(rr.event_payload, '$.owner_id') IS NULL
                                 OR (
                                     json_type(rr.event_payload, '$.owner_id') = 'text'
-                                    AND json_extract(rr.event_payload, '$.owner_id') = :owner_id
+                                    AND json_extract(rr.event_payload, '$.owner_id') = page.owner_id
                                 )
                             )
                         ELSE 0 END
@@ -583,7 +733,8 @@ class MemoryInsightReader:
                     ctes.append(
                         f"""
                         authorized_runs AS MATERIALIZED (
-                            SELECT page.memcell_id, rr.run_id,
+                            SELECT page.memcell_id, page.project_id, page.owner_id,
+                                   rr.run_id,
                                    CASE
                                      WHEN substr(rr.event_topic, -length(':EpisodeExtracted'))
                                               = ':EpisodeExtracted' COLLATE BINARY
@@ -617,7 +768,8 @@ class MemoryInsightReader:
                               AND pc.parent_type = 'episode'
                               AND pc.parent_id = authorized_runs.episode_entry_id
                               AND pc.stage = 'cascade' AND pc.app_id = :app_id
-                              AND pc.project_id = :project_id AND pc.owner_id = :owner_id
+                              AND pc.project_id = authorized_runs.project_id
+                              AND pc.owner_id = authorized_runs.owner_id
                             """,
                         )
                     )
@@ -632,8 +784,6 @@ class MemoryInsightReader:
                     {
                         "page_json": page_json,
                         "app_id": _APP_ID,
-                        "project_id": project_id,
-                        "owner_id": principal_id,
                     },
                 )
                 counts = {str(row["memcell_id"]): int(row["total"]) for row in rows}
@@ -828,6 +978,43 @@ class MemoryInsightReader:
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}
 
+    def _read_admin_detail_memcell(
+        self,
+        *,
+        memcell_id: str,
+    ) -> tuple[sqlite3.Row | None, dict[str, str]]:
+        try:
+            with _read_only(self._paths.system_db_path) as conn:
+                row = conn.execute(
+                    f"""
+                    SELECT memcell_id, app_id, project_id,
+                           CASE WHEN length(CAST(message_ids_json AS BLOB))
+                                         <= {_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES}
+                                THEN message_ids_json ELSE '[]' END AS message_ids_json,
+                           CASE WHEN length(CAST(sender_ids_json AS BLOB))
+                                         <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
+                                THEN sender_ids_json ELSE '[]' END AS sender_ids_json,
+                           CASE WHEN length(CAST(payload_json AS BLOB))
+                                         <= {_MAX_MEMCELL_PAYLOAD_JSON_BYTES}
+                                THEN payload_json ELSE NULL END AS payload_json,
+                           timestamp
+                    FROM memcell
+                    WHERE memcell_id = ? AND app_id = ? AND project_id GLOB ?
+                      AND length(CAST(sender_ids_json AS BLOB))
+                            <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
+                      AND CASE WHEN json_valid(sender_ids_json) THEN
+                            json_type(sender_ids_json) = 'array'
+                            AND json_array_length(sender_ids_json) = 1
+                            AND json_type(sender_ids_json, '$[0]') = 'text'
+                            AND json_extract(sender_ids_json, '$[0]') GLOB ?
+                          ELSE 0 END
+                    """,
+                    (memcell_id, _APP_ID, _PROJECT_GLOB, _PRINCIPAL_GLOB),
+                ).fetchone()
+                return row, {"status": "available"}
+        except _Unavailable as unavailable:
+            return None, {"status": "unavailable", "reason": unavailable.reason}
+
     def _read_detail_capture_rows(
         self, memcell: sqlite3.Row, *, principal_id: str, project_id: str
     ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
@@ -970,15 +1157,24 @@ def _decode_json(value: object) -> Any:
 
 
 def _memcell_owned_by(row: sqlite3.Row, *, principal_id: str, project_id: str) -> bool:
-    if row["app_id"] != _APP_ID or row["project_id"] != project_id:
-        return False
+    return _memcell_scope(row) == (principal_id, project_id)
+
+
+def _memcell_scope(row: sqlite3.Row) -> MemoryReadScope | None:
+    if row["app_id"] != _APP_ID or not isinstance(row["project_id"], str):
+        return None
+    project_id = row["project_id"]
+    if _PROJECT_RE.fullmatch(project_id) is None:
+        return None
     senders = _decode_json(row["sender_ids_json"])
-    return (
-        isinstance(senders, list)
-        and len(senders) == 1
-        and isinstance(senders[0], str)
-        and senders[0] == principal_id
-    )
+    if (
+        not isinstance(senders, list)
+        or len(senders) != 1
+        or not isinstance(senders[0], str)
+        or _PRINCIPAL_RE.fullmatch(senders[0]) is None
+    ):
+        return None
+    return senders[0], project_id
 
 
 def _timestamp_ms(value: object) -> int:
@@ -1078,11 +1274,17 @@ def _entry_projection(
     base_urls: tuple[str, ...],
     exact_values: tuple[str, ...],
 ) -> dict[str, Any]:
+    scope = _memcell_scope(row)
+    if scope is None:
+        raise ValueError("invalid memcell scope")
+    principal_id, project_id = scope
     return {
         "memcell_id": _bounded_string(
             _scrub(str(row["memcell_id"]), base_urls, ()),
             _MAX_MEMCELL_ID_BYTES,
         ),
+        "project_id": project_id,
+        "principal_id": principal_id,
         "timestamp_ms": _memcell_timestamp_ms(row),
         "preview": _memcell_preview(
             row,

@@ -1,7 +1,8 @@
 # Memory Processing Log Page (EverOS step timeline + provider call log)
 
-Status: implemented from approved v7 (four complexity reductions retained)
-Date: 2026-08-04
+Status: implemented from approved v7, with the installation-admin log follow-up
+implemented on 2026-08-05
+Date: 2026-08-05
 
 ## Background
 
@@ -13,9 +14,9 @@ does not explain how one captured message became a distilled memory. The new
 capture -> add / flush -> memcell -> episode -> offline strategies -> profile trigger -> indexing
 ```
 
-When diagnostics are explicitly enabled, the same timeline also shows the raw
-LLM, multimodal-LLM, and embedding requests and responses that can be attributed
-to those steps exactly.
+While Memory is enabled, the same timeline also shows bounded, scrubbed LLM,
+multimodal-LLM, and embedding requests and responses that can be attributed to
+those steps exactly. There is no provider-log switch.
 
 ## Scope and deliberate limits
 
@@ -28,6 +29,10 @@ every possible relationship:
   therefore has exactly one user sender. A foreign, corrupt, or future memcell
   with zero or multiple user senders is omitted from this scoped UI rather than
   introducing multi-owner call ACLs.
+- The authenticated Settings Log tab uses an explicit installation-admin
+  projection across all valid projects and principals. Each row carries its
+  `project_id` and `principal_id`; the ordinary CLI/internal read path remains
+  owner-scoped until permissions are tightened in a later change.
 - Storage admits only calls made inside a validated `/add` or `/flush` boundary,
   or with an exact run, memcell, or cascade key. Search, Get, and other EverOS API
   work is never recorded. A valid add/flush request that later fails may leave a
@@ -94,6 +99,8 @@ prepare_call_recorder(db_path) -> RecorderHandle | None
 MemoryInsightPaths(everos_root, capture_db_path, call_log_db_path)
 MemoryInsightReader(paths, provider_base_urls=()).list_entries(scope, cursor, limit) -> dict
 MemoryInsightReader(paths, provider_base_urls=()).entry_detail(scope, memcell_id) -> dict
+MemoryInsightReader(paths, provider_base_urls=()).list_admin_entries(cursor, limit) -> dict
+MemoryInsightReader(paths, provider_base_urls=()).admin_entry_detail(memcell_id) -> dict
 ```
 
 `MemoryRuntime` constructs the frozen path bundle from its own
@@ -112,16 +119,26 @@ contract tests, not scattered callers.
 
 ### Authorization model
 
-Both read functions receive `(principal_id, project_id)` from the existing
-`_memory_read_scope`. The base memcell must satisfy all of:
+The ordinary `list_entries` and `entry_detail` functions receive
+`(principal_id, project_id)` from the existing `_memory_read_scope`. Their base
+memcell must satisfy all of:
 
 - `app_id = 'avibe'`
 - `project_id = requested project`
 - `sender_ids_json` is a valid JSON array of length one whose only value is the
   requesting principal
 
+The Settings Log tab calls the separate `list_admin_entries` and
+`admin_entry_detail` functions after the existing signed UI proof has admitted
+the request. Those functions enumerate every valid Avibe project whose memcell
+has exactly one valid `u-...` sender, and derive the real `(principal_id,
+project_id)` from the row before loading related data. They do not accept a
+wildcard scope or caller-supplied owner/project query parameters. A malformed or
+multi-owner row is omitted in both modes.
+
 Provider calls do not duplicate a supposedly universal scope. The reader proves
-authorization through the call's exact provenance:
+authorization through the call's exact provenance, using the row-derived scope
+for the admin projection:
 
 | Provenance | Authorization proof |
 |---|---|
@@ -135,32 +152,11 @@ session-text, `LIKE`, or "unattributed calls" fallback.
 
 ### Privacy model
 
-Raw provider payload capture is opt-in and defaults to off through
-`memory.diagnostics.log_provider_calls`. V1 deliberately treats this as an
-installation-administrator decision, not per-Cloud-subject consent: only a
-direct-loopback Memory request admitted by `is_direct_loopback_memory_request()`
-may change this field. An authenticated Avibe Cloud subject may read only its
-own authorized rows but receives 403 when a PATCH tries to enable or disable
-global capture; the remote UI renders the control read-only. The local toggle
-gets explicit English and Chinese disclosure that it captures payloads for all
-principals using this installation. Tests prove a remote subject cannot mutate
-the field even when the same PATCH changes other Memory settings.
-
-Disabling capture stops new rows; already recorded rows remain readable until
-their 14-day expiry or Clear. Because the recorder receives its database path
-only when the persisted flag is enabled, the recording boundary independently
-enforces the local administrator's choice rather than trusting UI state.
-
-An enabled-to-disabled transition is privacy-first. While holding the lifecycle
-lock, `MemoryRuntime` stops the recorder-enabled child and transfers call-log
-ownership to host maintenance before artifact resolution, provider health
-preflight, or any other fallible replacement work. It then reconciles a child
-that never receives the database path. If that replacement cannot start, the
-settings response may report Memory degraded, but persisted capture remains off:
-rollback restores other failed settings while forcing
-`memory.diagnostics.log_provider_calls=False`. Tests hold both provider probes
-failed and prove the old recorder is stopped, no replacement receives the path,
-and neither runtime nor persisted config re-enables capture.
+Raw provider payload capture is always on while Memory is enabled. The legacy
+`memory.diagnostics.log_provider_calls` field remains loadable for rolling
+upgrades but is normalized to `true`; it is not exposed in the Settings API and
+cannot be patched. This makes the logging behavior explicit and avoids a second
+permission model for a global switch.
 
 Recording uses an explicit field whitelist. Every retained string, including
 prompt and response text, is recursively scrubbed for bearer/API-key values,
@@ -170,9 +166,11 @@ paths before it is truncated and stored. SDK objects are never serialized with
 rendering is inert text/JSON rather than Markdown or HTML.
 
 The database is stored locally, but the UI routes are available to both an
-authenticated local UI and an authenticated Avibe Cloud session. Every response
-is therefore owner-scoped and `Cache-Control: no-store`; the design does not
-describe the data as "local-view-only".
+authenticated local UI and an authenticated Avibe Cloud session. The Settings
+Log routes intentionally use the installation-admin projection for now, so
+operators can inspect conversations handled by their Agent across projects and
+users. Every response is `Cache-Control: no-store`; future permission tightening
+can narrow the projection without changing the provenance checks.
 
 ## Phase 1 - Provider call recorder
 
@@ -291,17 +289,14 @@ call to force physical compaction.
 
 There is one sqlite writer owner at a time:
 
-- while a recorder-enabled sidecar is running, its writer performs pruning;
-- while no recorder-enabled child exists and the database does, a host
+- while a Memory sidecar is running, its recorder writer performs pruning;
+- while no sidecar exists and the database does, a host
   `_call_log_retention_loop` prunes once immediately and then about every six
   hours through `asyncio.to_thread`, holding the Memory lifecycle lock used by
-  Clear. This includes a normal Memory sidecar running with diagnostics off;
-  that child never receives the DB path and cannot have the file open. No task
-  is created for an install that has never enabled capture. After acquiring the
-  lock, each tick rechecks that no recorder-enabled child owns the DB before
-  opening it;
+  Clear. After acquiring the lock, each tick rechecks that no sidecar owns the
+  DB before opening it;
 - under that same lock, a lifecycle transition cancels and awaits the host task
-  before starting a recorder-enabled sidecar;
+  before starting a sidecar;
 - runtime shutdown cancels and awaits the host task.
 
 Neither process unlinks a database that the other may have open. Corruption causes
@@ -319,25 +314,23 @@ maintenance. After verifying the fixed directory's owner, mode, and no-symlink
 chain, it lstat/unlinks only regular owned files on a strict allowlist:
 `call-log.db` and its WAL/SHM/rollback-journal names. Unexpected entries are
 preserved; the directory is removed only if it is then empty. This is
-intentionally not a recursive delete. The DB is recreated only when capture is
-enabled again.
+intentionally not a recursive delete. The DB is recreated when Memory
+processing starts again.
 
 ### Integration and capture tests
 
 - `core/memory/sidecar.py`: prepare patches before the EverOS app import and
   attach the returned handle to ASGI lifespan.
-- `core/memory/process.py`: pass `AVIBE_MEMORY_CALL_LOG_DB` only when the
-  diagnostic flag is enabled; prepare the owned directory.
-- `config/v2_config.py` and the settings route/UI: add the nested default-off
-  boolean, PATCH validation, local-only toggle, disclosure, and the asymmetric
-  rollback rule that never restores capture after a disable request.
-- `core/memory/runtime.py`: treat a diagnostics-flag change as a sidecar
-  environment reconciliation, switch recorder/host retention ownership under the
-  lifecycle lock, add recorder health to the existing Memory status, and own Clear
-  deletion. The settings API relies on that one reconciliation and does not issue
-  a second restart. A disable transition revokes the recorder before preflight;
-  failures can roll back other candidate fields but not the disabled diagnostics
-  flag.
+- `core/memory/process.py`: always pass the owned
+  `AVIBE_MEMORY_CALL_LOG_DB` to the managed sidecar and prepare its directory.
+- `config/v2_config.py` and the settings route/UI: retain the nested diagnostics
+  field only for old config compatibility, normalize it to `true`, and remove
+  the logging switch from the response and PATCH contract.
+- `core/memory/runtime.py`: always inject the recorder callbacks and call-log
+  path on reconcile, restart, and ready activation; keep recorder health on the
+  existing Memory status surface and keep Clear deletion serialized with
+  retention. The settings API relies on that one reconciliation and does not
+  issue a second restart.
 
 `tests/test_memory_call_log.py` covers serialization, recursive redaction across
 all columns, truncation, vectors/attachments omitted, provenance/stage capture,
@@ -379,7 +372,7 @@ Exact joins:
 
 | Link | Join |
 |---|---|
-| memcell list | app/project match and singleton `sender_ids_json` equals principal |
+| memcell list | scoped reads use app/project plus singleton `sender_ids_json`; admin reads use app plus valid project and singleton principal globs |
 | memcell -> capture | intersect `memcell.message_ids_json` with derived `m_{queue.session_id}_{queue.provider_timestamp_ms}_000` |
 | capture -> add/flush calls | exact add/flush `request_id`; validate every matching queue tombstone has the same requested scope |
 | memcell -> episode call | exact `provider_call.memcell_id` after base memcell authorization |
@@ -415,13 +408,19 @@ Public adapter results:
   worst-case route envelope below 1,000,000 encoded bytes without repeatedly
   serializing and shrinking the whole response. A route-level maximum-input test
   asserts that bound. No unresolved call bucket is returned.
+- `list_admin_entries(cursor, limit)` and `admin_entry_detail(memcell_id)` use the
+  same bounded projections across all valid projects and principals. The list
+  query aggregates the page in one pass and includes the derived project/user
+  IDs; detail derives its scope from the selected memcell before joining runs,
+  capture, and calls.
 
 Routes:
 
-- `core/memory/runtime.py`: `log_entries_payload` / `log_entry_payload`.
+- `core/memory/runtime.py`: scoped and admin log payload methods.
 - `core/internal_server.py`: `GET /internal/memory/log` (`limit` 1..50,
-  cursor <= 256 chars) and `GET /internal/memory/log/entry` (validated memcell id),
-  using `_memory_read_scope` exactly like profile.
+  cursor <= 256 chars) and `GET /internal/memory/log/entry` (validated memcell id).
+  A verified UI user-key request uses the installation-admin projection; a CLI
+  caller session uses `_memory_read_scope` and remains owner-scoped.
 - `vibe/internal_client.py`: signed `memory_log` / `memory_log_entry` helpers
   carrying the user-key headers.
 - `vibe/ui_memory_routes.py`: matching `/api/memory/log` routes using the user-key
@@ -463,9 +462,8 @@ Read-path tests include:
 
 Add `log` to `MemoryTab` and render `MemoryLogPanel` in the existing manage
 stage. Like Profile and Search, the Log tab is intentionally unavailable while
-Memory itself is disabled. "Timeline available when payload logging is off"
-means the diagnostic toggle does not hide the normal timeline while Memory is
-enabled; it does not override the page's disabled setup state.
+Memory itself is disabled. The panel shows Project ID and User ID on every list
+row and in detail so the installation-wide scope is unambiguous.
 
 Keep the five-tab `SegmentedRadio` unchanged. Wrap this page's tab row in a local
 `overflow-x-auto` container so other segmented controls do not change behavior.
@@ -484,13 +482,12 @@ checked in the browser/Incus verification because jsdom has no layout engine.
   JSON falls back to an inert `<pre>` string instead of mounting an unbounded
   `PreviewJson` tree;
 - all provider/user text rendered without Markdown or HTML;
-- an explicit current logging-off notice. When the persisted flag is enabled but
-  recorder health is `degraded`, show that new provider calls are not being
+- when recorder health is `degraded`, show that new provider calls are not being
   recorded. The panel receives the existing Memory status and restart callback
   from `SettingsMemoryPage`; transient recorder failures use the existing runtime
   restart action, while `call_log_corrupt` directs the administrator to Clear.
   For an older step with no provider rows, use the neutral wording "not recorded
-  or expired"; do not invent toggle history. Also label unavailable sections and
+  or expired"; do not infer missing provenance. Also label unavailable sections and
   current-state-only profile/indexing information.
 
 Add `jsdom`, `@testing-library/react`, and `@testing-library/user-event` as
@@ -502,13 +499,13 @@ helpers cover cursor accumulation, JSON guards, and view-model shaping. Static S
 continue to cover empty, loading, failure, and forbidden render states. The Log
 tests stub the existing status/restart props rather than a recorder-specific API.
 
-All new user-facing strings live in both i18n catalogs, including the diagnostic
-disclosure that retained rows survive turning the toggle off until expiry/Clear.
+All new user-facing strings live in both i18n catalogs, including explicit
+Project ID/User ID labels and the disclosure that bounded diagnostics are kept
+for every project and user until expiry/Clear.
 Add `docs/MEMORY.md` and `docs/MEMORY_ZH.md`, linked from the README Docs section,
-covering what provider payload capture records and omits, local-administrator-only
-enablement, owner-scoped Cloud reads, the 14-day/5000-row retention contract,
-retention after disabling, degraded-recorder recovery, and the destructive scope
-of Clear.
+covering what provider payload capture records and omits, the installation-admin
+UI log scope, the 14-day/5000-row retention contract, degraded-recorder recovery,
+and the destructive scope of Clear.
 
 ## Verification
 
@@ -531,11 +528,11 @@ of Clear.
    unit-test shards remain artifact-independent. Deployable runtime archive and
    metadata verification stay in the existing release workflows rather than
    being repeated on every PR.
-4. Incus regression only, never the local `vibe` service: enable diagnostic
-   capture, send a message with and without an attachment, wait for flush/OME,
-   inspect the list/detail calls, turn capture off and confirm retained rows are
-   still visible, verify a second principal is isolated, and check the tab at the
-   narrowest supported viewport. Cross-check call-log and run-record counts.
+4. Incus regression only, never the local `vibe` service: enable Memory, send a
+   message with and without an attachment from more than one project/user, wait
+   for flush/OME, inspect the installation-wide list/detail calls and visible
+   Project ID/User ID labels, and check the tab at the narrowest supported
+   viewport. Cross-check call-log and run-record counts.
 
 ## Touched files
 

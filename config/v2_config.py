@@ -305,13 +305,16 @@ class MemoryProcessingConfig:
 
 @dataclass
 class MemoryDiagnosticsConfig:
-    log_provider_calls: bool = False
+    # Retained only so older config files continue to load. Provider call
+    # recording is installation-wide and always enabled by the runtime.
+    log_provider_calls: bool = True
 
     def validate(self) -> None:
         if not isinstance(self.log_provider_calls, bool):
             raise ValueError(
                 "Config 'memory.diagnostics.log_provider_calls' must be a boolean"
             )
+        self.log_provider_calls = True
 
 
 @dataclass

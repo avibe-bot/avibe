@@ -319,6 +319,94 @@ def test_list_is_owner_scoped_and_omits_malformed_or_multi_owner(
     assert reader.entry_detail((BOB, PROJECT), "mc_alice") == {"status": "not_found"}
 
 
+def test_admin_log_spans_projects_and_principals_with_explicit_scope(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_alice", ALICE, timestamp_ms=5_000)
+    _insert_memcell(insight_paths, "mc_bob_same_project", BOB, timestamp_ms=4_000)
+    _insert_memcell(
+        insight_paths,
+        "mc_bob_other_project",
+        BOB,
+        timestamp_ms=3_000,
+        project=OTHER_PROJECT,
+    )
+    _insert_memcell(
+        insight_paths,
+        "mc_alice_other_project",
+        ALICE,
+        timestamp_ms=2_000,
+        project=OTHER_PROJECT,
+    )
+    _insert_memcell(insight_paths, "mc_multi", [ALICE, BOB], timestamp_ms=6_000)
+    _insert_call(insight_paths, "call_alice", memcell_id="mc_alice")
+    _insert_call(insight_paths, "call_bob", memcell_id="mc_bob_other_project")
+
+    reader = MemoryInsightReader(insight_paths)
+    first = reader.list_admin_entries(None, 2)
+    second = reader.list_admin_entries(first["next_cursor"], 2)
+    entries = first["entries"] + second["entries"]
+
+    assert [
+        (entry["memcell_id"], entry["project_id"], entry["principal_id"])
+        for entry in entries
+    ] == [
+        ("mc_alice", PROJECT, ALICE),
+        ("mc_bob_same_project", PROJECT, BOB),
+        ("mc_bob_other_project", OTHER_PROJECT, BOB),
+        ("mc_alice_other_project", OTHER_PROJECT, ALICE),
+    ]
+    assert first["next_cursor"] is not None
+    assert second["next_cursor"] is None
+    assert [entry["authorized_call_count"] for entry in entries] == [1, 0, 1, 0]
+    assert reader.entry_detail((ALICE, PROJECT), "mc_bob_other_project") == {
+        "status": "not_found"
+    }
+    detail = reader.admin_entry_detail("mc_bob_other_project")
+    assert detail["entry"]["project_id"] == OTHER_PROJECT
+    assert detail["entry"]["principal_id"] == BOB
+    assert [call["id"] for call in detail["calls"]] == ["call_bob"]
+
+
+def test_admin_log_aggregates_many_scopes_in_four_queries(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(20):
+        memcell_id = f"mc_scope_{index:02d}"
+        owner = f"u-{index:032x}"
+        project = f"p-{index:032x}"
+        _insert_memcell(
+            insight_paths,
+            memcell_id,
+            owner,
+            timestamp_ms=10_000 + index,
+            project=project,
+        )
+        _insert_call(insight_paths, f"call-scope-{index:02d}", memcell_id=memcell_id)
+
+    statements: list[str] = []
+    original_connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+
+    result = MemoryInsightReader(insight_paths).list_admin_entries(None, 20)
+
+    assert len(result["entries"]) == 20
+    assert {entry["authorized_call_count"] for entry in result["entries"]} == {1}
+    selects = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+    ]
+    assert len(selects) == 4
+
+
 def test_cursor_is_canonical_and_orders_duplicate_timestamps(
     insight_paths: MemoryInsightPaths,
 ) -> None:

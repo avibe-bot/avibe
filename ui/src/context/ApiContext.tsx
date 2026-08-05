@@ -1601,13 +1601,6 @@ export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
   processing: MemoryProcessingConfig;
-  // Optional for rolling upgrades: older daemons do not project diagnostics.
-  diagnostics?: {
-    log_provider_calls?: boolean;
-    // Response-only. The backend derives this from direct-loopback admission;
-    // clients must not infer administrative authority from their hostname.
-    mutable?: boolean;
-  };
 };
 
 // Omitting a field keeps its current value; an explicit `api_key: null` clears it
@@ -1623,9 +1616,6 @@ export type MemorySettingsPatch = {
   processing?: {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
-  };
-  diagnostics?: {
-    log_provider_calls: boolean;
   };
 };
 
@@ -1750,6 +1740,8 @@ export type MemoryLogSections = {
 
 export type MemoryLogEntry = {
   memcell_id: string;
+  project_id: string;
+  principal_id: string;
   timestamp_ms: number;
   preview: string;
   message_count: number;
@@ -1816,7 +1808,7 @@ export type MemoryLogCurrentState =
 export type MemoryLogDetailResult =
   | {
       status: 'ok';
-      entry: Pick<MemoryLogEntry, 'memcell_id' | 'timestamp_ms' | 'preview' | 'message_count'>;
+      entry: Pick<MemoryLogEntry, 'memcell_id' | 'project_id' | 'principal_id' | 'timestamp_ms' | 'preview' | 'message_count'>;
       capture: MemoryLogCapture;
       steps: MemoryLogStep[];
       calls: MemoryProviderCall[];

@@ -179,6 +179,25 @@ const formatTimestamp = (timestampMs: number | null | undefined): string =>
     ? new Date(timestampMs).toLocaleString()
     : '-';
 
+const MemoryLogScope: React.FC<Pick<MemoryLogEntry, 'project_id' | 'principal_id'>> = ({
+  project_id,
+  principal_id,
+}) => {
+  const { t } = useTranslation();
+  return (
+    <div className="grid min-w-0 gap-x-4 gap-y-1 text-[11px] text-muted sm:grid-cols-2">
+      <span className="min-w-0 break-all">
+        <span className="mr-1.5 text-foreground">{t('memory.log.projectId')}:</span>
+        <code>{project_id}</code>
+      </span>
+      <span className="min-w-0 break-all">
+        <span className="mr-1.5 text-foreground">{t('memory.log.userId')}:</span>
+        <code>{principal_id}</code>
+      </span>
+    </div>
+  );
+};
+
 const SectionNotices: React.FC<{ sections: MemoryLogSections }> = ({ sections }) => {
   const { t } = useTranslation();
   const notices = Object.entries(sections).filter(([, value]) => value.status !== 'available');
@@ -275,6 +294,7 @@ export const MemoryLogListContent: React.FC<{
                   ) : null}
                 </span>
               </div>
+              <MemoryLogScope project_id={entry.project_id} principal_id={entry.principal_id} />
               <span className="line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-foreground">
                 {entry.preview || t('memory.log.noPreview')}
               </span>
@@ -405,6 +425,9 @@ const MemoryLogDetail: React.FC<{
             {detail.entry.preview || t('memory.log.noPreview')}
           </div>
           <div className="mt-1 font-mono text-[10.5px] text-muted">{formatTimestamp(detail.entry.timestamp_ms)}</div>
+          <div className="mt-2">
+            <MemoryLogScope project_id={detail.entry.project_id} principal_id={detail.entry.principal_id} />
+          </div>
         </div>
       </div>
       <SectionNotices sections={detail.sections} />
@@ -494,10 +517,9 @@ export const MemoryRecorderFaultBanner: React.FC<{
 
 export const MemoryLogPanel: React.FC<{
   enabled: boolean;
-  loggingEnabled: boolean;
   status: MemoryStatus | null;
   onClearAll: () => void;
-}> = ({ enabled, loggingEnabled, status, onClearAll }) => {
+}> = ({ enabled, status, onClearAll }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [entries, setEntries] = useState<MemoryLogEntry[]>([]);
@@ -555,11 +577,6 @@ export const MemoryLogPanel: React.FC<{
 
   return (
     <div className="flex flex-col gap-3">
-      {!loggingEnabled ? (
-        <div className="rounded-md border border-border bg-surface px-4 py-3 text-[12px] text-muted">
-          {t('memory.log.loggingOff')}
-        </div>
-      ) : null}
       <MemoryRecorderFaultBanner
         status={status}
         onClearAll={onClearAll}

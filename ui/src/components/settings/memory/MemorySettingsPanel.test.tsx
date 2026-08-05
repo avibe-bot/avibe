@@ -46,8 +46,8 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('MemorySettingsPanel rolling compatibility', () => {
-  it('fails a missing diagnostics projection closed and omits it from unrelated saves', async () => {
+describe('MemorySettingsPanel', () => {
+  it('does not expose a provider logging switch and omits diagnostics from saves', async () => {
     const saved = {
       ...legacySettings,
       processing: {
@@ -72,10 +72,7 @@ describe('MemorySettingsPanel rolling compatibility', () => {
       />,
     );
 
-    const loggingSwitch = screen.getByRole('switch', { name: 'memory.settings.providerCallLoggingLabel' });
-    expect((loggingSwitch as HTMLButtonElement).disabled).toBe(true);
-    expect(loggingSwitch.getAttribute('aria-checked')).toBe('false');
-    expect(screen.getByText('memory.settings.providerCallLoggingLocalOnly')).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: 'memory.settings.providerCallLoggingLabel' })).toBeNull();
 
     const llmBaseUrl = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')[0];
     await user.clear(llmBaseUrl);
@@ -88,36 +85,4 @@ describe('MemorySettingsPanel rolling compatibility', () => {
     expect(onSaved).toHaveBeenCalledWith(saved);
   });
 
-  it('reloads authoritative settings when disabling diagnostics is persisted before a failed save', async () => {
-    const settings: MemorySettings = {
-      ...legacySettings,
-      diagnostics: { log_provider_calls: true, mutable: true },
-    };
-    api.saveMemorySettings.mockResolvedValue({ status: 'failed', error: 'memory_processing_failed' });
-    const onReloadSettings = vi.fn();
-    const onReloadStatus = vi.fn();
-    const user = userEvent.setup();
-
-    render(
-      <MemorySettingsPanel
-        settings={settings}
-        status={null}
-        dependencyReady
-        onSaved={() => undefined}
-        onReloadSettings={onReloadSettings}
-        onReloadStatus={onReloadStatus}
-        onClearAll={() => undefined}
-        clearing={false}
-      />,
-    );
-
-    await user.click(screen.getByRole('switch', { name: 'memory.settings.providerCallLoggingLabel' }));
-    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
-
-    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
-      diagnostics: { log_provider_calls: false },
-    }));
-    expect(onReloadSettings).toHaveBeenCalledTimes(1);
-    expect(onReloadStatus).toHaveBeenCalledTimes(1);
-  });
 });

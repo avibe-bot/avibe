@@ -853,6 +853,19 @@ def create_app(
                 raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
         return _memory_cli_scope(request)
 
+    memory_admin_log_access = object()
+
+    def _memory_log_access(request: Request) -> object | tuple[str, str] | None:
+        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+
+        if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
+            return (
+                memory_admin_log_access
+                if _verified_memory_ui_user_key(request) is not None
+                else None
+            )
+        return _memory_cli_scope(request)
+
     @app.get("/internal/memory/status")
     async def _memory_status() -> Any:
         runtime = _memory_runtime()
@@ -900,7 +913,7 @@ def create_app(
     async def _memory_log(request: Request) -> Any:
         try:
             cursor, limit = _memory_log_list_query(request)
-            scope = _memory_read_scope(request)
+            access = _memory_log_access(request)
         except ValueError:
             return JSONResponse(
                 status_code=400,
@@ -911,7 +924,7 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if scope is None:
+        if access is None:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
@@ -922,8 +935,10 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_runtime_missing"},
             )
-        principal_id, project_id = scope
         try:
+            if access is memory_admin_log_access:
+                return await runtime.admin_log_entries_payload(cursor, limit)
+            principal_id, project_id = access
             return await runtime.log_entries_payload(
                 principal_id,
                 project_id,
@@ -946,7 +961,7 @@ def create_app(
     async def _memory_log_entry(request: Request) -> Any:
         try:
             memcell_id = _memory_log_entry_query(request)
-            scope = _memory_read_scope(request)
+            access = _memory_log_access(request)
         except ValueError:
             return JSONResponse(
                 status_code=400,
@@ -957,7 +972,7 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if scope is None:
+        if access is None:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
@@ -968,13 +983,16 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_runtime_missing"},
             )
-        principal_id, project_id = scope
         try:
-            payload = await runtime.log_entry_payload(
-                principal_id,
-                project_id,
-                memcell_id,
-            )
+            if access is memory_admin_log_access:
+                payload = await runtime.admin_log_entry_payload(memcell_id)
+            else:
+                principal_id, project_id = access
+                payload = await runtime.log_entry_payload(
+                    principal_id,
+                    project_id,
+                    memcell_id,
+                )
         except ValueError:
             return JSONResponse(
                 status_code=400,
