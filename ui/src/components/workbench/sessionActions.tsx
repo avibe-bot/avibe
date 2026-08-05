@@ -26,7 +26,7 @@ export interface SessionActionDescriptor {
   label: string;
   /** Keyboard hint badge (e.g. ``⇧⌘D``), right-aligned in the menu row. */
   hint?: string;
-  /** Why this action is unavailable. Exposed as a hover tooltip and an accessible description. */
+  /** Why this action is unavailable. Exposed through the disabled row's disclosure tooltip. */
   title?: string;
   disabled?: boolean;
   /** A write is in flight: the icon becomes a spinner and the row stops accepting clicks. */
@@ -103,6 +103,7 @@ export const SessionActionMenu: React.FC<{
 }> = ({ actions, onAction, label }) => {
   const itemsRef = useRef<Array<HTMLButtonElement | null>>([]);
   const menuId = React.useId();
+  const [disclosedReasonId, setDisclosedReasonId] = useState<SessionActionId | null>(null);
 
   const focusItem = (index: number) => itemsRef.current[index]?.focus();
   const moveFocus = (from: number, delta: number) => {
@@ -120,7 +121,10 @@ export const SessionActionMenu: React.FC<{
         const reason = action.disabled ? action.title : undefined;
         const reasonId = reason ? `${menuId}-${action.id}-reason` : undefined;
         return (
-          <div key={action.id} className={clsx(newGroup && 'mt-1 border-t border-border pt-1')}>
+          <div
+            key={action.id}
+            className={clsx('group/action relative', newGroup && 'mt-1 border-t border-border pt-1')}
+          >
             <button
               ref={(node) => {
                 itemsRef.current[index] = node;
@@ -128,11 +132,17 @@ export const SessionActionMenu: React.FC<{
               type="button"
               aria-disabled={action.disabled || undefined}
               aria-describedby={reasonId}
-              title={action.title}
               onClick={() => {
-                if (action.disabled) return;
+                if (action.disabled) {
+                  if (reason) setDisclosedReasonId((current) => (current === action.id ? null : action.id));
+                  return;
+                }
+                setDisclosedReasonId(null);
                 onAction?.(action.id);
                 action.onSelect();
+              }}
+              onBlur={() => {
+                setDisclosedReasonId((current) => (current === action.id ? null : current));
               }}
               onKeyDown={(event) => {
                 if (event.key === 'ArrowDown') {
@@ -175,7 +185,16 @@ export const SessionActionMenu: React.FC<{
               )}
             </button>
             {reason && (
-              <span id={reasonId} className="sr-only">
+              <span
+                id={reasonId}
+                role="tooltip"
+                className={clsx(
+                  'pointer-events-none absolute left-0 right-0 top-full z-50 mt-1 rounded-md bg-foreground px-2 py-1.5 text-[11px] leading-tight text-background shadow-md transition-opacity',
+                  disclosedReasonId === action.id
+                    ? 'opacity-100'
+                    : 'opacity-0 group-hover/action:opacity-100 group-focus-within/action:opacity-100',
+                )}
+              >
                 {reason}
               </span>
             )}

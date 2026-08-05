@@ -67,9 +67,9 @@ describe('SessionActionMenu', () => {
 
   // ── Codex review (sessionActions.tsx:93) ────────────────────────────────────
   // A natively ``disabled`` button cannot be focused, so the row uses aria-disabled.
-  // Its reason stays out of the visible menu while remaining available on hover and
-  // to assistive technology.
-  it('keeps an unforkable fork row gray and exposes its reason without visible menu copy', () => {
+  // Its reason stays out of the resting menu and appears through a hover/focus/tap
+  // disclosure that also supplies the accessible description.
+  it('keeps an unforkable fork row gray and discloses its reason without resting menu copy', () => {
     const reason = 'This session has no native agent session to fork yet.';
     const html = renderMenu([
       row({ id: 'fork', group: 'continue', label: 'Fork session', icon: GitFork, disabled: true, title: reason }),
@@ -77,9 +77,13 @@ describe('SessionActionMenu', () => {
 
     expect(html).toContain('aria-disabled="true"');
     expect(html).not.toContain('disabled=""');
-    expect(html).toContain(`title="${reason}"`);
     expect(html).toContain('aria-describedby=');
-    expect(html).toContain('class="sr-only"');
+    expect(html).toContain('role="tooltip"');
+    expect(html).toContain('opacity-0');
+    expect(html).toContain('group-hover/action:opacity-100');
+    expect(html).toContain('group-focus-within/action:opacity-100');
+    expect(html).not.toContain(`title="${reason}"`);
+    expect(html).not.toContain('class="sr-only"');
     expect(html).toContain('cursor-not-allowed text-muted');
     expect(html).not.toContain('text-[10.5px] leading-tight text-muted');
     expect(html).toContain('Fork session');
