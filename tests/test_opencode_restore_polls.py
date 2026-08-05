@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_sessions import ActivePollInfo  # noqa: E402
@@ -336,7 +338,7 @@ def test_restore_preserves_durable_poll_when_verification_is_temporarily_unavail
     )
     poll.processing_indicator = {
         "platform": "avibe",
-        "delivery_start_attempt_id": "attempt-unknown",
+        "delivery_start_attempt_id": "atm-unknown",
         "opencode_native_steering": {
             "target_session_id": "ses_wb",
             "logical_turn_id": "turn-unknown",
@@ -363,7 +365,18 @@ def test_restore_preserves_durable_poll_when_verification_is_temporarily_unavail
     assert removed == []
 
 
-def test_restore_rebuilds_completed_exact_start_attempt() -> None:
+@pytest.mark.parametrize(
+    ("attempt_id", "native_message_id"),
+    [
+        ("atm-start", "msg-start"),
+        ("atm-start", "atm-start"),
+        ("legacy-start", "legacy-start"),
+    ],
+)
+def test_restore_rebuilds_completed_exact_start_attempt(
+    attempt_id: str,
+    native_message_id: str,
+) -> None:
     poll = _make_poll(
         platform="avibe",
         base_session_id="ses_wb",
@@ -371,7 +384,7 @@ def test_restore_rebuilds_completed_exact_start_attempt() -> None:
     )
     poll.processing_indicator = {
         "platform": "avibe",
-        "delivery_start_attempt_id": "atm-start",
+        "delivery_start_attempt_id": attempt_id,
         "opencode_native_steering": {
             "target_session_id": "ses_wb",
             "logical_turn_id": "logical-start",
@@ -379,7 +392,7 @@ def test_restore_rebuilds_completed_exact_start_attempt() -> None:
     }
     agent, _, removed, _ = _build_agent({"oc-1": poll})
     agent._test_server.messages = [
-        {"info": {"id": "atm-start", "role": "user", "time": {}}},
+        {"info": {"id": native_message_id, "role": "user", "time": {}}},
         {
             "info": {
                 "id": "assistant-done",

@@ -225,6 +225,49 @@ def request_path_is_degraded(request_path: dict[str, Any] | None) -> bool:
     )
 
 
+def request_path_needs_recovery(
+    request_path: dict[str, Any] | None,
+    *,
+    profile: str = "balanced",
+) -> bool:
+    """Apply a user-facing optimization policy to high-confidence path evidence."""
+
+    if not request_path or request_path.get("confidence") != "high":
+        return False
+    if request_path.get("status") == "unavailable":
+        return True
+    latency = request_path.get("latency_ms")
+    if not isinstance(latency, dict):
+        return False
+    p95 = float(latency.get("p95") or 0)
+    p99 = float(latency.get("p99") or 0)
+    slow = request_path.get("slow_request_rate") or {}
+    over_500_ms = float(slow.get("over_500_ms") or 0)
+    over_one_second = float(slow.get("over_1000_ms") or 0)
+    failure_rate = float(request_path.get("failure_rate") or 0)
+    baseline = request_path.get("baseline_p95_ms")
+    baseline_value = float(baseline) if baseline is not None else None
+
+    if failure_rate >= 0.10:
+        return True
+    if profile == "stable":
+        return (
+            p95 >= 1200
+            or (baseline_value is not None and p95 >= 3 * baseline_value)
+            or over_one_second >= 0.10
+            or (p99 >= 2400 and over_one_second >= 0.05)
+        )
+    if profile == "low_latency":
+        return (
+            p95 >= 500
+            or (baseline_value is not None and p95 >= 1.5 * baseline_value)
+            or over_500_ms >= 0.20
+            or over_one_second >= 0.03
+            or p99 >= 1000
+        )
+    return request_path_is_degraded(request_path)
+
+
 def request_path_has_usable_latency(request_path: dict[str, Any] | None) -> bool:
     if not request_path or request_path.get("confidence") == "low":
         return False
@@ -625,15 +668,25 @@ class QualityEvaluator:
         self._last_snapshot = snapshot
         return snapshot
 
-    def recovery_trigger(self, snapshot: dict[str, Any] | None = None) -> str | None:
+    def recovery_trigger(
+        self,
+        snapshot: dict[str, Any] | None = None,
+        *,
+        profile: str = "balanced",
+    ) -> str | None:
         current = snapshot or self._last_snapshot
-        if not current or current.get("state") != "degraded":
+        if not current or profile not in {"stable", "balanced", "low_latency"}:
+            return None
+        state = current.get("state")
+        if state != "degraded" and profile != "low_latency":
+            return None
+        if state not in {"healthy", "degraded"}:
             return None
         if int(current.get("ha_connections") or 0) < 4:
             return "availability"
         if float(current.get("request_errors_per_minute") or 0) >= 3 or float(current.get("packet_loss_per_minute") or 0) >= 10:
             return "errors"
-        if request_path_is_degraded(current.get("request_path")):
+        if request_path_needs_recovery(current.get("request_path"), profile=profile):
             return "tail_latency"
         rtt = current.get("rtt_ms")
         if not isinstance(rtt, dict):
@@ -641,6 +694,24 @@ class QualityEvaluator:
         median = float(rtt.get("median") or 0)
         maximum = float(rtt.get("max") or 0)
         baseline = current.get("baseline_median_rtt_ms")
+        if profile == "stable":
+            if baseline is None:
+                return "latency" if median >= 450 or maximum >= 900 else None
+            baseline_value = float(baseline)
+            if median >= 450 or (median >= 350 and median >= 2.5 * baseline_value):
+                return "latency"
+            if maximum >= 900 or (maximum >= 700 and maximum >= 3.5 * baseline_value):
+                return "latency"
+            return None
+        if profile == "low_latency":
+            if baseline is None:
+                return "latency" if median >= 180 or maximum >= 350 else None
+            baseline_value = float(baseline)
+            if median >= 250 or (median >= 160 and median >= 1.6 * baseline_value):
+                return "latency"
+            if maximum >= 450 or (maximum >= 300 and maximum >= 2.2 * baseline_value):
+                return "latency"
+            return None
         if baseline is None:
             return "latency" if median >= 250 or maximum >= 500 else None
         baseline_value = float(baseline)

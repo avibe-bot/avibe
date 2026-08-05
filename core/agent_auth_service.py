@@ -242,7 +242,6 @@ def classify_auth_error(backend: str, error_text: str) -> bool:
             "authentication",
             "credential",
             "api key",
-            "provider",
             "failed to send message: 401",
             "failed to start async prompt: 401",
         )

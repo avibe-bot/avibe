@@ -108,6 +108,15 @@ beforeEach(() => {
   mocks.authorizeRouteAction.mockImplementation(grantedAuthorization);
 });
 
+describe('surface-specific actions', () => {
+  it('omits rename when the surface provides no rename editor', () => {
+    const h = mount(options({ onRenameStart: undefined }));
+
+    expect(h.actions.map((action) => action.id)).not.toContain('rename');
+    expect(h.actions.map((action) => action.id)).toContain('pin');
+  });
+});
+
 // ── Codex review (useSessionActions.tsx:81) ──────────────────────────────────
 // `project_id` is the `proj_*` suffix of the scope id, so it is NULL for every
 // session outside a project. The hook used to bail out of pin / fork when it was
@@ -126,6 +135,14 @@ describe('a session with no project (project_id: null)', () => {
       // surface may have navigated to another session by then.
       expect(onSessionPatched).toHaveBeenCalledWith({ pinned: true }, 'ses_standalone');
     });
+  });
+
+  it('unpins a currently pinned session', () => {
+    const h = mount(options({ session: session({ pinned: true }) }));
+
+    select(h, 'pin');
+
+    expect(mocks.setSessionPinned).toHaveBeenCalledWith(null, 'ses_standalone', false);
   });
 
   it('forks and opens the fork', async () => {

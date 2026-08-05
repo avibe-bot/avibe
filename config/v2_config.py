@@ -1078,6 +1078,10 @@ class VibeCloudRemoteAccessConfig:
     session_secret: str = ""
     cloudflared_path: str = ""
     transport_protocol: str = "auto"
+    auto_recovery: bool = True
+    optimization_profile: str = "balanced"
+    edge_ip_version: str = "4"
+    edge_bind_address: str = ""
     dev_login_hint: str = ""
 
 
@@ -1392,6 +1396,47 @@ class V2Config:
             raise ValueError(
                 "Config 'remote_access.vibe_cloud.transport_protocol' must be 'auto', 'quic', or 'http2'"
             )
+        raw_auto_recovery = remote_access.vibe_cloud.auto_recovery
+        if isinstance(raw_auto_recovery, str):
+            remote_access.vibe_cloud.auto_recovery = raw_auto_recovery.strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        else:
+            remote_access.vibe_cloud.auto_recovery = bool(raw_auto_recovery)
+        remote_access.vibe_cloud.optimization_profile = str(
+            remote_access.vibe_cloud.optimization_profile or "balanced"
+        ).strip().lower()
+        if remote_access.vibe_cloud.optimization_profile not in {
+            "stable",
+            "balanced",
+            "low_latency",
+        }:
+            raise ValueError(
+                "Config 'remote_access.vibe_cloud.optimization_profile' must be "
+                "'stable', 'balanced', or 'low_latency'"
+            )
+        remote_access.vibe_cloud.edge_ip_version = str(
+            remote_access.vibe_cloud.edge_ip_version or "4"
+        ).strip().lower()
+        if remote_access.vibe_cloud.edge_ip_version not in {"auto", "4", "6"}:
+            raise ValueError(
+                "Config 'remote_access.vibe_cloud.edge_ip_version' must be 'auto', '4', or '6'"
+            )
+        remote_access.vibe_cloud.edge_bind_address = str(
+            remote_access.vibe_cloud.edge_bind_address or ""
+        ).strip()
+        if remote_access.vibe_cloud.edge_bind_address:
+            try:
+                remote_access.vibe_cloud.edge_bind_address = str(
+                    ipaddress.ip_address(remote_access.vibe_cloud.edge_bind_address)
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "Config 'remote_access.vibe_cloud.edge_bind_address' must be an IP address"
+                ) from exc
 
         audio_asr_payload = payload.get("audio_asr") or {}
         if not isinstance(audio_asr_payload, dict):

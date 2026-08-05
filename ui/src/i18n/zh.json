@@ -42,7 +42,6 @@
     "cancel": "取消",
     "confirm": "确定",
     "clear": "清除",
-    "none": "无",
     "retry": "重试",
     "undo": "撤销",
     "loading": "加载中...",
@@ -53,6 +52,8 @@
     "enable": "启用",
     "disable": "禁用",
     "disabled": "已禁用",
+    "archived": "已归档",
+    "systemSession": "系统",
     "default": "默认",
     "running": "运行中",
     "stopped": "已停止",
@@ -106,15 +107,14 @@
     "proxyUrl": "代理地址（可选）",
     "proxyUrlHint": "SOCKS5、SOCKS4、HTTP 或 HTTPS 代理。留空则回退到系统 SOCKS 代理探测，未配置时直连。",
     "proxyUrlCollapsedHint": "（留空则尝试系统代理，否则直连）",
-    "locked": "已锁定",
-    "archived": "已归档",
-    "systemSession": "系统",
     "duration": {
       "seconds": "秒",
       "minutes": "分",
       "hours": "小时",
       "days": "天"
-    }
+    },
+    "none": "无",
+    "locked": "已锁定"
   },
   "nav": {
     "dashboard": "控制台",
@@ -127,7 +127,6 @@
     "messagingPlatforms": "通讯平台",
     "backends": "后端",
     "remoteAccess": "远程访问",
-    "organization": "组织",
     "doctor": "诊断",
     "inbox": "收件箱",
     "projects": "项目",
@@ -135,7 +134,8 @@
     "more": "更多",
     "apps": "Apps",
     "workbench": "工作台",
-    "models": "模型"
+    "models": "模型",
+    "organization": "组织"
   },
   "more": {
     "title": "更多",
@@ -1141,13 +1141,13 @@
     "qualityUnknown": "测量中",
     "qualityRecovering": "正在优化",
     "qualityDegraded": "异常",
-    "optimizeRoute": "优化线路",
-    "optimizingRoute": "优化中...",
-    "optimizeStarted": "第二条 Connector 正在评估更优线路",
     "protocolAutomatic": "{{protocol}}（自动）",
     "protocolUnknown": "检测中",
+    "connectorConnectionsHealthy": "Cloudflare 连接正常",
+    "connectorConnectionsPartial": "Cloudflare 连接不完整（{{connections}}/4）",
+    "connectorConnectionsUnavailable": "Cloudflare 连接未建立",
     "connectorPath": "连接器 · {{protocol}} · {{connections}}/4 · 往返 {{rtt}}",
-    "rttUnavailable": "不可用",
+    "connectorPathWithLatency": "{{protocol}} · {{connections}} · Tunnel 延迟 {{rtt}}",
     "requestPath": "远程请求 · P95 {{p95}} · P99 {{p99}} · {{slow}}% 超过 1 秒",
     "requestPathUnavailable": "远程请求不可用 · {{success}}/{{count}} 成功",
     "requestPathMeasuring": "正在测量远程请求 · {{count}} 个样本",
@@ -1166,7 +1166,81 @@
     "networkTechnicalDetails": "技术详情",
     "networkEdgeNodes": "Cloudflare 边缘节点",
     "networkAnycastIps": "Cloudflare Anycast IP",
-    "networkIpUnavailable": "暂未获取边缘 IP"
+    "networkIpUnavailable": "暂未获取边缘 IP",
+    "optimizeRoute": "优化线路",
+    "optimizingRoute": "优化中...",
+    "optimizeStarted": "第二条 Connector 正在评估更优线路",
+    "controls": "Tunnel 控制（高级）",
+    "protocol": "传输协议",
+    "protocolAuto": "自动",
+    "protocolAutoActive": "自动 · 当前 {{protocol}}",
+    "autoRecovery": "自动优化线路",
+    "optimizationProfile": "优化策略",
+    "profileStable": "稳定优先",
+    "profileBalanced": "均衡",
+    "profileLowLatency": "低延迟",
+    "ipFamily": "边缘网络 IP",
+    "ipAuto": "自动",
+    "ipV4": "IPv4",
+    "ipV6": "IPv6",
+    "outboundInterface": "出口网卡",
+    "outboundSystem": "跟随系统",
+    "saveControls": "应用",
+    "savingControls": "应用中...",
+    "controlsSaved": "Tunnel 设置已应用",
+    "diagnostics": "连接诊断",
+    "runDiagnostics": "运行诊断",
+    "runningDiagnostics": "检测中...",
+    "diagnosticDns": "Cloudflare DNS",
+    "diagnosticQuic": "QUIC 路径",
+    "diagnosticHttp2": "HTTP/2 路径",
+    "diagnosticAvailable": "可用",
+    "diagnosticUnavailable": "不可用",
+    "diagnosticUnknown": "尚未观测",
+    "diagnosticQuicInactive": "未验证 · 当前 {{protocol}}",
+    "diagnosticQuicInactiveHelp": "Avibe 只会在当前 Connector 实际使用 QUIC 后确认该路径；当前 Connector 正在使用 {{protocol}}。",
+    "diagnosticVersion": "{{version}}",
+    "rttUnavailable": "不可用"
+  },
+  "models": {
+    "eligibility": {
+      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用",
+      "opencode_api_key_only": "OpenCode 只能由 API Key 来源供给",
+      "consent_required": "需要先同意实验性中枢供给"
+    },
+    "oauth": {
+      "upstream_failed": "厂商没有完成这次登录，请重试",
+      "engine_unavailable": "中枢没有响应，请重试",
+      "submission_failed": "粘贴的内容没能提交，请重试",
+      "ambiguous_engine_binding": "分不清登录的是哪个账号，请一次只登一个再重试",
+      "binding_failed": "该账号已被另一来源使用",
+      "expired": "授权超时，请重新连接"
+    },
+    "probe": {
+      "native_cli_unavailable": "用不上 CLI 的登录",
+      "no_candidate": {
+        "waiting": "所有来源都在冷却",
+        "interrupted": "现在没有来源能提供这个模型"
+      }
+    },
+    "source": {
+      "cooldown": {
+        "network": "网络不通",
+        "timeout": "连续超时",
+        "rate_limited": "触发限流",
+        "quota_exhausted": "本周期额度用完",
+        "server_error": "上游服务异常"
+      },
+      "needs_action": {
+        "oauth_expired": "需要重新登录",
+        "balance_exhausted": "余额不足，需要充值",
+        "credential_revoked": "凭据已失效，需要重新填写",
+        "account_banned": "账号被限制使用"
+      },
+      "error": {
+        "unclassified": "未知错误，暂时不可用"
+      }
+    }
   },
   "accessBlocked": {
     "title": "无法在此地址打开控制台",
@@ -1180,14 +1254,15 @@
     "invalid_share_id": "自定义链接只能用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
     "missing_share_id": "请先输入自定义链接。",
     "not_public": "请先把展示页面设为公开，再修改链接。",
+    "session_agent_unavailable": "源会话的 Agent 已不可用。请选择一个已启用的 Agent 来复刻此会话。",
     "session_archived": "该会话已归档，无法修改它的展示页面。",
+    "reserved_session": "该会话由 Avibe 管理，只接收工作区通知。",
     "invalid_icon_type": "图标必须是 SVG、PNG、ICO、JPEG 或 WebP 图片。",
     "icon_too_large": "图标太大了，请使用不超过 2 MiB 的图片。",
     "icon_required": "请选择要上传的图标文件。",
     "icon_write_failed": "无法保存图标，请重试。",
     "project_no_folder": "这个项目没有配置本地文件夹。",
     "project_not_found": "找不到这个项目。",
-    "project_access_denied": "你没有权限在这个项目中创建会话。",
     "remote_access_host_mismatch": "这个地址无法打开 Avibe 控制台。请用你的 https://<你的子域>.avibe.bot 链接打开，或在运行 Avibe 的机器上访问 http://127.0.0.1:5123。",
     "remote_access_config_unavailable": "Avibe 无法读取配置。请确认服务运行正常后重试。",
     "remote_access_public_url_invalid": "远程访问配置有误（公网地址无效）。请重新配对此设备或修正远程访问设置。",
@@ -1212,7 +1287,14 @@
     "remote_access_not_running": "请先启动远程访问，再优化线路。",
     "route_optimization_unavailable": "线路优化正在进行中，或当前仍处于冷却期。",
     "route_optimization_start_failed": "Avibe 无法启动线路优化，请查看远程访问运行日志。",
+    "remote_access_settings_invalid": "一个或多个 Tunnel 设置无效。",
+    "remote_access_settings_unavailable": "请等待当前线路切换完成，再应用这些设置。",
+    "remote_access_settings_apply_failed": "替换 Connector 未能就绪，原 Tunnel 设置仍然有效。",
+    "edge_bind_address_unavailable": "该出口地址已不在本机网卡上。请刷新网卡列表后重新选择。",
+    "edge_bind_address_family_mismatch": "所选出口地址与 IP 类型不匹配。",
+    "remote_access_diagnostics_failed": "连接诊断未能完成。",
     "bind_code_limit_reached": "可用绑定码过多，请先撤销一个未使用的绑定码，再创建新的绑定码。",
+    "project_access_denied": "你没有权限在这个项目中创建会话。",
     "memory_disabled": "记忆功能已禁用，或当前连接无法访问它。",
     "memory_invalid_input": "该记忆请求无效。",
     "memory_input_too_large": "输入内容对记忆功能来说太大了。",
@@ -1231,8 +1313,6 @@
     "memory_runtime_manifest_missing": "记忆运行时的清单缺失。",
     "memory_runtime_manifest_unavailable": "无法下载记忆运行时的清单。",
     "memory_runtime_archive_unavailable": "记忆运行时的下载包当前不可用。",
-    "session_agent_unavailable": "源会话的 Agent 已不可用。请选择一个已启用的 Agent 来复刻此会话。",
-    "reserved_session": "该会话由 Avibe 管理，只接收工作区通知。",
     "remote_execution_disabled": "当前版本的远程访问仅支持查看，不能执行 Agent、Harness、终端或文件操作。请在运行 Avibe 的机器上执行此操作。"
   },
   "apps": {
@@ -1596,6 +1676,7 @@
     },
     "search": {
       "roleYou": "你",
+      "includeArchived": "包含已归档",
       "roleAutomated": "自动触发",
       "roleAgent": "助手",
       "title": "搜索",
@@ -1611,8 +1692,7 @@
       "kbdNewTab": "新标签页",
       "kbdClose": "关闭",
       "footerNote": "应用与消息内容 · 全部会话",
-      "scopeAll": "全部会话",
-      "includeArchived": "包含已归档"
+      "scopeAll": "全部会话"
     },
     "inbox": {
       "eyebrow": "收件箱",
@@ -2469,29 +2549,6 @@
       "definitions": "定义",
       "running": "运行"
     },
-    "onboarding": {
-      "title": "组织访问",
-      "summary": "{{total}} 个 Agent · {{custom}} 个自定义 · {{system}} 个系统",
-      "inventory": "Agent 清单（{{count}}）",
-      "notOnboardedCount": "{{count}} 个未纳管",
-      "privateCount": "{{count}} 个私有",
-      "publishedCount": "{{count}} 个已发布",
-      "conflictCount": "{{count}} 个不可用",
-      "onboardPrivate": "按私有方式纳管",
-      "onboarded": "已纳管",
-      "manageAccess": "管理访问",
-      "system": "系统",
-      "custom": "自定义",
-      "saved": "已按私有方式纳管 {{count}} 个 Agent。",
-      "savedPending": "Agent 已在本地设为私有，等待发布。",
-      "failed": "无法纳管 Agent：{{error}}",
-      "status": {
-        "not_onboarded": "未纳管",
-        "private": "私有",
-        "published": "已发布",
-        "managed_elsewhere": "不可用"
-      }
-    },
     "running": {
       "empty": "当前没有正在运行的 Agent。",
       "unreachableTitle": "运行时不可达",
@@ -2541,6 +2598,28 @@
         "task": "TASK",
         "watch": "WATCH",
         "disabled": "已禁用"
+      },
+      "triggerDetail": {
+        "taskType": "Task",
+        "watchType": "Watch",
+        "enabled": "已启用",
+        "disabled": "已禁用",
+        "schedule": "计划",
+        "nextRun": "下次运行",
+        "command": "命令",
+        "runtime": "运行时",
+        "running": "运行中",
+        "runningPid": "运行中 · pid {{pid}}",
+        "notRunning": "未运行",
+        "firedSessions": "触发的会话",
+        "noFiredSessions": "该窗口内未触发任何会话。",
+        "runsTitle": "最近运行",
+        "taskActiveLabel": "已启用",
+        "watchActiveLabel": "监视中",
+        "enabledToast": "已启用",
+        "disabledToast": "已禁用",
+        "openInHarness": "在 Harness 中打开",
+        "toggleFailed": "更新失败,请重试。"
       },
       "search": {
         "placeholder": "查找会话或触发器…",
@@ -2596,28 +2675,6 @@
         "movedForeground": "已移到前台",
         "movedBackground": "已移到后台",
         "endGone": "该会话已不在运行。"
-      },
-      "triggerDetail": {
-        "taskType": "Task",
-        "watchType": "Watch",
-        "enabled": "已启用",
-        "disabled": "已禁用",
-        "schedule": "计划",
-        "nextRun": "下次运行",
-        "command": "命令",
-        "runtime": "运行时",
-        "running": "运行中",
-        "runningPid": "运行中 · pid {{pid}}",
-        "notRunning": "未运行",
-        "firedSessions": "触发的会话",
-        "noFiredSessions": "该窗口内未触发任何会话。",
-        "runsTitle": "最近运行",
-        "taskActiveLabel": "已启用",
-        "watchActiveLabel": "监视中",
-        "enabledToast": "已启用",
-        "disabledToast": "已禁用",
-        "openInHarness": "在 Harness 中打开",
-        "toggleFailed": "更新失败,请重试。"
       }
     },
     "showDisabled": "显示已禁用",
@@ -2632,7 +2689,6 @@
     "importFailed": "导入失败:{{error}}",
     "importNoneFound": "磁盘上没有找到可导入的 {{backend}} Agent。",
     "renameSuccess": "Agent 已重命名",
-    "renameKeptOld": "Agent 已重命名(旧名因被引用而保留)",
     "searchPlaceholder": "搜索 Agent…",
     "backendFilter": "Backend",
     "backendAll": "全部",
@@ -2642,7 +2698,6 @@
     "selectPrompt": "选择一个 Agent 查看配置。",
     "makeDefault": "设为默认",
     "deleteConfirm": "确认归档 Agent \"{{name}}\"？它将从 Agent 列表中消失，但已有会话和自动化仍会使用已保存的配置。",
-    "deleteInUse": "Agent \"{{name}}\" 正被一个或多个频道使用,无法删除。",
     "detail": {
       "enabled": "已启用",
       "enabledHint": "关掉后此 Agent 不会被新会话选用,已运行的会话不受影响",
@@ -2660,7 +2715,6 @@
       "model": "模型",
       "modelPlaceholder": "选择或输入模型",
       "modelEmpty": "找不到匹配的模型,可以直接输入。",
-      "modelDefault": "使用后端默认",
       "effort": "推理强度",
       "systemPrompt": "系统提示词",
       "systemPromptCount": "~{{count}} tokens",
@@ -2668,7 +2722,8 @@
       "systemPromptEditorHint": "在更大的编辑器里编写系统提示词，并实时预览 Markdown。",
       "systemLocked": "系统 Agent 不可删除,仍可调整模型、Effort 与系统提示词。",
       "run": "运行",
-      "nameLocked": "用作引用 ID,创建后不可改"
+      "nameLocked": "用作引用 ID,创建后不可改",
+      "modelDefault": "使用后端默认"
     },
     "runDialog": {
       "title": "用此 Agent 开一个会话",
@@ -2694,7 +2749,32 @@
       "systemPromptHint": "可选",
       "systemPromptPlaceholder": "可选。会拼接到使用本 Agent 的每一段对话前。",
       "submit": "创建 Agent"
-    }
+    },
+    "onboarding": {
+      "title": "组织访问",
+      "summary": "{{total}} 个 Agent · {{custom}} 个自定义 · {{system}} 个系统",
+      "inventory": "Agent 清单（{{count}}）",
+      "notOnboardedCount": "{{count}} 个未纳管",
+      "privateCount": "{{count}} 个私有",
+      "publishedCount": "{{count}} 个已发布",
+      "conflictCount": "{{count}} 个不可用",
+      "onboardPrivate": "按私有方式纳管",
+      "onboarded": "已纳管",
+      "manageAccess": "管理访问",
+      "system": "系统",
+      "custom": "自定义",
+      "saved": "已按私有方式纳管 {{count}} 个 Agent。",
+      "savedPending": "Agent 已在本地设为私有，等待发布。",
+      "failed": "无法纳管 Agent：{{error}}",
+      "status": {
+        "not_onboarded": "未纳管",
+        "private": "私有",
+        "published": "已发布",
+        "managed_elsewhere": "不可用"
+      }
+    },
+    "renameKeptOld": "Agent 已重命名(旧名因被引用而保留)",
+    "deleteInUse": "Agent \"{{name}}\" 正被一个或多个频道使用,无法删除。"
   },
   "editor": {
     "modeLabel": "编辑器模式",
@@ -2832,18 +2912,41 @@
   "harness": {
     "title": "Harness",
     "subtitle": "定时任务、Watch 及其运行历史。",
-    "soon": "敬请期待",
     "create": "创建",
     "searchPlaceholder": "搜索…",
+    "searchRunsPlaceholder": "搜索运行记录…",
     "statusFilter": {
       "all": "全部",
-      "enabled": "仅启用",
-      "disabled": "仅禁用",
       "active": "进行中",
       "waiting": "在等",
       "running": "在跑",
       "paused": "已暂停",
-      "finished": "已结束"
+      "finished": "已结束",
+      "enabled": "仅启用",
+      "disabled": "仅禁用"
+    },
+    "runStatus": {
+      "all": "全部",
+      "queued": "排队中",
+      "running": "运行中",
+      "succeeded": "已成功",
+      "failed": "已失败",
+      "canceled": "已取消"
+    },
+    "runType": {
+      "agent_run": "Agent 运行",
+      "watch": "监听检查",
+      "scheduled": "定时任务",
+      "task_run": "任务运行",
+      "hook_send": "消息投递",
+      "webhook": "Webhook 触发",
+      "watch_runtime": "监听心跳",
+      "unknown": "运行"
+    },
+    "runTypeFilter": {
+      "label": "运行类型",
+      "default": "默认（隐藏心跳）",
+      "all": "全部类型"
     },
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
@@ -2858,26 +2961,16 @@
     "emptyTasks": "暂无定时任务。让 Agent 帮你创建一个。",
     "emptyWatches": "没有正在运行的 Watch。让 Agent 帮你开启一个。",
     "emptyRuns": "暂无运行记录。任务或 Watch 触发后会出现在这里。",
-    "webhooksSoon": "Webhook 即将上线",
-    "webhooksSoonBody": "入站 HTTP 触发将在后续版本中落地。Tasks 和 Watches 已覆盖定时与事件驱动的运行。",
+    "noTaskMatches": "当前视图没有匹配的任务。请清除筛选或搜索。",
+    "noWatchMatches": "当前视图没有匹配的 Watch。请清除筛选或搜索。",
+    "noRunMatches": "当前视图没有匹配的运行记录。请清除筛选或搜索。",
     "unknownSchedule": "未知计划",
-    "schedule": {
-      "cron": "周期 · {{value}}",
-      "oneShot": "一次性 · {{value}}"
-    },
     "pageLabel": "第 {{page}} 页",
-    "runtime": {
-      "running": "运行中",
-      "paused": "已暂停",
-      "idle": "空闲",
-      "enabled": "已启用",
-      "disabled": "已禁用"
-    },
     "tabs": {
       "tasks": "Tasks",
       "watches": "Watches",
-      "webhooks": "Webhooks",
-      "runs": "Runs"
+      "runs": "Runs",
+      "webhooks": "Webhooks"
     },
     "detail": {
       "schedule": "计划",
@@ -2892,7 +2985,7 @@
       "runtime": "运行时",
       "lastError": "上次错误",
       "type": "类型",
-      "definition": "定义",
+      "triggeredBy": "触发来源",
       "result": "结果",
       "error": "错误",
       "timing": "时间线",
@@ -2903,12 +2996,11 @@
       "openInAgents": "在 Agents 打开",
       "agentInherit": "继承默认 Agent",
       "sessionNone": "未绑定会话",
+      "sessionDeleted": "会话已删除",
       "source": "来源",
       "parentRun": "父 Run",
       "callback": "回传",
       "effort": "推理 {{value}}",
-      "triggeredBy": "触发来源",
-      "sessionDeleted": "会话已删除",
       "waitingSince": "开始等待",
       "onFailure": "失败处理",
       "timeout": "超时",
@@ -2919,7 +3011,15 @@
       "escalation": "失败后 → 交给 Agent",
       "triagePrompt": "排查提示词",
       "cwdFromSession": "跟随绑定会话，否则运行时默认目录或 Avibe 状态目录",
-      "cwdRuntimeDefault": "运行时默认目录，否则 Avibe 状态目录"
+      "cwdRuntimeDefault": "运行时默认目录，否则 Avibe 状态目录",
+      "definition": "定义"
+    },
+    "taskKind": {
+      "command": "命令"
+    },
+    "onFailure": {
+      "none": "仅通知（无 Agent）",
+      "agent": "升级给 Agent 处理"
     },
     "sessionPolicy": {
       "createPerRun": "每次运行新建会话",
@@ -2962,40 +3062,6 @@
       "kindWatch": "等待器",
       "promptTask": "请帮我创建一个后台任务。我的需求是:[在这里描述,例如「每个工作日早上 9:30 总结昨天的 PR 评论」]。请确认参数后用 vibe task add 创建,并把任务挂到当前项目。",
       "promptWatch": "请帮我创建一个等待器(watch)。我希望监听:[在这里描述,例如「等 CI 工作流 #1234 跑完」]。条件满足后通知我。请确认参数后用 vibe watch add 创建。"
-    },
-    "searchRunsPlaceholder": "搜索运行记录…",
-    "runStatus": {
-      "all": "全部",
-      "queued": "排队中",
-      "running": "运行中",
-      "succeeded": "已成功",
-      "failed": "已失败",
-      "canceled": "已取消"
-    },
-    "runType": {
-      "agent_run": "Agent 运行",
-      "watch": "监听检查",
-      "scheduled": "定时任务",
-      "task_run": "任务运行",
-      "hook_send": "消息投递",
-      "webhook": "Webhook 触发",
-      "watch_runtime": "监听心跳",
-      "unknown": "运行"
-    },
-    "runTypeFilter": {
-      "label": "运行类型",
-      "default": "默认（隐藏心跳）",
-      "all": "全部类型"
-    },
-    "noTaskMatches": "当前视图没有匹配的任务。请清除筛选或搜索。",
-    "noWatchMatches": "当前视图没有匹配的 Watch。请清除筛选或搜索。",
-    "noRunMatches": "当前视图没有匹配的运行记录。请清除筛选或搜索。",
-    "taskKind": {
-      "command": "命令"
-    },
-    "onFailure": {
-      "none": "仅通知（无 Agent）",
-      "agent": "升级给 Agent 处理"
     },
     "run": {
       "definitionDeleted": "（已删除）"
@@ -3041,11 +3107,29 @@
         "sat": "六"
       },
       "weekdaySeparator": "、"
+    },
+    "soon": "敬请期待",
+    "webhooksSoon": "Webhook 即将上线",
+    "webhooksSoonBody": "入站 HTTP 触发将在后续版本中落地。Tasks 和 Watches 已覆盖定时与事件驱动的运行。",
+    "schedule": {
+      "cron": "周期 · {{value}}",
+      "oneShot": "一次性 · {{value}}"
+    },
+    "runtime": {
+      "running": "运行中",
+      "paused": "已暂停",
+      "idle": "空闲",
+      "enabled": "已启用",
+      "disabled": "已禁用"
     }
   },
   "chat": {
     "back": "返回",
     "untitled": "未命名会话",
+    "archived": {
+      "sendBlocked": "该会话已归档，无法发送消息。",
+      "editBlocked": "该会话已归档，无法再修改。"
+    },
     "selection": {
       "quote": "引用",
       "askInNew": "在新会话询问",
@@ -3055,6 +3139,9 @@
     "showPage": {
       "open": "可视化",
       "backToChat": "回聊天",
+      "launchMenu": "打开 Show Page",
+      "newWindow": "新窗口",
+      "newLink": "新链接",
       "annotate": {
         "toggle": "标注",
         "smart": "Smart",
@@ -3086,10 +3173,7 @@
       "pinnedConfirm": "已固定 —「{{title}}」已在你的 Dock 中",
       "addToHomeTitle": "添加到主屏幕",
       "addToHomeBodySafari": "点此处在新页面中打开，再点「分享」 →「添加到主屏幕」。",
-      "addToHomeBodyPwa": "复制上方链接，在 Safari 中打开，再点分享 →「添加到主屏幕」。",
-      "launchMenu": "打开 Show Page",
-      "newWindow": "新窗口",
-      "newLink": "新链接"
+      "addToHomeBodyPwa": "复制上方链接，在 Safari 中打开，再点分享 →「添加到主屏幕」。"
     },
     "titlePlaceholder": "会话标题",
     "pickAgent": "选择 Agent",
@@ -3117,10 +3201,16 @@
       "webhook": "Webhook",
       "hook": "Hook",
       "activityRecovery": "活动恢复",
+      "showIntent": "页面操作",
       "harness": "来自 Agent",
       "from": "来自",
-      "agentFallback": "智能体",
-      "showIntent": "页面操作"
+      "agentFallback": "智能体"
+    },
+    "annotation": {
+      "titleUser": "用户批注",
+      "titleAgent": "Agent 批注",
+      "resolved": "已处理",
+      "screenshot": "截图"
     },
     "picker": {
       "agent": "Agent",
@@ -3143,6 +3233,8 @@
     "compose": {
       "placeholder": "输入消息…",
       "placeholderBusy": "Agent 处理中，输入将排队…",
+      "placeholderArchived": "会话已归档，仅可查看",
+      "placeholderSystem": "Avibe 在这里发布工作区通知，该会话不接受发送消息",
       "hint": "Enter 发送",
       "send": "发送",
       "queueSend": "排队发送",
@@ -3152,10 +3244,6 @@
       "voice": "语音输入",
       "stopRecording": "完成录音",
       "cancelRecording": "取消录音",
-      "removeAttachment": "移除",
-      "dropOverlay": "拖放文件以添加",
-      "placeholderArchived": "会话已归档，仅可查看",
-      "placeholderSystem": "Avibe 在这里发布工作区通知，该会话不接受发送消息",
       "voiceProcessing": "正在处理录音",
       "voiceRetry": "重试转写",
       "voiceCopyTranscript": "复制已恢复的文字",
@@ -3168,7 +3256,9 @@
       "voiceEmpty": "这段录音中没有检测到语音。",
       "voicePermissionFailed": "无法使用麦克风，请检查浏览器权限后重试。",
       "voiceStartFailed": "当前浏览器无法启动语音录制，请刷新页面或更换支持的浏览器。",
-      "voiceDraftChanged": "语音输入期间草稿已变化，已保留整理结果供复制。"
+      "voiceDraftChanged": "语音输入期间草稿已变化，已保留整理结果供复制。",
+      "removeAttachment": "移除",
+      "dropOverlay": "拖放文件以添加"
     },
     "media": {
       "preview": "预览",
@@ -3236,16 +3326,6 @@
       "sendNow": "立即发送",
       "recall": "撤回到输入框",
       "remove": "移出队列"
-    },
-    "archived": {
-      "sendBlocked": "该会话已归档，无法发送消息。",
-      "editBlocked": "该会话已归档，无法再修改。"
-    },
-    "annotation": {
-      "titleUser": "用户批注",
-      "titleAgent": "Agent 批注",
-      "resolved": "已处理",
-      "screenshot": "截图"
     }
   },
   "vaults": {
@@ -3506,6 +3586,7 @@
     },
     "request": {
       "provide": "填写",
+      "expired": "该会话已归档，此请求已失效。",
       "fulfilled": "已提供",
       "title": "Agent 需要一个密钥",
       "help": "提供这个值——它会进入保险库,绝不会进入聊天或模型。",
@@ -3513,8 +3594,7 @@
       "dismiss": "忽略",
       "saveAndWake": "保存并让 AI 继续",
       "ambiguousProvision": "有多个待处理请求都需要这个密钥。请在 Vaults 里打开对应请求的填写行，这样才能保留请求里的详细设置。",
-      "saveFailed": "保存失败，请重试。",
-      "expired": "该会话已归档，此请求已失效。"
+      "saveFailed": "保存失败，请重试。"
     },
     "history": "历史",
     "audit": {
@@ -4022,46 +4102,6 @@
         "access": "访问级别",
         "audience": "受众",
         "sync": "同步"
-      }
-    }
-  },
-  "models": {
-    "eligibility": {
-      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用",
-      "opencode_api_key_only": "OpenCode 只能由 API Key 来源供给",
-      "consent_required": "需要先同意实验性中枢供给"
-    },
-    "oauth": {
-      "upstream_failed": "厂商没有完成这次登录，请重试",
-      "engine_unavailable": "中枢没有响应，请重试",
-      "submission_failed": "粘贴的内容没能提交，请重试",
-      "ambiguous_engine_binding": "分不清登录的是哪个账号，请一次只登一个再重试",
-      "binding_failed": "该账号已被另一来源使用",
-      "expired": "授权超时，请重新连接"
-    },
-    "probe": {
-      "native_cli_unavailable": "用不上 CLI 的登录",
-      "no_candidate": {
-        "waiting": "所有来源都在冷却",
-        "interrupted": "现在没有来源能提供这个模型"
-      }
-    },
-    "source": {
-      "cooldown": {
-        "network": "网络不通",
-        "timeout": "连续超时",
-        "rate_limited": "触发限流",
-        "quota_exhausted": "本周期额度用完",
-        "server_error": "上游服务异常"
-      },
-      "needs_action": {
-        "oauth_expired": "需要重新登录",
-        "balance_exhausted": "余额不足，需要充值",
-        "credential_revoked": "凭据已失效，需要重新填写",
-        "account_banned": "账号被限制使用"
-      },
-      "error": {
-        "unclassified": "未知错误，暂时不可用"
       }
     }
   }

@@ -3,7 +3,13 @@ import { Archive, EyeOff, GitFork, Pencil, Pin } from 'lucide-react';
 import { describe, expect, it } from 'vitest';
 
 import { Popover, PopoverTrigger } from '../ui/popover';
-import { SessionActionMenu, SessionActionsTrigger, type SessionActionDescriptor } from './sessionActions';
+import {
+  MobileChatSessionActionMenu,
+  SessionActionMenu,
+  SessionActionsTrigger,
+  type SessionActionDescriptor,
+} from './sessionActions';
+import { mobileChatSessionActions } from './chatSessionActions';
 
 const row = (over: Partial<SessionActionDescriptor> & Pick<SessionActionDescriptor, 'id' | 'group' | 'label'>) =>
   ({ icon: Pin, onSelect: () => undefined, ...over }) as SessionActionDescriptor;
@@ -141,5 +147,31 @@ describe('SessionActionsTrigger', () => {
 
     expect(html).not.toContain('opacity-0');
     expect(html).toContain('size-7');
+  });
+});
+
+describe('MobileChatSessionActionMenu', () => {
+  it('removes rename from the Chat surface while preserving the remaining descriptors', () => {
+    const actions = fullMenu();
+
+    expect(mobileChatSessionActions(actions).map((action) => action.id)).toEqual([
+      'pin',
+      'fork',
+      'hide',
+      'archive',
+    ]);
+  });
+
+  it('renders the chat trigger only below the desktop breakpoint', () => {
+    const html = renderToStaticMarkup(
+      <MobileChatSessionActionMenu actions={fullMenu()} label="Session actions" />,
+    );
+
+    expect(html).toContain('md:hidden');
+    expect(html).toContain('aria-label="Session actions"');
+  });
+
+  it('withdraws the trigger when the surface offers no actions', () => {
+    expect(renderToStaticMarkup(<MobileChatSessionActionMenu actions={[]} label="Session actions" />)).toBe('');
   });
 });

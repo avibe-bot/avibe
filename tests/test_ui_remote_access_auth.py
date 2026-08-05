@@ -2097,17 +2097,16 @@ def test_remote_instance_role_route_matrix(
     assert prefs_read_response.status_code == 200
     assert prefs_read_response.get_json()["background_work_banner_enabled"] is True
     assert prefs_write_response.status_code == (200 if role == "owner" else 403)
-    if role == "owner":
-        assert "runtime" in config_response.get_json()
-    else:
-        assert set(config_response.get_json()) == {
-            "capabilities",
-            "language",
-            "mode",
-            "setup_state",
-            "ui",
-            "version",
-        }
+    # Role grants an authorized remote operation, not trusted-local visibility.
+    # All remote callers receive the same explicit safe config projection.
+    assert set(config_response.get_json()) == {
+        "capabilities",
+        "language",
+        "mode",
+        "setup_state",
+        "ui",
+        "version",
+    }
     assert conversation_response.status_code == conversation_status
     assert project_response.status_code == project_status
     if role == "viewer":

@@ -6,6 +6,8 @@ capability:
     - tests/test_tunnel_quality.py
     - tests/test_tunnel_recovery.py
     - tests/test_cloudflare_network.py
+    - tests/test_remote_access_vibe_cloud.py
+    - tests/test_api_save_config_merge.py
 status_legend:
   covered: automated scenario or contract coverage exists
   partial: focused coverage exists but a live network dependency remains
@@ -168,3 +170,33 @@ scenarios:
     kind: network_policy
     layer: contract
     test: tests/test_ui_remote_access_auth.py::test_ra_tq_026_remote_status_uses_cf_ray_on_paired_public_host
+  - id: RA-TQ-027
+    name: User optimization policies change recovery sensitivity without changing path measurements
+    status: covered
+    kind: policy
+    layer: contract
+    test: tests/test_tunnel_quality.py::test_ra_tq_027_optimization_profiles_change_only_recovery_sensitivity
+  - id: RA-TQ-028
+    name: Live Tunnel setting changes promote a ready replacement before draining the previous Connector
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_028_settings_promote_before_draining_previous_connector
+  - id: RA-TQ-029
+    name: Edge IP and outbound-interface controls reach cloudflared only through currently assigned addresses
+    status: covered
+    kind: network_policy
+    layer: contract
+    test: tests/test_remote_access_vibe_cloud.py::test_ra_tq_029_connector_environment_applies_ip_and_interface_controls
+  - id: RA-TQ-030
+    name: Connectivity diagnostics report proven TCP reachability without guessing unobserved QUIC reachability
+    status: covered
+    kind: diagnostics
+    layer: contract
+    test: tests/test_remote_access_vibe_cloud.py::test_ra_tq_030_connectivity_diagnostics_do_not_guess_quic_reachability
+  - id: RA-TQ-031
+    name: Tunnel controls remain usable at desktop and mobile widths
+    status: manual
+    kind: user_experience
+    layer: browser
+    test: null

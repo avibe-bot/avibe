@@ -42,7 +42,6 @@
     "cancel": "Cancel",
     "confirm": "Confirm",
     "clear": "Clear",
-    "none": "None",
     "retry": "Retry",
     "undo": "Undo",
     "loading": "Loading...",
@@ -53,6 +52,8 @@
     "enable": "Enable",
     "disable": "Disable",
     "disabled": "Disabled",
+    "archived": "Archived",
+    "systemSession": "System",
     "default": "Default",
     "running": "Running",
     "stopped": "Stopped",
@@ -106,15 +107,14 @@
     "proxyUrl": "Proxy URL (optional)",
     "proxyUrlHint": "SOCKS5, SOCKS4, HTTP or HTTPS proxy. Leave empty to fall back to system SOCKS proxy detection or direct connection.",
     "proxyUrlCollapsedHint": "(blank → system proxy if set, else direct)",
-    "locked": "Locked",
-    "archived": "Archived",
-    "systemSession": "System",
     "duration": {
       "seconds": "s",
       "minutes": "m",
       "hours": "h",
       "days": "d"
-    }
+    },
+    "none": "None",
+    "locked": "Locked"
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -127,7 +127,6 @@
     "messagingPlatforms": "Messaging Platforms",
     "backends": "Backends",
     "remoteAccess": "Remote Access",
-    "organization": "Organization",
     "doctor": "Doctor",
     "inbox": "Inbox",
     "projects": "Projects",
@@ -135,7 +134,8 @@
     "more": "More",
     "apps": "Apps",
     "workbench": "Workbench",
-    "models": "Models"
+    "models": "Models",
+    "organization": "Organization"
   },
   "more": {
     "title": "More",
@@ -1141,13 +1141,13 @@
     "qualityUnknown": "Measuring",
     "qualityRecovering": "Optimizing",
     "qualityDegraded": "Degraded",
-    "optimizeRoute": "Optimize route",
-    "optimizingRoute": "Optimizing...",
-    "optimizeStarted": "A second Connector is evaluating a better route",
     "protocolAutomatic": "{{protocol}} (Auto)",
     "protocolUnknown": "Detecting",
+    "connectorConnectionsHealthy": "Cloudflare connections healthy",
+    "connectorConnectionsPartial": "Cloudflare connections partial ({{connections}}/4)",
+    "connectorConnectionsUnavailable": "Cloudflare connections unavailable",
     "connectorPath": "Connector · {{protocol}} · {{connections}}/4 · RTT {{rtt}}",
-    "rttUnavailable": "Unavailable",
+    "connectorPathWithLatency": "{{protocol}} · {{connections}} · Tunnel latency {{rtt}}",
     "requestPath": "Requests · P95 {{p95}} · P99 {{p99}} · {{slow}}% > 1 s",
     "requestPathUnavailable": "Requests unavailable · {{success}}/{{count}} succeeded",
     "requestPathMeasuring": "Measuring requests · {{count}} samples",
@@ -1166,7 +1166,81 @@
     "networkTechnicalDetails": "Technical details",
     "networkEdgeNodes": "Cloudflare edge nodes",
     "networkAnycastIps": "Cloudflare Anycast IPs",
-    "networkIpUnavailable": "Edge IP unavailable"
+    "networkIpUnavailable": "Edge IP unavailable",
+    "optimizeRoute": "Optimize route",
+    "optimizingRoute": "Optimizing...",
+    "optimizeStarted": "A second Connector is evaluating a better route",
+    "controls": "Tunnel controls (Advanced)",
+    "protocol": "Transport protocol",
+    "protocolAuto": "Auto",
+    "protocolAutoActive": "Auto · {{protocol}} active",
+    "autoRecovery": "Automatic route optimization",
+    "optimizationProfile": "Optimization policy",
+    "profileStable": "Stable",
+    "profileBalanced": "Balanced",
+    "profileLowLatency": "Low latency",
+    "ipFamily": "Edge IP family",
+    "ipAuto": "Auto",
+    "ipV4": "IPv4",
+    "ipV6": "IPv6",
+    "outboundInterface": "Outbound interface",
+    "outboundSystem": "System automatic",
+    "saveControls": "Apply",
+    "savingControls": "Applying...",
+    "controlsSaved": "Tunnel controls applied",
+    "diagnostics": "Connectivity diagnostics",
+    "runDiagnostics": "Run diagnostics",
+    "runningDiagnostics": "Testing...",
+    "diagnosticDns": "Cloudflare DNS",
+    "diagnosticQuic": "QUIC path",
+    "diagnosticHttp2": "HTTP/2 path",
+    "diagnosticAvailable": "Available",
+    "diagnosticUnavailable": "Unavailable",
+    "diagnosticUnknown": "Not observed",
+    "diagnosticQuicInactive": "Unverified · {{protocol}} active",
+    "diagnosticQuicInactiveHelp": "Avibe confirms QUIC only after the active Connector demonstrates it. The Connector is currently using {{protocol}}.",
+    "diagnosticVersion": "{{version}}",
+    "rttUnavailable": "Unavailable"
+  },
+  "models": {
+    "eligibility": {
+      "subscription_wrong_client": "{{vendor}} subscriptions only work in {{backend}}",
+      "opencode_api_key_only": "OpenCode can only be supplied by API-key sources",
+      "consent_required": "Needs your consent for experimental hub supply first"
+    },
+    "oauth": {
+      "upstream_failed": "The vendor didn't complete this sign-in, please retry",
+      "engine_unavailable": "The Hub isn't responding, please retry",
+      "submission_failed": "Couldn't submit what you pasted, please retry",
+      "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
+      "binding_failed": "That account is already used by another source",
+      "expired": "Authorization timed out, please reconnect"
+    },
+    "probe": {
+      "native_cli_unavailable": "Can't use the CLI's sign-in",
+      "no_candidate": {
+        "waiting": "Every source is cooling down",
+        "interrupted": "No source can serve this model right now"
+      }
+    },
+    "source": {
+      "cooldown": {
+        "network": "Network unreachable",
+        "timeout": "Repeated timeouts",
+        "rate_limited": "Rate limited",
+        "quota_exhausted": "Cycle quota used up",
+        "server_error": "Upstream server error"
+      },
+      "needs_action": {
+        "oauth_expired": "Needs a new sign-in",
+        "balance_exhausted": "Out of balance — top it up",
+        "credential_revoked": "Credential revoked — enter a new one",
+        "account_banned": "Account is restricted"
+      },
+      "error": {
+        "unclassified": "Unknown error — temporarily unavailable"
+      }
+    }
   },
   "accessBlocked": {
     "title": "Can't open the control panel here",
@@ -1180,14 +1254,15 @@
     "invalid_share_id": "A custom link may use only 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
     "missing_share_id": "Enter a custom link first.",
     "not_public": "Make the Show Page public first to change its link.",
+    "session_agent_unavailable": "The source session's Agent is no longer available. Choose an enabled Agent to fork this session.",
     "session_archived": "This session is archived, so its Show Page can't be changed.",
+    "reserved_session": "Avibe owns this session — it only receives workspace notifications.",
     "invalid_icon_type": "The icon must be an SVG, PNG, ICO, JPEG, or WebP image.",
     "icon_too_large": "That icon is too large. Use an image up to 2 MiB.",
     "icon_required": "Choose an icon file to upload.",
     "icon_write_failed": "Couldn't save the icon. Please try again.",
     "project_no_folder": "This project has no local folder configured.",
     "project_not_found": "Project not found.",
-    "project_access_denied": "You don't have permission to start a session in this project.",
     "remote_access_host_mismatch": "This address can't open the Avibe control panel. Open it from your https://<your-slug>.avibe.bot link, or http://127.0.0.1:5123 on the machine running Avibe.",
     "remote_access_config_unavailable": "Avibe couldn't read its configuration. Check that the service is healthy and try again.",
     "remote_access_public_url_invalid": "Remote access is misconfigured (the public URL is invalid). Re-pair this device or fix the remote-access settings.",
@@ -1212,7 +1287,14 @@
     "remote_access_not_running": "Start Remote Access before optimizing its route.",
     "route_optimization_unavailable": "A route optimization is already running or cooling down.",
     "route_optimization_start_failed": "Avibe could not start route optimization. Check the remote access runtime logs.",
+    "remote_access_settings_invalid": "One or more Tunnel controls are invalid.",
+    "remote_access_settings_unavailable": "Wait for the current route change to finish, then apply these controls again.",
+    "remote_access_settings_apply_failed": "The replacement Connector did not become ready. The previous Tunnel settings remain active.",
+    "edge_bind_address_unavailable": "That outbound address is no longer assigned to this machine. Refresh the interface list and choose again.",
+    "edge_bind_address_family_mismatch": "The selected outbound address does not match the chosen IP family.",
+    "remote_access_diagnostics_failed": "Connectivity diagnostics could not finish.",
     "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another.",
+    "project_access_denied": "You don't have permission to start a session in this project.",
     "memory_disabled": "Memory is disabled, or this connection can't reach it.",
     "memory_invalid_input": "That Memory request wasn't valid.",
     "memory_input_too_large": "That input is too large for Memory.",
@@ -1231,8 +1313,6 @@
     "memory_runtime_manifest_missing": "The memory runtime manifest is missing.",
     "memory_runtime_manifest_unavailable": "The memory runtime manifest couldn't be downloaded.",
     "memory_runtime_archive_unavailable": "The memory runtime download isn't available right now.",
-    "session_agent_unavailable": "The source session's Agent is no longer available. Choose an enabled Agent to fork this session.",
-    "reserved_session": "Avibe owns this session — it only receives workspace notifications.",
     "remote_execution_disabled": "Remote access is read-only for Agent, Harness, terminal, and file execution in this release. Open Avibe on the machine to run this action."
   },
   "apps": {
@@ -1596,6 +1676,7 @@
     },
     "search": {
       "roleYou": "You",
+      "includeArchived": "Include archived",
       "roleAutomated": "Automated",
       "roleAgent": "Agent",
       "title": "Search",
@@ -1611,8 +1692,7 @@
       "kbdNewTab": "New Tab",
       "kbdClose": "Close",
       "footerNote": "Apps and message content · all sessions",
-      "scopeAll": "all sessions",
-      "includeArchived": "Include archived"
+      "scopeAll": "all sessions"
     },
     "inbox": {
       "eyebrow": "Inbox",
@@ -2469,29 +2549,6 @@
       "definitions": "Definitions",
       "running": "Runs"
     },
-    "onboarding": {
-      "title": "Organization access",
-      "summary": "{{total}} Agents · {{custom}} custom · {{system}} system",
-      "inventory": "Agent inventory ({{count}})",
-      "notOnboardedCount": "{{count}} not onboarded",
-      "privateCount": "{{count}} private",
-      "publishedCount": "{{count}} published",
-      "conflictCount": "{{count}} unavailable",
-      "onboardPrivate": "Onboard privately",
-      "onboarded": "Onboarded",
-      "manageAccess": "Manage access",
-      "system": "system",
-      "custom": "custom",
-      "saved": "{{count}} Agents onboarded privately.",
-      "savedPending": "Agents are private locally; publication is pending.",
-      "failed": "Could not onboard Agents: {{error}}",
-      "status": {
-        "not_onboarded": "Not onboarded",
-        "private": "Private",
-        "published": "Published",
-        "managed_elsewhere": "Unavailable"
-      }
-    },
     "running": {
       "empty": "No agents are currently running.",
       "unreachableTitle": "Runtime unreachable",
@@ -2541,6 +2598,28 @@
         "task": "Task",
         "watch": "Watch",
         "disabled": "Disabled"
+      },
+      "triggerDetail": {
+        "taskType": "Task",
+        "watchType": "Watch",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "schedule": "Schedule",
+        "nextRun": "Next run",
+        "command": "Command",
+        "runtime": "Runtime",
+        "running": "Running",
+        "runningPid": "Running · pid {{pid}}",
+        "notRunning": "Not running",
+        "firedSessions": "Triggered sessions",
+        "noFiredSessions": "No sessions triggered in this window.",
+        "runsTitle": "Recent runs",
+        "taskActiveLabel": "Enabled",
+        "watchActiveLabel": "Watching",
+        "enabledToast": "Enabled",
+        "disabledToast": "Disabled",
+        "openInHarness": "Open in Harness",
+        "toggleFailed": "Couldn't update — try again."
       },
       "search": {
         "placeholder": "Find a session or trigger…",
@@ -2596,28 +2675,6 @@
         "movedForeground": "Moved to foreground",
         "movedBackground": "Moved to background",
         "endGone": "This session is no longer live."
-      },
-      "triggerDetail": {
-        "taskType": "Task",
-        "watchType": "Watch",
-        "enabled": "Enabled",
-        "disabled": "Disabled",
-        "schedule": "Schedule",
-        "nextRun": "Next run",
-        "command": "Command",
-        "runtime": "Runtime",
-        "running": "Running",
-        "runningPid": "Running · pid {{pid}}",
-        "notRunning": "Not running",
-        "firedSessions": "Triggered sessions",
-        "noFiredSessions": "No sessions triggered in this window.",
-        "runsTitle": "Recent runs",
-        "taskActiveLabel": "Enabled",
-        "watchActiveLabel": "Watching",
-        "enabledToast": "Enabled",
-        "disabledToast": "Disabled",
-        "openInHarness": "Open in Harness",
-        "toggleFailed": "Couldn't update — try again."
       }
     },
     "showDisabled": "Show disabled",
@@ -2632,7 +2689,6 @@
     "importFailed": "Import failed: {{error}}",
     "importNoneFound": "No {{backend}} agents found on disk to import.",
     "renameSuccess": "Agent renamed",
-    "renameKeptOld": "Agent renamed (old one kept due to references)",
     "searchPlaceholder": "Search agents…",
     "backendFilter": "Backend",
     "backendAll": "All",
@@ -2642,7 +2698,6 @@
     "selectPrompt": "Select an agent to view its configuration.",
     "makeDefault": "Make default",
     "deleteConfirm": "Archive agent \"{{name}}\"? It will disappear from Agents, while existing sessions and automations keep their saved configuration.",
-    "deleteInUse": "Agent \"{{name}}\" is currently in use by one or more channels and cannot be deleted.",
     "detail": {
       "enabled": "Enabled",
       "enabledHint": "Disabling keeps the agent in the registry but excludes it from new sessions; running sessions are unaffected.",
@@ -2660,7 +2715,6 @@
       "model": "Model",
       "modelPlaceholder": "Pick or type a model",
       "modelEmpty": "No matches — you can type a custom value.",
-      "modelDefault": "Backend default",
       "effort": "Reasoning effort",
       "systemPrompt": "System prompt",
       "systemPromptCount": "~{{count}} tokens",
@@ -2668,7 +2722,8 @@
       "systemPromptEditorHint": "Write the full system prompt with live Markdown preview.",
       "systemLocked": "System agents cannot be deleted. You can still adjust model, effort, and system prompt.",
       "run": "Run",
-      "nameLocked": "Used as the reference id · locked after create"
+      "nameLocked": "Used as the reference id · locked after create",
+      "modelDefault": "Backend default"
     },
     "runDialog": {
       "title": "Open a chat with this agent",
@@ -2694,7 +2749,32 @@
       "systemPromptHint": "Optional",
       "systemPromptPlaceholder": "Optional. Prepended to every conversation that uses this agent.",
       "submit": "Create agent"
-    }
+    },
+    "onboarding": {
+      "title": "Organization access",
+      "summary": "{{total}} Agents · {{custom}} custom · {{system}} system",
+      "inventory": "Agent inventory ({{count}})",
+      "notOnboardedCount": "{{count}} not onboarded",
+      "privateCount": "{{count}} private",
+      "publishedCount": "{{count}} published",
+      "conflictCount": "{{count}} unavailable",
+      "onboardPrivate": "Onboard privately",
+      "onboarded": "Onboarded",
+      "manageAccess": "Manage access",
+      "system": "system",
+      "custom": "custom",
+      "saved": "{{count}} Agents onboarded privately.",
+      "savedPending": "Agents are private locally; publication is pending.",
+      "failed": "Could not onboard Agents: {{error}}",
+      "status": {
+        "not_onboarded": "Not onboarded",
+        "private": "Private",
+        "published": "Published",
+        "managed_elsewhere": "Unavailable"
+      }
+    },
+    "renameKeptOld": "Agent renamed (old one kept due to references)",
+    "deleteInUse": "Agent \"{{name}}\" is currently in use by one or more channels and cannot be deleted."
   },
   "editor": {
     "modeLabel": "Editor mode",
@@ -2832,18 +2912,41 @@
   "harness": {
     "title": "Harness",
     "subtitle": "Scheduled tasks, watches, and the run history of both.",
-    "soon": "soon",
     "create": "Create",
     "searchPlaceholder": "Search…",
+    "searchRunsPlaceholder": "Search runs…",
     "statusFilter": {
       "all": "All",
-      "enabled": "Enabled only",
-      "disabled": "Disabled only",
       "active": "Live",
       "waiting": "Waiting",
       "running": "Running",
       "paused": "Paused",
-      "finished": "Finished"
+      "finished": "Finished",
+      "enabled": "Enabled only",
+      "disabled": "Disabled only"
+    },
+    "runStatus": {
+      "all": "All",
+      "queued": "Queued",
+      "running": "Running",
+      "succeeded": "Succeeded",
+      "failed": "Failed",
+      "canceled": "Canceled"
+    },
+    "runType": {
+      "agent_run": "Agent run",
+      "watch": "Watch check",
+      "scheduled": "Scheduled task",
+      "task_run": "Task run",
+      "hook_send": "Message delivery",
+      "webhook": "Webhook trigger",
+      "watch_runtime": "Watcher heartbeat",
+      "unknown": "Run"
+    },
+    "runTypeFilter": {
+      "label": "Run type",
+      "default": "Default (no heartbeats)",
+      "all": "All types"
     },
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
@@ -2858,26 +2961,16 @@
     "emptyTasks": "No scheduled tasks. Ask an agent to create one.",
     "emptyWatches": "No watches running. Ask an agent to start one.",
     "emptyRuns": "No runs yet. They appear here once a task or watch fires.",
-    "webhooksSoon": "Webhooks are coming soon",
-    "webhooksSoonBody": "Inbound HTTP triggers will land in a follow-up release. Tasks and watches cover scheduled and event-driven runs today.",
+    "noTaskMatches": "No tasks match this view. Clear the filters or search.",
+    "noWatchMatches": "No watches match this view. Clear the filters or search.",
+    "noRunMatches": "No runs match this view. Clear the filters or search.",
     "unknownSchedule": "unknown schedule",
-    "schedule": {
-      "cron": "cron · {{value}}",
-      "oneShot": "one-shot · {{value}}"
-    },
     "pageLabel": "page {{page}}",
-    "runtime": {
-      "running": "Running",
-      "paused": "Paused",
-      "idle": "Idle",
-      "enabled": "Enabled",
-      "disabled": "Disabled"
-    },
     "tabs": {
       "tasks": "Tasks",
       "watches": "Watches",
-      "webhooks": "Webhooks",
-      "runs": "Runs"
+      "runs": "Runs",
+      "webhooks": "Webhooks"
     },
     "detail": {
       "schedule": "Schedule",
@@ -2892,7 +2985,7 @@
       "runtime": "Runtime",
       "lastError": "Last error",
       "type": "Type",
-      "definition": "Definition",
+      "triggeredBy": "Triggered by",
       "result": "Result",
       "error": "Error",
       "timing": "Timing",
@@ -2903,12 +2996,11 @@
       "openInAgents": "Open in Agents",
       "agentInherit": "Inherits default agent",
       "sessionNone": "No bound session",
+      "sessionDeleted": "Session deleted",
       "source": "Source",
       "parentRun": "Parent run",
       "callback": "Callback",
       "effort": "effort {{value}}",
-      "triggeredBy": "Triggered by",
-      "sessionDeleted": "Session deleted",
       "waitingSince": "Waiting since",
       "onFailure": "On failure",
       "timeout": "Timeout",
@@ -2919,7 +3011,15 @@
       "escalation": "On failure → escalation",
       "triagePrompt": "Triage prompt",
       "cwdFromSession": "Bound session, else runtime default or Avibe state dir",
-      "cwdRuntimeDefault": "Runtime default, else Avibe state dir"
+      "cwdRuntimeDefault": "Runtime default, else Avibe state dir",
+      "definition": "Definition"
+    },
+    "taskKind": {
+      "command": "Command"
+    },
+    "onFailure": {
+      "none": "Notice only (no Agent)",
+      "agent": "Escalate to an Agent"
     },
     "sessionPolicy": {
       "createPerRun": "New session each run",
@@ -2962,40 +3062,6 @@
       "kindWatch": "Watch",
       "promptTask": "Help me create a scheduled task. What I want: [describe here, e.g. \"every weekday at 9:30am summarize yesterday's PR comments\"]. Once parameters look right, run vibe task add and bind it to this project.",
       "promptWatch": "Help me create a watch. I want to wait for: [describe here, e.g. \"CI workflow #1234 to finish\"]. Notify me when the condition is met. Once parameters look right, run vibe watch add."
-    },
-    "searchRunsPlaceholder": "Search runs…",
-    "runStatus": {
-      "all": "All",
-      "queued": "Queued",
-      "running": "Running",
-      "succeeded": "Succeeded",
-      "failed": "Failed",
-      "canceled": "Canceled"
-    },
-    "runType": {
-      "agent_run": "Agent run",
-      "watch": "Watch check",
-      "scheduled": "Scheduled task",
-      "task_run": "Task run",
-      "hook_send": "Message delivery",
-      "webhook": "Webhook trigger",
-      "watch_runtime": "Watcher heartbeat",
-      "unknown": "Run"
-    },
-    "runTypeFilter": {
-      "label": "Run type",
-      "default": "Default (no heartbeats)",
-      "all": "All types"
-    },
-    "noTaskMatches": "No tasks match this view. Clear the filters or search.",
-    "noWatchMatches": "No watches match this view. Clear the filters or search.",
-    "noRunMatches": "No runs match this view. Clear the filters or search.",
-    "taskKind": {
-      "command": "Command"
-    },
-    "onFailure": {
-      "none": "Notice only (no Agent)",
-      "agent": "Escalate to an Agent"
     },
     "run": {
       "definitionDeleted": "(deleted)"
@@ -3041,11 +3107,29 @@
         "sat": "Sat"
       },
       "weekdaySeparator": ", "
+    },
+    "soon": "soon",
+    "webhooksSoon": "Webhooks are coming soon",
+    "webhooksSoonBody": "Inbound HTTP triggers will land in a follow-up release. Tasks and watches cover scheduled and event-driven runs today.",
+    "schedule": {
+      "cron": "cron · {{value}}",
+      "oneShot": "one-shot · {{value}}"
+    },
+    "runtime": {
+      "running": "Running",
+      "paused": "Paused",
+      "idle": "Idle",
+      "enabled": "Enabled",
+      "disabled": "Disabled"
     }
   },
   "chat": {
     "back": "Back",
     "untitled": "Untitled session",
+    "archived": {
+      "sendBlocked": "This session is archived and read-only.",
+      "editBlocked": "This session is archived and can no longer be changed."
+    },
     "selection": {
       "quote": "Quote",
       "askInNew": "Ask in a new session",
@@ -3055,6 +3139,9 @@
     "showPage": {
       "open": "Visualize",
       "backToChat": "Back to chat",
+      "launchMenu": "Open Show Page",
+      "newWindow": "New window",
+      "newLink": "New link",
       "annotate": {
         "toggle": "Annotate",
         "smart": "Smart",
@@ -3086,10 +3173,7 @@
       "pinnedConfirm": "Pinned — “{{title}}” is in your Dock",
       "addToHomeTitle": "Add to Home Screen",
       "addToHomeBodySafari": "Tap here to open in a new tab, then Share → “Add to Home Screen”.",
-      "addToHomeBodyPwa": "Copy the link above and open it in Safari, then tap Share → “Add to Home Screen”.",
-      "launchMenu": "Open Show Page",
-      "newWindow": "New window",
-      "newLink": "New link"
+      "addToHomeBodyPwa": "Copy the link above and open it in Safari, then tap Share → “Add to Home Screen”."
     },
     "titlePlaceholder": "Session title",
     "pickAgent": "Pick an agent",
@@ -3117,10 +3201,16 @@
       "webhook": "Webhook",
       "hook": "Hook",
       "activityRecovery": "Recovered activity",
+      "showIntent": "Page action",
       "harness": "From agent",
       "from": "From",
-      "agentFallback": "agent",
-      "showIntent": "Page action"
+      "agentFallback": "agent"
+    },
+    "annotation": {
+      "titleUser": "User annotation",
+      "titleAgent": "Agent annotation",
+      "resolved": "Resolved",
+      "screenshot": "Screenshot"
     },
     "picker": {
       "agent": "Agent",
@@ -3143,6 +3233,8 @@
     "compose": {
       "placeholder": "Type a message…",
       "placeholderBusy": "Type to queue while the agent works…",
+      "placeholderArchived": "This session is archived — read-only",
+      "placeholderSystem": "Avibe posts workspace notifications here — this session does not accept messages",
       "hint": "Enter to send",
       "send": "Send",
       "queueSend": "Send to queue",
@@ -3152,10 +3244,6 @@
       "voice": "Voice input",
       "stopRecording": "Finish recording",
       "cancelRecording": "Cancel recording",
-      "removeAttachment": "Remove",
-      "dropOverlay": "Drop files to attach",
-      "placeholderArchived": "This session is archived — read-only",
-      "placeholderSystem": "Avibe posts workspace notifications here — this session does not accept messages",
       "voiceProcessing": "Processing recording",
       "voiceRetry": "Retry transcription",
       "voiceCopyTranscript": "Copy recovered transcript",
@@ -3168,7 +3256,9 @@
       "voiceEmpty": "No speech was detected in this recording.",
       "voicePermissionFailed": "Microphone access failed. Check your browser permission and try again.",
       "voiceStartFailed": "Voice recording could not start in this browser. Reload the page or try a supported browser.",
-      "voiceDraftChanged": "The draft changed during voice input. The recovered transcript is available to copy."
+      "voiceDraftChanged": "The draft changed during voice input. The recovered transcript is available to copy.",
+      "removeAttachment": "Remove",
+      "dropOverlay": "Drop files to attach"
     },
     "media": {
       "preview": "Preview",
@@ -3236,16 +3326,6 @@
       "sendNow": "Send now",
       "recall": "Recall to input",
       "remove": "Remove from queue"
-    },
-    "archived": {
-      "sendBlocked": "This session is archived and read-only.",
-      "editBlocked": "This session is archived and can no longer be changed."
-    },
-    "annotation": {
-      "titleUser": "User annotation",
-      "titleAgent": "Agent annotation",
-      "resolved": "Resolved",
-      "screenshot": "Screenshot"
     }
   },
   "vaults": {
@@ -3506,6 +3586,7 @@
     },
     "request": {
       "provide": "provide",
+      "expired": "This session is archived — this request has expired.",
       "fulfilled": "provided",
       "title": "Agent needs a secret",
       "help": "Provide the value — it goes to the vault, never to the chat or model.",
@@ -3513,8 +3594,7 @@
       "dismiss": "Dismiss",
       "saveAndWake": "Save & let the agent continue",
       "ambiguousProvision": "Multiple pending requests need this secret. Open the request-specific Provide secret row in Vaults so the requested details are preserved.",
-      "saveFailed": "Couldn't save the secret. Please try again.",
-      "expired": "This session is archived — this request has expired."
+      "saveFailed": "Couldn't save the secret. Please try again."
     },
     "history": "History",
     "audit": {
@@ -4022,46 +4102,6 @@
         "access": "Access",
         "audience": "Audience",
         "sync": "Sync"
-      }
-    }
-  },
-  "models": {
-    "eligibility": {
-      "subscription_wrong_client": "{{vendor}} subscriptions only work in {{backend}}",
-      "opencode_api_key_only": "OpenCode can only be supplied by API-key sources",
-      "consent_required": "Needs your consent for experimental hub supply first"
-    },
-    "oauth": {
-      "upstream_failed": "The vendor didn't complete this sign-in, please retry",
-      "engine_unavailable": "The Hub isn't responding, please retry",
-      "submission_failed": "Couldn't submit what you pasted, please retry",
-      "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
-      "binding_failed": "That account is already used by another source",
-      "expired": "Authorization timed out, please reconnect"
-    },
-    "probe": {
-      "native_cli_unavailable": "Can't use the CLI's sign-in",
-      "no_candidate": {
-        "waiting": "Every source is cooling down",
-        "interrupted": "No source can serve this model right now"
-      }
-    },
-    "source": {
-      "cooldown": {
-        "network": "Network unreachable",
-        "timeout": "Repeated timeouts",
-        "rate_limited": "Rate limited",
-        "quota_exhausted": "Cycle quota used up",
-        "server_error": "Upstream server error"
-      },
-      "needs_action": {
-        "oauth_expired": "Needs a new sign-in",
-        "balance_exhausted": "Out of balance — top it up",
-        "credential_revoked": "Credential revoked — enter a new one",
-        "account_banned": "Account is restricted"
-      },
-      "error": {
-        "unclassified": "Unknown error — temporarily unavailable"
       }
     }
   }

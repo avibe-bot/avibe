@@ -92,6 +92,25 @@ def _context(session_id: str = "ses_fsm") -> MessageContext:
     )
 
 
+def _agentless_context(session_id: str = "ses_fsm") -> MessageContext:
+    return MessageContext(
+        user_id="user",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={
+            "workbench_session_id": session_id,
+            "agent_session_id": session_id,
+            "agent_session_target": {
+                "id": session_id,
+                "agent_id": None,
+                "agent_name": None,
+                "agent_backend": "",
+                "agent_variant": "default",
+            },
+        },
+    )
+
+
 def _seed_session(engine, session_id: str = "ses_fsm") -> None:
     now = "2026-08-01T00:00:00+00:00"
     with engine.begin() as conn:
@@ -607,6 +626,372 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
     assert captured["delivery_start_attempt_id"] == turn["start_attempt_id"]
 
 
+def test_first_delivery_binds_agentless_session_before_runtime_start(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(
+                agent_id=None,
+                agent_name=None,
+                agent_backend="",
+                agent_variant="default",
+            )
+        )
+    manager.controller.resolve_vibe_agent_for_context = lambda *_args, **_kwargs: SimpleNamespace(
+        id="agent-codex",
+        name="reviewer",
+        backend="codex",
+    )
+
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="bind the default Agent",
+            ),
+            context=_agentless_context(),
+        )
+    )
+
+    assert result.state == "claimed"
+    assert [text for _turn_id, text in starts] == ["bind the default Agent"]
+    with engine.connect() as conn:
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+                agent_sessions.c.agent_variant,
+            ).where(agent_sessions.c.id == "ses_fsm")
+        ).one()
+    assert binding == ("agent-codex", "reviewer", "codex", "codex")
+
+
+def test_first_delivery_keeps_concurrent_session_binding_winner(managers) -> None:
+    manager, _other, engine, engine_b, _starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(
+                agent_id=None,
+                agent_name=None,
+                agent_backend="",
+                agent_variant="default",
+            )
+        )
+
+    def resolve_after_user_edit(*_args, **_kwargs):
+        with engine_b.begin() as conn:
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == "ses_fsm")
+                .values(
+                    agent_id="agent-claude",
+                    agent_name="writer",
+                    agent_backend="claude",
+                    agent_variant="claude",
+                )
+            )
+        return SimpleNamespace(id="agent-codex", name="reviewer", backend="codex")
+
+    manager.controller.resolve_vibe_agent_for_context = resolve_after_user_edit
+
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="keep the user's route",
+            ),
+            context=_agentless_context(),
+        )
+    )
+
+    assert result.state == "claimed"
+    with engine.connect() as conn:
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == "ses_fsm")
+        ).one()
+        turn = delivery_store.get_turn(conn, str(result.turn_id))
+    assert binding == ("agent-claude", "writer", "claude")
+    assert turn is not None and turn["backend"] == "claude"
+
+
+def test_first_delivery_honors_context_agent_override_when_binding(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(
+                agent_id=None,
+                agent_name=None,
+                agent_backend="",
+                agent_variant="default",
+            )
+        )
+    context = _agentless_context()
+    context.platform_specific.update(
+        {"vibe_agent_id": "agent-selected", "vibe_agent_name": "selected"}
+    )
+    resolved_kwargs: dict[str, object] = {}
+
+    def resolve(_context, **kwargs):
+        resolved_kwargs.update(kwargs)
+        return SimpleNamespace(
+            id="agent-selected",
+            name="selected",
+            backend="claude",
+        )
+
+    manager.controller.resolve_vibe_agent_for_context = resolve
+
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="use selected"),
+            context=context,
+        )
+    )
+
+    assert result.state == "claimed"
+    assert resolved_kwargs["override_agent_id"] == "agent-selected"
+    assert resolved_kwargs["override_agent_name"] == "selected"
+    with engine.connect() as conn:
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == "ses_fsm")
+        ).one()
+    assert binding == ("agent-selected", "selected", "claude")
+
+
+def test_first_delivery_rejects_unresolvable_context_agent_override(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(
+                agent_id=None,
+                agent_name=None,
+                agent_backend="",
+                agent_variant="default",
+            )
+        )
+    context = _agentless_context()
+    context.platform_specific["vibe_agent_name"] = "archived-agent"
+    resolved_kwargs: dict[str, object] = {}
+
+    def resolve(_context, **kwargs):
+        resolved_kwargs.update(kwargs)
+        return None
+
+    manager.controller.resolve_vibe_agent_for_context = resolve
+
+    with pytest.raises(RuntimeError, match="Explicit Vibe Agent override"):
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(session_id="ses_fsm", priority="p3", content="reject"),
+                context=context,
+            )
+        )
+    assert resolved_kwargs["required"] is True
+    with engine.connect() as conn:
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == "ses_fsm")
+        ).one()
+    assert binding == (None, "")
+
+
+def test_binding_refreshes_all_cached_route_projections(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    context = _agentless_context()
+    context.platform_specific.update(
+        {
+            "vibe_agent_id": "stale-agent",
+            "vibe_agent_name": "stale",
+            "agent_run_target": {
+                "agent_session_id": "ses_fsm",
+                "agent_id": "stale-agent",
+                "agent_name": "stale",
+                "agent_backend": "claude",
+                "agent_variant": "claude",
+                "model": "old-model",
+                "reasoning_effort": "low",
+                "workdir": "/tmp",
+            },
+            "resolved_vibe_agent": {
+                "id": "stale-agent",
+                "name": "stale",
+                "backend": "claude",
+            },
+        }
+    )
+
+    manager._apply_session_binding_to_context(
+        context,
+        {
+            "id": "ses_fsm",
+            "agent_id": None,
+            "agent_name": None,
+            "agent_backend": "codex",
+            "agent_variant": "codex",
+            "model": None,
+            "reasoning_effort": None,
+            "metadata_json": '{"explicit_setting_overrides":["model"]}',
+        },
+    )
+
+    spec = context.platform_specific
+    assert spec["vibe_agent_id"] is None
+    assert spec["vibe_agent_name"] is None
+    assert spec["agent_session_target"]["agent_backend"] == "codex"
+    assert spec["agent_run_target"]["agent_backend"] == "codex"
+    assert spec["agent_run_target"]["agent_name"] is None
+    assert spec["agent_run_target"]["model"] is None
+    assert spec["agent_session_target"]["metadata"] == {"explicit_setting_overrides": ["model"]}
+    assert "resolved_vibe_agent" not in spec
+
+
+def test_name_only_scheduled_projection_refreshes_same_durable_agent(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    context = _context()
+    context.platform_specific.update(
+        {
+            "turn_source": SOURCE_SCHEDULED,
+            "vibe_agent_name": "reviewer",
+            "agent_session_target": {
+                "id": "ses_fsm",
+                "agent_id": "agent-reviewer",
+                "agent_name": "reviewer",
+                "agent_backend": "claude",
+                "agent_variant": "claude",
+                "model": "old-model",
+                "reasoning_effort": "low",
+                "metadata": {},
+            },
+        }
+    )
+
+    assert manager._binding_projection_is_stale(
+        context,
+        {
+            "id": "ses_fsm",
+            "agent_id": "agent-reviewer",
+            "agent_name": "reviewer",
+            "agent_backend": "codex",
+            "agent_variant": "codex",
+            "model": "new-model",
+            "reasoning_effort": "high",
+            "metadata_json": '{"explicit_setting_overrides":["model"]}',
+        },
+    )
+
+
+def test_projection_refresh_preserves_explicit_run_target(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    context = _context()
+    context.platform_specific.update(
+        {
+            "agent_run_target": {
+                "agent_session_id": "ses_scheduled_run",
+                "agent_id": "agent-writer",
+                "agent_name": "writer",
+                "agent_backend": "claude",
+            },
+            "resolved_vibe_agent": {
+                "id": "agent-writer",
+                "name": "writer",
+                "backend": "claude",
+            },
+        }
+    )
+
+    assert not manager._binding_projection_is_stale(
+        context,
+        {
+            "id": "ses_fsm",
+            "agent_id": "agent-reviewer",
+            "agent_name": "reviewer",
+            "agent_backend": "codex",
+            "metadata_json": "{}",
+        },
+    )
+
+
+def test_fifo_head_mismatch_does_not_bind_session_route(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(
+                agent_id=None,
+                agent_name=None,
+                agent_backend="",
+                agent_variant="default",
+            )
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="scheduled",
+                text="exact head",
+                metadata={
+                    SCHEDULED_PROVENANCE_KEY: {
+                        "platform_specific": {
+                            "vibe_agent_name": "reviewer",
+                        }
+                    }
+                },
+            ),
+            dispatch_text="exact head",
+            now="2026-08-01T00:00:01Z",
+        )
+        head = delivery_store.get_delivery(conn, delivery_id)
+    assert head is not None
+
+    assert not asyncio.run(
+        manager.drain_delivery_queue(
+            "ses_fsm",
+            expected_head_id="different-head",
+            expected_head_version=int(head["version"]),
+        )
+    )
+    with engine.connect() as conn:
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == "ses_fsm")
+        ).one()
+    assert binding == (None, None, "")
+    assert starts == []
+
+
 def test_im_p1_materializes_only_after_exact_native_acceptance(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 
@@ -921,9 +1306,7 @@ def test_post_native_terminal_storage_failure_retains_owner_and_running_projecti
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
         status = conn.execute(
-            select(agent_sessions.c.agent_status).where(
-                agent_sessions.c.id == "ses_fsm"
-            )
+            select(agent_sessions.c.agent_status).where(agent_sessions.c.id == "ses_fsm")
         ).scalar_one()
     assert turn is not None and turn["state"] == "active"
     assert status == "running"
@@ -2611,6 +2994,44 @@ def test_exact_missing_start_attempt_requeues_only_its_own_delivery(managers) ->
     assert terminal["terminal_outcome"] == "not_written"
 
 
+@pytest.mark.anyio
+async def test_permanent_start_rejection_retires_delivery_without_retry(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    admitted = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="invalid payload"),
+        context=_context(),
+    )
+    following = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="continue FIFO"),
+        context=_context(),
+    )
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, str(admitted.turn_id))
+    assert turn is not None
+    attempt_id = str(turn["start_attempt_id"])
+
+    assert manager.settle_start_attempt_invalid_input(
+        str(admitted.turn_id),
+        attempt_id,
+        backend="opencode",
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    assert delivery["state"] == "retired"
+    history = json.loads(delivery["delivery_history_json"])["events"]
+    assert history[-1]["outcome"] == "invalid_input"
+    assert _row(engine, str(following.delivery_id))["state"] == "queued"
+    assert len(starts) == 1
+    with engine.connect() as conn:
+        terminal = delivery_store.get_turn(conn, str(admitted.turn_id))
+        assert delivery_store.claimable_fifo_head(conn, "ses_fsm") is not None
+    assert terminal is not None
+    assert terminal["terminal_outcome"] == "not_written"
+
+    await asyncio.sleep(0)
+    assert _row(engine, str(following.delivery_id))["state"] == "claimed"
+    assert starts[-1][1] == "continue FIFO"
+
+
 def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) -> None:
     first, restarted, engine, _engine_b, starts = managers
 
@@ -3036,7 +3457,9 @@ def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
         status = conn.execute(
-            select(agent_sessions.c.agent_status).where(agent_sessions.c.id == "ses_fsm")
+            select(agent_sessions.c.agent_status).where(
+                agent_sessions.c.id == "ses_fsm"
+            )
         ).scalar_one()
     assert turn is not None
     assert turn["state"] == "terminal"
@@ -3595,6 +4018,127 @@ def test_recovery_survives_queued_delivery_whose_agent_run_settled(
 
     assert _row(engine, poisoned_id)["state"] == "retired"
     assert starts == []
+
+
+def test_recovery_binds_agentless_session_before_draining_queue(managers) -> None:
+    """Startup repairs the pre-fix queue state instead of crashing again."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(
+                agent_id=None,
+                agent_name=None,
+                agent_backend="",
+                agent_variant="default",
+            )
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="recover the queued turn",
+            ),
+            dispatch_text="recover the queued turn",
+        )
+    manager.bind_context(_agentless_context)
+    manager.controller.resolve_vibe_agent_for_context = lambda *_args, **_kwargs: SimpleNamespace(
+        id="agent-codex",
+        name="reviewer",
+        backend="codex",
+    )
+
+    assert asyncio.run(
+        manager.recover_durable_delivery_state(service_restart=True)
+    ) == []
+
+    assert _row(engine, delivery_id)["state"] == "claimed"
+    assert [text for _turn_id, text in starts] == ["recover the queued turn"]
+    with engine.connect() as conn:
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == "ses_fsm")
+        ).one()
+    assert binding == ("agent-codex", "reviewer", "codex")
+
+
+def test_recovery_binds_scheduled_head_from_delivery_provenance(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(
+                agent_id=None,
+                agent_name=None,
+                agent_backend="",
+                agent_variant="default",
+            )
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                text="recover scheduled turn",
+                metadata={
+                    SCHEDULED_PROVENANCE_KEY: {
+                        "platform_specific": {
+                            "task_trigger_kind": "agent_run",
+                            "vibe_agent_id": "agent-scheduled",
+                            "vibe_agent_name": "scheduled",
+                        }
+                    }
+                },
+            ),
+            dispatch_text="recover scheduled turn",
+        )
+    manager.bind_context(_agentless_context)
+    manager.controller.resolve_vibe_agent_for_context = lambda _context, **kwargs: (
+        SimpleNamespace(
+            id="agent-scheduled",
+            name="scheduled",
+            backend="claude",
+        )
+        if kwargs.get("override_agent_name") == "scheduled"
+        else None
+    )
+
+    assert asyncio.run(manager.recover_durable_delivery_state(service_restart=True)) == []
+
+    assert _row(engine, delivery_id)["state"] == "claimed"
+    assert [text for _turn_id, text in starts] == ["recover scheduled turn"]
+    with engine.connect() as conn:
+        binding = conn.execute(
+            select(
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == "ses_fsm")
+        ).one()
+    assert binding == ("agent-scheduled", "scheduled", "claude")
 
 
 def test_fifo_claim_starts_head_whose_agent_run_is_still_queued(

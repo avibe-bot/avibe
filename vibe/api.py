@@ -834,9 +834,88 @@ def _validate_enabled_platform_runtime_credentials(
             raise ValueError(f"Config '{fields_text}' must be provided when {platform} is enabled")
 
 
-def save_config(payload: dict, *, allow_memory: bool = False) -> V2Config:
-    """Save general settings while preserving Memory's dedicated settings block."""
+def _remote_access_network_signature(config: V2Config | None) -> tuple[str, str]:
+    if config is None:
+        return ("4", "")
+    cloud = config.remote_access.vibe_cloud
+    return (
+        str(cloud.edge_ip_version or "4").strip().lower(),
+        str(cloud.edge_bind_address or "").strip(),
+    )
 
+
+_REMOTE_ACCESS_CONNECTOR_CONTROL_FIELDS = (
+    "transport_protocol",
+    "edge_ip_version",
+    "edge_bind_address",
+)
+
+
+def _remote_access_connector_control_signature(config: V2Config | None) -> tuple[str, str, str]:
+    if config is None:
+        return ("auto", "4", "")
+    cloud = config.remote_access.vibe_cloud
+    return (
+        str(cloud.transport_protocol or "auto").strip().lower(),
+        str(cloud.edge_ip_version or "4").strip().lower(),
+        str(cloud.edge_bind_address or "").strip(),
+    )
+
+
+def remote_access_runtime_changed(previous: V2Config | None, current: V2Config) -> bool:
+    """Return whether a generic config save must reconcile the Connector runtime."""
+
+    if previous is None:
+        return bool(current.remote_access.vibe_cloud.enabled)
+
+    def signature(config: V2Config) -> tuple[object, ...]:
+        cloud = config.remote_access.vibe_cloud
+        return (
+            config.remote_access.provider,
+            bool(cloud.enabled),
+            str(cloud.public_url or ""),
+            str(cloud.tunnel_token or ""),
+            str(cloud.cloudflared_path or ""),
+            *_remote_access_connector_control_signature(config),
+        )
+
+    return signature(previous) != signature(current)
+
+
+def _validate_remote_access_network_change(
+    config: V2Config,
+    base_config: V2Config | None,
+    *,
+    require_current_binding: bool = False,
+) -> None:
+    if (
+        not require_current_binding
+        and _remote_access_network_signature(config) == _remote_access_network_signature(base_config)
+    ):
+        return
+    from vibe import remote_access
+
+    error = remote_access.edge_binding_error(config)
+    if error == "edge_bind_address_unavailable":
+        raise ValueError(
+            "Config 'remote_access.vibe_cloud.edge_bind_address' must be assigned "
+            "to an active network interface"
+        )
+    if error == "edge_bind_address_family_mismatch":
+        raise ValueError(
+            "Config 'remote_access.vibe_cloud.edge_bind_address' must match "
+            "'remote_access.vibe_cloud.edge_ip_version'"
+        )
+
+
+def save_config(
+    payload: dict,
+    *,
+    allow_memory: bool = False,
+    validate_remote_access_network: bool = True,
+    generic_remote_access: bool = False,
+) -> V2Config:
+    """Save general settings while preserving Memory's dedicated settings block."""
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
 
@@ -885,6 +964,30 @@ def save_config(payload: dict, *, allow_memory: bool = False) -> V2Config:
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        connector_controls_changed = (
+            base_config is not None
+            and _remote_access_connector_control_signature(config)
+            != _remote_access_connector_control_signature(base_config)
+        )
+        if generic_remote_access and connector_controls_changed:
+            fields = "', '".join(
+                f"remote_access.vibe_cloud.{field}"
+                for field in _REMOTE_ACCESS_CONNECTOR_CONTROL_FIELDS
+            )
+            raise ValueError(
+                f"Config '{fields}' must be changed through "
+                "'/api/remote-access/settings'"
+            )
+        if validate_remote_access_network:
+            _validate_remote_access_network_change(
+                config,
+                base_config,
+                require_current_binding=(
+                    generic_remote_access
+                    and config.remote_access.vibe_cloud.enabled
+                    and remote_access_runtime_changed(base_config, config)
+                ),
+            )
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         if guild_scope_update is not None:
             _save_discord_guild_scope_update(*guild_scope_update)
