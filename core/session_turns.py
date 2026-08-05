@@ -978,6 +978,21 @@ class SessionTurnManager:
     ) -> bool:
         spec = getattr(context, "platform_specific", None) or {}
 
+        # Scheduled/CLI deliveries may intentionally run a Session through a
+        # different Agent for this one execution. Their top-level identity is the
+        # explicit request, not a stale copy of the Session row, so durable context
+        # refresh must not overwrite it.
+        if (
+            spec.get("task_trigger_kind")
+            or spec.get("turn_source") == SOURCE_SCHEDULED
+        ) and any(spec.get(key) for key in ("vibe_agent_id", "vibe_agent_name")):
+            if any(
+                str(spec.get(key) or "").strip()
+                != str(binding.get(key) or "").strip()
+                for key in ("vibe_agent_id", "vibe_agent_name")
+            ):
+                return False
+
         def differs(
             projection: dict[str, Any],
             *,
