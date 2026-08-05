@@ -2410,13 +2410,14 @@ def test_load_state_file_rejects_a_sibling_watch_with_the_same_filters(tmp_path)
         )
 
     assert "belongs to watch wat_first" in str(excinfo.value)
-    # A manual run has no watch id, so it adopts the file rather than refusing it.
-    assert (
+    # A manual run has no watch id either, and cannot prove it is ``wat_first`` -- so
+    # it is refused too. Adopting it would strip the owner on the next write and leave
+    # the watch resuming from cursors covering activity it never delivered.
+    with pytest.raises(module.StateFileOwnershipError) as manual:
         module._load_state_file(
             str(state_file), repo="avibe-bot/avibe", pr_number=153, watch_identity="abc123"
-        )["owner"]
-        == "wat_first"
-    )
+        )
+    assert "belongs to watch wat_first" in str(manual.value)
 
 
 def test_main_skips_the_settle_window_that_would_outlast_the_timeout(tmp_path) -> None:
@@ -2662,7 +2663,7 @@ def test_main_new_prs_commits_the_cursor_only_after_the_event_is_reported(tmp_pa
     assert json.loads(state_file.read_text(encoding="utf-8"))["pr_cursor"] == 410
 
 
-def _managed_state(module, path, watch_id: str, **fields) -> None:
+def _managed_state(module, path, watch_id: str | None, **fields) -> None:
     """A state file already owned by ``watch_id``, so a managed run resumes from it."""
 
     path.write_text(
@@ -2810,10 +2811,15 @@ def test_a_managed_run_reports_the_event_again_when_it_was_never_delivered(tmp_p
 
 
 def test_a_manual_run_stages_nothing_because_printing_is_its_delivery(tmp_path) -> None:
-    """No watch id, no next cycle: staged cursors would be promoted by nobody."""
+    """No watch id, no next cycle: staged cursors would be promoted by nobody.
+
+    The file is deliberately ownerless: a manual run is refused a state file that
+    names a watch, so an owned one would fail the preflight before this test could
+    observe what it stages.
+    """
     module = _load_module()
     state_file = tmp_path / "pr-153.json"
-    _managed_state(module, state_file, "wat_9")
+    _managed_state(module, state_file, None)
 
     def _fetch(repo, pr_number, token, **kwargs):
         return _pr_state(review_comments=[_review_comment(501)]), 1
@@ -2932,6 +2938,82 @@ def test_preflight_does_not_adopt_another_watchs_state_file(tmp_path) -> None:
         watch_id="wat_second",
     )
 
+    assert json.loads(state_file.read_text(encoding="utf-8"))["owner"] == "wat_first"
+    with pytest.raises(module.StateFileOwnershipError):
+        module._load_state_file(
+            str(state_file),
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            watch_identity="abc123",
+            watch_id="wat_second",
+        )
+
+
+def test_load_state_file_refuses_a_managed_watchs_file_for_a_manual_run(tmp_path) -> None:
+    """A manual run cannot prove it is the watch that owns the path, so it is refused.
+
+    Adopting it instead is silent data loss, not sharing: the manual run reports to a
+    terminal, then ``_write_state_file`` stamps ``owner: null`` over the claim while
+    advancing the cursors. The watch adopts its own file back as ownerless and resumes
+    past activity its Agent follow-up was never sent.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _ownerless_state(module, state_file, watch="abc123", owner="wat_first")
+
+    with pytest.raises(module.StateFileOwnershipError):
+        module._load_state_file(
+            str(state_file),
+            repo="avibe-bot/avibe",
+            pr_number=153,
+            watch_identity="abc123",
+            watch_id=None,
+        )
+
+    # The preflight leaves the claim exactly as it found it.
+    module._verify_state_file_writable(
+        str(state_file), repo="avibe-bot/avibe", pr_number=153, watch_identity="abc123"
+    )
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["owner"] == "wat_first"
+    assert saved["review_comment_cursor"] == 500
+
+
+def test_preflight_claims_an_empty_state_file_for_a_managed_watch(tmp_path) -> None:
+    """An interrupted claim must be finished, not rewritten empty.
+
+    A zero-byte file carries no cursors, so the load treats it as a fresh baseline --
+    but it also names no owner. Left that way, two managed watches pointed at the path
+    both clear the preflight and poll, and one overwrites the other's cursors.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state_file.write_text("", encoding="utf-8")
+
+    module._verify_state_file_writable(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity="abc123",
+        watch_id="wat_first",
+    )
+
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["owner"] == "wat_first"
+    assert saved["watch"] == "abc123"
+    assert saved["repo"] == "avibe-bot/avibe"
+    assert saved["pr"] == 153
+    # No cursors were invented: this cycle still baselines from the current PR.
+    assert "review_comment_cursor" not in saved
+
+    # The second managed watch now loses on the claim instead of sharing the path.
+    module._verify_state_file_writable(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity="abc123",
+        watch_id="wat_second",
+    )
     assert json.loads(state_file.read_text(encoding="utf-8"))["owner"] == "wat_first"
     with pytest.raises(module.StateFileOwnershipError):
         module._load_state_file(

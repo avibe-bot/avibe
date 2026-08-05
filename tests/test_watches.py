@@ -1461,6 +1461,67 @@ def test_managed_watch_service_fuses_watch_after_store_error(tmp_path: Path) -> 
     assert request_store.list_pending() == []
 
 
+def test_managed_watch_service_fuses_quiet_cycle_after_store_error(tmp_path: Path) -> None:
+    """A quiet cycle commits through the same wrapper as every other result branch.
+
+    Called synchronously, a raising ``mark_cycle_result`` escapes ``_run_cycle`` and
+    kills the watch task with the store unfused and the cycle unrecorded. Reconcile
+    then restarts the same quiet cycle and repeats it, so a real storage failure
+    never reaches the user as one.
+    """
+
+    class FailingResultStore(ManagedWatchStore):
+        def __init__(self, path: Path):
+            super().__init__(path)
+            self.starts = 0
+
+        def mark_cycle_start(self, watch_id: str) -> bool:
+            self.starts += 1
+            return super().mark_cycle_start(watch_id)
+
+        def mark_cycle_result(self, *args, **kwargs) -> bool:
+            raise RuntimeError("database disk image is malformed")
+
+    store = FailingResultStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Quiet with broken persistence",
+        session_key="slack::channel::C123",
+        command=_quiet_waiter_command("nothing to report"),
+        shell_command=None,
+        prefix="Should not storm.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        await _start_watch_service(service)
+        await asyncio.sleep(0.12)
+        assert watch.id in service._fused_watch_ids
+        await asyncio.sleep(0.08)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    assert store.starts == 1, "the fused store let the quiet cycle restart"
+    assert service._store_error_fused is True
+    # A quiet cycle authorises no hook, and a failed one must not invent it.
+    assert request_store.list_pending() == []
+
+
 def test_managed_watch_service_fuses_reconcile_after_store_read_error(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
 

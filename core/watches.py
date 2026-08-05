@@ -1843,7 +1843,13 @@ class ManagedWatchService:
                 # No prompt, prefix or body: ``_hook_request`` returns None, so this
                 # commits the cycle WITHOUT authorising a hook. The stamp still lands,
                 # so ``vibe watch show`` can say the cycle ran and found nothing.
-                if not self._commit_cycle_result(
+                #
+                # Through the async wrapper like every other result branch: a store
+                # failure here must fuse the store and stop the watch, not escape
+                # ``_run_cycle`` and kill the task silently -- reconcile would restart
+                # the same quiet cycle and hide the storage problem instead of
+                # surfacing it.
+                if not await self._commit_cycle_result_async(
                     watch,
                     exit_code=NO_EVENT_EXIT_CODE,
                     error=None,

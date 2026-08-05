@@ -545,9 +545,16 @@ def _owner_conflict(
 ) -> str | None:
     """Why ``owner`` is somebody else's claim on the path, or ``None`` when it is ours.
 
-    Only a proven mismatch is a conflict. A state file written before identities
-    existed carries none, and a manual run has no watch id, so an absent value on
-    either side is adopted rather than rejected.
+    A state file written before identities existed carries no owner, and an absent
+    owner is compatible with every run -- that is the file a managed watch adopts.
+
+    A file that DOES name an owner is the opposite: the burden is on this run to
+    prove it is that owner, and a manual run cannot. Letting it through would be
+    silent data loss rather than a mere sharing of the path -- the manual run polls,
+    reports to a terminal nobody is reading, and ``_write_state_file`` stamps
+    ``owner: null`` over the managed claim while advancing the cursors past that
+    activity. The managed watch then adopts its own file back as ownerless and
+    resumes from cursors covering events its Agent follow-up never received.
     """
 
     if owner is None:
@@ -560,7 +567,12 @@ def _owner_conflict(
             f"belongs to another watch on {saved_repo}#{saved_pr} with different "
             "reporting filters"
         )
-    if saved_owner is not None and watch_id is not None and saved_owner != watch_id:
+    if saved_owner is not None and saved_owner != watch_id:
+        if watch_id is None:
+            return (
+                f"belongs to watch {saved_owner}; this run is not managed by that "
+                "watch. Use a different --state-file."
+            )
         return f"belongs to watch {saved_owner}, not watch {watch_id}"
     return None
 
@@ -729,7 +741,14 @@ def _state_file_lock(target: Path) -> Iterator[None]:
             os.close(handle)
 
 
-def _adopt_state_file(target: Path, *, watch_id: str, watch_identity: str | None) -> bool:
+def _adopt_state_file(
+    target: Path,
+    *,
+    repo: str,
+    pr_number: int | None,
+    watch_id: str,
+    watch_identity: str | None,
+) -> bool:
     """Stamp this managed watch onto an ownerless state file, keeping its cursors.
 
     A file written before owners existed, or by a manual run, names no owner -- and an
@@ -738,16 +757,34 @@ def _adopt_state_file(target: Path, *, watch_id: str, watch_identity: str | None
     activity for good. Claiming the name here, under the lock and before any polling,
     turns that into a conflict the loser sees while it can still be told about it.
 
+    An EMPTY file is the same hazard wearing different clothes: it is a claim caught
+    between its exclusive create and its first write, so ``_load_state_file`` reads it
+    as a fresh baseline with no cursors to lose. Left as it is, it names no owner
+    either, and two managed watches pointed at that path both clear this preflight and
+    poll -- so finish the claim the interrupted run started rather than falling through
+    to a byte-for-byte rewrite that preserves the emptiness and the ambiguity with it.
+
     Returns False when the file says nothing usable, leaving it to the caller's probe.
     """
 
     try:
-        with target.open(encoding="utf-8") as stream:
-            payload = json.load(stream)
-    except (OSError, ValueError):
+        raw = target.read_text(encoding="utf-8")
+    except OSError:
         return False
-    if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
-        return False
+
+    if not raw.strip():
+        payload: dict[str, Any] = {
+            "version": STATE_FILE_VERSION,
+            "repo": repo,
+            "pr": pr_number,
+        }
+    else:
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return False
+        if not isinstance(payload, dict) or payload.get("version") != STATE_FILE_VERSION:
+            return False
 
     payload["owner"] = watch_id
     if payload.get("watch") is None and watch_identity is not None:
@@ -843,7 +880,13 @@ def _verify_state_file_writable(
                 watch_id=watch_id,
             )
             is None
-            and _adopt_state_file(target, watch_id=watch_id, watch_identity=watch_identity)
+            and _adopt_state_file(
+                target,
+                repo=repo,
+                pr_number=pr_number,
+                watch_id=watch_id,
+                watch_identity=watch_identity,
+            )
         ):
             # Rewriting the real file is the write probe, as the claim is above.
             return
