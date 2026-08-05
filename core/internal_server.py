@@ -1074,6 +1074,7 @@ def create_app(
         same Controller -> UI-server -> browser SSE path.
         """
         from core.inbox_events import (
+            DEFINITIONS_UPDATED_EVENT,
             QUEUE_UPDATED_EVENT,
             RUNS_UPDATED_EVENT,
             VAULTS_UPDATED_EVENT,
@@ -1086,6 +1087,7 @@ def create_app(
         event_type = str(payload.get("type") or "").strip()
         data = payload.get("data")
         if event_type not in {
+            DEFINITIONS_UPDATED_EVENT,
             QUEUE_UPDATED_EVENT,
             RUNS_UPDATED_EVENT,
             VAULTS_UPDATED_EVENT,

@@ -2235,15 +2235,14 @@ def enforce_instance_role_capabilities():
 
 def _is_remote_local_execution_request(method: str, path: str) -> bool:
     normalized_method = method.upper()
+    is_mutation = normalized_method not in {"GET", "HEAD", "OPTIONS"}
     if path.startswith(("/api/files/", "/api/browse")):
         return True
     if path.startswith("/api/terminal/"):
         return True
-    if path.startswith("/api/harness/") and normalized_method not in {
-        "GET",
-        "HEAD",
-        "OPTIONS",
-    }:
+    if is_mutation and path.startswith(("/api/harness/", "/api/models/", "/api/backend/")):
+        return True
+    if normalized_method == "POST" and re.fullmatch(r"/api/show-pages/[^/]+/icon", path):
         return True
     if normalized_method == "POST" and path == "/api/running-agents/end":
         return True
@@ -8484,6 +8483,54 @@ async def _archive_release_vault_scopes(session_id: str, revoked_vault_scopes: l
         logger.debug("archive: resident-agent grant release failed for %s", session_id, exc_info=True)
 
 
+async def _archive_publish_definition_updates(reclaimed: dict[str, Any]) -> None:
+    definition_types = [
+        definition_type
+        for definition_type, key in (("scheduled", "tasks"), ("watch", "watches"))
+        if reclaimed.get(key)
+    ]
+    if not definition_types:
+        return
+    from core.inbox_events import publish_definitions_updated
+
+    await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                publish_definitions_updated,
+                definition_type=definition_type,
+            )
+            for definition_type in definition_types
+        )
+    )
+
+
+async def _archive_publish_run_updates(
+    session_id: str,
+    reclaimed: dict[str, Any],
+) -> None:
+    """Wake post-commit Run consumers for archive cancellation writes."""
+
+    if not reclaimed.get("runs"):
+        return
+    from core.inbox_events import RUNS_UPDATED_EVENT
+    from vibe import internal_client
+
+    try:
+        await internal_client.publish_event(
+            RUNS_UPDATED_EVENT,
+            {"session_id": session_id, "reason": "session_archived"},
+            timeout=1.5,
+        )
+    except internal_client.InternalServerUnavailable:
+        pass
+    except Exception:
+        logger.debug(
+            "archive: run update publish failed for %s",
+            session_id,
+            exc_info=True,
+        )
+
+
 @app.route("/api/sessions/<session_id>", methods=["DELETE"])
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
@@ -8520,6 +8567,11 @@ async def sessions_archive(session_id: str):
         return _coded_error_response(code, str(err), 403)
 
     revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
+    reclaimed = session.get("reclaimed") or {}
+    await asyncio.gather(
+        _archive_publish_definition_updates(reclaimed),
+        _archive_publish_run_updates(session_id, reclaimed),
+    )
 
     # Broadcast + return immediately — the archive is already committed. Other
     # mounted clients (sidebars, tabs) drop the row live and leave the chat if
@@ -10559,6 +10611,9 @@ def harness_task_patch(task_id: str):
             return jsonify({"ok": False, "code": "task_not_found"}), 404
         store.set_definition_enabled(task_id, enabled, definition_type="scheduled")
         task = store.get_scheduled_task(task_id)
+    from core.inbox_events import publish_definitions_updated
+
+    publish_definitions_updated(definition_type="scheduled")
     return jsonify({"ok": True, "task": task})
 
 
@@ -10568,6 +10623,9 @@ def harness_task_delete(task_id: str):
         if not store.get_scheduled_task(task_id):
             return jsonify({"ok": False, "code": "task_not_found"}), 404
         store.remove_task(task_id)
+    from core.inbox_events import publish_definitions_updated
+
+    publish_definitions_updated(definition_type="scheduled")
     return jsonify({"ok": True, "id": task_id})
 
 
@@ -10617,6 +10675,9 @@ def harness_watch_patch(watch_id: str):
             return jsonify({"ok": False, "code": "watch_not_found"}), 404
         store.set_definition_enabled(watch_id, enabled, definition_type="watch")
         watch = store.get_watch(watch_id)
+    from core.inbox_events import publish_definitions_updated
+
+    publish_definitions_updated(definition_type="watch")
     return jsonify({"ok": True, "watch": watch})
 
 
@@ -10626,6 +10687,9 @@ def harness_watch_delete(watch_id: str):
         if not store.get_watch(watch_id):
             return jsonify({"ok": False, "code": "watch_not_found"}), 404
         store.remove_task(watch_id)
+    from core.inbox_events import publish_definitions_updated
+
+    publish_definitions_updated(definition_type="watch")
     return jsonify({"ok": True, "id": watch_id})
 
 

@@ -1006,6 +1006,89 @@ def test_remote_system_operations_are_blocked_before_runtime_calls(
 
 
 @pytest.mark.parametrize(
+    ("path", "call_target"),
+    [
+        ("/api/models/runtime/start", "vibe.ui_server._model_hub_service"),
+        ("/api/models/agents/codex/probe", "vibe.ui_server._model_hub_service"),
+        ("/api/backend/codex/restart", "vibe.api.restart_backend"),
+        ("/api/backend/codex/auth/test", "vibe.api.test_backend_auth_async"),
+    ],
+)
+def test_remote_model_and_backend_operations_are_blocked_before_runtime_calls(
+    monkeypatch,
+    tmp_path,
+    path,
+    call_target,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_runtime_call(*args, **kwargs):
+        raise AssertionError("remote backend operation reached the local runtime")
+
+    monkeypatch.setattr(call_target, unexpected_runtime_call)
+    response = client.post(
+        path,
+        json={},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_show_page_icon_upload_is_blocked_before_filesystem_access(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_icon_write(*args, **kwargs):
+        raise AssertionError("remote icon upload reached the local filesystem")
+
+    monkeypatch.setattr(api, "upload_show_page_icon", unexpected_icon_write)
+    response = client.post(
+        "/api/show-pages/ses-local/icon",
+        files={"file": ("icon.svg", b"<svg/>", "image/svg+xml")},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/models/runtime/status",
+        "/api/models/agents",
+        "/api/backend/codex/runtime",
+        "/api/backend/codex/auth",
+    ],
+)
+def test_remote_model_and_backend_reads_remain_available(path):
+    assert not ui_server._is_remote_local_execution_request("GET", path)
+
+
+@pytest.mark.parametrize(
     ("method", "path", "json_body", "api_method"),
     [
         ("POST", "/api/agents", {"name": "remote"}, "create_vibe_agent"),

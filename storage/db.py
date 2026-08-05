@@ -97,15 +97,26 @@ class SqliteInvalidationProbe:
     def __init__(self, engine: Engine):
         self._connection = engine.connect()
         self._last_data_version: int | None = None
+        self._lock = RLock()
 
     def has_external_write(self) -> bool:
-        version = int(self._connection.exec_driver_sql("PRAGMA data_version").scalar_one())
-        changed = self._last_data_version is not None and version != self._last_data_version
-        self._last_data_version = version
-        return changed
+        # Runtime work lanes may ask the same store to refresh from separate
+        # executor workers. The probe deliberately owns one persistent
+        # connection, so its read-and-compare operation must remain single-file.
+        with self._lock:
+            version = int(
+                self._connection.exec_driver_sql("PRAGMA data_version").scalar_one()
+            )
+            changed = (
+                self._last_data_version is not None
+                and version != self._last_data_version
+            )
+            self._last_data_version = version
+            return changed
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def __enter__(self) -> "SqliteInvalidationProbe":
         return self

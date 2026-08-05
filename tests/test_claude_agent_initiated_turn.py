@@ -858,10 +858,6 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             [activity.id for activity in pending_request.output_activities],
             ["task-current-a", "task-current-b"],
         )
-        detached = service.activities.claim_completed_output("claude", composite_key)
-        self.assertIsNotNone(detached)
-        self.assertEqual(detached.id, "task-detached")
-        service.activities.ack_completed_output(detached)
         self.assertTrue(
             service.activities.settle_completed_output_batch(
                 pending_request.output,
@@ -869,6 +865,10 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         agent._clear_request_activities(pending_request)
+        detached = service.activities.claim_completed_output("claude", composite_key)
+        self.assertIsNotNone(detached)
+        self.assertEqual(detached.id, "task-detached")
+        service.activities.ack_completed_output(detached)
 
     async def test_terminal_only_task_event_keeps_current_turn_origin(self):
         agent, service = _build_agent()
@@ -2366,7 +2366,6 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
     async def test_requeued_activity_batch_preserves_fifo_order(self):
         agent, service = _build_agent()
         composite_key = "session-requeued-batch-order:/tmp/work"
-        claimed = []
         for activity_id in ("task-build", "task-rebuild"):
             service.activities.start(
                 backend="claude",
@@ -2383,9 +2382,14 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 status="completed",
                 expects_output=True,
             )
-            activity = service.activities.claim_completed_output("claude", composite_key)
-            self.assertIsNotNone(activity)
-            claimed.append(activity)
+        claimed = service.activities.claim_completed_output_batch(
+            "claude",
+            composite_key,
+        )
+        self.assertEqual(
+            [activity.id for activity in claimed],
+            ["task-build", "task-rebuild"],
+        )
         request = SimpleNamespace(
             output_activities=claimed,
             output=agent._activity_message_output(
@@ -2397,17 +2401,15 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
         agent._requeue_request_activity(request)
 
-        retried = [
-            service.activities.claim_completed_output("claude", composite_key),
-            service.activities.claim_completed_output("claude", composite_key),
-        ]
+        retried = service.activities.claim_completed_output_batch(
+            "claude",
+            composite_key,
+        )
         self.assertEqual(
-            [activity.id for activity in retried if activity is not None],
+            [activity.id for activity in retried],
             ["task-build", "task-rebuild"],
         )
-        for activity in retried:
-            self.assertIsNotNone(activity)
-            service.activities.ack_completed_output(activity)
+        self.assertEqual(service.activities.requeue_completed_outputs(retried), 2)
 
     async def test_failed_pending_batch_restores_older_global_output_order(self):
         agent, service = _build_agent()
@@ -2454,6 +2456,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
         ):
             restored.append(activity)
+            service.activities.ack_completed_output(activity)
         self.assertEqual(
             [activity.id for activity in restored],
             ["task-old", "task-current-b"],

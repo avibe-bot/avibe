@@ -582,7 +582,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(activity)
         activity_key = registry._activity_key(activity)
         with registry._lock:
-            registry._recovered_output_ids.add(activity_key)
+            registry._add_recovered_output_id(activity_key, activity)
 
         service = object.__new__(ScheduledTaskService)
         service.controller = controller

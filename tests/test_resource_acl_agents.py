@@ -155,7 +155,7 @@ def test_agent_removal_deletes_resource_policy_and_groups(monkeypatch, tmp_path)
     assert groups == []
 
 
-def test_remote_agent_creation_defaults_to_private_organization_policy(monkeypatch, tmp_path) -> None:
+def test_remote_agent_creation_is_blocked_by_conservative_execution_gate(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
@@ -178,15 +178,13 @@ def test_remote_agent_creation_defaults_to_private_organization_policy(monkeypat
         environ_base=_remote_peer(),
     )
 
-    assert response.status_code == 200
-    agent_id = response.get_json()["agent"]["id"]
-    engine = get_cached_sqlite_engine()
-    with engine.connect() as connection:
-        policy = resource_access_service.get_resource_policy("agent", agent_id, connection=connection)
-    assert policy is not None
-    assert policy["organization_id"] == "org-1"
-    assert policy["owner_user_id"] == "member-1"
-    assert policy["access_level"] == "private"
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+    store = VibeAgentStore()
+    try:
+        assert store.get("remote-private") is None
+    finally:
+        store.close()
 
 
 def test_agent_management_is_enforced_inside_the_store(monkeypatch, tmp_path) -> None:
