@@ -28,6 +28,8 @@ import pytest
 from core.handlers.session_handler import SessionHandler
 from core.services import running_agents
 from core.session_turns import SessionTurnManager
+from modules.agents.codex.agent import CodexAgent
+from modules.agents.codex.event_handler import CodexEventHandler
 from modules.agents.codex.turn_state import CodexTurnRegistry
 
 
@@ -201,10 +203,17 @@ def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
     behavior and it should stay. What this probe records is the part nobody
     owns: the value returned to the caller is synthesized fresh and is
     byte-identical to a stop that really settled the turn. The turn's session
-    and turn-registry mappings are cleared, its Run is never settled by anyone,
-    and the Web/API caller is told ``ok: True, action: "ended"``.
+    and turn-registry mappings are cleared and the Web/API caller is told
+    ``ok: True, action: "ended"``.
 
     The teardown is not the defect. The missing signal is.
+
+    Scope, narrowed after review: this builds only the codex session and turn
+    registries, so there is no Run row here and the probe claims nothing about
+    the Run's terminal state. An earlier draft said the Run "is never settled";
+    that was inferred from the missing interrupt, not observed, and inference
+    dressed as evidence is the one thing this unit exists to stop. The IM
+    lane's ``user_stop`` cells carry the probe that would settle it.
     """
     cleared = {}
     session_mgr = types.SimpleNamespace(
@@ -248,9 +257,10 @@ def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
     assert handle_stop.called is True  # it ran, and it returned False
     assert cleared == {"session_mgr": "b1", "turn_registry": "b1"}
 
-    # Current master's answer. The turn was NOT interrupted and its Run was NOT
-    # settled, yet nothing in the payload says so -- no ``stop_failed``, no
-    # ``interrupted: False``, no ``settled``. A fix must add that signal here.
+    # Current master's answer. The turn was NOT interrupted, yet nothing in the
+    # payload says so -- no ``stop_failed``, no ``interrupted: False``, no
+    # ``settled``. A fix must add that signal here. What happened to any Run
+    # bound to this turn is outside what this probe can see.
     assert result == {"ok": True, "action": "ended", "backend": "codex"}
     assert "stop_failed" not in result
     assert "interrupted" not in result
@@ -317,26 +327,31 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
     )
 
 
-# ----- HFR-183: Q2 blocker -------------------------------------------------
+# ----- HFR-183: Q2 exact-Turn signals --------------------------------------
 
 
-def test_no_backend_keys_a_progress_signal_by_turn_on_either_lane():
-    """HFR-183 / Q2: every backend stamps progress per session, not per Turn.
+def test_only_codex_attributes_a_progress_event_to_an_exact_turn():
+    """HFR-183 / Q2: codex has the signal and throws it away; the others lack it.
 
     The plan forbids a generic inactivity timeout unless every backend and lane
     has an exact-Turn progress signal, and states that session-wide activity is
     never an acceptable substitute.
 
-    This exercises the three real progress-bearing structures rather than
-    reading the evidence file's own labels back. An earlier draft did the
-    latter: it asserted that ``EXACT_TURN_PROGRESS_SIGNALS`` says ``unproven``
-    everywhere, which is true by construction and would stay green after a
-    backend gained Turn correlation. The metadata cross-check is still made at
-    the end, but only as a consistency tie -- the finding is established by the
-    three probes above it.
+    This corrects the probe's own earlier conclusion. Two drafts ago it read
+    ``EXACT_TURN_PROGRESS_SIGNALS`` back to itself; one draft ago it exercised
+    the three real structures but looked only at each backend's
+    base-session PROJECTION -- ``_active_turns[base]`` for codex -- and
+    concluded from a lossy projection that no exact signal existed anywhere.
+    It does exist for codex, one level up: the app-server's notifications
+    carry a ``turnId`` and ``_find_request_for_notification`` resolves the
+    participating Run's request from that id through a per-turn map. The loss
+    happens afterwards, at ``should_emit_progress`` and at the per-session
+    timestamp. "The attribution is discarded" and "the attribution does not
+    exist" call for different fixes, so the distinction is load-bearing.
 
-    Neither lane changes any of it: all three structures are keyed by composite
-    key or base session id, and a lane does not change a key.
+    Neither lane changes any of it: the claude and opencode structures are keyed
+    by composite key or base session id, codex's notification carries its
+    ``turnId`` on both, and a lane does not change a key.
     """
     # Claude. The progress baseline is stamped per COMPOSITE KEY, and the
     # method has no parameter that could carry a Turn.
@@ -356,21 +371,51 @@ def test_no_backend_keys_a_progress_signal_by_turn_on_either_lane():
     assert list(handler.session_turn_started) == ["slack_a:/w"]
     assert handler.session_turn_started["slack_a:/w"] >= first_baseline
 
-    # Codex. The registry holds ONE active turn per base session, so a second
-    # accepted turn displaces the first as the answer to "what is running".
+    # Codex. Two distinct Runs accepted into one base session.
     registry = CodexTurnRegistry()
-    for turn_id in ("turn-1", "turn-2"):
-        # Two distinct Runs, one base session -- the registry keys on the
-        # latter, so the second registration overwrites the first.
-        registry.register_turn(
-            turn_id, types.SimpleNamespace(base_session_id="base-1")
+    requests = {
+        turn_id: types.SimpleNamespace(base_session_id="base-1", turn=turn_id)
+        for turn_id in ("turn-1", "turn-2")
+    }
+    for turn_id, request in requests.items():
+        registry.register_turn(turn_id, request)
+
+    # The signal EXISTS. A notification naming ``turn-1`` resolves to turn-1's
+    # own request even though turn-2 is the base session's active turn, because
+    # ``_find_request_for_notification`` reads the params' ``turnId`` first and
+    # only falls back to the thread when there is none. This is the exact-Turn
+    # attribution the plan asks for, on the real production resolver.
+    agent = object.__new__(CodexAgent)
+    agent._turn_registry = registry
+    agent._session_mgr = types.SimpleNamespace(
+        find_base_session_id_for_thread=lambda _thread: "base-1"
+    )
+    for turn_id, request in requests.items():
+        resolved = agent._find_request_for_notification(
+            "item/completed", {"turnId": turn_id, "threadId": "thread-1"}
         )
+        assert resolved is request, turn_id
+    # Without the turnId the same notification collapses to the base session's
+    # latest request -- so the id is doing the work, not the thread.
+    assert (
+        agent._find_request_for_notification("item/completed", {"threadId": "thread-1"})
+        is requests["turn-2"]
+    )
+    # ``_on_item_completed`` reads the same key, so the attribution is present
+    # on the progress path specifically and not only on turn lifecycle events.
+    assert 'params.get("turnId", "")' in inspect.getsource(
+        CodexEventHandler._on_item_completed
+    )
+
+    # And it is DISCARDED one step later. ``should_emit_progress`` gates on
+    # ``is_active_turn``, which reads the single ``_active_turns[base]`` slot,
+    # so turn-1's progress -- correctly attributed a line earlier -- is dropped
+    # while turn-1 is still live.
     assert registry.get_active_turn("base-1") == "turn-2"
-    # Both turn states are still held, so the loss is specifically in the
-    # base-session -> active-turn projection every progress read goes through.
     assert registry.get_turn("turn-1") is not None
-    assert not registry.is_active_turn("turn-1"), (
-        "the first turn is still live but no base-session read names it"
+    assert registry.should_emit_progress("turn-2") is True
+    assert registry.should_emit_progress("turn-1") is False, (
+        "the notification named turn-1 exactly; the emit gate throws that away"
     )
 
     # OpenCode. One asyncio task slot per base session id, by annotation and by
@@ -383,7 +428,8 @@ def test_no_backend_keys_a_progress_signal_by_turn_on_either_lane():
     assert "self._active_requests[turn" not in source
 
     # Consistency tie: the matrix must still say the same thing these three
-    # probes just showed, for all six cells.
+    # probes just showed, for all six cells -- codex proven on both lanes, the
+    # other four still named gaps.
     from tests.run_terminal_truth_evidence import (
         BACKENDS,
         EXACT_TURN_PROGRESS_SIGNALS,
@@ -393,7 +439,13 @@ def test_no_backend_keys_a_progress_signal_by_turn_on_either_lane():
     assert set(EXACT_TURN_PROGRESS_SIGNALS) == {
         (backend, lane) for backend in BACKENDS for lane in LANES
     }
-    for cell, (kind, reason) in EXACT_TURN_PROGRESS_SIGNALS.items():
-        assert kind == "unproven", cell
-        assert "probe" in reason.lower(), cell
+    for (backend, lane), (kind, reason) in EXACT_TURN_PROGRESS_SIGNALS.items():
+        if backend == "codex":
+            assert kind == "covered", (backend, lane)
+            assert reason.endswith(
+                "test_only_codex_attributes_a_progress_event_to_an_exact_turn"
+            ), (backend, lane)
+        else:
+            assert kind == "unproven", (backend, lane)
+            assert "probe" in reason.lower(), (backend, lane)
 

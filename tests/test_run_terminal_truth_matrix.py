@@ -208,9 +208,22 @@ def test_a_citation_with_the_wrong_class_component_is_rejected() -> None:
         )
 
 
-def test_the_q2_blocker_is_spelled_for_every_backend_and_lane() -> None:
-    """HFR-186: Q2's per-backend/per-lane obligation has no missing cells."""
+def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:
+    """HFR-186: Q2's per-backend/per-lane obligation has no missing cells.
+
+    The verdict is tied to the table rather than pinned to a literal. Q2 opened
+    once a backend was shown to carry an exact-Turn attribution, and it may only
+    close when EVERY cell does -- the plan's rule is all-or-nothing, so a partial
+    table and an ``answered`` verdict cannot both be true.
+    """
     assert set(EXACT_TURN_PROGRESS_SIGNALS) == {
         (backend, lane) for backend in BACKENDS for lane in LANES
     }
-    assert PR7R_QUESTIONS["Q2"]["verdict"] == "blocked"
+    kinds = {kind for kind, _reason in EXACT_TURN_PROGRESS_SIGNALS.values()}
+    verdict = PR7R_QUESTIONS["Q2"]["verdict"]
+    if kinds == {"unproven"}:
+        assert verdict == "blocked", kinds
+    elif kinds == {"covered"}:
+        assert verdict == "answered", kinds
+    else:
+        assert verdict == "open", kinds

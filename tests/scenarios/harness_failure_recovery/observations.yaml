@@ -294,20 +294,34 @@ observations:
       FAILED ``_stop_active_agent`` synthesizes ``{ok: True, action: "ended"}``.
       Clearing the stale row is deliberate and should stay, but the payload is
       byte-identical to a stop that really settled the turn: the un-interrupted
-      turn's mappings are cleared, its Run is never settled, and no caller can tell.
-      The teardown is not the defect; the missing signal is.
+      turn's mappings are cleared and no caller can tell that the interrupt never
+      happened. The teardown is not the defect; the missing signal is. What the Run
+      receives is NOT established here either -- the reproducer builds only the codex
+      session and turn registries, so no Run row exists for it to observe, and an
+      earlier draft's "its Run is never settled" was inference from the missing
+      interrupt rather than evidence.
   - id: HFR-OBS-024
     date: 2026-08-06
     source: PR7R current-master evidence matrix (HFR-183, HFR-184)
     result: confirmed
     detail: >-
-      No backend exposes a per-Turn progress signal on either lane. Claude stamps
+      Codex exposes a per-Turn progress signal on both lanes and then discards it;
+      Claude and OpenCode expose none. Codex's ``item/*`` notifications carry a
+      ``turnId`` and ``_find_request_for_notification`` resolves the participating
+      Run's request from that id through a per-turn map, so the event IS attributable
+      to an exact Turn -- but ``should_emit_progress`` then gates on the single
+      ``_active_turns[base]`` slot and the activity timestamp is stamped per session,
+      so the attribution is thrown away one step downstream. Claude stamps
       ``session_turn_started`` / ``session_last_activity`` per composite key and the
-      SDK has no query/result correlation id; codex holds one active turn id per base
-      session; opencode holds one asyncio task per base session. All three are
-      session-wide, which the plan explicitly rules out as a substitute -- so a
-      generic inactivity timeout is blocked on evidence, not on design taste, and no
-      implementation PR may be opened for one yet. Separately, a Turn's accepted-run
+      SDK has no query/result correlation id; opencode holds one asyncio task per
+      base session. The plan's rule requires an exact signal for EVERY backend and
+      lane, so a generic inactivity timeout is still blocked on evidence and no
+      implementation PR may be opened for one yet -- but the shape of the remaining
+      work is now known to differ per backend: codex needs its existing attribution
+      carried through to the stamp, the other two need a signal that does not exist.
+      This corrects the first draft of the same observation, which read only each
+      backend's base-session projection and generalised "no backend has one" from a
+      lossy projection. Separately, a Turn's accepted-run
       record cannot discriminate between its participants: it holds a flat
       ``accepted_agent_run_ids`` list and one Turn-level ``source_kind`` stamped by
       the first participant, with no per-Run source or deadline anywhere. Whether a
@@ -330,10 +344,16 @@ observations:
       health cursor is needed. Q1 holds on the durable Workbench lane only -- a
       Delivery reservation and an ownership transfer both leave the Run ``running``
       -- but nothing exercises the direct-IM reservation or backend-acceptance
-      boundary, so the premature-success claim may not be closed yet. Q4's four
-      durable pre-terminal facts are real for Claude and unproven for the other two
-      backends: three of the four rest on the Activity output batch, whose only
-      production producer is ``modules/agents/claude_agent.py``.
+      boundary, so the premature-success claim may not be closed yet. Q4 names four
+      pre-terminal facts and establishes two of them, for Claude only: the durable
+      pending-output Activity batch and the ``activity_local_settlement_only``
+      marker, both resting on an Activity whose only production producer is
+      ``modules/agents/claude_agent.py``. The terminal-result latch and the accepted
+      Message receipt are NOT established -- no cited node invokes
+      ``SessionTurnManager.on_terminal_result`` or reads
+      ``_avibe_terminal_result_latch``, and the latch is in-process context state
+      popped by ``on_terminal_delivery_complete`` rather than a durable row, so
+      listing it among "four durable facts" was wrong twice over.
   - id: HFR-OBS-026
     date: 2026-08-06
     source: adversarial review of the PR7R matrix (PR #1212)
@@ -356,3 +376,28 @@ observations:
       it verifies a citation RESOLVES, not that it is about the right thing. Only a
       reader comparing each cited test's body against its cell can, which makes that
       comparison a required step whenever a cell is marked covered.
+  - id: HFR-OBS-027
+    date: 2026-08-06
+    source: second adversarial review of the PR7R matrix (PR #1212)
+    result: confirmed
+    detail: >-
+      One adversarial pass over an evidence matrix is not enough. A second review of
+      PR7R -- over cells the first pass had read and left alone -- found 39 more of
+      the same substitution and moved the budget 78 -> 117. The four: a cancellation
+      test (asserts the Run is ``failed`` after ``execution.cancel()``) standing in
+      for a successful one-shot ``at`` firing; a Delivery-FSM prewrite test that
+      inserts a bare Delivery and never creates an ``agent_runs`` row standing in for
+      the Run's terminal-persistence-failure behaviour; an AST read of each backend's
+      ``handle_stop`` plus a Running-tab test whose ``SessionTurnManager`` is a stub
+      returning a prebuilt ``{ok: True}`` dict, together standing in for a durable
+      Stop settling a real Run; and a settlement test admitted through
+      ``enqueue_agent_run`` with ``task_trigger_kind="agent_run"`` -- which is not one
+      of the matrix's four triggers -- standing in for all four. That last one is the
+      general shape worth naming: a test can trace the SETTLEMENT half of a cell
+      perfectly and still say nothing about the ADMISSION half, and a trigger owns
+      admission. The same review also overturned a claim in the other direction:
+      Q2's "no backend exposes a per-Turn progress signal" was false for codex, and
+      it was reached by reading a lossy base-session projection instead of the
+      notification that feeds it. Rejecting a finding and loosening a blocker are
+      both valid outcomes of a review; the lesson is that reading one level up from
+      where the loss happens is part of the check.

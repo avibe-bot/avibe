@@ -195,9 +195,9 @@ _F2 = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
     "test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted"
 )
-_Q2_BLOCKER = (
+_Q2_SIGNALS = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
-    "test_no_backend_keys_a_progress_signal_by_turn_on_either_lane"
+    "test_only_codex_attributes_a_progress_event_to_an_exact_turn"
 )
 _Q3_PROBE = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
@@ -258,19 +258,60 @@ _NON_CLAUDE_LOCAL_SETTLEMENT: Final = {
 _DURABLE_BY_OUTCOME: Final = {
     "success": {"shared": covered(_TERMINAL_SUCCESS)},
     "failure": {"shared": covered(_TERMINAL_FAILURE)},
-    "resultless_termination": {"shared": covered(_NO_RESULT)},
-    "user_stop": {
-        "shared": covered(_STOP_DEFAULT),
-        "per_backend": {
-            # End on a Workbench row routes through SessionTurnManager.cancel
-            # for every backend; the per-backend runtime teardown after it does
-            # not choose the settlement.
-            "claude": covered(_END_TURN),
-            "codex": covered(_END_TURN),
-            "opencode": covered(_END_TURN),
-        },
+    # The settlement half IS traced end to end: the cited test drives a real
+    # ``SessionTurnManager``, a real ``TaskExecutionStore``, and asserts the Run
+    # reaches ``canceled`` with ``interrupt_reason='stopped'``. What it does not
+    # cover is the ADMISSION half, and admission is exactly what a trigger owns.
+    # Its context carries ``task_trigger_kind='agent_run'`` -- ``vibe agent run``,
+    # which is deliberately not one of ``TRIGGERS`` -- so a scheduler or watch
+    # fire that never attaches ``accepted_agent_run_ids`` to the Turn context it
+    # submits would leave the test green and its own Run unsettled forever.
+    "resultless_termination": {
+        "shared": unproven(
+            "the cited test admits the Run through ``enqueue_agent_run`` with "
+            "``task_trigger_kind='agent_run'``, which is not one of the four "
+            "TRIGGERS; only the settlement half is traced. Probe: admit a Run "
+            "through THIS trigger's real enqueue path, end its turn with no "
+            "terminal result, and assert the run id reached the Turn context "
+            "and the Run row reached a terminal status -- "
+            + _NO_RESULT
+            + " covers the agent-run admission only."
+        ),
     },
-    "terminal_persistence_failure": {"shared": covered(_PREWRITE)},
+    # Neither cited test observes a Run. ``_STOP_DEFAULT`` is a SOURCE-STRUCTURE
+    # test: it parses each backend's ``handle_stop`` and asserts the terminal
+    # emit uses ``stop_output_for``, which pins the emit's semantics and nothing
+    # about settlement. ``_END_TURN`` replaces the manager with a stub that
+    # returns a prebuilt ``{ok: True}`` dict, so it proves the Running-tab
+    # service delegates to ``manager.cancel`` and stops there. A broken real
+    # ``SessionTurnManager.cancel`` settlement path leaves both green.
+    "user_stop": {
+        "shared": unproven(
+            "no cited test binds a Run to a durable Stop: "
+            + _STOP_DEFAULT
+            + " reads the backend stop emit out of the AST, and "
+            + _END_TURN
+            + " stubs the manager out entirely. Probe: End a Workbench row "
+            "whose Turn owns a real Harness Run through the real "
+            "``SessionTurnManager.cancel`` and assert the Run settles "
+            "``canceled`` with the user-stop cause."
+        ),
+    },
+    # The cited test inserts a bare Delivery through ``delivery_store`` and
+    # asserts the Delivery requeues and the Turn records ``not_written``. No
+    # ``agent_runs`` row is ever created, so it says nothing about what the Run
+    # does when the terminal write fails -- which is the whole cell.
+    "terminal_persistence_failure": {
+        "shared": unproven(
+            "the cited test carries no Harness Run: it inserts a bare Delivery "
+            "and asserts only the requeue and the ``not_written`` Turn "
+            "outcomes. Probe: attach a real Run to that Delivery, fail the "
+            "prewrite, and assert whether the Run is retried, left nonterminal, "
+            "or swept -- "
+            + _PREWRITE
+            + " covers the Delivery/Turn half only."
+        ),
+    },
     "pending_output_delivery": {
         "shared": covered(_PENDING_OUTPUT),
         "per_backend": dict(_NON_CLAUDE_ACTIVITY),
@@ -347,8 +388,22 @@ def _lane_rows(by_outcome: dict) -> dict:
 #: facts a trigger actually owns are respelled: which Run row is enqueued, and
 #: what the definition projection retires when the Run goes terminal.
 _TRIGGER_OVERRIDES: Final = {
+    # The one-shot retirement test is a CANCELLATION test: it cancels the
+    # execution and asserts the Run settles ``failed`` with ``last_error``. It
+    # proves the projection follows a terminal Run and that only scheduler
+    # one-shots are retired -- but never on a successful firing, which is what
+    # this cell is about.
     ("durable_workbench", "scheduler_at"): {
-        "success": {"shared": covered(_ONE_SHOT_RETIREMENT)},
+        "success": {
+            "shared": unproven(
+                "the cited test cancels its execution and asserts the Run is "
+                "``failed``; no successful ``at`` firing is driven. Probe: fire "
+                "a one-shot to a real terminal success and assert both the "
+                "Run's terminal status and the definition's retirement -- "
+                + _ONE_SHOT_RETIREMENT
+                + " covers the canceled path only."
+            ),
+        },
     },
     # Both watch tests deliberately stop at the ownership boundary, which is
     # what makes them good tests of the boundary and useless as success
@@ -418,7 +473,18 @@ RUN_TERMINAL_TRUTH_MATRIX: Final = _build_matrix()
 #: it -- which is worth recording, because it means a cell citing a real,
 #: passing, relevant-looking test is still not evidence until someone checks
 #: that the test's subject is this cell's subject.
-UNPROVEN_BUDGET: Final = 78
+#:
+#: A second adversarial round moved it 78 -> 117, and every one of the 39 was
+#: the same defect again, in cells the first round had walked past: a
+#: cancellation test standing in for a successful one-shot firing (3), a bare
+#: Delivery with no Run row standing in for the Run's persistence-failure
+#: behaviour (12), an AST read of ``handle_stop`` plus a stubbed-out manager
+#: standing in for a durable Stop settling a Run (12), and a settlement test
+#: admitted through ``vibe agent run`` standing in for all four real triggers
+#: (12). Two rounds of this is the finding: the guard checks that a citation
+#: RESOLVES, and nothing mechanical can check that it is ABOUT the cell. The
+#: number going up twice is the unit working, not the unit failing.
+UNPROVEN_BUDGET: Final = 117
 
 
 # ----- Q2: exact-Turn progress attribution ---------------------------------
@@ -439,13 +505,19 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
         "same session-wide stamp as the Workbench lane; the IM lane additionally "
         "has no durable Turn row to attribute against. Same probe."
     ),
-    ("codex", "durable_workbench"): unproven(
-        "``_turn_registry.get_active_turn(base)`` holds ONE turn id per base "
-        "session, which is an exact signal only while a single Turn is active. "
-        "Probe: assert whether a second accepted Run in the same base session "
-        "can be distinguished from the first by any registry read."
-    ),
-    ("codex", "direct_im"): unproven("same registry as above -- same probe."),
+    # Codex is the exception, and the first draft of this table got it wrong by
+    # reading only the base-session projection. The app-server's ``item/*`` and
+    # ``turn/*`` notifications carry a ``turnId`` in their params, and
+    # ``_find_request_for_notification`` resolves the participating Run's
+    # request from THAT id through ``get_request_for_turn`` -- a per-turn map,
+    # not a per-session one. The exact-Turn signal therefore exists. What
+    # discards it is downstream: ``should_emit_progress`` gates on
+    # ``is_active_turn``, which reads the ONE ``_active_turns[base]`` slot, and
+    # the activity timestamp is stamped per session. So the attribution is
+    # available and thrown away, which is a different -- and cheaper -- problem
+    # than not having it.
+    ("codex", "durable_workbench"): covered(_Q2_SIGNALS),
+    ("codex", "direct_im"): covered(_Q2_SIGNALS),
     ("opencode", "durable_workbench"): unproven(
         "``_active_requests[base]`` is one asyncio task per base session with no "
         "per-Turn identity. Probe: assert whether the poller reports progress "
@@ -487,16 +559,28 @@ PR7R_QUESTIONS: Final = {
             "Which observable assistant/tool events can be attributed to the "
             "exact Turn and participating Runs, per backend and per lane?"
         ),
-        "verdict": "blocked",
+        "verdict": "open",
         "answer": (
-            "No backend exposes a per-Turn progress signal on either lane; all "
-            "three stamp progress per session/base-session. See "
-            "``EXACT_TURN_PROGRESS_SIGNALS`` for the six cells and their probes. "
-            "Until at least one exact signal exists for every backend and lane, "
-            "the plan's own rule forbids a generic inactivity timeout -- so no "
-            "implementation PR may be opened for one."
+            "Codex can, on both lanes; Claude and OpenCode cannot, on either. "
+            "This corrects an earlier blanket 'no backend exposes one', which "
+            "was reached by reading only the base-session projection each "
+            "backend stamps. Codex's ``item/*`` notifications carry a "
+            "``turnId`` and ``_find_request_for_notification`` resolves the "
+            "participating Run's request from it, so the event IS attributable "
+            "to an exact Turn -- the attribution is then discarded by "
+            "``should_emit_progress``, which gates on the single "
+            "``_active_turns[base]`` slot, and by an activity timestamp stamped "
+            "per session. Claude's ``mark_session_turn_started`` takes a "
+            "composite key and no Turn, and OpenCode holds one asyncio task per "
+            "base session; neither event stream names a Turn at all. The plan's "
+            "rule still bites: it requires an exact signal for EVERY backend "
+            "and lane before a generic inactivity timeout, and two of three "
+            "backends have none. What changes is the shape of the work -- codex "
+            "needs its existing attribution carried through to the stamp, not a "
+            "new signal invented. See ``EXACT_TURN_PROGRESS_SIGNALS`` for the "
+            "four remaining cells and their probes."
         ),
-        "evidence": (_Q2_BLOCKER,),
+        "evidence": (_Q2_SIGNALS,),
     },
     "Q3": {
         "question": (
@@ -530,19 +614,29 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "Four durable facts, all of which must outrank a later inactivity "
-            "decision: the terminal-result latch, a durable pending-output fact, "
-            "an accepted Message receipt, and the "
-            "``activity_local_settlement_only`` marker that survives a failed "
-            "local settlement without re-delivering. FOR CLAUDE ONLY. Three of "
-            "the four rest on the Activity output batch, and "
-            "``modules/agents/claude_agent.py`` is its only production producer "
-            "-- every cited test starts its activity with ``backend='claude'``. "
-            "A codex or opencode Turn has no proven pre-terminal evidence at "
-            "all, which is the stronger form of the same blocker as Q2: an "
-            "inactivity decision on those backends would have nothing to "
-            "outrank it. Probe: the per-backend one named in the "
-            "``pending_output_delivery`` cells."
+            "Two facts are established, FOR CLAUDE ONLY, and a third and fourth "
+            "are named but unproven. Established: a durable pending-output fact "
+            "(an Activity output batch that survives restart and settles the Run "
+            "once) and the ``activity_local_settlement_only`` marker that "
+            "survives a failed local settlement without re-delivering. Both rest "
+            "on the Activity output batch, and ``modules/agents/claude_agent.py`` "
+            "is its only production producer -- every cited test starts its "
+            "activity with ``backend='claude'``. NOT established, and previously "
+            "asserted here without evidence: the terminal-result latch "
+            "``SessionTurnManager.on_terminal_result`` writes, and the accepted "
+            "Message receipt. No cited node invokes ``on_terminal_result`` or "
+            "reads ``_avibe_terminal_result_latch``; removing the latch would "
+            "leave every test named here green. The latch is also in-process "
+            "context state, not a durable row -- it is popped by "
+            "``on_terminal_delivery_complete``, which is where the durable "
+            "commit happens -- so calling it a durable pre-terminal fact was "
+            "wrong on two counts. A codex or opencode Turn has no proven "
+            "pre-terminal evidence at all, which is the stronger form of the "
+            "same gap as Q2: an inactivity decision on those backends would have "
+            "nothing to outrank it. Probes: (1) the per-backend one named in the "
+            "``pending_output_delivery`` cells; (2) latch a terminal result on a "
+            "Turn that owns a Run, then drive an inactivity decision against it "
+            "and assert the latch outranks it."
         ),
         "evidence": (
             _PENDING_OUTPUT,
@@ -626,9 +720,15 @@ PR7R_FINDINGS: Final = {
             "Clearing the stale row is deliberate (see "
             "``test_end_active_codex_clears_stale_row_even_when_stop_fails``), "
             "but the response is byte-identical to a stop that really settled "
-            "the turn: the un-interrupted turn's mappings are cleared, its Run "
-            "is never settled, and no caller can tell. The teardown may stay; "
-            "the result must carry the failed stop."
+            "the turn: the un-interrupted turn's mappings are cleared and no "
+            "caller can tell that the interrupt never happened. The teardown "
+            "may stay; the result must carry the failed stop. WHAT THE RUN "
+            "RECEIVES IS DELIBERATELY NOT CLAIMED HERE -- the reproducer builds "
+            "only the codex session and turn registries, so no Run row exists "
+            "for it to observe. An earlier draft asserted the Run 'is never "
+            "settled'; that was inference from the missing interrupt, not "
+            "evidence. The IM lane's ``user_stop`` cells carry the probe that "
+            "would settle it."
         ),
         "reproducer": _F2,
     },
