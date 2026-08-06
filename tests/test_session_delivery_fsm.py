@@ -1028,6 +1028,303 @@ def test_im_p1_materializes_only_after_exact_native_acceptance(managers) -> None
     assert message["author_id"] == "U42"
 
 
+def _record_admission_acks(manager: SessionTurnManager) -> list[tuple[str, str, str, str]]:
+    """Capture every admission receipt as (platform, reaction target, state, admission)."""
+
+    acks: list[tuple[str, str, str, str]] = []
+
+    async def record_ack(context, *, state, admission=""):
+        spec = context.platform_specific or {}
+        target = spec.get("processing_indicator_message_id") or context.message_id
+        acks.append((str(context.platform), str(target), state, admission))
+        return None
+
+    manager.controller.processing_indicator = SimpleNamespace(
+        ack_delivery_state=record_ack
+    )
+    return acks
+
+
+def test_late_steer_acceptance_upgrades_the_queued_admission_receipt(managers) -> None:
+    """MESSAGE-DELIVERY-303.
+
+    An input admitted as ``pending_steer`` already told its sender it was queued.
+    The attempt that actually accepts it runs in ``_run_pending_steers``, whose
+    result no ingress caller ever sees, so this loop is the only place that can
+    correct the receipt.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    acks = _record_admission_acks(manager)
+
+    async def run() -> None:
+        turn_id, _ = await _activate(manager, text="active")
+        delivery_id = delivery_store.new_delivery_id()
+        with engine.begin() as conn:
+            row = delivery_store.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id="ses_fsm",
+                priority="p1",
+                state="reserved",
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    platform="slack",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="late steer",
+                    native_message_id="slack-msg-99",
+                ),
+                dispatch_text="late steer",
+            )
+            pending = delivery_store.open_pending_steer_batch(
+                conn,
+                deliveries=[row],
+                turn_id=turn_id,
+                attempt_id=delivery_store.new_attempt_id(),
+            )
+            assert len(pending) == 1
+            assert pending[0]["state"] == "pending_steer"
+
+        manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+        await manager._run_pending_steers("ses_fsm", turn_id, _context())
+
+        with engine.connect() as conn:
+            settled = delivery_store.get_delivery(conn, delivery_id)
+        assert settled is not None
+        assert settled["state"] == "accepted"
+
+    asyncio.run(run())
+
+    assert acks == [("slack", "slack-msg-99", "accepted", "steered")]
+
+
+def test_workbench_delivery_reports_no_reaction_receipt(managers) -> None:
+    """Only an IM input has a native message to react on."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        row = delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p1",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="composer input",
+            ),
+            dispatch_text="composer input",
+        )
+
+    assert manager._delivery_receipt_context("ses_fsm", row) is None
+
+
+def test_quick_reply_receipt_uses_its_persisted_echo_target(managers) -> None:
+    """MESSAGE-DELIVERY-306.
+
+    A quick-reply callback is dispatched with ``message_id=None`` on purpose, so
+    its Delivery snapshot carries no native message id and the persisted echo id
+    is the only reaction target it will ever have.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    acks = _record_admission_acks(manager)
+
+    async def run() -> None:
+        turn_id, _ = await _activate(manager, text="active")
+        delivery_id = delivery_store.new_delivery_id()
+        with engine.begin() as conn:
+            row = delivery_store.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id="ses_fsm",
+                priority="p1",
+                state="reserved",
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    platform="telegram",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="quick reply",
+                ),
+                dispatch_text="quick reply",
+                history_event={
+                    "kind": "admission",
+                    "context": {"processing_indicator_message_id": "echo-7"},
+                },
+            )
+            delivery_store.open_pending_steer_batch(
+                conn,
+                deliveries=[row],
+                turn_id=turn_id,
+                attempt_id=delivery_store.new_attempt_id(),
+            )
+
+        manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+        await manager._run_pending_steers("ses_fsm", turn_id, _context())
+
+    asyncio.run(run())
+
+    assert acks == [("telegram", "echo-7", "accepted", "steered")]
+
+
+def test_definitive_steer_refusal_after_archive_reports_the_retired_receipt(
+    managers,
+) -> None:
+    """MESSAGE-DELIVERY-307.
+
+    A Delivery refused after its Session went inactive is retired, never starts a
+    Turn of its own, and would otherwise keep the 👌 that promised it would run.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    acks = _record_admission_acks(manager)
+
+    async def run() -> None:
+        turn_id, _ = await _activate(manager, text="active")
+        delivery_id = delivery_store.new_delivery_id()
+        with engine.begin() as conn:
+            row = delivery_store.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id="ses_fsm",
+                priority="p1",
+                state="reserved",
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    platform="slack",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="refused steer",
+                    native_message_id="slack-msg-77",
+                ),
+                dispatch_text="refused steer",
+            )
+            delivery_store.open_pending_steer_batch(
+                conn,
+                deliveries=[row],
+                turn_id=turn_id,
+                attempt_id=delivery_store.new_attempt_id(),
+            )
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == "ses_fsm")
+                .values(status="archived")
+            )
+
+        manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.REFUSED))
+        await manager._run_pending_steers("ses_fsm", turn_id, _context())
+
+        with engine.connect() as conn:
+            settled = delivery_store.get_delivery(conn, delivery_id)
+        assert settled is not None
+        assert settled["state"] == "retired"
+
+    asyncio.run(run())
+
+    assert acks == [("slack", "slack-msg-77", "retired", "")]
+
+
+def test_merged_batch_exposes_every_reaction_target(managers) -> None:
+    """MESSAGE-DELIVERY-309.
+
+    Only the first Delivery of a merged Turn hydrates the dispatch context, so
+    the Turn has to carry the reaction targets of the others for the processing
+    indicator to clear their receipts.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    rows = []
+    with engine.begin() as conn:
+        for index, echo in enumerate(("echo-1", "echo-2")):
+            rows.append(
+                delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=delivery_store.new_delivery_id(),
+                    session_id="ses_fsm",
+                    priority="p3",
+                    state="queued",
+                    snapshot=delivery_store.message_snapshot(
+                        scope_id=None,
+                        session_id="ses_fsm",
+                        platform="telegram",
+                        author="user",
+                        source="user",
+                        message_type="user",
+                        text=f"quick reply {index}",
+                    ),
+                    dispatch_text=f"quick reply {index}",
+                    history_event={
+                        "kind": "admission",
+                        "context": {"processing_indicator_message_id": echo},
+                    },
+                )
+            )
+
+    context = _context()
+    manager._hydrate_delivery_batch_context(context, rows)
+
+    assert context.platform_specific["delivery_ack_targets"] == ["echo-1", "echo-2"]
+
+
+def test_recovered_reservation_reports_its_admission_receipt(managers) -> None:
+    """MESSAGE-DELIVERY-308.
+
+    A reservation committed before the service stopped is re-entered by recovery,
+    not by the ingress handler, so recovery is the only reporter of its outcome.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    acks = _record_admission_acks(manager)
+
+    async def run() -> None:
+        await _activate(manager, text="active")
+        delivery_id = delivery_store.new_delivery_id()
+        with engine.begin() as conn:
+            delivery_store.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id="ses_fsm",
+                priority="p3",
+                state="reserved",
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    platform="slack",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="recovered input",
+                    native_message_id="slack-msg-55",
+                ),
+                dispatch_text="recovered input",
+            )
+
+        await manager.recover_durable_delivery_state("ses_fsm")
+
+        with engine.connect() as conn:
+            settled = delivery_store.get_delivery(conn, delivery_id)
+        assert settled is not None
+        assert settled["state"] == "queued"
+
+    asyncio.run(run())
+
+    assert acks == [("slack", "slack-msg-55", "queued", "")]
+
+
 def test_duplicate_im_p1_reuses_one_delivery_and_one_native_steer(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 

@@ -1401,6 +1401,12 @@ class TelegramBot(BaseIMClient):
             "robot_face": "🤖",
             "robot": "🤖",
             "🤖": "🤖",
+            # Telegram's allowed reaction set lists the writing hand WITHOUT the
+            # U+FE0F variation selector; the presentation variant is rejected.
+            "✍️": "✍",
+            "writing_hand": "✍",
+            "thinking_face": "🤔",
+            "shrug": "🤷",
         }
         return aliases.get(normalized, normalized)
 

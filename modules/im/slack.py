@@ -1354,7 +1354,8 @@ class SlackBot(BaseIMClient):
         Slack's ``reactions.add`` / ``reactions.remove`` require the short name
         (e.g. ``ok_hand``), NOT the raw unicode character — sending the codepoint
         returns ``invalid_name``. Every emoji used as a reaction by the processing
-        indicator / handlers must be mapped here: 👀 ack, 👌 queued, 🤖 subagent.
+        indicator / handlers must be mapped here: 👀 ack, 👌 queued, 🤖 subagent,
+        ✍️ steered, 🤔 unconfirmed, 🤷 not delivered.
         """
         name = (emoji or "").strip()
         if name.startswith(":") and name.endswith(":") and len(name) > 2:
@@ -1366,6 +1367,10 @@ class SlackBot(BaseIMClient):
             "robot": "robot_face",
             "👌": "ok_hand",
             "ok": "ok_hand",
+            "✍️": "writing_hand",
+            "✍": "writing_hand",
+            "🤔": "thinking_face",
+            "🤷": "shrug",
         }
         return aliases.get(name, name)
 
