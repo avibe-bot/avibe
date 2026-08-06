@@ -1891,8 +1891,9 @@ def test_no_step_of_the_durable_reservation_path_settles_the_run(tmp_path):
     """HFR-199 / Q1: the reservation half, driven against real rows.
 
     Round 10's first-priority finding, and it is the stubbed-store lesson in
-    the other half of the unit. Q1's answer said "a Delivery reservation and an
-    ownership transfer both leave the Run ``running``" and cited a scheduler
+    the other half of the unit. Q1's answer said, and this test SUPERSEDED,
+    "a Delivery reservation and an
+    ownership transfer both leave the Run ``running``" -- it cited a scheduler
     test that replaces ``submit_scheduled`` with a ``SimpleNamespace`` returning
     ``queue_persisted=True, delivery_owner_transferred=True``. No Delivery is
     reserved there and no Run row is read: what that test establishes is the

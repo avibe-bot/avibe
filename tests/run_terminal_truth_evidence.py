@@ -176,6 +176,13 @@ _DEFINITION_CAS = (
     "tests/test_scheduled_tasks.py::"
     "test_task_definition_projection_follows_the_exact_terminal_cas_winner"
 )
+#: HFR-264. Round 15: Q5's answer named a scenario id as the thing that
+#: reconciles a refused definition stamp, and named the wrong one, because a
+#: prose citation is not evidence and nothing made it be. It is evidence now.
+_REFUSED_STAMP_FAILS_THE_RUN = (
+    "tests/test_scheduled_tasks.py::"
+    "test_a_refused_result_stamp_cannot_complete_the_run_ok"
+)
 _ONE_SHOT_RETIREMENT = (
     "tests/test_scheduled_tasks.py::"
     "test_canceled_task_execution_projects_every_result_and_only_retires_scheduler_one_shots"
@@ -731,6 +738,37 @@ RETRACTED_PHRASINGS: Final = (
         "SESSION on every backend -- say that, and do not generalise it into "
         "the attribution being discarded.",
     ),
+    # Round 15's three, and the reason there are three is that round 13 wrote
+    # down "every accepted retraction finding has to end with a row" and then
+    # applied it only FORWARD. Rounds 3 and 10 retracted these and enrolled
+    # none of them, so two survived in the canonical answer and the plan verdict
+    # for five more rounds. Back-filling is the whole fix: a ledger that starts
+    # at the round it was invented protects nothing that came before it.
+    (
+        "stamped by the first participant",
+        "round 10",
+        "HFR-182 PRELOADS the Turn-level ``source_kind`` and drives only "
+        "``_attach_accepted_agent_runs``, so what it shows is that the APPEND "
+        "path does not restamp the label -- not who set it. The originating "
+        "stamp belongs to ``_hydrate_delivery_batch_context`` and is an open "
+        "probe. Say 'a later participant does not restamp it'.",
+    ),
+    (
+        "an ownership transfer both leave the run ``running``",
+        "round 15",
+        "HFR-199 drives the real rows and every nonterminal step of the "
+        "durable chain reads ``queued``. The stale word came from the stubbed "
+        "scheduler test round 10 superseded. Say NONTERMINAL for the "
+        "load-bearing fact, and ``queued`` if a concrete status is wanted.",
+    ),
+    (
+        "no backend exposes a per-turn progress signal",
+        "round 3",
+        "found while mechanising this ledger in round 15, not by a reviewer. "
+        "All six backend/lane cells expose one; the verdict went 'no backend' "
+        "-> 'codex only' -> 'four of six, split by lane' -> all six, and "
+        "HFR-183 drives it. The claim is only quotable as history.",
+    ),
 )
 
 #: Words that mark a retraction in prose. A retracted phrasing may appear within
@@ -1071,8 +1109,13 @@ PR7R_QUESTIONS: Final = {
             "probe actually reaches: once several Runs are attributed to one "
             "Turn, the Turn's own CONTEXT PROJECTION records only a flat "
             "``accepted_agent_run_ids`` list plus one Turn-level "
-            "``source_kind`` stamped by whichever participant arrived first -- "
-            "no per-Run source, no per-Run deadline. An earlier draft went on "
+            "``source_kind`` that a later participant does NOT restamp -- "
+            "no per-Run source, no per-Run deadline. Who ORIGINALLY stamps "
+            "that label is a separate question and is not reached here: "
+            "HFR-182 preloads it and drives only the append path, so what the "
+            "probe shows is that the append path does not write it. Round 10 "
+            "corrected the probe's own wording and left this sentence saying "
+            "the first participant stamps it; round 15 corrects it here. An earlier draft went on "
             "to conclude that a per-Run timeout policy is therefore "
             "unspecifiable, and that was an over-claim: each accepted id is the "
             "primary key of an ``agent_runs`` row carrying ``source_kind``, "
@@ -1171,8 +1214,14 @@ PR7R_QUESTIONS: Final = {
             "``request_store.complete`` in ``_execute_claimed_request``'s "
             "``finally`` (~7815-7829), a SECOND write that happens afterwards. "
             "Two writes, not one transition, with a window between them. "
-            "HFR-261 reconciles the case where the terminal CAS REFUSES the "
-            "transition -- nothing reconciles process loss in the gap, which "
+            "HFR-264 reconciles the case where that definition stamp is "
+            "REFUSED, by converting the refusal into a failed Run rather than "
+            "a green one. Through round 14 this sentence named the "
+            "definition-write CAS that PRODUCES the refusal instead, which "
+            "sent follow-up work to the producer-side guard rather than to the "
+            "reconciliation; HFR-OBS-040 keeps both halves and which is which. "
+            "Nothing reconciles process loss in the gap, "
+            "which "
             "leaves a definition advertising a ``last_run_at``/``last_error`` "
             "for a Run that never reached a terminal status. So these two "
             "fields are a projection of an ATTEMPT, not of settled Run "
@@ -1186,6 +1235,7 @@ PR7R_QUESTIONS: Final = {
             _HEALTH_DERIVED_NOT_STORED,
             _HEALTH_PROJECTION,
             _DEFINITION_CAS,
+            _REFUSED_STAMP_FAILS_THE_RUN,
         ),
     },
 }

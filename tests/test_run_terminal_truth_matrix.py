@@ -9,7 +9,9 @@ silently.
 """
 
 import ast
+import io
 import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -1220,6 +1222,11 @@ def test_a_mistyped_matrix_key_is_an_error_not_a_silent_fallback():
 _LEDGER_LITERALS = frozenset(
     f'"{phrase}",' for phrase, _round, _why in RETRACTED_PHRASINGS
 )
+#: The same rows as bare text, for the tokenized Python split, which sees a
+#: string literal rather than the source line that carries it.
+_LEDGER_PHRASES = frozenset(
+    phrase.lower() for phrase, _round, _why in RETRACTED_PHRASINGS
+)
 
 
 def _flatten(text: str) -> str:
@@ -1291,24 +1298,101 @@ def _yaml_prose_units(lines: list[str]) -> list[str]:
     return units
 
 
+#: The quote characters a Python string literal can open with, after any of the
+#: ``r``/``b``/``f``/``u`` prefixes.
+_STRING_OPENER = re.compile(r"^[A-Za-z]*(\"\"\"|'''|\"|')")
+
+
+def _unquote(literal: str) -> str:
+    """A Python string literal's text, without its prefix and delimiters.
+
+    The delimiters have to go before the quote rule can read the literal: a
+    docstring's own opening ``\"\"\"`` would otherwise pair with the first inner
+    quote and put everything after it "outside" quotes.
+    """
+    opener = _STRING_OPENER.match(literal)
+    if opener is None:  # pragma: no cover - tokenize guarantees a delimiter
+        return literal
+    return literal[opener.end() : -len(opener.group(1))]
+
+
+def _py_prose_units(source: str) -> list[str]:
+    """One unit per Python string literal and per contiguous comment block.
+
+    Round 15, and the same defect round 14 fixed for YAML: a ``.py`` file
+    flattened to one line, so the only thing separating a marker in one
+    docstring from a banned phrasing three hundred lines below it was whether
+    some sentence-ending period happened to fall between them. Where a docstring
+    ends without one -- and most of the multi-line ones in this corpus end on a
+    ``\"\"\"`` after a clause -- its tail merged with the head of the next
+    literal into a single "sentence", and the scope rule ranged over both.
+
+    Nothing drove this in round 14 because the YAML leak was the one a reviewer
+    had found. It is driven now because the quote rule in ``_marker_near``
+    cannot work without it: counting quote pairs across a whole flattened
+    Python file pairs the close of one literal with the open of the next, and
+    every answer is arbitrarily inside or outside quotes depending on how many
+    unrelated strings precede it.
+
+    Adjacent literals are merged, because implicit concatenation is one string
+    to whoever reads it -- the same join ``_flatten`` did textually, done here
+    where the token boundaries are actually known. A statement boundary
+    (``NEWLINE``) or any other token ends the run; ``NL`` and indentation do
+    not, since they are what a wrapped literal is made of.
+    """
+    units: list[str] = []
+    buffer: list[str] = []
+    kind: str | None = None
+
+    def flush() -> None:
+        nonlocal buffer, kind
+        if buffer:
+            joined = _flatten(" ".join(buffer))
+            if joined and joined not in _LEDGER_PHRASES:
+                units.append(joined)
+        buffer, kind = [], None
+
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.STRING:
+            if kind != "string":
+                flush()
+                kind = "string"
+            buffer.append(_unquote(token.string))
+        elif token.type == tokenize.COMMENT:
+            if kind != "comment":
+                flush()
+                kind = "comment"
+            buffer.append(re.sub(r"^#+\s?", "", token.string.strip()))
+        elif token.type in (tokenize.NL, tokenize.INDENT, tokenize.DEDENT):
+            continue
+        else:
+            flush()
+    flush()
+    return units
+
+
 def _prose_units(path: Path, span: tuple[int, int] | None = None) -> list[str]:
     """The searchable prose of one artefact, split into independent scopes.
 
     A phrase in this corpus is routinely split across a line break, wrapped in a
     ``#`` comment, or spread over two adjacent Python string literals, so a
     naive substring search over the raw file finds none of them -- which would
-    make the ledger below a guard that passes because it cannot see. Python and
-    Markdown are therefore still flattened whole: a wrapped comment or a folded
-    docstring IS one continuous statement there, and cutting it at line
-    boundaries would hide every phrase that spans one.
+    make the ledger below a guard that passes because it cannot see. Markdown is
+    therefore still flattened whole: a wrapped paragraph IS one continuous
+    statement there, and cutting it at line boundaries would hide every phrase
+    that spans one.
 
-    YAML is not, for the reason in ``_yaml_prose_units``.
+    YAML is not, for the reason in ``_yaml_prose_units``; Python is not, for the
+    reason in ``_py_prose_units``.
 
     The ledger's OWN row literals are dropped. Leaving them in would make every
     row trivially findable by its own definition, which is precisely how the
     "this row matches nothing" check would stop meaning anything.
     """
-    lines = path.read_text(encoding="utf-8").splitlines()
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".py" and span is None:
+        return _py_prose_units(text)
+    lines = text.splitlines()
     if span is not None:
         lines = lines[span[0] : span[1]]
     lines = [line for line in lines if line.strip() not in _LEDGER_LITERALS]
@@ -1341,8 +1425,21 @@ def _pr7r_plan_span(path: Path) -> tuple[int, int]:
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 
 
+def _inside_quotes(prose: str, start: int, end: int) -> bool:
+    """Does a pair of double quotes enclose ``prose[start:end]``?
+
+    Quotes are counted from the start of the prose unit, so an unbalanced quote
+    can only ever make this stricter -- it shifts a later phrase from "inside"
+    to "outside", which fails loudly, rather than the other way around.
+    """
+    for match in re.finditer(r'"([^"]*)"', prose):
+        if match.start(1) <= start and end <= match.end(1):
+            return True
+    return False
+
+
 def _marker_near(prose: str, start: int, end: int) -> bool:
-    """Is a retraction marker in the phrase's OWN sentence?
+    """Is a retraction marker in the phrase's OWN sentence, around a QUOTE of it?
 
     The first draft of this rule used a 400-character window, and round 11's
     counter-check killed it: restoring the real stale sentence to
@@ -1360,7 +1457,26 @@ def _marker_near(prose: str, start: int, end: int) -> bool:
     accepted: an author who quotes a retracted claim and corrects it in the NEXT
     sentence must move the correction into the same one. The benefit is that the
     rule cannot be satisfied by neighbouring prose that is about something else.
+
+    Round 15 adds the other half, found by counter-checking that round's own
+    fix: the marker still only has to be SOMEWHERE in the sentence, and a
+    sentence can carry a marker for a different retraction. Q3's answer opens
+    "What IS established, and NARROWED in round 3 to what the probe actually
+    reaches: ... one Turn-level ``source_kind`` stamped by the first
+    participant" -- whose tail round 10 RETRACTED, rescued by one marker about
+    round 3's narrowing sitting at the other end of it. Same accident as
+    round 11's "narrower", one level up: the marker is real, it is just not
+    about this phrase.
+
+    So the phrase must also be QUOTED. That is not a new convention imposed on
+    the corpus, it is what every real retraction here already does -- ``narrowed
+    that from "..."``, ``said, and this test SUPERSEDED, "..."``, ``Q2's "..."
+    was false`` -- and it is the difference between mentioning a claim and
+    making one. An unquoted restatement is an assertion however many markers
+    share its sentence.
     """
+    if not _inside_quotes(prose, start, end):
+        return False
     bounds = [0, *(m.end() for m in _SENTENCE_BOUNDARY.finditer(prose)), len(prose)]
     spans = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
     scope = "".join(
@@ -1403,10 +1519,20 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction(tmp_path):
     computed over a whole flattened file, and a YAML field ends with no full
     stop, so several fields and the comment after them were one sentence and a
     marker in any of them vouched for all. The corpus is now searched per prose
-    UNIT -- a scalar value or a comment block in YAML, the whole file in Python
-    and Markdown, where a wrapped comment really is one statement. Three rounds
-    have now narrowed this one guard (window, then whole words, now scope), each
-    time because the previous width passed text it was written to fail.
+    UNIT -- a scalar or comment block in YAML, a string literal or comment block
+    in Python, the whole file only in Markdown, where a wrapped paragraph really
+    is one statement.
+
+    Round 15 narrows the rule itself and finishes the input. The rule: the
+    marker had only to share the sentence, so a marker about a DIFFERENT
+    retraction rescued a restated claim at the other end of the same sentence --
+    round 11's accident one level up. The phrase must now be QUOTED too, which
+    is the difference between mentioning a claim and making one. The input:
+    Python was still flattened whole, which is both round 14's leak unfixed on
+    the other half of the corpus and the reason the quote rule could not be
+    computed there. Four rounds have now narrowed this one guard (window, whole
+    words, scope, quotation), each time because the previous width passed text
+    it was written to fail.
     """
     repo_root = Path(__file__).resolve().parents[1]
     plan = repo_root / "docs" / "plans" / "harness-run-reliability.md"
@@ -1487,14 +1613,68 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction(tmp_path):
     folded = tmp_path / "folded.yaml"
     folded.write_text(
         "detail: >-\n"
-        "  round 9 wrote that the two\n"
-        f"  {low}; round 10 retracted it.\n",
+        '  round 9 wrote that "the two\n'
+        f'  {low}"; round 10 retracted it.\n',
         encoding="utf-8",
     )
     assert _prose_units(folded) == [
-        f"round 9 wrote that the two {low}; round 10 retracted it."
+        f'round 9 wrote that "the two {low}"; round 10 retracted it.'
     ]
     assert _unrescued(_prose_units(folded)) == []
+
+    # Round 15, and it is round 11's accident one level up. A marker only has
+    # to be somewhere in the sentence, and a sentence can carry a marker for a
+    # DIFFERENT retraction: Q3's answer opens "and NARROWED in round 3 to what
+    # the probe actually reaches" and went on, in the same sentence, to restate
+    # round 10's banned claim as fact -- rescued by a marker that was about
+    # something else entirely. Counter-checking round 15's own text edit is
+    # what surfaced it: putting the claim back left this guard green.
+    # So the phrase must be QUOTED as well, which is what every real retraction
+    # in this corpus already does. Quoting a claim is mentioning it; saying it
+    # unquoted is asserting it, however many markers share the sentence.
+    assert not _accepts(
+        f"what is established, and narrowed in round 3, is the two {banned}."
+    )
+    assert _accepts(
+        f'what is established, and narrowed in round 3, is that "the two '
+        f'{banned}" was the claim.'
+    )
+
+    # Round 15's second half is round 14's leak on the other half of the corpus.
+    # A ``.py`` file was flattened whole, so a docstring ending without a full
+    # stop -- which is most of the multi-line ones here -- merged with the
+    # literal after it into one "sentence" and a marker in either vouched for
+    # both. It is also what makes the quote rule above computable: counting
+    # quote pairs across a whole file pairs the close of one literal with the
+    # open of the next, and puts every phrase arbitrarily inside or outside.
+    sample_py = tmp_path / "sample_prose.py"
+    sample_py.write_text(
+        "def a():\n"
+        '    """round 10 retracted that claim"""\n'
+        "def b():\n"
+        f'    """the two {low} and nothing gates them"""\n'
+        "FLAG = 1\n"
+        f'# round 9 wrote "the two {low}"; it is false.\n',
+        encoding="utf-8",
+    )
+    py_units = _prose_units(sample_py)
+    assert "round 10 retracted that claim" in py_units, py_units
+    assert _unrescued(py_units) == [f"the two {low} and nothing gates them"], py_units
+    # ...and adjacent literals are still ONE unit, or every wrapped answer in
+    # this corpus would be chopped at the quote that continues it -- the
+    # over-correction that would hide any phrase spanning the join.
+    wrapped_py = tmp_path / "wrapped_prose.py"
+    wrapped_py.write_text(
+        "ANSWER = (\n"
+        f"    'round 9 wrote \"the two {low}\"'\n"
+        "    'and round 10 retracted it.'\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    assert _prose_units(wrapped_py) == [
+        f'round 9 wrote "the two {low}" and round 10 retracted it.'
+    ]
+    assert _unrescued(_prose_units(wrapped_py)) == []
 
     # A phrase that matches nothing is a ledger row that enforces nothing, and a
     # renamed subject would turn every row into one silently. Each row must
@@ -1519,3 +1699,78 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction(tmp_path):
         f"retraction narrative was deleted or the phrase no longer spells the "
         f"claim it bans"
     )
+
+
+def test_a_scenario_id_named_in_an_answer_is_carried_as_that_answer_s_evidence(
+    tmp_path,
+) -> None:
+    """HFR-203: leaning on a scenario in prose must mean citing its test.
+
+    Round 15's second finding. Q5's answer said "HFR-261 reconciles the case
+    where the terminal CAS refuses the transition" -- and HFR-261 is the
+    definition-write CAS that PRODUCES the refusal, filed against a CLI update
+    conflict test. The scenario that reconciles the refusal with the Run ledger
+    is HFR-264, whose test converts it into a failed Run. A follow-up unit
+    reading the answer would have gone to the producer-side guard and found
+    nothing that supports the sentence it was sent there by.
+
+    Every other citation in this unit is a NODE ID and every guard here checks
+    node ids; a scenario id written into prose was the one reference nothing
+    validated. HFR-192 would not catch it either, because it walks docstring
+    ids on tests rather than ids in an answer, and HFR-261 is a perfectly real
+    row -- existence was never the failure.
+
+    The rule is the cheapest one that would have caught it and is worth
+    obeying on its own: if an answer leans on a scenario, that scenario's test
+    belongs in the answer's ``evidence``, where the citation resolver already
+    checks it names something pytest collects. That turns a prose reference
+    into a driven one, and the fix for Q5 was to add HFR-264's test rather than
+    to reword the sentence.
+
+    Deliberately NOT extended to findings' ``detail`` or to cell reasons: those
+    name scenarios as neighbouring context ("HFR-261 closed its own CAS")
+    rather than as support, and a rule wide enough to cover them would be
+    turned off rather than obeyed. Scope is the five question answers.
+    """
+    yaml = pytest.importorskip("yaml")
+    catalog_path = (
+        Path(__file__).resolve().parent
+        / "scenarios"
+        / "harness_failure_recovery"
+        / "catalog.yaml"
+    )
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    by_id = {row["id"]: row.get("test") for row in scenarios}
+
+    def _unsupported(answer: str, evidence: tuple[str, ...]) -> list[str]:
+        missing = []
+        for scenario in sorted(set(re.findall(r"HFR-\d+", answer))):
+            assert scenario in by_id, f"{scenario} names no catalog row"
+            if by_id[scenario] not in evidence:
+                missing.append(f"{scenario} ({by_id[scenario]})")
+        return missing
+
+    # Guard the guard, on the shape that actually occurred: an answer that
+    # names a scenario whose test it does not carry, and the same answer once
+    # the right test is cited. Built from real catalog rows so a renamed test
+    # cannot leave this passing against a string that no longer exists.
+    assert _unsupported("HFR-264 reconciles it", ()) == [
+        f"HFR-264 ({by_id['HFR-264']})"
+    ]
+    assert _unsupported("HFR-264 reconciles it", (by_id["HFR-264"],)) == []
+    # ...and naming the WRONG scenario is caught even when some evidence is
+    # present, which is exactly how round 15's defect survived: Q5 had four
+    # cited nodes and none of them was the row the sentence leaned on.
+    assert _unsupported("HFR-261 reconciles it", (by_id["HFR-264"],)) == [
+        f"HFR-261 ({by_id['HFR-261']})"
+    ]
+
+    offenders: list[str] = []
+    for question, entry in PR7R_QUESTIONS.items():
+        for missing in _unsupported(entry["answer"], tuple(entry["evidence"])):
+            offenders.append(
+                f"{question}'s answer leans on {missing}, which is not among "
+                f"its evidence -- cite the test or stop leaning on the scenario"
+            )
+    assert not offenders, "\n".join(offenders)

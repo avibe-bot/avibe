@@ -362,9 +362,9 @@ observations:
       Run's request from that id through a per-turn map, so the event IS attributable
       to an exact Turn. Round 8 added, and round 9 RETRACTED, the claim that
       ``should_emit_progress`` then gates on the single ``_active_turns[base]`` slot
-      and so the attribution is thrown away one step downstream; what survives of it
-      is only the per-session activity timestamp, and the reasoning is at the end of
-      this observation rather than here. Claude stamps
+      "and so the attribution is thrown away one step downstream"; what survives of
+      it is only the per-session activity timestamp, and the reasoning is at the end
+      of this observation rather than here. Claude stamps
       ``session_turn_started`` / ``session_last_activity`` per composite key and the
       SDK has no query/result correlation id -- but that projection is not the
       event stream either: ``_adopt_pending_turn_token`` copies the FIFO-head
@@ -449,15 +449,23 @@ observations:
       (core/scheduled_tasks.py:~8394); the Run's own terminal CAS is
       ``request_store.complete`` in ``_execute_claimed_request``'s ``finally``
       (~7815-7829), a second write that happens after the first has already
-      committed. HFR-261 reconciles the case where that CAS REFUSES the
-      transition; nothing reconciles process loss in the gap, so a definition can
+      committed. HFR-264 reconciles the case where that stamp is REFUSED --
+      HFR-261 is the definition-write CAS that produces the refusal, and
+      HFR-264 is what turns it into a failed Run instead of a green one;
+      nothing reconciles process loss in the gap, so a definition can
       advertise a ``last_run_at`` / ``last_error`` for a Run that never reached a
       terminal status. Unlike the derived trio these two are stored, so they can
       drift -- they project an ATTEMPT, not settled Run history. Q5 is therefore
       ``open``. Q1 holds on the durable Workbench lane only -- a
-      Delivery reservation and an ownership transfer both leave the Run ``running``
-      -- but nothing exercises the direct-IM reservation or backend-acceptance
-      boundary, so the premature-success claim may not be closed yet. Q4 names four
+      Delivery reservation and an ownership transfer both leave the Run
+      NONTERMINAL -- but nothing exercises the direct-IM reservation or
+      backend-acceptance boundary, so the premature-success claim may not be
+      closed yet. (This observation first said
+      "reservation and an ownership transfer both leave the run ``running``",
+      which came from the stubbed scheduler test round 10 superseded. HFR-199
+      drives the real rows and every nonterminal step reads ``queued``; the
+      load-bearing fact is nonterminality, and the concrete status is
+      ``queued``, not ``running``.) Q4 names four
       pre-terminal facts and establishes two of them, for Claude only: the durable
       pending-output Activity batch and the ``activity_local_settlement_only``
       marker, both resting on an Activity whose only production producer is
@@ -804,7 +812,8 @@ observations:
       ``settle_agent_runs_for_turn_in_connection`` does, so any path that ends a
       Turn without calling it leaves a live Run with no owner. Q1 stays open
       because the direct-IM lane is still unestablished. And HFR-182's Q3 claim
-      said the Turn-level ``source_kind`` is stamped by the FIRST participant,
+      said, and this round RETRACTED, that the Turn-level ``source_kind`` is
+      "stamped by the first participant",
       which the probe PRELOADED rather than drove; it now attaches a second Run
       carrying real provenance and asserts only what that shows -- a later
       participant does not restamp it.
@@ -1035,3 +1044,71 @@ observations:
       ``tests/test_scheduled_tasks.py`` now trails FOUR of this unit's fixes --
       leaf-only, container collectibility, ancestry and ``__test__`` -- and is
       still deliberately untouched (HFR-OBS-028).
+
+  - id: HFR-OBS-040
+    area: run-terminal-truth
+    summary: >-
+      Round 15, three findings, all accepted, plus one this unit found while
+      counter-checking its own fix and one it found while mechanising the
+      ledger. One new scenario (HFR-203). No budget move.
+      Finding one: Q3's canonical answer, and the plan verdict copying it, said
+      the Turn-level ``source_kind`` is "stamped by the first participant" --
+      a claim round 10 had already RETRACTED in the probe. HFR-182 PRELOADS the field
+      and drives only ``_attach_accepted_agent_runs``, so what it establishes is
+      that a later participant does not RESTAMP the label, not who set it; the
+      originating write is ``_hydrate_delivery_batch_context`` and remains an
+      open probe. The retraction had been applied where it was found and nowhere
+      else, which is the round-13 lesson recurring: the edit was made, the row
+      was not.
+      Finding two: Q5's answer, its observation copy and two plan lines named
+      HFR-261 as the scenario reconciling a REFUSED terminal stamp. HFR-261 is
+      the producer-side definition-write CAS that makes the stamp refuse;
+      HFR-264 is the consumer that converts the refusal into a failed Run
+      (``test_a_refused_result_stamp_cannot_complete_the_run_ok``). Both halves
+      are real and adjacent, which is exactly why the wrong one reads
+      plausibly -- and a follow-up unit would have gone to the guard rather than
+      to the reconciliation. The deeper defect is that a scenario id in prose
+      was never evidence of anything: nothing tied it to the answer's
+      ``evidence`` tuple, so it could name any id, or a wrong one, and every
+      guard stayed green. HFR-203 now requires that any ``HFR-\d+`` an answer
+      leans on be carried in that answer's evidence, and HFR-264's test is in
+      Q5's evidence because of it.
+      Finding three: this observation asserted, and this round RETRACTS, that
+      "a Delivery reservation and
+      an ownership transfer both leave the Run ``running``". HFR-199 drives the
+      real rows and reads ``queued`` at every nonterminal step; the stale word
+      came from the stubbed scheduler test round 10 superseded. Rewritten to
+      state nonterminality as the load-bearing fact with ``queued`` as the
+      concrete status, and enrolled.
+      The fourth is this unit's own: counter-check A restored the round-10
+      claim into Q3's answer and HFR-201 stayed GREEN. Q3's opening sentence
+      carries "NARROWED in round 3" -- a real marker, about a different
+      retraction, two hundred characters up the same sentence. That is round
+      11's "narrower" accident one level up, and it means the fix under test
+      was not protected by the row that was supposed to protect it. The rule is
+      narrowed a fourth time (after window, whole words, scope): the phrase must
+      also be QUOTED, which is what every genuine retraction in this corpus
+      already does and is the difference between mentioning a claim and making
+      one. Applying it exposed six corpus sites that narrated a retraction while
+      restating it unquoted -- all six were mentions, all six are now quoted.
+      Making that computable required finishing round 14's input fix on the
+      other half of the corpus: a ``.py`` file was still flattened whole, so a
+      docstring ending without a full stop merged with the literal after it, and
+      counting quote pairs across a whole file pairs the close of one literal
+      with the open of the next. Python is now split per string literal and per
+      contiguous comment block, with adjacent literals merged because implicit
+      concatenation is one string to a reader.
+      The fifth was found while enrolling the others: "no backend exposes a
+      per-turn progress signal", retracted in round 3, was still standing in two
+      artefacts and in no ledger row. All six backend/lane cells expose one.
+      THE DURABLE RULE, and it is the same rule the ledger itself keeps
+      teaching: a citation is not evidence until something reads it. A scenario
+      id in prose, a retraction applied at the site where it was noticed, a
+      marker that shares a sentence -- each LOOKS like the corpus checking
+      itself, and none of them was, because no guard consumed them. Round 15's
+      three real fixes are all the same defect wearing three hats.
+      Rejected: nothing. All three review findings were real and in scope.
+      UNPROVEN_BUDGET stays 168: nothing this round touches a matrix cell.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
+      and is still deliberately untouched (HFR-OBS-028).

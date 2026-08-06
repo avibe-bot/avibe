@@ -3,7 +3,7 @@
 Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
 PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
 PR4 (#1173) are complete. Only PR7R remains as the next unit, and it is
-evidence-only; its first increment is in flight (`HFR-180…202`, see §7). PR4's
+evidence-only; its first increment is in flight (`HFR-180…203`, see §7). PR4's
 conditional transport-attempt delta (PR4B) opens only if a current-master
 reproducer proves a missing durable fact.**
 
@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…202`, `HFR-203…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn and per-emit Run attribution is derived from that Turn, so the inactivity timeout is no longer blocked on attribution; the one residual is the per-session activity timestamp; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…203`, `HFR-204…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn and per-emit Run attribution is derived from that Turn, so the inactivity timeout is no longer blocked on attribution; the one residual is the per-session activity timestamp; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,11 +1227,11 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under fourteen review rounds
+#### PR7R status (2026-08-06) — first increment, revised under fifteen review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
-`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…202`) and fed by
+`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…203`) and fed by
 `tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
 `HFR-191`, `HFR-195`, `HFR-197`, `HFR-199`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
@@ -1242,12 +1242,13 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through fourteen changed how the
-findings are demonstrated, two question verdicts, and seventeen degenerate
+rounds and has held at 168 since; rounds four through fifteen changed how the
+findings are demonstrated, two question verdicts, and nineteen degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
-round thirteen that were round twelve's, and two in round fourteen that were
-round thirteen's — the newest guard is now reliably the likeliest defect).
+round thirteen that were round twelve's, two in round fourteen that were round
+thirteen's, and two in round fifteen that were round fourteen's — the newest
+guard is now reliably the likeliest defect).
 Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
@@ -1410,8 +1411,10 @@ Q5 went the other way. Its answer said `last_run_at`/`last_error` "are written i
 the same CAS-guarded terminal transition that settles the Run" — they are not.
 `store.mark_task_result` commits a definition-level stamp inside `_execute_task`,
 and the Run's terminal CAS is a *second* write, `request_store.complete` in
-`_execute_claimed_request`'s `finally`. HFR-261 reconciles a refused transition;
-nothing reconciles process loss in the gap, so a definition can advertise a
+`_execute_claimed_request`'s `finally`. HFR-264 reconciles a refused stamp —
+HFR-261 is the definition-write CAS that refuses it, HFR-264 is what turns the
+refusal into a failed Run — and nothing reconciles process loss in the gap, so a
+definition can advertise a
 `last_run_at` for a Run that never settled. The health trio remains answered —
 derived per read over a bounded window, so it cannot drift — and Q5's verdict is
 now `open` on the two stored fields alone.
@@ -1699,7 +1702,7 @@ de-duplicates is not checking the document it reports on.**
 
 The third is the retraction ledger's *enrolment* rather than its rule.
 `HFR-OBS-024` still stated as current fact that `should_emit_progress` gates on the
-`_active_turns[base]` slot so the attribution is thrown away downstream, while the
+`_active_turns[base]` slot "so the attribution is thrown away downstream", while the
 end of the same observation says that claim was narrowed and the filter is correct
 — a reader derives the opposite Q2 contract depending on where they stop. Both
 remedies applied: the sentence is rewritten as an explicitly historical
@@ -1744,6 +1747,51 @@ lets the stale field pass, and a per-source-line split chops a folded block scal
 so a wrapped phrase becomes invisible. **A proximity rule is a claim about a unit
 of authorship, so it has to be told where the units are; flattening structured
 data into prose just moves the blindness somewhere it will not be noticed.**
+
+Round 15 — three findings, all accepted, plus two this unit found itself. One new
+scenario (`HFR-203`), no budget move. The first: Q3's answer and the verdict below
+said the Turn-level `source_kind` is "stamped by the first participant" — a claim
+round 10 already retracted *in the probe*, since `HFR-182` preloads the field and
+drives only `_attach_accepted_agent_runs`, establishing that a later participant
+does not **restamp** the label, not who set it. The originating write is
+`_hydrate_delivery_batch_context` and stays an open probe. The retraction had been
+applied where it was found and nowhere else: the edit was made, the ledger row was
+not — round 13's lesson recurring one round later.
+
+The second: Q5's answer, its observation copy and two plan lines named `HFR-261`
+as the scenario reconciling a **refused** terminal stamp. `HFR-261` is the
+producer-side definition-write CAS that makes the stamp refuse; `HFR-264` is the
+consumer that turns the refusal into a failed Run. Both are real and adjacent,
+which is why the wrong one reads plausibly — and a follow-up unit would have gone
+to the guard instead of the reconciliation. The deeper defect is that a scenario
+id in prose was never evidence of anything: nothing tied it to the answer's
+`evidence` tuple, so it could name any id, or a wrong one, and every guard stayed
+green. `HFR-203` now requires that any `HFR-\d+` an answer leans on be carried in
+that answer's evidence. The third: `HFR-OBS-024` asserted the Run is `running`
+after a Delivery reservation and an ownership transfer; `HFR-199` drives the real
+rows and reads `queued` at every nonterminal step, the stale word inherited from
+the stubbed scheduler test round 10 superseded.
+
+The fourth is this unit's own, and it is why the round-15 fixes are trustworthy at
+all. Counter-check A restored the round-10 claim into Q3's answer and `HFR-201`
+stayed **green**: Q3's sentence opens with "NARROWED in round 3", a real marker
+about a *different* retraction, two hundred characters up the same sentence. That
+is round 11's "narrower" one level up — the row meant to protect the fix did not.
+So the rule narrows a fourth time (window, whole words, scope, now **quotation**):
+the phrase must be quoted, which is what every genuine retraction here already
+does, and is the difference between mentioning a claim and making one. Applying it
+surfaced six corpus sites narrating a retraction while restating it unquoted. And
+making it computable required finishing round 14's input fix on the other half of
+the corpus — a `.py` file was still flattened whole, so a docstring ending without
+a full stop merged with the literal after it, and counting quote pairs across a
+whole file pairs the close of one literal with the open of the next. Python is now
+split per string literal and per contiguous comment block, adjacent literals
+merged. The fifth, found while enrolling the rest: "no backend exposes a per-turn
+progress signal", retracted in round 3, was standing in two artefacts and in no
+ledger row; all six backend/lane cells expose one. **A citation is not evidence
+until something reads it — a scenario id in prose, a retraction applied only where
+it was noticed, a marker that merely shares a sentence: each looks like the corpus
+checking itself, and none of them was.**
 
 Question verdicts:
 
@@ -1804,9 +1852,11 @@ Question verdicts:
    handler.
 3. **Q3 — open, split, and narrower than it was.** Established: the *Turn's*
    accepted-run record cannot discriminate between participants — a flat
-   `accepted_agent_run_ids` list and one Turn-level `source_kind` stamped by
-   whichever Run arrived first, with no per-Run source or deadline anywhere in
-   the projection. That is a statement about the projection and must not be read
+   `accepted_agent_run_ids` list and one Turn-level `source_kind` that a later
+   participant does *not* restamp, with no per-Run source or deadline anywhere
+   in the projection. Which participant originally stamps that label is not
+   reached — `HFR-182` preloads it and drives only the append path — and this
+   sentence went on claiming the first participant did until round 15. That is a statement about the projection and must not be read
    as one about the system: each accepted id is the primary key of an
    `agent_runs` row carrying `source_kind`, `source_actor` and `definition_id`,
    and `run_definitions` carries `timeout_seconds` / `lifetime_timeout_seconds`.
@@ -1843,9 +1893,11 @@ Question verdicts:
    as this block said through round 5. They are a definition-level stamp that
    `store.mark_task_result` commits inside `_execute_task`; the Run's terminal
    CAS is `request_store.complete` in `_execute_claimed_request`'s `finally`, a
-   second write afterwards. HFR-261 reconciles a refused transition and nothing
-   reconciles process loss in the gap, so a definition can advertise a
-   `last_run_at` for a Run that never settled. Those two fields are stored, not
+   second write afterwards. `HFR-264` reconciles a refused stamp — `HFR-261` is
+   the definition-write CAS that refuses it, `HFR-264` is what turns the refusal
+   into a failed Run rather than a green one — and nothing reconciles process
+   loss in the gap, so a definition can advertise a `last_run_at` for a Run that
+   never settled. Those two fields are stored, not
    derived, so unlike the trio they can drift: they project an *attempt*, not
    settled Run history.
 Reproduced defects, both on the direct-IM / agent-run lane and both owned by
@@ -2040,8 +2092,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…202` — occupied by PR7R's first increment (`HFR-188…202` were
-  taken by its round-6 through round-12 reviews); `HFR-203…219` still reserved for
+- PR7: `HFR-180…203` — occupied by PR7R's first increment (`HFR-188…203` were
+  taken by its round-6 through round-15 reviews); `HFR-204…219` still reserved for
   the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is

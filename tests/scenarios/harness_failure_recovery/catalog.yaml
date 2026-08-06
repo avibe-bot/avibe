@@ -2902,6 +2902,26 @@ scenarios:
     # places and left it standing in this file -- the canonical record -- plus an
     # observation. RETRACTED_PHRASINGS is now data and this enforces it corpus-wide.
     test: tests/test_run_terminal_truth_matrix.py::test_no_retracted_phrasing_survives_outside_its_own_retraction
+  - id: HFR-203
+    name: a scenario id named in an answer is carried as that answer's evidence
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Every citation in the PR7R evidence unit is a node id, and every guard checks node
+    # ids -- so a SCENARIO id written into a question's prose was the one reference
+    # nothing validated. Q5's answer said HFR-261 reconciles a refused definition stamp;
+    # HFR-261 is the definition-write CAS that PRODUCES the refusal, filed against a CLI
+    # update-conflict test, and the reconciliation is HFR-264, which turns the refusal
+    # into a failed Run. Existence was never the failure, so HFR-192 could not see it: the
+    # row is real, it is just not about the sentence it was cited for.
+    # RULE: if an answer leans on a scenario, that scenario's catalog test belongs in the
+    # answer's evidence tuple, where the node-id resolver already checks it names
+    # something pytest collects. A prose pointer becomes a driven one.
+    # Deliberately NOT extended to finding details or cell reasons, which name scenarios
+    # as neighbouring context rather than as support -- a rule that fired on those would
+    # be turned off rather than obeyed.
+    test: tests/test_run_terminal_truth_matrix.py::test_a_scenario_id_named_in_an_answer_is_carried_as_that_answer_s_evidence
   - id: HFR-202
     name: one scenario id names exactly one catalog row
     status: covered
