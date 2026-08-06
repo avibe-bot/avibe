@@ -679,26 +679,6 @@ def create_app(
                 if delivery is not None and delivery["session_id"] == session_id
                 else None
             )
-            if (
-                delivery is not None
-                and delivery_payload is not None
-                and message_deliveries.delivery_has_remote_resource_context(delivery)
-            ):
-                message_deliveries.retire_not_written(
-                    conn,
-                    session_id,
-                    delivery_id,
-                    reason="remote_execution_disabled",
-                )
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "ok": False,
-                        "code": "remote_execution_disabled",
-                        "session_id": session_id,
-                        "delivery_id": delivery_id,
-                    },
-                )
             attachment_specs: list[dict[str, Any]] = []
             if delivery_payload is not None:
                 from core.workbench_media import resolve_attachment_specs

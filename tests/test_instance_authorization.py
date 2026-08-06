@@ -19,7 +19,7 @@ def _remote_context(role: str) -> AuthorizationContext:
     return AuthorizationContext(instance_role=role, is_remote=True)
 
 
-def test_remote_roles_keep_management_monotonic_but_execution_disabled() -> None:
+def test_remote_roles_allow_chat_without_enabling_local_machine_capabilities() -> None:
     viewer = AuthorizationContext(instance_role="viewer", is_remote=True)
     editor = AuthorizationContext(instance_role="editor", is_remote=True)
     owner = AuthorizationContext(instance_role="owner", is_remote=True)
@@ -28,10 +28,10 @@ def test_remote_roles_keep_management_monotonic_but_execution_disabled() -> None
     assert viewer.can_chat is False
     assert viewer.can_use_cloud_asr is False
     assert editor.can_read_instance is True
-    assert editor.can_chat is False
+    assert editor.can_chat is True
     assert editor.can_use_cloud_asr is True
     assert editor.can_manage_projects is False
-    assert owner.can_chat is False
+    assert owner.can_chat is True
     assert owner.can_use_cloud_asr is True
     assert owner.can_manage_projects is True
     assert owner.can_manage_agents is True
@@ -81,7 +81,7 @@ def test_context_uses_role_not_diagnostic_source_for_owner() -> None:
     )
 
     assert context.is_instance_owner is False
-    assert context.can_chat is False
+    assert context.can_chat is True
     assert context.can_manage_instance is False
     assert context.authorization_revision == 0
 
@@ -174,6 +174,7 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
     ("method", "path", "expected"),
     [
         ("GET", "/api/projects", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/sessions/ses-1/messages", REMOTE_HTTP_ALLOWED),
         ("PUT", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
         ("PUT", "/api/resource-policies/agent/agent-1", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/models/runtime/status", REMOTE_HTTP_ALLOWED),
