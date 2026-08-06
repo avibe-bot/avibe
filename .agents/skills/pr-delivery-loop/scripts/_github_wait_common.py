@@ -18,7 +18,7 @@ RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 def get_token() -> str | None:
-    for env_name in ("GITHUB_TOKEN", "GH_TOKEN"):
+    for env_name in ("GH_TOKEN", "GITHUB_TOKEN"):
         value = os.environ.get(env_name)
         if value:
             return value

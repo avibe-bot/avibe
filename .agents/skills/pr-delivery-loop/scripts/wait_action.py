@@ -202,7 +202,7 @@ def main() -> int:
         print(
             (
                 "GitHub authentication is required for reliable polling. "
-                "Set GITHUB_TOKEN/GH_TOKEN, run 'gh auth login', or pass "
+                "Set GH_TOKEN/GITHUB_TOKEN, run 'gh auth login', or pass "
                 "--allow-unauthenticated for a throttled best-effort run."
             ),
             file=sys.stderr,
@@ -244,7 +244,7 @@ def main() -> int:
                 print(
                     (
                         "GitHub unauthenticated polling hit a rate limit. "
-                        "Authenticate with 'gh auth login' or GITHUB_TOKEN/GH_TOKEN."
+                        "Authenticate with 'gh auth login' or GH_TOKEN/GITHUB_TOKEN."
                     ),
                     file=sys.stderr,
                 )

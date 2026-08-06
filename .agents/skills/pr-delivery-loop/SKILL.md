@@ -239,8 +239,8 @@ turn ends because you armed a watch and are waiting, say exactly that.
   selects reviews by head sha will count it as "the bot has started". Filter it
   out by author and empty body.
 - A 0-finding review is not clean. The bot double-passes commits; close-out
-  requires zero unresolved threads on that same head, not a quiet latest
-  review.
+  requires zero unresolved threads across the entire PR, including threads
+  opened on earlier or outdated heads, not a quiet latest review.
 - Resolve every thread you address (reply, then resolve). For intentional
   non-changes the bot keeps re-flagging: keep a **Known-by-design ledger** in
   the PR body and answer re-flags by linking the entry.
