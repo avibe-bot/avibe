@@ -4733,6 +4733,8 @@ def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     if code == "resource_access_forbidden":
         status = 403
+    elif code == "show_page_not_found":
+        status = 404
     # A conflict (not a malformed request) when the page is in the wrong state or
     # the chosen suffix is already claimed.
     elif code in {"not_public", "share_id_taken"}:

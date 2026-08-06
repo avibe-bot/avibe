@@ -102,6 +102,12 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(html).not.toContain('chat.showPage.emailAccessDesc');
   });
 
+  it('hides exact-email grants from an Organization admin who does not own the page', () => {
+    const html = renderControl(access({ can_manage: true, can_publish_public: false }));
+
+    expect(html).not.toContain('chat.showPage.emailAccess');
+  });
+
   it('mounts the established Organization audience-narrowing confirmation', () => {
     const html = renderControl(access({ access_level: 'public' }));
 

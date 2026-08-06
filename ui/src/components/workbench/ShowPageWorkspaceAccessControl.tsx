@@ -435,7 +435,7 @@ export function ShowPageWorkspaceAccessControl({
       {access ? (
         <ShowPageEmailAccessEditor
           active={active}
-          canManage={canManage}
+          canManage={access.can_publish_public}
           sessionId={sessionId}
         />
       ) : null}

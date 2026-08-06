@@ -561,6 +561,15 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
     }
 
 
+def test_show_page_access_api_reports_missing_page_as_definitive_denial(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    response = app.test_client().get("/api/show-pages/ses-missing/access")
+
+    assert response.status_code == 404
+    assert response.get_json()["code"] == "show_page_not_found"
+
+
 def test_show_page_owner_can_read_and_replace_exact_email_grants(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ShowPageStore()
