@@ -418,7 +418,7 @@ def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> 
     )
     cleanup_calls = []
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
         cleanup_calls.append((key, current_receiver_task))
 
     handler.cleanup_session = _cleanup_session
@@ -462,7 +462,7 @@ def test_service_initiated_teardown_signal_is_not_reported_as_session_error() ->
     composite_key = "slack_C123:/tmp/workdir"
     cleanup_calls = []
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
         cleanup_calls.append(key)
 
     handler.cleanup_session = _cleanup_session
@@ -487,7 +487,7 @@ def test_teardown_intent_does_not_suppress_errors_from_the_next_generation() -> 
     handler = SessionHandler(controller)
     composite_key = "slack_C123:/tmp/workdir"
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session
@@ -516,7 +516,7 @@ def test_unrelated_error_during_teardown_window_is_still_reported() -> None:
     handler = SessionHandler(controller)
     composite_key = "slack_C123:/tmp/workdir"
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session
@@ -551,7 +551,7 @@ def test_client_teardown_marker_suppresses_signal_error_without_key_record() -> 
     )
     controller.claude_sessions[composite_key] = client
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session
@@ -580,7 +580,7 @@ def test_teardown_containment_matches_colon_delimited_exit_code() -> None:
     handler = SessionHandler(controller)
     composite_key = "slack_C123:/tmp/workdir"
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session
@@ -639,7 +639,7 @@ def test_old_generation_teardown_is_contained_after_a_replacement_registers() ->
     )
     controller.claude_sessions[composite_key] = replacement
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session

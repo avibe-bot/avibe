@@ -2795,3 +2795,77 @@ def test_cleanup_defers_duplicate_reap_when_a_live_client_pid_is_unresolved(
 
     assert captured["reap_calls"] == 0
     assert client.disconnects == 1
+
+
+def test_cleanup_skips_a_generation_a_replacement_already_took_over(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Containing a stale teardown must not become a second teardown.
+
+    ``cleanup_session`` resolves the composite key again under the generation
+    lock. A caller acting on a client that has since been replaced would
+    otherwise disconnect the healthy replacement that now owns the key.
+    """
+    captured: dict[str, Any] = {"reap_calls": 0}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(*args, **kwargs):
+        captured["reap_calls"] += 1
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    superseded = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(superseded, "_vibe_native_session_id", "native-session-1")
+
+    # A newer turn registered its own client under the same key.
+    replacement = _StubClaudeSDKClient(None)
+    setattr(replacement, "_vibe_native_session_id", "native-session-1")
+    controller.claude_sessions[composite_key] = replacement
+
+    asyncio.run(handler.cleanup_session(composite_key, expected_client=superseded))
+
+    assert replacement.disconnects == 0
+    assert superseded.disconnects == 0
+    assert captured["reap_calls"] == 0
+    assert controller.claude_sessions[composite_key] is replacement
+
+
+def test_cleanup_records_no_teardown_intent_for_an_empty_key(monkeypatch, tmp_path: Path) -> None:
+    """No generation retired means nothing to explain later.
+
+    A marker left on an already-empty key opens a 120s window in which the NEXT
+    client's genuine ``-9`` — dying inside ``connect()``, before registration
+    can clear the record — is suppressed as a service teardown.
+    """
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    composite_key = f"slack_C123:{tmp_path}"
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert composite_key not in handler.claude_intentional_teardowns

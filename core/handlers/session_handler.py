@@ -1859,8 +1859,15 @@ class SessionHandler(BaseHandler):
         current_receiver_task=None,
         retire_model_hub_scope: bool = True,
         activation_retired: bool = False,
+        expected_client=None,
     ):
-        """Clean up one Claude generation under the same lock used by creation."""
+        """Clean up one Claude generation under the same lock used by creation.
+
+        ``expected_client`` names the generation the caller means to retire.
+        Cleanup resolves the composite key again under the lock, so a caller
+        acting on a client that has since been replaced would otherwise tear
+        down the healthy replacement instead.
+        """
 
         async with self._claude_runtime_generation_lock(composite_key):
             await self._cleanup_session_locked(
@@ -1868,6 +1875,7 @@ class SessionHandler(BaseHandler):
                 current_receiver_task=current_receiver_task,
                 retire_model_hub_scope=retire_model_hub_scope,
                 activation_retired=activation_retired,
+                expected_client=expected_client,
             )
 
     async def _cleanup_session_locked(
@@ -1877,9 +1885,19 @@ class SessionHandler(BaseHandler):
         current_receiver_task=None,
         retire_model_hub_scope: bool = True,
         activation_retired: bool = False,
+        expected_client=None,
     ):
         """Clean up a specific session by composite key"""
         client = self.claude_sessions.get(composite_key)
+        if expected_client is not None and client is not expected_client:
+            # The named generation is gone: either already retired, or replaced
+            # by a client that owns the key now. Containing a stale teardown
+            # must not become a second teardown.
+            logger.info(
+                "Skipping Claude cleanup for session %s: the named generation no longer owns the key",
+                composite_key,
+            )
+            return
         activation_retired = activation_retired or bool(
             getattr(client, "_vibe_runtime_activation_retired", False)
         )
@@ -1898,7 +1916,13 @@ class SessionHandler(BaseHandler):
         native_session_id = getattr(client, "_vibe_native_session_id", None)
         keep_pid = get_claude_client_pid(client)
         self.clear_session_tracking(composite_key)
-        self._mark_claude_teardown_intentional(composite_key, client)
+        if client is not None or receiver_task is not None:
+            # Only a generation that actually existed can produce the signal the
+            # marker explains. Recording one for an already-empty key leaves a
+            # 120s window in which the NEXT client's genuine ``-9`` — say, dying
+            # inside ``connect()`` before registration can clear the record — is
+            # suppressed as though the service had killed it.
+            self._mark_claude_teardown_intentional(composite_key, client)
 
         try:
             # Close the SDK client first so its receive stream can finish normally.
@@ -2511,7 +2535,13 @@ class SessionHandler(BaseHandler):
                 composite_key,
                 error_msg,
             )
-            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            await self.cleanup_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+                # This failure may belong to a generation a replacement has
+                # already taken over from; retire that exact client or nothing.
+                expected_client=client,
+            )
             return True
         if returncode is not None:
             reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
@@ -2523,7 +2553,15 @@ class SessionHandler(BaseHandler):
                 reason,
                 diagnostic,
             )
-            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            # Same generation guard as the contained branch above: this branch is
+            # reached off the CALLER's client, which a replacement may already
+            # have superseded. Reporting a stale crash is right; retiring the
+            # live client that replaced it is not.
+            await self.cleanup_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+                expected_client=client,
+            )
             await self._get_im_client(context).send_message(
                 context,
                 self._get_formatter(context).format_error(
