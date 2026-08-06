@@ -711,8 +711,11 @@ observations:
       facts. ``CodexAgent.handle_message`` holds ``_session_locks[base]`` -- the
       registry's key space, not the gate's -- across its whole body, and inside it
       sends ``turn/interrupt`` for any active turn before ``turn/start``. The two
-      turns never overlap, and the turn that goes mute has been interrupted, so
-      ``should_emit_progress`` is correct. The real consequence of the split is
+      requests are serialized before they reach the backend, and the turn that
+      goes mute has been interrupted, so ``should_emit_progress`` is correct.
+      (Round 9 wrote "the two turns never overlap" there; round 10 narrowed it --
+      see HFR-OBS-035. Serialized at the lock is not non-overlapping on the
+      backend.) The real consequence of the split is
       narrower: a cwd change converts "queue behind the gate and run after" into
       "interrupt the running turn and replace it". HFR-195 now drives that on the
       real method. THE DURABLE RULE: this claim was argued three times -- correct,
@@ -803,3 +806,57 @@ observations:
       which the probe PRELOADED rather than drove; it now attaches a second Run
       carrying real provenance and asserts only what that shows -- a later
       participant does not restamp it.
+  - id: HFR-OBS-036
+    area: run-terminal-truth
+    summary: >-
+      Round 11 of PR7R's review, three findings, three accepted -- and the
+      round's real work was auditing my own fixes, two of which were degenerate
+      on the first draft. Finding one: round 10 retracted the codex overlap
+      claim in five artefacts and left it standing in ``catalog.yaml``, the file
+      that exists to BE the canonical record, so a follow-up unit reading only
+      the scenario row would have taken the retracted contract as the contract.
+      A SEVENTH copy sat unnoticed in HFR-OBS-034, which the finding did not
+      name. Rounds 7, 9, 10 and 11 have each now found a stale-copy defect --
+      docstring, headline range, document, canonical row -- and each was fixed
+      as a text edit while the class was named only in prose. THE DURABLE RULE:
+      naming a class does not enforce it; four recurrences ARE the evidence that
+      prose is not a control. So the retractions became data
+      (``RETRACTED_PHRASINGS`` in ``tests/run_terminal_truth_evidence.py``) and
+      HFR-201 enforces them across every artefact this unit owns: a retracted
+      phrasing may appear only in a sentence that also carries a retraction
+      marker.
+      Building that guard produced two degenerate drafts and a rigged
+      counter-check, all three caught by insisting the counter-check restore the
+      REAL prior text rather than a paraphrase. (1) The ledger's first phrase was
+      ``"turns never overlap"``, which spells the retraction as round 10 WROTE it
+      and not as the catalog CARRIED it -- "so the two never overlap", the wording
+      this round retracted. A ledger keyed to a paraphrase of the bug cannot fail
+      on the bug. (2) The proximity rule was a
+      400-character window; restoring the real stale sentence to HFR-OBS-034
+      left it GREEN, rescued by the word "narrower" -- about the consequence of
+      the gate split, nothing to do with any retraction. (3) Widening the scope
+      to "own sentence plus the next" still passed it, because "narrower" was in
+      exactly that next sentence. The rule is now the phrase's own sentence and
+      nothing else, and the three strings that decided that width are asserted
+      in the test. THE DURABLE RULE: a proximity rule wide enough to span
+      unrelated prose does not test proximity, it tests prose density -- and a
+      counter-check written against a remembered version of the defect proves
+      only that you remember it.
+      Finding two is round 10's lesson at the next joint out. Round 10 taught
+      ``_assert_node_exists`` that a container class must be collectible; the
+      catalog-discovery walker in the same file kept its own inline class walk
+      and never learned it, so a scenario row citing a test inside an
+      uncollectible class was discovered by the corpus check and rejected by the
+      citation check. One predicate, two readers, one of them updated. The walk
+      is now a single module-level ``_collected_tests`` both call. THE DURABLE
+      RULE: when you fix a rule at one call site, the question is not "is this
+      right" but "who else answers this question".
+      Finding three: ``_expand`` read ``cell.get("per_backend", {})`` and
+      ``cell["shared"]``, so a misspelled backend key or an unknown cell key
+      silently fell back to the shared proof -- evidence written and never read,
+      which is worse than missing evidence because it looks present.
+      ``_validate_matrix`` now whitelists both levels and HFR-200 pins all three
+      rejections. The checked-in matrix was audited before the guard landed and
+      contains no such typo, so UNPROVEN_BUDGET stays 168. A defaulted lookup
+      cannot fail; if a key is meaningful, the code that reads it must be able to
+      say it does not recognise it.

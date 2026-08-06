@@ -3,7 +3,7 @@
 Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
 PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
 PR4 (#1173) are complete. Only PR7R remains as the next unit, and it is
-evidence-only; its first increment is in flight (`HFR-180…199`, see §7). PR4's
+evidence-only; its first increment is in flight (`HFR-180…201`, see §7). PR4's
 conditional transport-attempt delta (PR4B) opens only if a current-master
 reproducer proves a missing durable fact.**
 
@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…199`, `HFR-200…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn and per-emit Run attribution is derived from that Turn, so the inactivity timeout is no longer blocked on attribution; the one residual is the per-session activity timestamp; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…201`, `HFR-202…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn and per-emit Run attribution is derived from that Turn, so the inactivity timeout is no longer blocked on attribution; the one residual is the per-session activity timestamp; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,11 +1227,11 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under ten review rounds
+#### PR7R status (2026-08-06) — first increment, revised under eleven review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
-`HFR-192…194`, `HFR-196`, `HFR-198`) and fed by
+`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…201`) and fed by
 `tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
 `HFR-191`, `HFR-195`, `HFR-197`, `HFR-199`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
@@ -1242,9 +1242,11 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through ten changed how the
-findings are demonstrated, two question verdicts, and eight degenerate guards
-(three of them in round ten alone). Why it moved is the
+rounds and has held at 168 since; rounds four through eleven changed how the
+findings are demonstrated, two question verdicts, and eleven degenerate guards
+(three of them in round ten, and two more in round eleven that were in this
+unit's own new code, found by counter-checking it against the real prior text).
+Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
 cell rather than about the cell. The first round found fifty such cells, in four
@@ -1571,6 +1573,48 @@ probe preloaded rather than drove; it now attaches a second Run carrying real
 provenance and asserts only what that shows — a later participant does not
 restamp it.
 
+Round 11 — three findings, all three accepted; the round's substance is that two
+of my own fixes were degenerate on the first draft and only the counter-check
+found them. The first finding is that round 10 retracted the codex overlap claim
+in five artefacts and left it standing in `catalog.yaml`, the file that exists to
+**be** the canonical record — a follow-up unit reading only the scenario row would
+have taken the retracted contract as the contract. A seventh copy the finding did
+not name sat in `HFR-OBS-034`. That is the fourth stale-copy defect in five rounds
+(docstring, headline range, document, canonical row), each previously fixed as a
+text edit while the class was named in prose only. **Naming a class does not
+enforce it; four recurrences are the proof that prose is not a control.** So the
+retractions are now data — `RETRACTED_PHRASINGS` in
+`tests/run_terminal_truth_evidence.py` — and `HFR-201` enforces them across every
+artefact this unit owns.
+
+Writing that guard produced three defects of its own, all caught by insisting the
+counter-check restore the **real** prior text rather than a paraphrase of it. The
+ledger's first phrase was `"turns never overlap"`, which spells the retraction as
+round 10 wrote it and *not* as the catalog carried it ("so the two never overlap",
+the wording this round retracted) — a ledger keyed to a paraphrase of the bug
+cannot fail on the bug. The proximity rule was
+then a 400-character window, and restoring the real stale sentence left it green,
+rescued by the word "narrower" describing the consequence of the gate split and
+nothing to do with any retraction; widening to "own sentence plus the next" still
+passed it, because "narrower" was in exactly that next sentence. The rule is now
+the phrase's own sentence and nothing else, and the three strings that decided
+that width are asserted in the test. **A proximity rule wide enough to span
+unrelated prose does not test proximity, it tests prose density — and a
+counter-check written against a remembered version of the defect proves only that
+you remember it.**
+
+The second finding is round 10's own lesson at the next joint out. Round 10 taught
+`_assert_node_exists` that a container class must be collectible; the
+catalog-discovery walker in the same file kept its own inline class walk and never
+learned it, so a row citing a test inside an uncollectible class was *discovered*
+by one check and *rejected* by the other. One predicate, two readers, one updated
+— the walk is now a single module-level `_collected_tests`. The third: `_expand`
+read `cell.get("per_backend", {})`, so a misspelled backend key fell back to the
+shared proof silently, which is worse than missing evidence because it looks
+present. `_validate_matrix` now whitelists both key levels and `HFR-200` pins all
+three rejections. The checked-in matrix was audited before the guard landed and
+holds no such typo, so the budget stays at 168.
+
 Question verdicts:
 
 1. **Q1 — open, do not close the claim yet.** On the durable Workbench lane,
@@ -1866,8 +1910,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…199` — occupied by PR7R's first increment (`HFR-188…199` were
-  taken by its round-6 through round-10 reviews); `HFR-200…219` still reserved for
+- PR7: `HFR-180…201` — occupied by PR7R's first increment (`HFR-188…201` were
+  taken by its round-6 through round-11 reviews); `HFR-202…219` still reserved for
   the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is

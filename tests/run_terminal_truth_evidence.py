@@ -670,6 +670,75 @@ RUN_TERMINAL_TRUTH_MATRIX: Final = _build_matrix()
 UNPROVEN_BUDGET: Final = 168
 
 
+# ----- the retraction ledger ------------------------------------------------
+
+#: Phrasings this unit has RETRACTED, and the round that retracted them.
+#:
+#: Round 11 exists because round 10 retracted a claim in five places and missed
+#: the sixth. The correction went into the matrix comment, the Q2 answer, the
+#: probe docstring, the plan and a new observation -- and the catalog's own
+#: scenario record kept telling a follow-up reader the opposite, from the file
+#: whose whole job is to be the canonical record. A seventh copy, in the round-9
+#: observation, nobody had even noticed.
+#:
+#: The class is not new: round 7 found a stale docstring, round 9 a stale
+#: headline range, round 10 a stale document copy. Each was fixed as a text edit
+#: and the CLASS was named in prose without being mechanised, so it recurred at
+#: the next unguarded copy. This is the mechanisation. **When a claim is
+#: retracted, the retracted phrasing must not survive anywhere in the corpus
+#: except next to its own retraction** -- which is checkable, unlike "keep the
+#: documents consistent".
+#:
+#: Add a row here the same commit a claim is retracted. Phrases are matched
+#: case-insensitively against whitespace-normalised prose with comment markers
+#: and adjacent string-literal joins removed, so a phrase split across lines or
+#: sitting in a ``#`` comment is still found. Keep each phrase specific enough
+#: that it cannot match an unrelated subject, and never phrase a row as a
+#: substring of its own correct negation -- "discard its signal" would match
+#: "does not discard its signal" and ban the truth along with the error.
+#: Each phrase is also kept as SHORT as it can be while staying unambiguous
+#: inside the scanned corpus. The first draft of this ledger read
+#: ``"turns never overlap"``, which matches the sentence round 10 retracted and NOT
+#: the one the catalog actually carried -- "so the two never overlap". A ledger
+#: that fails to match the exact text that caused it is the degenerate-assertion
+#: shape this unit has now found six times: it reads like the rule and enforces
+#: a special case of it. Write the shortest phrase that is still specific, then
+#: check it against the wording that went wrong.
+RETRACTED_PHRASINGS: Final = (
+    (
+        "never overlap",
+        "round 10",
+        "read off the registry's one slot, which is an in-process projection of "
+        "a backend that has its own opinion. Production sends turn/start without "
+        "awaiting turn/completed(interrupted), so a window exists and the lock "
+        "orders SUBMISSIONS only. Say 'serialized at the lock' and name the "
+        "late-arrival handling that makes the window harmless.",
+    ),
+    (
+        "no window in which two codex turns are live",
+        "round 10",
+        "the window exists and is harmless because both of its arrivals are "
+        "handled, not because it is closed.",
+    ),
+)
+
+#: Words that mark a retraction in prose. A retracted phrasing may appear within
+#: ``_RETRACTION_RADIUS`` characters of one of these and nowhere else: quoting an
+#: error in order to correct it is the point of the ledger, repeating it as an
+#: assertion is what the ledger forbids.
+RETRACTION_MARKERS: Final = (
+    "retract",
+    "is false",
+    "was false",
+    "too strong",
+    "narrow",
+    "correction",
+    "supersede",
+    "round 9 wrote",
+    "used to",
+)
+
+
 # ----- Q2: exact-Turn progress attribution ---------------------------------
 
 #: The plan singles out one question that must be answered SEPARATELY for every

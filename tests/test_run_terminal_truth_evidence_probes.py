@@ -1195,8 +1195,8 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
     Round ten narrows the answer once more, and the narrowing is the same shape
     as every earlier flip. "There is no window in which two codex turns are
     live" was asserted from the REGISTRY -- one slot, therefore one turn -- and
-    the registry is an in-process projection of a backend that has its own
-    opinion. ``docs/plans/codex-app-server-refactor.md`` specifies three steps
+    that reading is too strong, because the registry is an in-process projection
+    of a backend that has its own opinion. ``docs/plans/codex-app-server-refactor.md`` specifies three steps
     for insertion: interrupt, WAIT for the interrupted completion, then start.
     Production does the first and third. So between ``turn/interrupt`` and the
     ``turn/completed(interrupted)`` that answers it, turn-1 IS still executing

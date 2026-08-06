@@ -1,4 +1,4 @@
-"""HFR-184..187, HFR-189..190, HFR-192..194, HFR-196, HFR-198: the PR7R matrix is closed.
+"""HFR-184..187, HFR-189..190, HFR-192..194, HFR-196, HFR-198, HFR-200..201: the PR7R matrix is closed.
 
 Same contract as HFR-105 for ``TEARDOWN_SETTLEMENT_MATRIX``: growing a
 dimension fails here until every new cell names a consuming test or a precise
@@ -21,6 +21,8 @@ from tests.run_terminal_truth_evidence import (
     OUTCOMES,
     PR7R_FINDINGS,
     PR7R_QUESTIONS,
+    RETRACTED_PHRASINGS,
+    RETRACTION_MARKERS,
     RUN_TERMINAL_TRUTH_MATRIX,
     TRIGGERS,
     UNPROVEN_BUDGET,
@@ -29,12 +31,59 @@ from tests.run_terminal_truth_evidence import (
 _PROOF_KINDS = {"covered", "shared", "N/A", "defect", "unproven"}
 
 
+_CELL_KEYS = {"shared", "per_backend"}
+
+
+def _validate_matrix(matrix: dict) -> None:
+    """Every key a cell can be looked up by must be one the expansion reads.
+
+    Round 11. The expansion resolves a backend override with
+    ``cell.get("per_backend", {}).get(backend, cell["shared"])``, and ``.get``
+    with a default is a silent fallback: ``per_backend={"codecs": ...}`` drops
+    the override for all three real backends and every downstream check --
+    product size, ``UNPROVEN_BUDGET``, the per-cell assertions -- still passes,
+    because a shared proof was substituted for evidence someone wrote
+    specifically. That is the exact silent omission this matrix exists to
+    prevent, committed by the matrix's own reader.
+
+    The same hole exists one level up for a misspelled cell key: ``per_backends``
+    would be ignored wholesale. So the check is a WHITELIST on both -- unknown
+    keys are an error, not a no-op -- rather than a spell-check of the two
+    names we happened to think of.
+
+    Raises rather than asserts because ``_expand()`` runs at import time; a
+    ``ValueError`` names the offending key instead of failing collection with a
+    ``KeyError`` somewhere downstream, and it keeps the rule callable on a
+    synthetic matrix from a regression test.
+    """
+    for (lane, trigger), rows in matrix.items():
+        for outcome, cell in rows.items():
+            where = f"({lane}, {trigger}) / {outcome}"
+            unknown = set(cell) - _CELL_KEYS
+            if unknown:
+                raise ValueError(
+                    f"{where}: unknown cell key(s) {sorted(unknown)}; the "
+                    f"expansion reads only {sorted(_CELL_KEYS)}, so anything "
+                    f"else is evidence written and never read"
+                )
+            if "shared" not in cell:
+                raise ValueError(f"{where}: no ``shared`` proof to fall back to")
+            stray = set(cell.get("per_backend", {})) - set(BACKENDS)
+            if stray:
+                raise ValueError(
+                    f"{where}: per_backend names {sorted(stray)}, which is not "
+                    f"in BACKENDS {sorted(BACKENDS)}; that override would be "
+                    f"dropped and the shared proof used for every real backend"
+                )
+
+
 def _expand() -> list[tuple[str, str, str, str, tuple[str, str]]]:
     """The full backend x lane x trigger x outcome product.
 
     A cell written once for the lane applies to every backend; the expansion is
     what makes that a claim about all three rather than a silent omission.
     """
+    _validate_matrix(RUN_TERMINAL_TRUTH_MATRIX)
     cells = []
     for backend in BACKENDS:
         for lane in LANES:
@@ -129,6 +178,37 @@ def _collectible_class(node: ast.ClassDef) -> bool:
         if tail.endswith("TestCase"):
             return True
     return False
+
+
+def _collected_tests(
+    body: list[ast.stmt], prefix: tuple[str, ...] = ()
+) -> list[tuple[str, ast.stmt]]:
+    """Every test callable pytest would collect from ``body``, named as pytest names it.
+
+    Module level in round 11, and applying ``_collectible_class``, because the
+    walker that discovers this unit's tests and the resolver that validates a
+    cited node id are two readings of ONE rule -- "what does pytest collect" --
+    and only the resolver got the rule. A ``class Helper`` with a ``test_x``
+    method was walked into unconditionally here, so its method was reported as a
+    discovered node; adding a catalog row for it then satisfied BOTH directions
+    of the docstring/catalog tie while pytest collected nothing.
+
+    That is round 10's lesson at the next joint out. Round 10 found a rule fixed
+    at one nesting LEVEL that did not travel to the levels above it, and fixed
+    it inside one function. The same rule then failed to travel to the other
+    CALL SITE. A predicate that encodes an external system's behaviour belongs in
+    one place with every reader going through it; two readers and one predicate
+    is the shape that produced both bugs.
+    """
+    found: list[tuple[str, ast.stmt]] = []
+    for node in body:
+        if isinstance(node, ast.ClassDef):
+            if _collectible_class(node):
+                found.extend(_collected_tests(node.body, prefix + (node.name,)))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name.startswith("test_"):
+                found.append(("::".join(prefix + (node.name,)), node))
+    return found
 
 
 def _assert_node_exists(node_id: str) -> None:
@@ -415,22 +495,11 @@ def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None
         "tests/test_run_terminal_truth_matrix.py",
         "tests/test_run_terminal_truth_evidence_probes.py",
     )
-    def _tests(body: list[ast.stmt], prefix: tuple[str, ...]) -> list[tuple[str, ast.stmt]]:
-        """Every test callable in ``body``, named the way pytest would name it."""
-        found: list[tuple[str, ast.stmt]] = []
-        for node in body:
-            if isinstance(node, ast.ClassDef):
-                found.extend(_tests(node.body, prefix + (node.name,)))
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.name.startswith("test_"):
-                    found.append(("::".join(prefix + (node.name,)), node))
-        return found
-
     repo_root = Path(__file__).resolve().parents[1]
     discovered: set[str] = set()
     for rel in modules:
         tree = ast.parse((repo_root / rel).read_text(encoding="utf-8"))
-        for suffix, node in _tests(tree.body, ()):
+        for suffix, node in _collected_tests(tree.body):
             node_id = f"{rel}::{suffix}"
             doc = ast.get_docstring(node) or ""
             head = doc.split(":", 1)[0].split("/", 1)[0].strip()
@@ -673,6 +742,24 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         # test class, so pytest never reaches it.
         _assert_node_exists(f"{rel}::Owner::test_case")
 
+    # Round 11: the OTHER reader of the same rule. ``_collected_tests`` walks
+    # these modules to discover what has a docstring id, and it recursed into
+    # every class unconditionally -- so ``Owner::test_case`` was reported as a
+    # discovered node, and adding a catalog row for it satisfied BOTH directions
+    # of HFR-192 while pytest collected nothing. Discovery and citation are two
+    # readings of one question and now share one predicate, which is checked
+    # here on the same fixture rather than in two places that can drift.
+    discovered = {suffix for suffix, _node in _collected_tests(ast.parse(
+        module.read_text(encoding="utf-8")
+    ).body)}
+    assert discovered == {
+        "test_real",
+        "test_async_real",
+        "TestGood::test_case",
+        "OwnerTests::test_case",
+    }, discovered
+    assert "Owner::test_case" not in discovered
+
     # And the real citations still pass under the tightened rule -- the point of
     # a stricter guard is that the corpus already satisfies it, checked here
     # rather than left to the parametrized cells so a tightening that quietly
@@ -681,3 +768,217 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     assert cited, "no citations to check"
     for node_id in sorted(cited):
         _assert_node_exists(node_id)
+
+
+def test_a_mistyped_matrix_key_is_an_error_not_a_silent_fallback():
+    """HFR-200: an override key the expansion cannot read must fail loudly.
+
+    The expansion resolves a backend override with ``.get(backend, shared)``,
+    and a defaulted lookup cannot tell "no override was written" from "an
+    override was written under a name nobody reads". A cell carrying
+    ``per_backend={"codecs": ...}`` loses that evidence for all three real
+    backends, and every downstream check stays green: the product is still
+    3 x 2 x 4 x 7, the unproven count is unchanged, and each surviving cell
+    still names a probe. The matrix's stated purpose is that a cell written once
+    per lane is a claim about all three backends rather than a silent omission,
+    which makes a silently-dropped override the one failure it must not have.
+
+    Same shape as the degenerate guards rounds 8-11 kept finding, in the reader
+    rather than in an assertion: a lookup that cannot fail reports success for
+    an input it never handled.
+    """
+    good = {
+        (lane, trigger): {
+            outcome: {"shared": ("unproven", "x"), "per_backend": {"codex": ("unproven", "y")}}
+            for outcome in OUTCOMES
+        }
+        for lane in LANES
+        for trigger in TRIGGERS
+    }
+    _validate_matrix(good)
+
+    def _mutated(**cell):
+        broken = {k: dict(v) for k, v in good.items()}
+        first = next(iter(broken))
+        broken[first] = dict(broken[first])
+        broken[first][OUTCOMES[0]] = cell
+        return broken
+
+    with pytest.raises(ValueError, match=r"per_backend names \['codecs'\]"):
+        _validate_matrix(_mutated(shared=("unproven", "x"), per_backend={"codecs": ("unproven", "y")}))
+
+    with pytest.raises(ValueError, match=r"unknown cell key\(s\) \['per_backends'\]"):
+        _validate_matrix(_mutated(shared=("unproven", "x"), per_backends={"codex": ("unproven", "y")}))
+
+    with pytest.raises(ValueError, match="no ``shared`` proof"):
+        _validate_matrix(_mutated(per_backend={"codex": ("unproven", "y")}))
+
+    # And the checked-in matrix satisfies it, which is what makes the guard a
+    # statement about this corpus rather than about a fixture.
+    _validate_matrix(RUN_TERMINAL_TRUTH_MATRIX)
+
+
+_LEDGER_LITERALS = frozenset(
+    f'"{phrase}",' for phrase, _round, _why in RETRACTED_PHRASINGS
+)
+
+
+def _normalized_prose(path: Path, span: tuple[int, int] | None = None) -> str:
+    """One flat lowercase line: comment markers gone, string joins closed up.
+
+    A phrase in this corpus is routinely split across a line break, wrapped in a
+    ``#`` comment, or spread over two adjacent Python string literals, so a
+    naive substring search over the raw file finds none of them -- which would
+    make the ledger below a guard that passes because it cannot see.
+
+    The ledger's OWN row literals are dropped. Leaving them in would make every
+    row trivially findable by its own definition, which is precisely how the
+    "this row matches nothing" check would stop meaning anything.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if span is not None:
+        lines = lines[span[0] : span[1]]
+    flat = " ".join(
+        re.sub(r"^#+\s?", "", line.strip())
+        for line in lines
+        if line.strip() not in _LEDGER_LITERALS
+    )
+    flat = re.sub(r'"\s+"', "", flat)  # adjacent literals: "...the " "rest..."
+    return re.sub(r"\s+", " ", flat).lower()
+
+
+def _pr7r_plan_span(path: Path) -> tuple[int, int]:
+    """Line bounds of the plan's PR7R block, which is the part this unit owns.
+
+    Scoping matters: the plan discusses process replacement and delivery batches
+    elsewhere in language that legitimately reuses these words, and a guard that
+    fired on those would be turned off rather than obeyed.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("#### PR7R status"))
+    end = next(
+        (
+            i
+            for i, ln in enumerate(lines[start + 1 :], start + 1)
+            if ln.startswith("### ") or ln.startswith("## ")
+        ),
+        len(lines),
+    )
+    return start, end
+
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+
+def _marker_near(prose: str, start: int, end: int) -> bool:
+    """Is a retraction marker in the phrase's OWN sentence?
+
+    The first draft of this rule used a 400-character window, and round 11's
+    counter-check killed it: restoring the real stale sentence to
+    ``observations.yaml`` left the guard GREEN, because the word "narrower" --
+    describing the consequence of the gate split, nothing to do with any
+    retraction -- sat inside the window. A proximity rule wide enough to span
+    unrelated prose does not test proximity to a retraction, it tests prose
+    density. That is the ninth degenerate guard this unit has found, and the
+    first one it found in its own new code.
+
+    The second draft allowed the following sentence too, for the "claim, full
+    stop, THAT IS FALSE" shape -- and that draft passed the stale text as well,
+    because "narrower" was in exactly that following sentence. So the
+    scope is the phrase's own sentence and nothing else. The cost is real and
+    accepted: an author who quotes a retracted claim and corrects it in the NEXT
+    sentence must move the correction into the same one. The benefit is that the
+    rule cannot be satisfied by neighbouring prose that is about something else.
+    """
+    bounds = [0, *(m.end() for m in _SENTENCE_BOUNDARY.finditer(prose)), len(prose)]
+    spans = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+    scope = "".join(
+        prose[lo:hi] for lo, hi in spans if lo <= start < hi or lo < end <= hi
+    )
+    return any(marker in scope for marker in RETRACTION_MARKERS)
+
+
+def test_no_retracted_phrasing_survives_outside_its_own_retraction():
+    """HFR-201: a claim this unit retracted may only appear next to its retraction.
+
+    Round 11's finding is that round 10 retracted the codex overlap claim in
+    five artefacts and left it standing in the catalog -- the file that exists
+    to BE the canonical record, so a follow-up unit reading only the scenario
+    row would have taken the retracted contract as the contract. A seventh copy
+    sat unnoticed in the round-9 observation.
+
+    Rounds 7, 9 and 10 each found the same class -- a stale docstring, a stale
+    headline range, a stale document copy -- and each was fixed as a text edit
+    while the class was named only in prose. Naming a class does not enforce it;
+    the recurrence is the evidence. So the ledger is data
+    (``RETRACTED_PHRASINGS``) and this is its enforcement across every artefact
+    the unit owns.
+
+    The rule is deliberately narrow enough to be mechanical: a retracted
+    phrasing may occur in a sentence that carries a retraction marker, or in the
+    sentence right before one, and nowhere else (see ``_marker_near``, whose
+    first draft was itself too loose to fail on the real stale text). Quoting an
+    error to correct it is the point; restating it as an assertion is what
+    recurred three times.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    plan = repo_root / "docs" / "plans" / "harness-run-reliability.md"
+    corpus: list[tuple[Path, tuple[int, int] | None]] = [
+        (repo_root / "tests" / "run_terminal_truth_evidence.py", None),
+        (repo_root / "tests" / "test_run_terminal_truth_matrix.py", None),
+        (repo_root / "tests" / "test_run_terminal_truth_evidence_probes.py", None),
+        (repo_root / "tests" / "scenarios" / "harness_failure_recovery" / "catalog.yaml", None),
+        (
+            repo_root / "tests" / "scenarios" / "harness_failure_recovery" / "observations.yaml",
+            None,
+        ),
+        (plan, _pr7r_plan_span(plan)),
+    ]
+    for path, _span in corpus:
+        assert path.exists(), path
+
+    # Guard the guard, on the three shapes that decided its width. Only a marker
+    # in the phrase's own sentence counts: the third string below is the REAL
+    # stale sentence this round removed, and both looser drafts of the rule
+    # passed it, rescued by "narrower" in the sentence after -- a word about the
+    # consequence of the gate split, not about any retraction.
+    # The fixtures are BUILT from the ledger row rather than spelled out, so
+    # this file does not itself become a corpus offender -- and so a reworded
+    # row keeps exercising the rule instead of silently testing a dead string.
+    banned = RETRACTED_PHRASINGS[0][0]
+
+    def _accepts(prose: str) -> bool:
+        match = re.search(re.escape(banned), prose)
+        assert match is not None, prose
+        return _marker_near(prose, match.start(), match.end())
+
+    assert _accepts(f'round 9 wrote "the two {banned}"; round 10 narrowed it.')
+    assert not _accepts(f"the two {banned}. that is false: a window exists.")
+    assert not _accepts(
+        f"the two {banned}, and the mute turn was interrupted. the real "
+        f"consequence of the split is narrower: it replaces rather than queues."
+    )
+
+    # A phrase that matches nothing is a ledger row that enforces nothing, and a
+    # renamed subject would turn every row into one silently. Each row must
+    # still be FINDABLE somewhere -- next to its retraction, which is where the
+    # rule below then requires it to be.
+    hits: dict[str, int] = {phrase: 0 for phrase, _round, _why in RETRACTED_PHRASINGS}
+    offenders: list[str] = []
+    for path, span in corpus:
+        prose = _normalized_prose(path, span)
+        for phrase, round_name, why in RETRACTED_PHRASINGS:
+            for match in re.finditer(re.escape(phrase.lower()), prose):
+                hits[phrase] += 1
+                if not _marker_near(prose, match.start(), match.end()):
+                    offenders.append(
+                        f"{path.name}: {phrase!r} was retracted in {round_name} "
+                        f"but is stated here as fact -- {why}"
+                    )
+    assert not offenders, "\n".join(offenders)
+    unfindable = sorted(phrase for phrase, count in hits.items() if not count)
+    assert not unfindable, (
+        f"ledger rows matching nothing in the corpus: {unfindable} -- either the "
+        f"retraction narrative was deleted or the phrase no longer spells the "
+        f"claim it bans"
+    )

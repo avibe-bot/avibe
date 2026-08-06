@@ -2829,8 +2829,13 @@ scenarios:
     # The admission gate keys on the composite <base>:<working_path>; codex's
     # _active_turns keys on the base session alone, so a cwd change opens a second
     # gate. handle_message then serializes on _session_locks[base] and interrupts
-    # the active turn before starting the next, so the two never overlap: the cwd
-    # change converts queue-and-run-after into interrupt-and-replace.
+    # the active turn before starting the next: the cwd change converts
+    # queue-and-run-after into interrupt-and-replace. Serialized at the lock is
+    # NOT non-overlapping on the backend -- production sends turn/start without
+    # awaiting turn/completed(interrupted), diverging from the protocol note, so a
+    # window exists in which both turns execute. It is harmless because both late
+    # arrivals are handled: the interrupted turn's item/completed is dropped and
+    # its turn/completed is popped and released with nothing emitted.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot
   - id: HFR-196
     name: no PR7R prose states a Q2 cell count the table disagrees with
@@ -2873,6 +2878,30 @@ scenarios:
     # TURN. Only settle_agent_runs_for_turn_in_connection moves it, which also means
     # a path that ends a Turn without calling it leaves a live Run with no owner.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_no_step_of_the_durable_reservation_path_settles_the_run
+  - id: HFR-200
+    name: a mistyped matrix key is an error, not a silent fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The expansion read a backend override with .get(backend, shared), which
+    # cannot tell "no override written" from "override written under a name
+    # nobody reads": per_backend={"codecs": ...} dropped the evidence for all
+    # three real backends with the product size, the unproven budget and every
+    # per-cell check still green. Cell keys and per_backend keys are whitelisted.
+    test: tests/test_run_terminal_truth_matrix.py::test_a_mistyped_matrix_key_is_an_error_not_a_silent_fallback
+  - id: HFR-201
+    name: a retracted phrasing may only appear next to its own retraction
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Rounds 7, 9 and 10 each found a retracted claim surviving in an artefact
+    # the correction missed, and each was fixed as a text edit while the class
+    # was named only in prose. Round 10 retracted the codex overlap claim in five
+    # places and left it standing in this file -- the canonical record -- plus an
+    # observation. RETRACTED_PHRASINGS is now data and this enforces it corpus-wide.
+    test: tests/test_run_terminal_truth_matrix.py::test_no_retracted_phrasing_survives_outside_its_own_retraction
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
