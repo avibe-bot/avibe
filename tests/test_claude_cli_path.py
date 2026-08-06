@@ -2592,8 +2592,17 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    async def fake_reap(native_session_id, *, keep_pid=None, cli_path=None, logger, terminate_timeout=2.0):
+    async def fake_reap(
+        native_session_id,
+        *,
+        keep_pid=None,
+        exclude_pids=None,
+        cli_path=None,
+        logger,
+        terminate_timeout=2.0,
+    ):
         captured["reap_calls"].append((native_session_id, keep_pid, cli_path))
+        captured["exclude_pids"] = exclude_pids
         return 2
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
@@ -2616,3 +2625,66 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
     assert client.disconnects == 1
     assert getattr(client, "_vibe_native_session_id") == "native-session-1"
     assert captured["reap_calls"] == [("native-session-1", None, "/usr/local/bin/claude-proxy")]
+    # The evicted client is gone from the registry, so its own pid stays reapable.
+    assert captured["exclude_pids"] == set()
+
+
+def test_evict_idle_sessions_protects_pids_of_other_live_sessions(monkeypatch, tmp_path: Path) -> None:
+    """The duplicate reap must never target a still-registered client's pid.
+
+    ``force_cleanup_stuck_active_session`` reaches cleanup without a receiver
+    task, so ``keep_pid`` is dropped and the reaper falls back to "kill every
+    process matching this native session id". Ownership of live pids is the
+    guard that survives that path.
+    """
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(
+        native_session_id,
+        *,
+        keep_pid=None,
+        exclude_pids=None,
+        cli_path=None,
+        logger,
+        terminate_timeout=2.0,
+    ):
+        captured["exclude_pids"] = exclude_pids
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(client, "_vibe_native_session_id", "native-session-1")
+
+    # A second live client resuming the same native session id, as created by
+    # the turn that follows a force eviction.
+    replacement = _StubClaudeSDKClient(None)
+    replacement._transport._process.pid = 9876
+    setattr(replacement, "_vibe_native_session_id", "native-session-1")
+    controller.claude_sessions["slack_C999:other"] = replacement
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert captured["exclude_pids"] == {9876}

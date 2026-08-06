@@ -55,6 +55,15 @@ from .base import BaseHandler
 
 logger = logging.getLogger(__name__)
 
+# A Claude CLI process the service terminated on purpose surfaces as SIGTERM
+# (-15) or the SIGKILL escalation (-9). The SDK may report it as a returncode
+# or only as text on the transport error, so both shapes are recognized.
+CLAUDE_TEARDOWN_RETURNCODES = frozenset({-9, -15})
+CLAUDE_TEARDOWN_EXIT_PATTERN = re.compile(r"exit code (-9|-15)\b")
+# Teardown intent is dropped as soon as a new client takes the key; this bound
+# only limits how long a stale record can survive when that never happens.
+CLAUDE_INTENTIONAL_TEARDOWN_TTL_SECONDS = 120.0
+
 if TYPE_CHECKING:
     from core.runtime_ownership import RuntimeResourceTarget
     from modules.agents.model_hub import ModelHubLaunch
@@ -105,12 +114,18 @@ class SessionHandler(BaseHandler):
             "claude_runtime_generation_locks",
             {},
         )
+        self.claude_intentional_teardowns = getattr(
+            controller,
+            "claude_intentional_teardowns",
+            {},
+        )
         controller.session_last_activity = self.session_last_activity
         controller.session_turn_started = self.session_turn_started
         controller.claude_active_sessions = self.active_sessions
         controller.claude_system_prompts = self.claude_system_prompts
         controller.claude_session_creates = self.claude_session_creates
         controller.claude_runtime_generation_locks = self.claude_runtime_generation_locks
+        controller.claude_intentional_teardowns = self.claude_intentional_teardowns
 
     @staticmethod
     def _cached_claude_subagent_model(
@@ -160,6 +175,70 @@ class SessionHandler(BaseHandler):
         self.session_last_activity.pop(composite_key, None)
         self.session_turn_started.pop(composite_key, None)
         self.claude_system_prompts.pop(composite_key, None)
+
+    def _live_claude_client_pids(self) -> set[int]:
+        """Claude CLI pids owned by clients that are still registered.
+
+        The duplicate reaper matches on the native ``--resume`` id, which is
+        reused across reconnects and therefore cannot distinguish a leaked
+        generation from a live client for the same session. Membership in
+        ``claude_sessions`` is the authoritative ownership signal, so these
+        pids are never eligible for a duplicate reap.
+        """
+        pids: set[int] = set()
+        for client in list(self.claude_sessions.values()):
+            pid = get_claude_client_pid(client)
+            if pid:
+                pids.add(pid)
+        return pids
+
+    def _mark_claude_teardown_intentional(self, composite_key: str, client) -> None:
+        """Record that this generation is being torn down by the service."""
+        if client is not None:
+            setattr(client, "_vibe_intentional_teardown", True)
+        if not composite_key:
+            return
+        now = time.monotonic()
+        # Keys that never get a replacement client would otherwise keep their
+        # record forever; drop expired ones on the way in.
+        for key, started_at in list(self.claude_intentional_teardowns.items()):
+            if now - started_at > CLAUDE_INTENTIONAL_TEARDOWN_TTL_SECONDS:
+                self.claude_intentional_teardowns.pop(key, None)
+        self.claude_intentional_teardowns[composite_key] = now
+
+    def _clear_claude_teardown_intent(self, composite_key: str) -> None:
+        """Drop the teardown record once a new generation owns the key.
+
+        A fresh client must never inherit the previous generation's teardown
+        marker, otherwise its own failures would be silently swallowed.
+        """
+        if composite_key:
+            self.claude_intentional_teardowns.pop(composite_key, None)
+
+    def _is_intentional_teardown_signal(
+        self,
+        composite_key: str,
+        error: Exception,
+        returncode: Optional[int],
+        client=None,
+    ) -> bool:
+        """Was this failure our own SIGTERM/SIGKILL against a torn-down client?
+
+        Cleanup escalates SIGTERM to SIGKILL, so the SDK reports ``exit code
+        -15``/``-9`` for a process the service killed on purpose. Reporting
+        that as a session error makes a deliberate teardown look like a backend
+        crash.
+        """
+        if not getattr(client, "_vibe_intentional_teardown", False):
+            started_at = self.claude_intentional_teardowns.get(composite_key)
+            if started_at is None:
+                return False
+            if time.monotonic() - started_at > CLAUDE_INTENTIONAL_TEARDOWN_TTL_SECONDS:
+                self.claude_intentional_teardowns.pop(composite_key, None)
+                return False
+        if returncode is not None:
+            return returncode in CLAUDE_TEARDOWN_RETURNCODES
+        return bool(CLAUDE_TEARDOWN_EXIT_PATTERN.search(str(error)))
 
     async def _wait_for_claude_session_idle(self, composite_key: str) -> None:
         while composite_key in self.active_sessions:
@@ -1454,6 +1533,7 @@ class SessionHandler(BaseHandler):
             ),
         )
         self.claude_sessions[composite_key] = client
+        self._clear_claude_teardown_intent(composite_key)
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")
 
         return client
@@ -1775,6 +1855,7 @@ class SessionHandler(BaseHandler):
         native_session_id = getattr(client, "_vibe_native_session_id", None)
         keep_pid = get_claude_client_pid(client)
         self.clear_session_tracking(composite_key)
+        self._mark_claude_teardown_intentional(composite_key, client)
 
         try:
             # Close the SDK client first so its receive stream can finish normally.
@@ -1788,9 +1869,14 @@ class SessionHandler(BaseHandler):
         finally:
             if not cleanup_from_receiver:
                 await self._stop_receiver_task(receiver_task, composite_key)
+            # ``disconnect()`` on a hung client can block for seconds, so the
+            # owner set is re-read here rather than before it: by now another
+            # client may legitimately own a process resuming the same native
+            # session id, and it must not be reaped as a duplicate.
             await reap_duplicate_claude_resume_processes(
                 native_session_id,
                 keep_pid=keep_pid if cleanup_from_receiver else None,
+                exclude_pids=self._live_claude_client_pids(),
                 cli_path=self._get_claude_cli_path_override(),
                 logger=logger,
             )
@@ -2311,6 +2397,17 @@ class SessionHandler(BaseHandler):
 
         client = self.claude_sessions.get(composite_key)
         returncode = get_claude_client_returncode(client)
+        if self._is_intentional_teardown_signal(composite_key, error, returncode, client):
+            # The service killed this process itself (idle eviction, duplicate
+            # reap, shutdown). Surfacing it would report a deliberate teardown
+            # as an unexplained backend failure.
+            logger.warning(
+                "Claude session %s ended on a service-initiated teardown signal: %s",
+                composite_key,
+                error_msg,
+            )
+            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            return
         if returncode is not None:
             reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
             reason = self._t(reason_key, **reason_values)

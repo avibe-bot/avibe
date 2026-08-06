@@ -357,6 +357,7 @@ async def reap_duplicate_claude_resume_processes(
     native_session_id: str | None,
     *,
     keep_pid: int | None = None,
+    exclude_pids: set[int] | None = None,
     cli_path: str | None = None,
     logger: logging.Logger,
     terminate_timeout: float = 2.0,
@@ -366,6 +367,14 @@ async def reap_duplicate_claude_resume_processes(
     This is intentionally conservative: it only matches a full ``--resume`` id
     and only reaps when more than one matching process exists, or when the
     caller no longer has a tracked PID to keep.
+
+    A native session id is stable and reused across reconnects, so a matching
+    process may belong to a *newer* client for the same session rather than to
+    a leaked generation. ``keep_pid`` alone cannot express that: cleanup paths
+    that do not run from the receiver task pass ``keep_pid=None``, which drops
+    the duplicate guard entirely. ``exclude_pids`` carries the stronger
+    invariant — never signal a pid (or descendant of a pid) owned by a client
+    that is still registered — and holds regardless of the initiating path.
     """
     if not native_session_id or os.name == "nt":
         return 0
@@ -376,10 +385,18 @@ async def reap_duplicate_claude_resume_processes(
         logger.debug("Failed to read process table for Claude duplicate cleanup", exc_info=True)
         return 0
 
+    children = _build_children_map(all_rows)
+    protected_pids: set[int] = {
+        pid for pid in (exclude_pids or set()) if isinstance(pid, int) and pid > 0
+    }
+    for pid in list(protected_pids):
+        protected_pids.update(_descendant_pids(all_rows, pid, children))
+
     matches = [
         row
         for row in all_rows
         if row.pid != os.getpid()
+        and row.pid not in protected_pids
         and _command_is_claude(row.command, cli_path=cli_path)
         and _command_has_resume(row.command, native_session_id)
     ]
@@ -396,19 +413,22 @@ async def reap_duplicate_claude_resume_processes(
 
     target_pids = {row.pid for row in target_rows}
     for row in target_rows:
-        target_pids.update(_descendant_pids(all_rows, row.pid))
+        target_pids.update(_descendant_pids(all_rows, row.pid, children))
     target_pids.discard(os.getpid())
     if keep_pid is not None:
         target_pids.discard(keep_pid)
+    target_pids -= protected_pids
 
     if not target_pids:
         return 0
 
     logger.warning(
-        "Reaping %d duplicate Claude resume process(es) for native session %s (keep_pid=%s)",
+        "Reaping %d duplicate Claude resume process(es) for native session %s "
+        "(keep_pid=%s, owned_pids_protected=%d)",
         len(target_pids),
         native_session_id,
         keep_pid,
+        len(protected_pids),
     )
     return await _reap_pid_set(target_pids, terminate_timeout=terminate_timeout, logger=logger)
 

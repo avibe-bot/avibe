@@ -446,3 +446,124 @@ def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> 
     )
     assert "Claude process terminated: SIGABRT (signal 6)" in diagnostic
     assert "Claude stderr tail:\nfatal: Claude CLI aborted\ntransport closed" in diagnostic
+
+
+def test_service_initiated_teardown_signal_is_not_reported_as_session_error() -> None:
+    """A SIGKILL the service issued itself must not read as a backend crash.
+
+    Cleanup escalates SIGTERM to SIGKILL, so the SDK surfaces ``exit code -9``
+    for a process Avibe terminated deliberately. Without this containment the
+    failure falls through to the generic branch and the user is told the
+    session failed for an unknown reason.
+    """
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    cleanup_calls = []
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+        cleanup_calls.append(key)
+
+    handler.cleanup_session = _cleanup_session
+    handler._mark_claude_teardown_intentional(composite_key, None)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code -9"),
+        )
+    )
+
+    assert cleanup_calls == [composite_key]
+    assert controller.im_client.sent_messages == []
+
+
+def test_teardown_intent_does_not_suppress_errors_from_the_next_generation() -> None:
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._mark_claude_teardown_intentional(composite_key, None)
+    # A replacement client took the key, so the previous teardown says nothing
+    # about this failure.
+    handler._clear_claude_teardown_intent(composite_key)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code -9"),
+        )
+    )
+
+    assert len(controller.im_client.sent_messages) == 1
+    _, message = controller.im_client.sent_messages[0]
+    assert "Command failed with exit code -9" in message
+
+
+def test_unrelated_error_during_teardown_window_is_still_reported() -> None:
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._mark_claude_teardown_intentional(composite_key, None)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code 1"),
+        )
+    )
+
+    assert len(controller.im_client.sent_messages) == 1
+
+
+def test_client_teardown_marker_suppresses_signal_error_without_key_record() -> None:
+    """A client the service marked for teardown is authoritative on its own.
+
+    The per-key record is dropped when a replacement client registers, but the
+    marked client object still identifies exactly which generation was killed
+    deliberately.
+    """
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        _vibe_intentional_teardown=True,
+    )
+    controller.claude_sessions[composite_key] = client
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._clear_claude_teardown_intent(composite_key)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code -9"),
+        )
+    )
+
+    assert controller.im_client.sent_messages == []
