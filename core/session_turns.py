@@ -4401,6 +4401,64 @@ class SessionTurnManager:
             return True
         return False
 
+    def _steer_receipt_context(
+        self,
+        session_id: str,
+        delivery: dict[str, Any],
+    ) -> Optional["MessageContext"]:
+        """Rebuild just enough routing to react on one Delivery's own message."""
+
+        payload = delivery_store.delivery_payload(delivery)
+        platform = str(payload.get("platform") or "")
+        native_message_id = str(payload.get("native_message_id") or "").strip()
+        if not platform or platform == "avibe" or not native_message_id:
+            # Nothing to decorate: only an IM input has a native message, and the
+            # Workbench composer is P3 (it never reaches a pending steer).
+            return None
+        context = self._delivery_context(session_id)
+        context.platform = platform
+        context.message_id = native_message_id
+        admission_context = delivery_store.delivery_admission_context(delivery)
+        target = (
+            admission_context.get("processing_indicator_message_id")
+            if isinstance(admission_context, dict)
+            else None
+        )
+        spec = dict(context.platform_specific or {})
+        if target:
+            spec["processing_indicator_message_id"] = str(target)
+        else:
+            spec.pop("processing_indicator_message_id", None)
+        context.platform_specific = spec
+        return context
+
+    async def _report_steered_receipts(
+        self,
+        session_id: str,
+        deliveries: list[dict[str, Any]],
+    ) -> None:
+        """Upgrade the admission receipt of a steer that settled out of band.
+
+        The admission call that returned ``pending_steer`` already told the
+        sender its message was queued, but the attempt that actually accepts it
+        runs later in ``_run_pending_steers`` and its result is consumed here,
+        not by the ingress caller — so this is the only place that can report
+        that the message did make it into the running turn.
+        """
+
+        indicator = getattr(self.controller, "processing_indicator", None)
+        ack = getattr(indicator, "ack_delivery_state", None)
+        if not callable(ack):
+            return
+        for delivery in deliveries or []:
+            try:
+                context = self._steer_receipt_context(session_id, delivery)
+                if context is None:
+                    continue
+                await ack(context, state="accepted", admission="steered")
+            except Exception as err:
+                logger.debug("Failed to report steered admission receipt: %s", err)
+
     async def _run_pending_steers(
         self,
         session_id: str,
@@ -4453,7 +4511,9 @@ class SessionTurnManager:
                     attempt_id=attempt_id,
                 ),
             )
-            await self._finish_steer(delivery_id, receipt, context=context)
+            result = await self._finish_steer(delivery_id, receipt, context=context)
+            if result.state == "accepted" and result.admission == "steered":
+                await self._report_steered_receipts(session_id, claimed_batch)
 
     def _publish_materialized_delivery(self, delivery_id: str) -> None:
         """Publish one accepted immutable Message after its transaction commits."""

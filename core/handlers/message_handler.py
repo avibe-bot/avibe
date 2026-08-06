@@ -424,6 +424,9 @@ class MessageHandler(BaseHandler):
             )
             restored_route = restored_route if isinstance(restored_route, dict) else None
 
+            if durable_delivery_owned:
+                self._restore_reaction_target(context, delivery_context)
+
             if restored_route is not None:
                 base_session_id = str(
                     restored_route.get("base_session_id") or base_session_id
@@ -598,6 +601,12 @@ class MessageHandler(BaseHandler):
                     delivery_intent=delivery_intent,
                     downloaded_attachment_paths=downloaded_attachment_paths,
                     admission_context={
+                        # The reaction target is not always the sender's own
+                        # message (a quick reply reacts on its bot echo), and it
+                        # cannot be rebuilt from the Delivery snapshot.
+                        "processing_indicator_message_id": self._reaction_target(
+                            context
+                        ),
                         "message_handler_route": {
                             "base_session_id": base_session_id,
                             "composite_session_id": composite_key,
@@ -953,6 +962,42 @@ class MessageHandler(BaseHandler):
         # message sent while a turn is running.
         await self._ack_delivery_admission(context, result)
         return True
+
+    @staticmethod
+    def _reaction_target(context: MessageContext) -> Optional[str]:
+        """The message this input's reactions belong on, when it is not its own.
+
+        A quick-reply callback is dispatched with ``message_id=None`` (to bypass
+        platform event dedup) and reacts on its bot echo instead. The echo id
+        only exists in this process, so it has to travel with the Delivery.
+        """
+
+        target = (context.platform_specific or {}).get(
+            "processing_indicator_message_id"
+        )
+        return str(target) if target else None
+
+    @staticmethod
+    def _restore_reaction_target(
+        context: MessageContext,
+        delivery_context: Any,
+    ) -> None:
+        """Put a Delivery's reaction target back on its rehydrated context.
+
+        Durable hydration restores only the native message id, so without this a
+        promoted quick-reply Delivery computes a different receipt key: its 👌
+        would never be cleared and its own indicator would target the synthetic
+        delivery id instead of the echo.
+        """
+
+        if not isinstance(delivery_context, dict):
+            return
+        target = delivery_context.get("processing_indicator_message_id")
+        if not target:
+            return
+        spec = dict(context.platform_specific or {})
+        spec["processing_indicator_message_id"] = str(target)
+        context.platform_specific = spec
 
     async def _ack_delivery_admission(self, context: MessageContext, result: Any) -> None:
         """Report one admission outcome back to the sender, best effort."""

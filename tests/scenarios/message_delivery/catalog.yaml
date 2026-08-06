@@ -170,5 +170,23 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_start_clears_the_queued_receipt_before_the_turn_indicator
+  - id: MESSAGE-DELIVERY-303
+    name: Late steer acceptance upgrades the queued admission receipt
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_late_steer_acceptance_upgrades_the_queued_admission_receipt
+  - id: MESSAGE-DELIVERY-304
+    name: A receipt racing the turn start is cleared exactly once
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_receipt_in_flight_when_the_turn_starts_is_still_cleared
+  - id: MESSAGE-DELIVERY-305
+    name: The receipt target survives Delivery hydration into a new process
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::ReactionTargetSurvivalTests
 next_priority:
-  - MESSAGE-DELIVERY-303
+  - MESSAGE-DELIVERY-306

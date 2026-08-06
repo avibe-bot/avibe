@@ -74,8 +74,30 @@ before the turn's own indicator takes over — a promoted Delivery is
 re-dispatched with its original native message id (`_hydrate_delivery_context`),
 so 👌 and 👀 would otherwise land on the same message.
 
+Only *replaceable* states (`queued`, `pending_steer`, `reconciling_steer`) are
+remembered. A final receipt (✍️ / 🤷) is never cleared, so keeping its key would
+leak one entry per message for the life of the process; a FIFO cap
+(`_ADMISSION_ACK_REGISTRY_LIMIT`) backstops the replaceable ones.
+
+A receipt and the turn start it races are serialized per message key by a
+refcounted `asyncio.Lock`, and `clear_admission_ack` writes an
+`_ADMISSION_ACK_CONSUMED` marker *before* awaiting the removal. Together those
+cover both orderings: a clear waits for an in-flight add and then removes it,
+and an add that lands after the turn started is suppressed instead of leaving an
+orphan 👌 next to 👀.
+
 Platforms without reaction support stay silent: one bubble per queued message is
 worse than no receipt.
+
+### 3.4 Carrying the receipt target across hydration
+
+The reaction target is not always the sender's own message — a quick reply
+reacts on the bot echo it was attached to — and it cannot be rebuilt from the
+Delivery snapshot. The ingress handler stores it in the durable
+`admission_context` (`processing_indicator_message_id`), and both consumers read
+it back: `MessageHandler._restore_reaction_target` when the durable owner
+re-dispatches a hydrated context, and `_steer_receipt_context` when a late steer
+acceptance reports its own receipt.
 
 ### 3.3 Platform emoji mappings
 
@@ -91,10 +113,19 @@ keys.
   `_EMOJI_MAP`" warning and returns `False`, so Lark degrades to no receipt for
   those two until the `emoji_type` keys are verified against the Lark table.
 
+### 3.5 Upgrading a receipt when the steer is accepted late
+
+A Delivery that reaches `queued` / `pending_steer` at admission time can still be
+steered into the running turn afterwards. `_run_pending_steers` used to discard
+the `_finish_steer` result, so that 👌 was never upgraded. It now reports
+`accepted` / `steered` for every delivery in the claimed batch, replacing 👌 with
+✍️ on the original message.
+
 ## 4. Known limitations
 
-- A `reconciling_steer` receipt (🤔) is not upgraded when reconciliation later
-  settles the Delivery; the outcome shows up in the turn's reply instead.
+- A `reconciling_steer` receipt (🤔) is upgraded only when reconciliation settles
+  through the pending-steer path; other reconciliation outcomes still show up in
+  the turn's reply instead.
 - Receipts are best-effort and in-memory: after a restart a stale 👌 is not
   cleared by `start()`. On Telegram the reaction is replaced anyway; on Slack it
   can linger until the next turn on that message.
@@ -104,7 +135,9 @@ keys.
 ## 5. Evidence
 
 - contract/unit: `tests/test_delivery_ack_reaction.py`
-  (MESSAGE-DELIVERY-301, MESSAGE-DELIVERY-302)
+  (MESSAGE-DELIVERY-301, 302, 304, 305) and
+  `tests/test_session_delivery_fsm.py::test_late_steer_acceptance_upgrades_the_queued_admission_receipt`
+  (MESSAGE-DELIVERY-303)
 - regression: `tests/test_processing_indicator_reaction.py`,
   `tests/test_session_delivery_fsm.py`, `tests/scenarios/message_delivery/`
 - manual: send a second and third message on Telegram/Slack while a turn runs;

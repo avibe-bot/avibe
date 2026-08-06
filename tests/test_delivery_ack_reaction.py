@@ -1,6 +1,6 @@
 """Admission receipts for IM input that does not start its own turn.
 
-MESSAGE-DELIVERY-301 / MESSAGE-DELIVERY-302.
+MESSAGE-DELIVERY-301 / 302 / 304 / 305.
 
 A message sent while a turn is already running is handed to its durable
 Delivery owner and the message handler returns before any processing indicator
@@ -11,6 +11,7 @@ receipt is cleared once that input's own turn starts.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -19,6 +20,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.processing_indicator import (
+    _ADMISSION_ACK_REGISTRY_LIMIT,
     ACK_REACTION_EMOJI,
     NOT_DELIVERED_REACTION_EMOJI,
     QUEUED_REACTION_EMOJI,
@@ -59,12 +61,27 @@ class _FakeIM:
         return True
 
 
+class _GatedIM(_FakeIM):
+    """Reaction calls that only complete when the test lets them."""
+
+    def __init__(self):
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def add_reaction(self, context, message_id, emoji):
+        self.entered.set()
+        await self.release.wait()
+        return await super().add_reaction(context, message_id, emoji)
+
+
 def _svc(im, *, reactions=True):
     svc = ProcessingIndicatorService.__new__(ProcessingIndicatorService)
     svc.controller = SimpleNamespace(get_im_client_for_context=lambda ctx: im, im_client=im)
     svc.config = SimpleNamespace(ack_mode="typing")
     svc._indicators_by_turn_token = {}
     svc._admission_acks = {}
+    svc._admission_ack_locks = {}
     capabilities = SimpleNamespace(
         preferred_processing_indicator="reaction",
         force_preferred_processing_indicator=True,
@@ -218,6 +235,154 @@ class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
         svc = _svc(im)
 
         self.assertIsNone(await svc.ack_delivery_state(_ctx(message_id=None), state="queued"))
+
+    async def test_accepted_without_steer_provenance_reports_nothing(self):
+        # An idempotent re-entry observes an already accepted Delivery and
+        # returns no admission; that observation cannot tell whether the input
+        # joined a running turn or started its own, and guessing ✍️ would stack
+        # on (or replace) a live processing indicator.
+        im = _FakeIM()
+        svc = _svc(im)
+
+        self.assertIsNone(await svc.ack_delivery_state(_ctx(), state="accepted"))
+        self.assertEqual(im.calls, [])
+
+    async def test_receipt_in_flight_when_the_turn_starts_is_still_cleared(self):
+        # Both halves await a platform call. Without serialization the add
+        # records its emoji after start() has looked for one, stranding 👌 next to
+        # the running indicator.
+        im = _GatedIM()
+        svc = _svc(im)
+        context = _ctx()
+
+        ack = asyncio.ensure_future(svc.ack_delivery_state(context, state="queued"))
+        await im.entered.wait()
+        clear = asyncio.ensure_future(svc.start(context, "claude"))
+        await asyncio.sleep(0)
+        im.release.set()
+        await ack
+        await clear
+
+        self.assertEqual(
+            im.calls,
+            [
+                ("add", "m1", QUEUED_REACTION_EMOJI),
+                ("remove", "m1", QUEUED_REACTION_EMOJI),
+            ],
+        )
+
+    async def test_receipt_arriving_after_the_turn_started_is_suppressed(self):
+        # The other ordering of the same race: the promoted turn already owns
+        # the message, so a late queued receipt must not decorate it.
+        im = _FakeIM()
+        svc = _svc(im)
+        context = _ctx()
+
+        await svc.start(context, "claude")
+        applied = await svc.ack_delivery_state(context, state="queued")
+
+        self.assertIsNone(applied)
+        self.assertEqual(im.calls, [])
+
+    async def test_final_receipts_do_not_accumulate_registry_entries(self):
+        # accepted/retired deliveries never start a turn, so nothing would ever
+        # read these entries back; keeping them grows the registry by one key
+        # per mid-turn message for the life of the process.
+        im = _FakeIM()
+        svc = _svc(im)
+
+        for index in range(5):
+            await svc.ack_delivery_state(
+                _ctx(message_id=f"steered-{index}"),
+                state="accepted",
+                admission="steered",
+            )
+            await svc.ack_delivery_state(_ctx(message_id=f"retired-{index}"), state="retired")
+
+        self.assertEqual(svc._admission_acks, {})
+        self.assertEqual(len(im.calls), 10)
+
+    async def test_replaceable_receipts_are_bounded(self):
+        im = _FakeIM()
+        svc = _svc(im)
+
+        for index in range(_ADMISSION_ACK_REGISTRY_LIMIT + 10):
+            await svc.ack_delivery_state(_ctx(message_id=f"q-{index}"), state="queued")
+
+        self.assertLessEqual(len(svc._admission_acks), _ADMISSION_ACK_REGISTRY_LIMIT)
+
+    async def test_quick_reply_echo_target_keeps_one_receipt_key(self):
+        # A quick-reply callback is dispatched with message_id=None and reacts on
+        # its bot echo. Durable hydration replaces the message id with the
+        # synthetic delivery id, so the receipt is only clearable when the echo
+        # target survives admission.
+        im = _FakeIM()
+        svc = _svc(im)
+        before = _ctx(message_id=None)
+        before.platform_specific = {"processing_indicator_message_id": "echo-7"}
+        hydrated = _ctx(message_id="delivery-abc")
+        hydrated.platform_specific = {"processing_indicator_message_id": "echo-7"}
+        stripped = _ctx(message_id="delivery-abc")
+
+        await svc.ack_delivery_state(before, state="queued")
+        await svc.clear_admission_ack(hydrated)
+
+        self.assertEqual(
+            im.calls,
+            [
+                ("add", "echo-7", QUEUED_REACTION_EMOJI),
+                ("remove", "echo-7", QUEUED_REACTION_EMOJI),
+            ],
+        )
+        self.assertNotEqual(
+            svc._admission_ack_key(before),
+            svc._admission_ack_key(stripped),
+        )
+
+
+class ReactionTargetSurvivalTests(unittest.TestCase):
+    """The reaction target must survive admission and durable hydration."""
+
+    def test_quick_reply_echo_is_captured_from_the_ingress_context(self):
+        from core.handlers.message_handler import MessageHandler
+
+        context = _ctx(message_id=None)
+        context.platform_specific = {"processing_indicator_message_id": "echo-7"}
+
+        self.assertEqual(MessageHandler._reaction_target(context), "echo-7")
+
+    def test_ordinary_message_carries_no_separate_target(self):
+        from core.handlers.message_handler import MessageHandler
+
+        self.assertIsNone(MessageHandler._reaction_target(_ctx()))
+
+    def test_hydrated_context_gets_its_reaction_target_back(self):
+        from core.handlers.message_handler import MessageHandler
+
+        hydrated = _ctx(message_id="delivery-abc")
+        hydrated.platform_specific = {"delivery_id": "delivery-abc"}
+
+        MessageHandler._restore_reaction_target(
+            hydrated,
+            {"processing_indicator_message_id": "echo-7"},
+        )
+
+        self.assertEqual(
+            (hydrated.platform_specific or {}).get("processing_indicator_message_id"),
+            "echo-7",
+        )
+
+    def test_restore_is_a_no_op_without_a_captured_target(self):
+        from core.handlers.message_handler import MessageHandler
+
+        hydrated = _ctx(message_id="delivery-abc")
+
+        MessageHandler._restore_reaction_target(hydrated, {"message_handler_route": {}})
+        MessageHandler._restore_reaction_target(hydrated, None)
+
+        self.assertIsNone(
+            (hydrated.platform_specific or {}).get("processing_indicator_message_id")
+        )
 
 
 class ReceiptEmojiMappingTests(unittest.TestCase):
