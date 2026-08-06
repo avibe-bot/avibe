@@ -38,9 +38,14 @@ not justify a permanent compatibility layer or two live routing authorities.
 the recommended and default subscription path. A Claude subscription stays in Claude
 Code's local login and a ChatGPT subscription stays in Codex's local login; each native
 source naturally leads its own backend's order. When native quota is exhausted or
-cooling, that same turn falls through to the first runnable Gateway upstream for the
-backend, then automatically returns to native after recovery. This channel handoff is
-a first-class product story, not an escape hatch or implementation detail.
+cooling, a failure observed before output starts falls through in that same turn to
+the first runnable Gateway upstream for the backend, then automatically returns to
+native after recovery. If native output has already started, the turn stops honestly
+and the next turn uses the Gateway; Avibe never duplicates a partial response. This
+channel handoff is a first-class product story, not an escape hatch or implementation
+detail. Native-first is the recommended Follow default, not an invisible pre-pass: a
+user who explicitly puts a Hub hop first in a Custom chain has intentionally overridden
+it, and the stored Custom order remains authoritative.
 
 A user may explicitly add either subscription as a Gateway-held upstream, and a
 Gateway-held subscription may participate in a cross-vendor custom chain. The only
@@ -86,10 +91,12 @@ base URLs, protocol conversion, account pools or routers.
 1. **Connect upstream access once.** A vendor subscription, API key, or API key
    with a custom Base URL becomes a Source that every eligible Gateway route can
    use.
-2. **Native subscriptions lead, and the Gateway takes over without drama.** Claude
-   Code and Codex use their own local subscription login first. If that quota is
-   exhausted or cooling, the same turn uses the first runnable Gateway upstream;
-   after recovery, the next turn returns to native automatically.
+2. **Native subscriptions lead by default, and the Gateway takes over without drama.**
+   Follow routes for Claude Code and Codex use their own local subscription login
+   first. If that quota fails before output starts, the same turn uses the first
+   runnable Gateway upstream; after a partial streamed response, the next turn does.
+   Recovery returns subsequent Follow turns to native automatically. An explicit
+   Custom chain may put a Hub hop first, and Avibe honors that user-owned order.
 3. **Routing has two explicit grains.** Each backend owns a global Source order.
    Each menu model follows the chain projected from that order by default, or the
    user gives that `(backend, menu model)` an exact custom ordered chain of
@@ -259,10 +266,18 @@ cooldown pool keyed on the shared source row, `_cooldown` in
    first inspect the route chain projected by §4.6. If its leading runnable hop is
    the backend's own `native_cli` subscription, launch the official CLI with its local
    login and zero Gateway credential injection. If that native source is exhausted,
-   cooling, or unavailable in this process, continue **within the same turn** to the
-   first runnable `hub` hop in that chain. Once the native source is retry-ready again,
-   the next turn returns to it automatically. The UI and product copy must make this
-   three-state story obvious: native now → Gateway takeover → native restored.
+   cooling, or unavailable in this process **before output starts**, continue within
+   the same turn to the first runnable `hub` hop in that chain. If any output was
+   already streamed, do not replay the request: end with §4.5's interrupted-turn copy,
+   keep native cooling, and let the next turn select the Gateway hop. Once the native
+   source is retry-ready again, the next Follow turn returns to it automatically. The
+   UI and product copy must make this three-state story obvious: native now → Gateway
+   takeover → native restored.
+
+   This dispatch does not prepend native outside the chain. A Custom chain is an
+   explicit override: when its first runnable hop is Hub, the turn uses Hub even while
+   native is healthy. That is the §2 promise that the user owns every custom order,
+   and avoids a hidden route before the chain the Gateway renders.
 
    A native subscription is bound to its sanctioned backend because only that CLI can
    consume the local login. A hub-held subscription is different: it is an ordinary
@@ -790,6 +805,9 @@ For backend `B`, caller-facing menu model `M`, and `B`'s effective Source order 
    - reject the Source when it is not eligible for `B` and its channel (§4.4);
    - for OpenCode, split `M` into `vendor/model`, require the Source vendor to match
      the provider segment, and use the bare model id;
+   - for a fixed-menu backend, require its native vendor — Anthropic for Claude Code,
+     OpenAI for Codex — before any alias or exact-identity rule. A foreign-vendor
+     Source enters that backend only through an explicit Custom hop;
    - for a fixed-menu `native_cli` Source, preserve an exact CLI alias such as `opus`
      or `sonnet[1m]`; the installed official CLI owns that alias;
    - for a fixed-menu hub Source on the backend's native vendor, resolve built-in
@@ -807,22 +825,30 @@ For backend `B`, caller-facing menu model `M`, and `B`'s effective Source order 
    blocked hops. The runnable candidate list is the resulting chain filtered to
    `runnable: true`; it is not a second chain.
 
-Therefore a healthy native subscription at position 0 leads its own backend; when it
-is cooling, the first runnable hub hop later in the same projection takes over; when
-it recovers, the unchanged projection naturally selects it again. A custom chain can
-instead name `src_chatgptplus + gpt-5.6` ahead of `src_anthkey01 +
-claude-sonnet-4-6` for Claude Code, making both the source and model choice explicit.
+Therefore a healthy native subscription at position 0 leads its own backend's Follow
+routes; when it is cooling, the first runnable hub hop later in the same projection
+takes over; when it recovers, the unchanged projection naturally selects it again. A
+Custom chain can instead name `src_chatgptplus + gpt-5.6` ahead of
+`src_anthkey01 + claude-sonnet-4-6` for Claude Code, making both the Source/model
+choice and the deliberate native-first override explicit.
 
 **Mapping evolution proposal — owner-vetoable (2026-08-07).** Contract v5 removes
 `mappings` and `PUT /api/models/agents/<backend>/mappings`. During one atomic pre-GA
-upgrade, each enabled legacy mapping is consumed as input and materialized into one
-custom chain by walking the backend Source order and emitting
-`(source_id, target_model_id)` for every enrolled eligible Source that advertises the
-target. All hops therefore share one target model: the old single-target behavior is
-the degenerate chain shape. Disabled mappings become `follow`. If an enabled mapping
-cannot produce any valid hop, the upgrade fails closed and asks for configuration
-review; it never keeps a live mapping beside an empty chain. Only after every row is
-converted are legacy mappings deleted and the v5 config committed.
+upgrade, legacy rows are first grouped by `builtin_id`. The current resolver uses the
+first enabled row in stored order, so that resolver-effective row alone defines the
+group's target; later enabled duplicates are ignored as shadowed and do not overwrite
+it. A group with no enabled row becomes `follow`. This normalization preserves current
+behavior even for duplicate rows that the old write path accepted.
+
+Each resolver-effective mapping is then materialized into one Custom chain by walking
+the backend Source order and emitting `(source_id, target_model_id)` for **every**
+enrolled eligible Source that advertises the target. All hops therefore share one
+target model while retaining the old fallback supplier set: the legacy behavior is a
+single-target, potentially multi-hop chain, and it is one-hop only when exactly one
+Source can supply the target. If an effective mapping cannot produce any valid hop,
+the upgrade fails closed and asks for configuration review; it never falls through to
+a shadowed duplicate or keeps a live mapping beside an empty chain. Only after every
+group is normalized and converted are legacy rows deleted and the v5 config committed.
 
 This replacement is smaller and more honest than coexistence: one route owner answers
 both “which Source?” and “which upstream model?”, one projection powers runtime and UI,
@@ -922,7 +948,7 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
   `settings.json` etc.), useful for diagnostics and self-managed setups.
 - Backends can differ in mode; the Gateway module surfaces the mode per backend.
   A `native_cli` hop inside Gateway mode is not Direct mode: Avibe still owns the
-  same-turn fallback and recovery policy.
+  pre-stream same-turn fallback and recovery policy.
 - **Native-config import** remains copy-only
   and reversible, a per-item checklist grouped by backend. API keys + base URLs →
   direct import; subscription OAuth → `keep_native` by default (stays in the CLI's
@@ -1028,7 +1054,8 @@ directions into questions that later lanes must answer before writing mechanical
 ## 11. Owner acceptance checklist (~10 min)
 
 - [ ] §0 and §2 say “default local model Gateway” and preserve native subscription
-      first → same-turn Gateway takeover → automatic native recovery as one story.
+      first → pre-stream same-turn Gateway takeover → automatic native recovery as
+      one story, while Custom order remains authoritative.
 - [ ] §3 makes Gateway a first-class noun and the owner-vetoable banned-term table
       matches the intended UI language.
 - [ ] §4.1 defaults every subscription to `native_cli`; explicit hub-held Claude is
@@ -1040,7 +1067,8 @@ directions into questions that later lanes must answer before writing mechanical
 - [ ] §4.6 is the document's only chain derivation, and its custom hops are exact
       `(source_id, model_id)` pairs.
 - [ ] The owner-vetoable mapping evolution is acceptable: atomic materialization into
-      a single-target custom chain, then removal; no dual routing authority.
+      a single-target Custom chain that preserves every supplier and duplicate-row
+      resolver semantics, then removal; no dual routing authority.
 - [ ] §4.5 keeps state source-global, status live-derived, successful fallback silent,
       and proactive delivery cut.
 - [ ] §5 has exactly Sources + Gateway modules; the connector is state-only and
