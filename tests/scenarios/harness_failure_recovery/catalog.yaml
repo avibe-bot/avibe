@@ -2861,6 +2861,18 @@ scenarios:
     # type; a node id reusing that rule accepted a private helper or a bare class,
     # i.e. a citation no test run executes. Both strictnesses are pinned here.
     test: tests/test_run_terminal_truth_matrix.py::test_a_node_id_citation_must_name_something_pytest_collects
+  - id: HFR-199
+    name: no step of the durable reservation path settles the Run
+    status: covered
+    kind: observability
+    layer: contract
+    backend: shared
+    # Driven against real rows, not a stubbed store: enqueue, delivery reservation,
+    # owner transfer, batch claim, native bind and materialized start acceptance all
+    # leave the Run queued with no completed_at -- and so does terminalizing the
+    # TURN. Only settle_agent_runs_for_turn_in_connection moves it, which also means
+    # a path that ends a Turn without calling it leaves a live Run with no owner.
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_no_step_of_the_durable_reservation_path_settles_the_run
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

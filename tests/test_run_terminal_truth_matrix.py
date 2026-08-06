@@ -50,11 +50,14 @@ def _expand() -> list[tuple[str, str, str, str, tuple[str, str]]]:
 _CELLS = _expand()
 
 
-def _assert_symbol_exists(qualified: str) -> ast.AST:
+def _assert_symbol_exists(qualified: str) -> list[ast.AST]:
     """Resolve a COMPLETE ``path::Class::symbol`` id, one nesting level at a time.
 
-    Returns the resolved leaf node, so a caller with a stricter contract than
-    "the symbol exists" can check the KIND of what it resolved to.
+    Returns the whole resolved CHAIN, innermost last, so a caller with a
+    stricter contract than "the symbol exists" can check the kind of what it
+    resolved to -- and, since round 10, the kinds it resolved THROUGH. Returning
+    only the leaf was the same displacement one more level out: the leaf rule
+    got tightened and the classes on the way to it stayed unexamined.
 
     Matching only the trailing function name and walking the whole module --
     which is what HFR-105 does, and what this guard did first -- accepts an id
@@ -77,7 +80,7 @@ def _assert_symbol_exists(qualified: str) -> ast.AST:
     assert source.exists(), f"{qualified}: no module at {module_path}"
 
     scope: list[ast.stmt] = ast.parse(source.read_text(encoding="utf-8")).body
-    match: ast.AST | None = None
+    chain: list[ast.AST] = []
     for depth, name in enumerate(parts):
         is_leaf = depth == len(parts) - 1
         # A leaf may be a function; a non-leaf must be a class. A leaf that is
@@ -99,8 +102,33 @@ def _assert_symbol_exists(qualified: str) -> ast.AST:
             f"{qualified}: no {'symbol' if is_leaf else 'class'} "
             f"named {name!r} at this level"
         )
+        chain.append(match)
         scope = match.body
-    return match
+    return chain
+
+
+def _collectible_class(node: ast.ClassDef) -> bool:
+    """pytest's own default rule, read off the AST: ``Test*`` or a TestCase base.
+
+    With no ``python_classes`` override in this repo, pytest collects a class
+    only if its name starts with ``Test`` or the unittest plugin claims it as a
+    ``TestCase`` subclass. Bases are matched on their trailing attribute name
+    ending in ``TestCase``, which is what covers ``IsolatedAsyncioTestCase`` --
+    the base both class-qualified citations in this corpus actually use.
+
+    The approximation is deliberately conservative: a class inheriting
+    collectibility through an intermediate base named something else fails this
+    check and has to be spelled out. A false rejection is loud and one line to
+    fix; a false acceptance is the silent citation rot this resolver exists to
+    stop.
+    """
+    if node.name.startswith("Test"):
+        return True
+    for base in node.bases:
+        tail = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
+        if tail.endswith("TestCase"):
+            return True
+    return False
 
 
 def _assert_node_exists(node_id: str) -> None:
@@ -114,9 +142,21 @@ def _assert_node_exists(node_id: str) -> None:
     the same failure this whole guard exists to prevent, one level in. So the
     leaf must be a function pytest collects, and the class-leaf latitude stays
     where it was justified.
+
+    Round 10 finished the thought. Round 9 tightened the LEAF and left every
+    class on the path to it judged by "a class with this name exists", so
+    ``tests/foo.py::Helper::test_case`` resolved even though pytest collects
+    neither ``Helper`` nor anything inside it. Same defect, same file, one
+    nesting level out -- which is why the resolver now returns the chain and
+    every non-leaf component is checked against pytest's collection rule.
     """
     assert node_id.split("::")[0].startswith("tests/"), node_id
-    leaf = _assert_symbol_exists(node_id)
+    *containers, leaf = _assert_symbol_exists(node_id)
+    for container in containers:
+        assert isinstance(container, ast.ClassDef) and _collectible_class(container), (
+            f"{node_id}: pytest does not collect class {container.name!r} "
+            f"(not Test*-named, no TestCase base), so nothing inside it runs"
+        )
     assert isinstance(leaf, (ast.FunctionDef, ast.AsyncFunctionDef)), (
         f"{node_id}: a node id must name a test function, not a "
         f"{type(leaf).__name__.removesuffix('Def').lower()}"
@@ -189,8 +229,25 @@ def test_the_unproven_count_matches_the_checked_in_budget() -> None:
     # calling it honest. So: distinct probes, at least one per (lane, outcome),
     # because a gap that cannot say what would close it is not a gap, it is a
     # shrug.
-    distinct = {detail for _b, _la, _t, _o, (kind, detail) in _CELLS if kind == "unproven"}
-    assert len(distinct) >= len(LANES) * len(OUTCOMES), len(distinct)
+    #
+    # Round 10: the comment above said "per (lane, outcome)" and the assertion
+    # counted globally, so fourteen distinct probes all describing the SUCCESS
+    # row satisfied it while thirteen rows said nothing of their own. This unit
+    # has now produced that exact shape -- an assertion that reads like the
+    # comment above it and enforces something weaker -- five times, and it is
+    # the fifth one appearing in the very assertion written to catch the first
+    # four. So the grouping is real now: each (lane, outcome) that still has a
+    # gap must name at least one probe no other group is already claiming.
+    groups: dict[tuple[str, str], set[str]] = {}
+    for _b, lane_key, _t, outcome_key, (kind, detail) in _CELLS:
+        if kind == "unproven":
+            groups.setdefault((lane_key, outcome_key), set()).add(detail)
+    for group, details in sorted(groups.items()):
+        elsewhere = {d for other, ds in groups.items() if other != group for d in ds}
+        assert details - elsewhere, (
+            f"{group}: every unproven cell here reuses a probe named for another "
+            f"(lane, outcome) -- this row states no gap of its own"
+        )
 
 
 def test_every_question_and_finding_names_a_real_consuming_test() -> None:
@@ -321,7 +378,7 @@ def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:
 
 
 def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None:
-    """HFR-192: the id in a docstring is the id in the catalog, or neither is real.
+    """HFR-192: the id in a docstring is the id in the catalog, and back again.
 
     The regression this pins is the one review caught by hand: a test whose
     docstring opened ``HFR-186`` while the catalog filed it under ``HFR-187``,
@@ -370,7 +427,7 @@ def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None
         return found
 
     repo_root = Path(__file__).resolve().parents[1]
-    seen = 0
+    discovered: set[str] = set()
     for rel in modules:
         tree = ast.parse((repo_root / rel).read_text(encoding="utf-8"))
         for suffix, node in _tests(tree.body, ()):
@@ -384,9 +441,28 @@ def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None
             assert by_id[head] == node_id, (
                 f"{head} is filed against {by_id[head]} but claimed by {node_id}"
             )
-            seen += 1
+            discovered.add(node_id)
     # A floor, so deleting every docstring id cannot turn this into a vacuous pass.
-    assert seen >= 10, seen
+    assert len(discovered) >= 10, len(discovered)
+
+    # And the other direction, which round 10 found missing. Everything above
+    # walks FROM the tests: delete a probe, or rename it, and its catalog row
+    # keeps saying ``status: covered`` against a node id nothing collects, with
+    # this guard green -- the floor of ten is far too coarse to notice one
+    # scenario going dark. The catalog is what the plan and the next unit read
+    # to decide what is already proven, so a row pointing at a deleted test is
+    # a false claim of coverage, not a stale comment. Scope stays the two PR7R
+    # modules for the same reason it does above: rows filed against the rest of
+    # the suite follow a convention this unit has not audited.
+    orphans = sorted(
+        (row["id"], row["test"])
+        for row in scenarios
+        if row["test"].split("::")[0] in modules and row["test"] not in discovered
+    )
+    assert not orphans, f"catalog rows pointing at tests that no longer exist: {orphans}"
+    assert len({row["id"] for row in scenarios if row["test"].split("::")[0] in modules}) == len(
+        discovered
+    ), "every PR7R test owns exactly one catalog row and vice versa"
 
 
 _PLAN = Path(__file__).resolve().parents[1] / "docs" / "plans" / "harness-run-reliability.md"
@@ -536,6 +612,14 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     Both directions are asserted, because tightening the leaf rule everywhere
     would have been the easy over-correction and would have broken the owner
     citations that legitimately name classes.
+
+    Round 10 extended it one level out and the extension is the point of the
+    scenario now: round 9 fixed the leaf and left the CONTAINER unjudged, so
+    ``Helper::test_case`` -- a class pytest never collects, holding a function
+    named exactly like a test -- still resolved. The lesson this unit keeps
+    relearning is that a rule fixed at one nesting level does not travel; the
+    corpus below therefore names a collectible container, an uncollectible one,
+    and the same leaf under both.
     """
     cited = {
         detail if kind == "covered" else _detail_node(detail)
@@ -550,8 +634,14 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     module = tmp_path / "tests" / "sample_module.py"
     module.parent.mkdir(parents=True, exist_ok=True)
     module.write_text(
+        "import unittest\n"
         "class Owner:\n"
         "    def method(self): ...\n"
+        "    def test_case(self): ...\n"
+        "class TestGood:\n"
+        "    def test_case(self): ...\n"
+        "class OwnerTests(unittest.IsolatedAsyncioTestCase):\n"
+        "    async def test_case(self): ...\n"
         "def _helper(): ...\n"
         "def test_real(): ...\n"
         "async def test_async_real(): ...\n",
@@ -560,16 +650,28 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     monkeypatch.chdir(tmp_path)
     rel = Path("tests/sample_module.py")
 
-    # The owner resolver: a class leaf and a method leaf are both legitimate.
+    # The owner resolver: a class leaf and a method leaf are both legitimate,
+    # and it stays indifferent to whether the container is collectible -- an
+    # owner is a place to change code, not a thing pytest runs.
     for owner in (f"{rel}::Owner", f"{rel}::Owner::method", f"{rel}::_helper"):
-        _assert_symbol_exists(owner)
+        assert _assert_symbol_exists(owner), owner
 
-    # The node-id resolver: only a collected test function.
-    for node_id in (f"{rel}::test_real", f"{rel}::test_async_real"):
+    # The node-id resolver: only a collected test function, under a collected
+    # class if it is nested at all.
+    for node_id in (
+        f"{rel}::test_real",
+        f"{rel}::test_async_real",
+        f"{rel}::TestGood::test_case",
+        f"{rel}::OwnerTests::test_case",
+    ):
         _assert_node_exists(node_id)
     for rejected in (f"{rel}::Owner", f"{rel}::_helper"):
         with pytest.raises(AssertionError):
             _assert_node_exists(rejected)
+    with pytest.raises(AssertionError, match="pytest does not collect class 'Owner'"):
+        # The leaf is a perfectly good test function; the container is not a
+        # test class, so pytest never reaches it.
+        _assert_node_exists(f"{rel}::Owner::test_case")
 
     # And the real citations still pass under the tightened rule -- the point of
     # a stricter guard is that the corpus already satisfies it, checked here

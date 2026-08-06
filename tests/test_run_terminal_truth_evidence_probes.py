@@ -14,7 +14,7 @@ be about. Where the real subject is out of reach in this unit, the claim is
 narrowed to what is reached and the rest becomes a named probe in the matrix,
 never a green test that reads like coverage.
 
-Scenario ids: HFR-180 .. HFR-183, HFR-188, HFR-191, HFR-195, HFR-197.
+Scenario ids: HFR-180 .. HFR-183, HFR-188, HFR-191, HFR-195, HFR-197, HFR-199.
 """
 
 import ast
@@ -22,6 +22,7 @@ import asyncio
 import inspect
 import textwrap
 import types
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,39 @@ from modules.agents.codex.agent import CodexAgent
 from modules.agents.codex.event_handler import CodexEventHandler
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from modules.agents.service import AgentService
+
+
+_STAMP = "2026-08-01T00:00:00+00:00"
+
+
+def _durable_engine(tmp_path, session_id: str = "ses-1"):
+    """A real state DB with the real schema and one seeded Agent Session.
+
+    Round 10. Two probes here had been standing on stubbed stores -- the shape
+    this unit keeps catching, one layer lower: a fabricated reader answers
+    whatever the test wants, so a store that could not tell two Turns apart, or
+    that settled a Run on reservation, would leave both of them green. The rows
+    below are cheap; the substitution was never worth it.
+    """
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions, metadata as storage_metadata
+
+    engine = create_sqlite_engine(tmp_path / "state.sqlite")
+    storage_metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id, scope_id=None, agent_id=None, agent_name="codex",
+                agent_backend="codex", agent_variant="codex", model=None,
+                reasoning_effort=None, session_anchor=session_id, workdir="/w",
+                native_session_id="", title=None, status="active",
+                visibility="foreground", pinned=0, agent_status="idle",
+                composer_draft_text=None, composer_draft_updated_at=None,
+                metadata_json="{}", created_at=_STAMP, updated_at=_STAMP,
+                last_active_at=_STAMP,
+            )
+        )
+    return engine
 
 
 class _AsyncFlag:
@@ -567,10 +601,18 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
     Delivery batch into one context, and the matrix carries it as an open probe.
 
     What IS provable here is the consequence, and it holds however the merge
-    happens: the Turn keeps a flat list of run ids and nothing per-Run. The
-    Turn-level ``source_kind`` is whatever the FIRST participant stamped, so a
-    cancellation consulting it would answer for a Run that may not be the one it
-    is about.
+    happens: the Turn keeps a flat list of run ids and nothing per-Run. There is
+    one Turn-level ``source_kind``, a later participant does not restamp it, and
+    a cancellation consulting it would therefore answer for a Run that may not
+    be the one it is about.
+
+    Round 10 corrected the wording of exactly that sentence. It used to say the
+    label is "whatever the FIRST participant stamped" -- which this fixture
+    PRELOADS and cannot possibly establish, so the assertion's own message was
+    claiming the conclusion the docstring two paragraphs down concedes is not
+    reached here. The driven fact is the weaker and still useful one: the append
+    path does not write the label, so whoever set it keeps it. Who that is stays
+    with ``_hydrate_delivery_batch_context`` and stays an open probe.
 
     Scope, narrowed again in round 3. An earlier draft ended "no per-Run timeout
     policy can be specified against that record", and quietly promoted "the
@@ -598,9 +640,14 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
     manager._attach_accepted_agent_runs(
         session_id="ses-1",
         turn_id="turn-1",
-        # A manual `vibe task run` of a different definition, same Session.
+        # A manual `vibe task run` of a different definition, same Session,
+        # arriving with its OWN provenance -- which is the only way to ask
+        # whether a second participant restamps the Turn. Round 9 passed
+        # ``None`` here and asserted about first-participant ownership anyway.
         run_ids=["run-manual-cli"],
-        context=None,
+        context=types.SimpleNamespace(
+            platform_specific={"turn_token": "turn-1", "source_kind": "manual_cli"}
+        ),
     )
 
     recorded = projected.context.platform_specific
@@ -618,9 +665,14 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
         if isinstance(value, dict) and set(value) & set(accepted)
     ]
     assert per_run_keys == [], per_run_keys
-    assert recorded["source_kind"] == "scheduler", (
-        "one Turn-level label, stamped by the first participant"
-    )
+    # One Turn-level label, and the append path is not what sets it: the second
+    # participant carried ``manual_cli`` and the Turn still reads ``scheduler``.
+    # This says the label cannot be corrected by a later Run, NOT that the first
+    # Run is what stamped it -- that decision is upstream and still unproven.
+    assert recorded["source_kind"] == "scheduler", recorded
+    assert "source_kind" not in inspect.getsource(
+        SessionTurnManager._attach_accepted_agent_runs
+    ), "the append path started writing provenance; Q3 has to be re-derived"
 
     # The other half of the narrowed claim: the durable rows those ids key DO
     # carry the provenance the projection drops, so "the Turn cannot
@@ -1139,6 +1191,26 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
     claim that keeps flipping is not an unlucky claim; it is a claim whose
     subject was never driven end to end. So part (4) drives it, on the real
     method, with only the collaborators it needs to reach the network stubbed.
+
+    Round ten narrows the answer once more, and the narrowing is the same shape
+    as every earlier flip. "There is no window in which two codex turns are
+    live" was asserted from the REGISTRY -- one slot, therefore one turn -- and
+    the registry is an in-process projection of a backend that has its own
+    opinion. ``docs/plans/codex-app-server-refactor.md`` specifies three steps
+    for insertion: interrupt, WAIT for the interrupted completion, then start.
+    Production does the first and third. So between ``turn/interrupt`` and the
+    ``turn/completed(interrupted)`` that answers it, turn-1 IS still executing
+    on the backend while turn-2 is registered. The window exists.
+
+    What makes it harmless is not the registry but the two handlers that meet
+    the window's arrivals, and part (4b) drives both through the real
+    ``CodexEventHandler``: turn-1's late tail is dropped by the named guard in
+    ``_on_item_completed`` while turn-2's lands, and turn-1's late
+    ``turn/completed`` is handled as an interruption -- popped, ack removed,
+    stream released, nothing emitted -- rather than mistaken for turn-2's
+    result. Q2 asks whether attribution EXISTS, and it does; the window changes
+    where it comes from, not whether it holds. The stronger sentence is
+    retracted because it was true of the projection and not of the system.
     """
     import inspect as _inspect
 
@@ -1241,6 +1313,10 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
         "finalize_turn_start_response"
     ), "the stub below registers after sending; the real one must too"
 
+    acks: list = []
+    emitted: list = []
+    released: list = []
+
     async def _drive_handle_message():
         calls: list[tuple[str, str]] = []
         first_start_reached = asyncio.Event()
@@ -1260,15 +1336,20 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
 
         transport = _Transport()
         live = object.__new__(CodexAgent)
-        live.controller = types.SimpleNamespace(model_hub_runtime=None)
+        live.controller = types.SimpleNamespace(
+            model_hub_runtime=None,
+            mark_turn_complete=lambda ctx: released.append(("mark", ctx)),
+            agent_service=types.SimpleNamespace(
+                release_runtime_turn=lambda ctx: released.append(("release", ctx))
+            ),
+        )
         live._session_locks = {}
         live._session_mgr = CodexSessionManager()
         live._session_mgr.set_thread_id("base-1", "thread-1")
         live._turn_registry = CodexTurnRegistry()
-        live._event_handler = types.SimpleNamespace(
-            clear_pending=lambda turn_id: None,
-            _release_stream_turn=lambda ctx: None,
-        )
+        # The REAL event handler, because part (4b) below drives the window
+        # through it and a stub there would decide the answer.
+        live._event_handler = CodexEventHandler(live)
 
         async def _noop_async(*a, **kw):
             return None
@@ -1281,7 +1362,16 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
         live._delete_ack = _noop_async
         live._refresh_thread_developer_instructions_if_needed = _noop_async
         live._bind_runtime_agent_session_id = lambda *a, **kw: None
-        live._remove_ack_reaction = _noop_async
+
+        async def _remove_ack(request):
+            acks.append(request)
+
+        live._remove_ack_reaction = _remove_ack
+
+        async def _emit_result(*a, **kw):
+            emitted.append((a, kw))
+
+        live.emit_result_message = _emit_result
 
         async def _fake_start_turn(_transport, request, thread_id):
             live._turn_registry.begin_turn_start(request, thread_id)
@@ -1300,8 +1390,8 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
         await asyncio.sleep(0.05)
         # THE RETRACTION. The gate let this second request through (part 3), but
         # codex's own lock is keyed by base session -- the registry's key space,
-        # not the gate's -- so it has made no backend call at all. There is no
-        # window in which two codex turns are live.
+        # not the gate's -- so it has made no backend call at all. The two
+        # requests are serialized before they reach the backend.
         blocked = list(calls)
 
         release_first_start.set()
@@ -1309,9 +1399,10 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
             *(asyncio.wait_for(t, timeout=2) for t in (first, second)),
             return_exceptions=True,
         )
-        return blocked, calls, live._turn_registry
+        return blocked, calls, live
 
-    blocked, calls, live_registry = asyncio.run(_drive_handle_message())
+    blocked, calls, live = asyncio.run(_drive_handle_message())
+    live_registry = live._turn_registry
     assert blocked == [("turn/start", "")], blocked
     # And when it is finally admitted, it interrupts turn-1 BEFORE starting
     # turn-2. So the slot overwrite lands on a turn that has been told to stop.
@@ -1322,6 +1413,87 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
     ], calls
     assert live_registry.get_active_turn("base-1") == "turn-2"
     assert live_registry.should_emit_progress("turn-1") is False
+    assert live_registry.should_emit_progress("turn-2") is True
+
+    # (4b) The window, which round 9 asserted away instead of driving. Codex's
+    # protocol note (``docs/plans/codex-app-server-refactor.md``, "Message
+    # Insertion via turn/interrupt + turn/start") specifies THREE steps --
+    # interrupt, WAIT for the interrupted completion, then start. Production
+    # skips the wait: the call sequence in ``calls`` above goes straight from
+    # ``turn/interrupt`` to ``turn/start``. So turn-1 is still executing on the
+    # backend while turn-2 is registered, and round 9's "there is no window in
+    # which two codex turns are live" was too strong. The design divergence is
+    # asserted, not narrated, so this stops being true silently.
+    _refactor_plan = (
+        Path(__file__).resolve().parents[1]
+        / "docs" / "plans" / "codex-app-server-refactor.md"
+    ).read_text(encoding="utf-8")
+    assert "Wait for `turn/completed` (with interrupted status)" in _refactor_plan
+    handle_source = _inspect.getsource(CodexAgent.handle_message)
+    assert '"turn/interrupt"' in handle_source
+    assert "turn/completed" not in handle_source, (
+        "handle_message started awaiting the interrupted completion; the window "
+        "below no longer exists and this probe has to be re-derived"
+    )
+
+    # What makes the window harmless is not that it is closed but that both of
+    # its arrivals are handled, and each is driven here through the real
+    # ``handle_notification`` entry point on the real event handler.
+    turn_1 = live_registry.get_turn("turn-1")
+    turn_2 = live_registry.get_turn("turn-2")
+    assert turn_1 is not None and turn_2 is not None, "the window needs both turns"
+    assert turn_1.pending_assistant is None and turn_2.pending_assistant is None
+
+    async def _drive_window():
+        for turn_id in ("turn-1", "turn-2"):
+            await live._event_handler.handle_notification(
+                "item/completed",
+                {
+                    "turnId": turn_id,
+                    "threadId": "thread-1",
+                    "item": {"type": "agentMessage", "text": f"tail of {turn_id}"},
+                },
+                live_registry.get_turn(turn_id).request,
+            )
+        # ...and then the late completion the protocol says should have been
+        # awaited before turn-2 ever started.
+        await live._event_handler.handle_notification(
+            "turn/completed",
+            {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "interrupted"}},
+            turn_1.request,
+        )
+
+    # Part (4) already removed turn-1's ack: ``handle_message`` calls
+    # ``clear_pending(active_turn)`` right after ``turn/interrupt`` and removes
+    # the ack of whatever request it hid, without waiting for the completion.
+    # So the ack removal is EAGER, and the late completion below removes it a
+    # second time -- idempotent for every current surface, but a fact the
+    # window makes visible and worth pinning rather than papering over.
+    assert acks == [turn_1.request], acks
+    assert released == [], released
+    acks.clear()
+    released.clear()
+
+    asyncio.run(_drive_window())
+
+    # The interrupted turn's tail is dropped -- deliberately, by the named guard
+    # in ``_on_item_completed`` -- and the live turn's is not. The filter is
+    # therefore selective, which is the property round 9 needed and asserted
+    # from the registry alone.
+    assert turn_1.pending_assistant is None, turn_1.pending_assistant
+    assert turn_2.pending_assistant == ("tail of turn-2", "markdown")
+    assert "Ignoring stale/interrupted item" in _inspect.getsource(
+        CodexEventHandler._on_item_completed
+    )
+
+    # And the late ``turn/completed`` is handled as an interruption rather than
+    # as turn-2's result: turn-1 is popped, its ack removed, its stream
+    # released, and NOTHING is emitted to the user. Turn-2 is untouched.
+    assert live_registry.get_turn("turn-1") is None
+    assert acks == [turn_1.request]
+    assert released == [("mark", turn_1.request.context), ("release", turn_1.request.context)]
+    assert emitted == []
+    assert live_registry.get_active_turn("base-1") == "turn-2"
     assert live_registry.should_emit_progress("turn-2") is True
 
     # The same eviction on the bare registry, for contrast: identical end state,
@@ -1358,7 +1530,7 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
     )
 
 
-def test_participating_run_attribution_is_resolved_per_turn_not_per_session():
+def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_path):
     """HFR-197 / Q2: the "and participating Runs" half of the question.
 
     Q2 asks which events can be attributed to the exact Turn AND PARTICIPATING
@@ -1381,6 +1553,16 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session():
     end and lossy at the other -- if the durable read were keyed by session, or
     if the in-context list survived a Turn change, the Runs would smear across
     Turns even though the tokens did not.
+
+    Round 10 supplied the half round 9 faked. Parts (1) through (5) drive the
+    dispatcher against a ``_Turns`` stub, which shows that the READER asks per
+    Turn but says nothing about whether the STORE can answer per Turn -- a stub
+    that returns fabricated ids for fabricated tokens is green whether or not a
+    Run is ever bound to a Turn at all. Part (6) therefore builds the rows: real
+    schema, real claim/bind/materialize path, real ``attach_agent_run_delivery``,
+    and the dispatcher reading through a real ``SessionTurnManager``. Both are
+    kept, because they fail differently -- (1) catches a reader that stops
+    passing the token, (6) catches a store that cannot keep two Turns apart.
     """
     from core.message_dispatcher import ConsolidatedMessageDispatcher, _owned_agent_run_ids
     from modules.agents.base import AGENT_TURN_TOKEN
@@ -1490,8 +1672,218 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session():
     # (5) Scope, stated rather than implied. OpenCode is NOT re-driven here: its
     # emit context is ``request.context`` (HFR-183), so it is the same object
     # this test already read, and the pointer below is a pointer, not evidence.
-    # What is NOT settled anywhere is whether the delivery store's per-Turn rows
-    # are themselves complete -- a different question, on Q5's boundary.
     from modules.agents.opencode.poll_loop import OpenCodePollLoop
 
     assert "request.context" in inspect.getsource(OpenCodePollLoop.run_prompt_poll)
+
+    # (6) The rows themselves, which is where round 9 stopped and asserted
+    # anyway. One Session, three Turns taken in sequence -- the schema permits
+    # only one live Turn per Session, so "sequential" is the real shape and the
+    # smear this is looking for is a LATER Turn inheriting an earlier one's
+    # Runs. Turn A merges two Deliveries into one native start and so has two
+    # participating Runs; ``agent_runs.delivery_id`` is unique, which is why
+    # plural participation must come from a merged batch and not from two Runs
+    # on one Delivery. Turn C is claimed and never materialized, so its Run is
+    # bound to a real Delivery of a real Turn that was never ACCEPTED.
+    from storage import message_deliveries as durable_deliveries
+    from storage.background import attach_agent_run_delivery_in_connection
+    from storage.models import agent_runs
+
+    engine = _durable_engine(tmp_path)
+    with engine.begin() as conn:
+        for turn_id, delivery_ids, accepted_turn in (
+            ("turn-a", ("del-a1", "del-a2"), True),
+            ("turn-b", ("del-b1",), True),
+            ("turn-c", ("del-c1",), False),
+        ):
+            batch = [
+                durable_deliveries.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id="ses-1",
+                    priority="p3",
+                    state="queued",
+                    snapshot=durable_deliveries.message_snapshot(
+                        scope_id=None, session_id="ses-1", platform="avibe",
+                        author="harness", source="harness", message_type="user",
+                        text=f"prompt {delivery_id}", metadata={},
+                    ),
+                    dispatch_text=f"prompt {delivery_id}",
+                )
+                for delivery_id in delivery_ids
+            ]
+            claimed = durable_deliveries.claim_start_batch(
+                conn, turn_id=turn_id, session_id="ses-1", backend="codex",
+                deliveries=batch, dispatch_text=f"prompt {turn_id}",
+            )
+            if accepted_turn:
+                durable_deliveries.bind_native_start(
+                    conn, turn_id,
+                    expected_version=int(claimed["turn"]["version"]),
+                    runtime_key="ses-1:/w", runtime_turn_id=turn_id,
+                    native_turn_id=turn_id,
+                )
+                durable_deliveries.materialize_start_acceptance(
+                    conn, turn_id=turn_id, evidence={"kind": "probe"},
+                )
+            durable_deliveries.terminalize_turn(
+                conn, turn_id, outcome="completed", settled_by="probe",
+                evidence_kind="probe",
+            )
+        for run_id, delivery_id in (
+            ("run-a1", "del-a1"), ("run-a2", "del-a2"),
+            ("run-b1", "del-b1"), ("run-c1", "del-c1"),
+        ):
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id, definition_id=None, run_type="agent_run",
+                    status="running", cancel_requested=0, session_id="ses-1",
+                    created_at=_STAMP, updated_at=_STAMP, metadata_json="{}",
+                )
+            )
+            assert attach_agent_run_delivery_in_connection(
+                conn, run_id, session_id="ses-1", delivery_id=delivery_id
+            ), run_id
+
+    durable = object.__new__(SessionTurnManager)
+    durable._engine = engine
+    assert durable._durable_schema_available()
+
+    # The Runs split by Turn, out of the store, with no stub anywhere in the
+    # path -- which is the claim Q2's Run half rests on.
+    assert durable.accepted_agent_run_ids_for_turn("turn-a") == ["run-a1", "run-a2"]
+    assert durable.accepted_agent_run_ids_for_turn("turn-b") == ["run-b1"]
+    # A Turn that never reached acceptance contributes nothing, even though its
+    # Run is bound and running: the read is over ACCEPTED participation, so an
+    # abandoned start cannot lend its Run to the Session's next Turn.
+    assert durable.accepted_agent_run_ids_for_turn("turn-c") == []
+    assert durable.accepted_agent_run_ids_for_turn("turn-z") == []
+
+    # ...and the dispatcher reads exactly that, through the real manager. Same
+    # method as part (1), same emit-context shape, real rows underneath.
+    live_dispatcher = object.__new__(ConsolidatedMessageDispatcher)
+    live_dispatcher.controller = types.SimpleNamespace(session_turns=durable)
+    assert read(live_dispatcher, _ctx({"turn_token": "turn-a"})) == ["run-a1", "run-a2"]
+    assert read(live_dispatcher, _ctx({"turn_token": "turn-b"})) == ["run-b1"]
+
+    # Scope that survives round 10: whether every Run a Turn really executed is
+    # bound to one of that Turn's Deliveries in the first place is a question
+    # about the WRITE side, on Q5's boundary, and this probe assumes it.
+
+
+# ----- HFR-199: Q1 durable reservation -------------------------------------
+
+
+def test_no_step_of_the_durable_reservation_path_settles_the_run(tmp_path):
+    """HFR-199 / Q1: the reservation half, driven against real rows.
+
+    Round 10's first-priority finding, and it is the stubbed-store lesson in
+    the other half of the unit. Q1's answer said "a Delivery reservation and an
+    ownership transfer both leave the Run ``running``" and cited a scheduler
+    test that replaces ``submit_scheduled`` with a ``SimpleNamespace`` returning
+    ``queue_persisted=True, delivery_owner_transferred=True``. No Delivery is
+    reserved there and no Run row is read: what that test establishes is the
+    SCHEDULER'S REACTION to a reported reservation, which is a fact about the
+    caller, not about the boundary Q1 asks after. A store that settled the Run
+    the moment its Delivery was reserved would have left it green.
+
+    So the reservation is taken for real here -- real schema, real
+    ``enqueue_queued``, real ``attach_agent_run_delivery_in_connection``, real
+    claim/bind/materialize -- and the Run row is re-read after every single
+    step. The trace is the assertion, rather than one check at the end, because
+    "still nonterminal afterwards" and "never terminal in between" are different
+    claims and only the second one is what a terminal-truth matrix can use.
+
+    One fact fell out that the answer did not previously contain, and it is the
+    sharper half: terminalizing the TURN does not settle the Run either. The
+    settlement is a separate write, so a path that ends a Turn without calling
+    it leaves a live Run with no owner -- which is Q4's subject, recorded here
+    because this is where it became visible rather than argued.
+    """
+    from sqlalchemy import select
+
+    from storage import message_deliveries as durable_deliveries
+    from storage.background import (
+        attach_agent_run_delivery_in_connection,
+        settle_agent_runs_for_turn_in_connection,
+    )
+    from storage.models import agent_runs
+
+    engine = _durable_engine(tmp_path)
+    trace: list[tuple[str, str, bool]] = []
+
+    def _observe(conn, step: str) -> None:
+        row = (
+            conn.execute(select(agent_runs).where(agent_runs.c.id == "run-1"))
+            .mappings()
+            .first()
+        )
+        trace.append((step, str(row["status"]), row["completed_at"] is not None))
+
+    with engine.begin() as conn:
+        conn.execute(
+            agent_runs.insert().values(
+                id="run-1", definition_id=None, run_type="agent_run",
+                status="queued", cancel_requested=0, session_id="ses-1",
+                source_kind="scheduler", created_at=_STAMP, updated_at=_STAMP,
+                metadata_json="{}",
+            )
+        )
+        _observe(conn, "run_enqueued")
+
+        # (1) The reservation itself: a durable P3 Delivery, persisted.
+        reserved = durable_deliveries.enqueue_queued(
+            conn, scope_id=None, session_id="ses-1", text="cron prompt",
+            source="harness", author="harness",
+        )
+        _observe(conn, "delivery_reserved")
+
+        # (2) The ownership transfer: the Run hands its input to the Delivery
+        # owner, which is the exact transition the stubbed test only reported.
+        assert attach_agent_run_delivery_in_connection(
+            conn, "run-1", session_id="ses-1", delivery_id=reserved["id"]
+        )
+        _observe(conn, "delivery_owner_transferred")
+
+        # (3) ...and on through admission, so the claim covers the whole path
+        # rather than stopping where the old citation did.
+        claimed = durable_deliveries.claim_start_batch(
+            conn, turn_id="turn-1", session_id="ses-1", backend="codex",
+            deliveries=[durable_deliveries.get_delivery(conn, reserved["id"])],
+            dispatch_text="cron prompt",
+        )
+        _observe(conn, "turn_claimed")
+        durable_deliveries.bind_native_start(
+            conn, "turn-1", expected_version=int(claimed["turn"]["version"]),
+            runtime_key="ses-1:/w", runtime_turn_id="turn-1",
+            native_turn_id="turn-1",
+        )
+        durable_deliveries.materialize_start_acceptance(
+            conn, turn_id="turn-1", evidence={"kind": "probe"},
+        )
+        _observe(conn, "start_accepted")
+
+        # (4) The Turn reaches its terminal state.
+        assert durable_deliveries.terminalize_turn(
+            conn, "turn-1", outcome="completed", settled_by="probe",
+            evidence_kind="probe",
+        )["changed"]
+        _observe(conn, "turn_terminal")
+
+        # (5) And only now, on the explicit participant settlement.
+        assert settle_agent_runs_for_turn_in_connection(
+            conn, ["run-1"], ok=True
+        ) == ["run-1"]
+        _observe(conn, "run_settled")
+
+    nonterminal = [step for step, status, done in trace if not done]
+    assert nonterminal == [
+        "run_enqueued",
+        "delivery_reserved",
+        "delivery_owner_transferred",
+        "turn_claimed",
+        "start_accepted",
+        "turn_terminal",
+    ], trace
+    assert {status for _s, status, done in trace if not done} == {"queued"}, trace
+    assert trace[-1] == ("run_settled", "succeeded", True), trace[-1]

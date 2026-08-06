@@ -221,6 +221,10 @@ _Q2_RUNS = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
     "test_participating_run_attribution_is_resolved_per_turn_not_per_session"
 )
+_Q1_RESERVATION = (
+    "tests/test_run_terminal_truth_evidence_probes.py::"
+    "test_no_step_of_the_durable_reservation_path_settles_the_run"
+)
 _Q3_PROBE = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
     "test_the_accepted_run_batch_records_no_per_run_source_or_deadline"
@@ -718,12 +722,24 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # missed is the code BETWEEN those two facts.
     # ``CodexAgent.handle_message`` holds ``_session_locks[base]`` -- the
     # registry's key space -- across its whole body, and inside it sends
-    # ``turn/interrupt`` for any active turn before ``turn/start``. So the
-    # second request never overlaps the first, and the muted turn has been
-    # interrupted. That is correct filtering. The real consequence of the split
-    # is narrower: a cwd change turns "queue and run after" into "interrupt and
-    # replace". All of it is driven in
+    # ``turn/interrupt`` for any active turn before ``turn/start``. So the two
+    # requests are SERIALIZED before they reach the backend, and the muted turn
+    # has been interrupted. That is correct filtering. The real consequence of
+    # the split is narrower: a cwd change turns "queue and run after" into
+    # "interrupt and replace". All of it is driven in
     # ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``.
+    # Round 10 narrows it once more, from the same projection habit: "the turns
+    # never overlap" was read off the registry, and the protocol note
+    # (docs/plans/codex-app-server-refactor.md, step 2) says an insertion must
+    # WAIT for ``turn/completed(interrupted)`` before ``turn/start``. Production
+    # does not wait, so turn-1 is still executing on the backend while turn-2 is
+    # registered -- the window exists. It is harmless because both of its
+    # arrivals are handled, and the same probe now drives them through the real
+    # ``CodexEventHandler``: the interrupted turn's late tail is dropped by the
+    # named guard in ``_on_item_completed`` while the live turn's lands, and its
+    # late ``turn/completed`` is popped and released with nothing emitted rather
+    # than mistaken for the new turn's result. Serialization at the lock is a
+    # weaker property than non-overlap, and it is the one that is true.
     # The cell is ``covered`` because the question is whether the exact-Turn
     # signal EXISTS, and it does: the ``turnId`` is on the notification and
     # ``_find_request_for_notification`` resolves it before any filtering. One
@@ -763,19 +779,30 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "Yes on the durable Workbench lane: a Delivery reservation and an "
-            "ownership transfer both leave the Run ``running``, and a "
-            "result-less failure is not laundered into an interruption. The "
-            "direct-IM lane is NOT established. Both cited tests are durable: "
-            "neither touches the IM reservation or the backend-acceptance "
-            "boundary, so a premature terminal transition there would leave "
-            "them green. Probe: bind an IM-scoped Harness Run to an accepted "
-            "backend dispatch and assert the Run is still nonterminal at the "
+            "Yes on the durable Workbench lane, driven against real rows: "
+            "reservation, ownership transfer, claim, native bind and "
+            "materialized acceptance each leave the Run nonterminal, and so "
+            "does terminalizing the TURN -- only the explicit participant "
+            "settlement moves it. A result-less failure is also not laundered "
+            "into an interruption. "
+            "Round 10 corrected the basis of that first clause rather than the "
+            "clause itself. It used to rest on a scheduler test that stubs "
+            "``submit_scheduled`` and merely REPORTS ``queue_persisted`` / "
+            "``delivery_owner_transferred``, which establishes the caller's "
+            "reaction to a reported reservation and not the reservation; a "
+            "store that settled the Run on reserve would have left it green. "
+            "The stubbed test is still cited, for the scheduler decision it "
+            "does prove. "
+            "The direct-IM lane is NOT established. None of the cited tests "
+            "touch the IM reservation or the backend-acceptance boundary, so a "
+            "premature terminal transition there would leave them green. "
+            "Probe: bind an IM-scoped Harness Run to an accepted backend "
+            "dispatch and assert the Run is still nonterminal at the "
             "acceptance boundary. The old premature-success claim may only be "
             "closed once that probe exists -- on the durable lane alone this "
             "answer does not carry it."
         ),
-        "evidence": (_NONTERMINAL_UNTIL_SETTLED, _NOT_A_SUCCESS),
+        "evidence": (_NONTERMINAL_UNTIL_SETTLED, _NOT_A_SUCCESS, _Q1_RESERVATION),
     },
     "Q2": {
         "question": (
@@ -839,11 +866,35 @@ PR7R_QUESTIONS: Final = {
             "requests past the shared gate. But ``CodexAgent.handle_message`` "
             "holds ``_session_locks[base]``, the REGISTRY's key space, across "
             "its whole body and sends ``turn/interrupt`` for any active turn "
-            "before ``turn/start``. The turns never overlap and the muted turn "
-            "has been interrupted, which is correct filtering. Rounds 6, 8 and "
+            "before ``turn/start``. The two requests are SERIALIZED before they "
+            "reach the backend and the muted turn has been interrupted, which "
+            "is correct filtering. Rounds 6, 8 and "
             "9 all argued this claim from the two ENDS of a mechanism without "
             "running the code between them; a claim that flips three times is "
-            "one whose subject was never driven end to end. What the key split "
+            "one whose subject was never driven end to end. "
+            "The SEVENTH correction, round 10, is the same projection habit at "
+            "its last hiding place. Round 9 wrote \"there is no window in which "
+            "two codex turns are live\", and read that off the REGISTRY's one "
+            "slot. Codex's own protocol note "
+            "(docs/plans/codex-app-server-refactor.md, insertion step 2) "
+            "requires waiting for ``turn/completed`` with interrupted status "
+            "before ``turn/start``; production sends interrupt and start with "
+            "no wait between them, so turn-1 is still executing on the backend "
+            "while turn-2 is registered. The window EXISTS, and it is harmless "
+            "for a reason the registry cannot show: both of its arrivals are "
+            "handled. The probe now drives them through the real "
+            "``CodexEventHandler`` -- the interrupted turn's late "
+            "``item/completed`` is dropped by the named guard in "
+            "``_on_item_completed`` while the live turn's is kept, and its late "
+            "``turn/completed`` is popped, ack-removed and stream-released with "
+            "NOTHING emitted, so it is never mistaken for the new turn's "
+            "result. Q2 asks whether the exact-Turn signal EXISTS, and the "
+            "window does not touch that; what it corrects is the basis, from a "
+            "projection's one slot to the handlers that actually meet the "
+            "overlap. One byproduct is pinned in the probe: the ack removal for "
+            "an interrupted turn happens TWICE, eagerly at "
+            "``clear_pending(active_turn)`` and again when the completion "
+            "lands. What the key split "
             "really costs is narrower: a cwd change turns queue-and-run-after "
             "into interrupt-and-replace, and "
             "``runtime_turn_keys_for_session_key`` cannot address the replaced "

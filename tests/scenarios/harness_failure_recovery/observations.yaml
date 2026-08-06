@@ -415,8 +415,10 @@ observations:
       search that produced it, so resolve the KEY, not the string.
       Separately, a Turn's accepted-run
       record cannot discriminate between its participants: it holds a flat
-      ``accepted_agent_run_ids`` list and one Turn-level ``source_kind`` stamped by
-      the first participant, with no per-Run source or deadline anywhere. Whether a
+      ``accepted_agent_run_ids`` list and one Turn-level ``source_kind`` that a later
+      participant does not restamp, with no per-Run source or deadline anywhere.
+      (Round 10 narrowed that from "stamped by the first participant", which the
+      probe preloaded rather than drove.) Whether a
       scheduler cron Run and a manual CLI Run actually coalesce is a separate,
       still-open question owned by ``_hydrate_delivery_batch_context``, not by the
       accumulator. That is a statement about the PROJECTION and must not be read as
@@ -736,3 +738,68 @@ observations:
       verbatim, inheriting an exemption written for a different caller: a class
       leaf is legitimate for a finding OWNER and is not a pytest node id, so
       ``tests/foo.py::_helper`` resolved green. HFR-198 pins both strictnesses.
+  - id: HFR-OBS-035
+    area: run-terminal-truth
+    summary: >-
+      Round 10 of PR7R's review, seven findings, seven accepted -- though the
+      first one's proposed REMEDY was rejected, which is its own lesson. The
+      finding is right that round 9's "there is no window in which two codex
+      turns are live" is false: codex's own protocol note
+      (docs/plans/codex-app-server-refactor.md, insertion step 2) requires
+      waiting for ``turn/completed`` with interrupted status before
+      ``turn/start``, and production sends the two calls back to back. Turn-1 is
+      still executing on the backend while turn-2 is registered. But the finding
+      asked to reopen Q2, and Q2 asks whether the exact-Turn signal EXISTS. The
+      window does not touch that. What it corrects is the BASIS of the answer,
+      from a projection's one slot to the handlers that actually meet the
+      overlap -- and both of them handle it: the interrupted turn's late
+      ``item/completed`` is dropped by the named guard in ``_on_item_completed``
+      while the live turn's is kept, and its late ``turn/completed`` is popped,
+      ack-removed and stream-released with nothing emitted. HFR-195 now drives
+      the window through the real ``CodexEventHandler`` instead of stubbing it.
+      THE DURABLE RULE, and it is round 9's rule one level deeper: the projection
+      error survives being named. Round 9 caught itself reading
+      ``_active_turns`` for a claim about the event stream, went and drove
+      ``handle_message`` -- and then read the REGISTRY for a claim about what the
+      BACKEND is doing. The subject moved out one layer and the habit followed
+      it. When the thing you are asserting about lives on the other side of a
+      wire, the in-process map is still a projection no matter how carefully you
+      drove the code that writes it.
+      A byproduct the window made visible and the probe now pins: an interrupted
+      turn's ack is removed TWICE, eagerly at ``clear_pending(active_turn)``
+      inside ``handle_message`` and again when the interrupted completion lands.
+      Idempotent on every current surface; not obviously so on the next one.
+      Round 10's second finding is the same displacement in the test corpus.
+      HFR-197 asserted per-Turn Run attribution against a STUBBED
+      ``session_turns``, i.e. against a store that answers whatever the test
+      wants; a real store that smeared Runs across Turns would have left it
+      green. It now drives real rows through the real durable chain, which cost
+      three schema lessons: a delivery may not be inserted directly as
+      ``accepted`` (``ck_message_deliveries_materialization``), a session may
+      hold only one live Turn (unique ``session_turns.session_id``), and
+      ``agent_runs.delivery_id`` is unique -- so a Turn with plural participating
+      Runs must come from a MERGED delivery batch, not two Runs on one delivery.
+      Findings three through five are guards weaker than their own comments.
+      ``_assert_node_exists`` was tightened at the LEAF in round 9 and left the
+      CONTAINERS unexamined, so ``tests/foo.py::Helper::test_x`` passed while
+      pytest collects nothing in a class that is neither ``Test*``-named nor a
+      ``TestCase`` subclass -- a rule fixed at one nesting level does not travel.
+      HFR-192 checked docstring ids against the catalog in one direction only, so
+      a catalog row pointing at a deleted test stayed green; it is bidirectional
+      now. And HFR-185's anti-degeneracy check counted distinct probe names
+      GLOBALLY, which a single diverse row satisfies on behalf of every
+      degenerate one; it is per ``(lane, outcome)`` group now. That is the fifth
+      instance in this unit of an assertion that reads like the comment above it
+      and enforces something weaker.
+      The last two narrow claims to what was driven. Q1's "reservation does not
+      settle the Run" rested on a scheduler test that STUBS ``submit_scheduled``
+      and merely reports ``queue_persisted`` / ``delivery_owner_transferred``.
+      HFR-199 drives the real chain and finds the fact holds and is broader than
+      claimed: terminalizing the TURN does not settle the Run either -- only
+      ``settle_agent_runs_for_turn_in_connection`` does, so any path that ends a
+      Turn without calling it leaves a live Run with no owner. Q1 stays open
+      because the direct-IM lane is still unestablished. And HFR-182's Q3 claim
+      said the Turn-level ``source_kind`` is stamped by the FIRST participant,
+      which the probe PRELOADED rather than drove; it now attaches a second Run
+      carrying real provenance and asserts only what that shows -- a later
+      participant does not restamp it.

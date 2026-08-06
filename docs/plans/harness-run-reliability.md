@@ -3,7 +3,7 @@
 Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
 PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
 PR4 (#1173) are complete. Only PR7R remains as the next unit, and it is
-evidence-only; its first increment is in flight (`HFR-180…198`, see §7). PR4's
+evidence-only; its first increment is in flight (`HFR-180…199`, see §7). PR4's
 conditional transport-attempt delta (PR4B) opens only if a current-master
 reproducer proves a missing durable fact.**
 
@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…198`, `HFR-199…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn and per-emit Run attribution is derived from that Turn, so the inactivity timeout is no longer blocked on attribution; the one residual is the per-session activity timestamp; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…199`, `HFR-200…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn and per-emit Run attribution is derived from that Turn, so the inactivity timeout is no longer blocked on attribution; the one residual is the per-session activity timestamp; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,13 +1227,13 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under nine review rounds
+#### PR7R status (2026-08-06) — first increment, revised under ten review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
 `HFR-192…194`, `HFR-196`, `HFR-198`) and fed by
 `tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
-`HFR-191`, `HFR-195`, `HFR-197`). It expands
+`HFR-191`, `HFR-195`, `HFR-197`, `HFR-199`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
 (lane, trigger, outcome) with a `per_backend` override wherever the backend
 demonstrably changes the answer, because the durable owner chain is chosen by
@@ -1242,8 +1242,9 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through eight changed how the
-findings are demonstrated, two question verdicts, and five degenerate guards. Why it moved is the
+rounds and has held at 168 since; rounds four through ten changed how the
+findings are demonstrated, two question verdicts, and eight degenerate guards
+(three of them in round ten alone). Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
 cell rather than about the cell. The first round found fifty such cells, in four
@@ -1454,15 +1455,17 @@ get two requests past the shared gate at once. What both rounds missed is the co
 *between* the gate and the slot. `handle_message` holds
 `_session_locks[base_session_id]` — the registry's key space, not the gate's —
 across its whole body, and inside it sends `turn/interrupt` for any active turn
-before `turn/start`. The second request therefore never overlaps the first, and
-the turn that goes mute has been interrupted. `should_emit_progress` is correct.
+before `turn/start`. The two requests are therefore serialized before they reach
+the backend, and the turn that goes mute has been interrupted.
+`should_emit_progress` is correct.
 The real consequence of the split is narrower and still worth having: a cwd change
 converts "queue behind the gate and run after" into "interrupt the running turn
 and replace it". `HFR-195` now drives that end to end — the two key functions, the
 gate admitting both, and the real `CodexAgent.handle_message` recording
 `turn/interrupt(turn-1)` before `turn/start(turn-2)`. The probe the codex cell had
 carried since round 4 ("can anything put two live turns on one base session") is
-closed: no.
+closed — with the qualification round 10 adds below: serialized at the lock, but
+*not* non-overlapping on the backend.
 
 The error is a new shape, not a fifth repeat of the projection mistake: a correct
 fact about one key was carried across to a different key. Worse, the assertion
@@ -1512,15 +1515,81 @@ citation naming a real symbol that no test run executes, which is the failure th
 resolver exists to prevent, displaced one level. `HFR-198` pins both strictnesses,
 and asserts the whole citation corpus against the tightened rule in one place.
 
+Round 10 — seven findings, all seven accepted on the facts, one with its proposed
+remedy rejected. The headline is that **the projection error survives being
+named.** Round 9 caught itself reading `_active_turns` for a claim about the event
+stream, went and drove `handle_message` — and then read the *registry's* one slot
+for a claim about what the **backend** is doing. "There is no window in which two
+codex turns are live" is false: codex's own protocol note
+(`docs/plans/codex-app-server-refactor.md`, insertion step 2) requires waiting for
+`turn/completed` with interrupted status before `turn/start`, and production sends
+the two calls back to back, so turn-1 is still executing while turn-2 is
+registered. The finding asked to reopen Q2; that is rejected, because Q2 asks
+whether the exact-Turn signal *exists* and the window does not touch it. What the
+window corrects is the **basis** of the answer, and the corrected basis is
+stronger: both of the window's arrivals are handled, and `HFR-195` now drives them
+through the real `CodexEventHandler` rather than a stub — the interrupted turn's
+late `item/completed` is dropped by the named guard in `_on_item_completed` while
+the live turn's is kept, and its late `turn/completed` is popped, ack-removed and
+stream-released with **nothing** emitted. One byproduct is pinned there too: an
+interrupted turn's ack is removed twice, eagerly at `clear_pending(active_turn)`
+and again when the completion lands. When the subject of a claim lives on the
+other side of a wire, the in-process map is still a projection no matter how
+carefully you drove the code that writes it.
+
+The second finding is the same displacement inside this unit's own tests:
+`HFR-197` asserted per-Turn Run attribution against a **stubbed** `session_turns`,
+i.e. a store that answers whatever the test wants, so a real store that smeared
+Runs across Turns would have left it green. It now drives real rows through the
+real durable chain, which cost three schema lessons worth recording: a Delivery
+may not be inserted directly as `accepted`
+(`ck_message_deliveries_materialization`), a Session may hold only one live Turn
+(unique `session_turns.session_id`), and `agent_runs.delivery_id` is unique — so a
+Turn with plural participating Runs must come from a **merged** Delivery batch,
+not from two Runs on one Delivery.
+
+Findings three through five are guards weaker than their own comments, which is
+now the fifth instance in this unit. `_assert_node_exists` was tightened at the
+**leaf** last round and left the **containers** unexamined, so
+`tests/foo.py::Helper::test_x` resolved green while pytest collects nothing in a
+class that is neither `Test*`-named nor a `TestCase` subclass — *a rule fixed at
+one nesting level does not travel.* `HFR-192` checked docstring ids against the
+catalog in one direction only, so a catalog row pointing at a deleted test stayed
+green; it is bidirectional now. And `HFR-185`'s anti-degeneracy check counted
+distinct probe names *globally*, which one diverse row satisfies on behalf of
+every degenerate one; it is per `(lane, outcome)` group now.
+
+The last two narrow claims to what was actually driven. Q1's "reservation does not
+settle the Run" rested on a scheduler test that stubs `submit_scheduled` and
+merely *reports* `queue_persisted` / `delivery_owner_transferred`. `HFR-199` drives
+the real chain and finds the fact holds and is **broader** than claimed:
+terminalizing the *Turn* does not settle the Run either — only
+`settle_agent_runs_for_turn_in_connection` does, so any path that ends a Turn
+without calling it leaves a live Run with no owner. And `HFR-182`'s Q3 claim said
+the Turn-level `source_kind` is stamped by the *first* participant, which the
+probe preloaded rather than drove; it now attaches a second Run carrying real
+provenance and asserts only what that shows — a later participant does not
+restamp it.
+
 Question verdicts:
 
-1. **Q1 — open, do not close the claim yet.** A Delivery reservation and an
-   ownership transfer both leave the Run `running` on the durable Workbench
-   lane, and a result-less failure is not laundered into an interruption. The
-   direct-IM lane is not established: both cited tests are durable, so a
-   premature terminal transition in the IM reservation or backend-acceptance
-   path would leave them green. The premature-success claim may be closed once
-   an IM-lane acceptance-boundary probe exists — not before.
+1. **Q1 — open, do not close the claim yet.** On the durable Workbench lane,
+   driven against real rows in `HFR-199`: enqueue, Delivery reservation, owner
+   transfer, batch claim, native bind and materialized start acceptance each
+   leave the Run nonterminal — and so does terminalizing the **Turn**. Only
+   `settle_agent_runs_for_turn_in_connection` moves it, which is broader than the
+   claim round 9 made and has a corollary worth carrying into Q4: a path that ends
+   a Turn without calling it leaves a live Run with no owner. A result-less
+   failure is not laundered into an interruption. Round 10 corrected the *basis*
+   of the first clause rather than the clause itself — it used to rest on a
+   scheduler test that stubs `submit_scheduled` and merely reports
+   `queue_persisted` / `delivery_owner_transferred`, so a store that settled the
+   Run on reserve would have left it green; that test is still cited, for the
+   scheduler decision it does prove. The direct-IM lane is still not established:
+   the driven chain is durable, so a premature terminal transition in the IM
+   reservation or backend-acceptance path would leave it green. The
+   premature-success claim may be closed once an IM-lane acceptance-boundary probe
+   exists — not before.
 2. **Q2 — answered. All six backend/lane cells key a progress event by Turn,
    and it no longer blocks the timeout.** Codex's `item/*` notifications carry a
    `turnId` and `_find_request_for_notification` resolves the participating
@@ -1553,7 +1622,12 @@ Question verdicts:
    at `should_emit_progress`. That claim was argued three times from the two ends
    of a mechanism without ever running the code between them; `handle_message`
    interrupts the active turn under a base-session lock before starting the next,
-   so the mute follows an interrupt (`HFR-195`).
+   so the mute follows an interrupt (`HFR-195`). Narrowed in round 10: the two
+   turns are *serialized at the lock*, not non-overlapping on the backend —
+   production skips the interrupted-completion wait its own protocol note
+   specifies — and what makes the window harmless is that both of its late
+   arrivals are handled, which `HFR-195` now drives through the real event
+   handler.
 3. **Q3 — open, split, and narrower than it was.** Established: the *Turn's*
    accepted-run record cannot discriminate between participants — a flat
    `accepted_agent_run_ids` list and one Turn-level `source_kind` stamped by
@@ -1691,7 +1765,10 @@ ordering is by how many cells one harness closes:
    correct (`HFR-195`). What remains there is a behavioural note rather than a
    defect — a cwd change interrupts and replaces the running turn instead of
    queueing behind it, and `runtime_turn_keys_for_session_key` cannot address the
-   replaced turn. That one is for the implementation unit, not evidence work. Still open on
+   replaced turn. Round 10 adds a second note of the same rank: the insertion path
+   does not wait for `turn/completed(interrupted)` before `turn/start`, diverging
+   from `docs/plans/codex-app-server-refactor.md` step 2, and it removes an
+   interrupted turn's ack twice. That one is for the implementation unit, not evidence work. Still open on
    the evidence side: the **Q5 crash-gap probe** (kill between
    `mark_task_result` and `request_store.complete` and check whether anything
    reconciles the definition stamp with the Run's terminal status), the Q3
@@ -1789,8 +1866,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…198` — occupied by PR7R's first increment (`HFR-188…198` were
-  taken by its round-6 through round-9 reviews); `HFR-199…219` still reserved for
+- PR7: `HFR-180…199` — occupied by PR7R's first increment (`HFR-188…199` were
+  taken by its round-6 through round-10 reviews); `HFR-200…219` still reserved for
   the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is
