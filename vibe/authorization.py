@@ -87,7 +87,7 @@ class AuthorizationContext:
 
     @property
     def can_chat(self) -> bool:
-        return not self.is_remote and self.has_role("editor")
+        return self.has_role("editor")
 
     @property
     def can_use_cloud_asr(self) -> bool:
@@ -347,7 +347,7 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
         ("POST", r"^/api/sessions/[^/]+/fork$"),
         (
             "POST",
-            r"^/api/sessions/[^/]+/(?:messages|attachments|cancel|queue/[^/]+/send-now)$",
+            r"^/api/sessions/[^/]+/(?:attachments|cancel|queue/[^/]+/send-now)$",
         ),
         ("POST", r"^/api/asr/transcribe$"),
         ("POST", r"^/api/show/sessions/[^/]+/(?:events|prewarm)$"),

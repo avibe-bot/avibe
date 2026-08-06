@@ -12,16 +12,18 @@ from config.v2_config import (
     UiConfig,
     V2Config,
 )
+from core.vibe_agents import VibeAgentStore
 from storage import (
     media_service,
     message_deliveries,
     messages_service,
     project_access_service,
     projects_service,
+    resource_access_service,
 )
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import media_object_references, media_objects, scopes
+from storage.models import agent_sessions, media_object_references, media_objects, scopes
 from storage.workbench_sessions_service import create_session
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_server
@@ -457,7 +459,7 @@ def test_legacy_media_token_uses_all_migrated_session_references(monkeypatch, tm
     assert _get(beta, f"/api/media/{token}").status_code == 200
 
 
-def test_remote_message_is_blocked_before_persistence_or_dispatch(
+def test_remote_editor_message_persists_authoritative_identity_and_dispatches(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -465,6 +467,26 @@ def test_remote_message_is_blocked_before_persistence_or_dispatch(
     config, ids = _setup_state(tmp_path)
     engine = create_sqlite_engine()
     client = _remote_client(config, role="editor", email="alice@example.com")
+    store = VibeAgentStore()
+    try:
+        agent = store.create(name="remote-editor-agent", backend="codex")
+        with store.engine.begin() as conn:
+            resource_access_service.ensure_resource_policy(
+                conn,
+                resource_kind="agent",
+                resource_id=agent.id,
+                organization_id=None,
+                owner_user_id="user-editor-alice@example.com",
+                access_level="private",
+            )
+    finally:
+        store.close()
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == ids["session_a"])
+            .values(agent_id=agent.id, agent_name=agent.name)
+        )
 
     with engine.connect() as conn:
         before_ids = {
@@ -476,8 +498,11 @@ def test_remote_message_is_blocked_before_persistence_or_dispatch(
             )["messages"]
         }
 
+    dispatch_calls = []
+
     async def dispatch_async(payload):
-        raise AssertionError("remote message reached the local controller")
+        dispatch_calls.append(payload)
+        return {"status_code": 202, "body": {"delivery_state": "queued"}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", dispatch_async)
     response = client.post(
@@ -500,9 +525,11 @@ def test_remote_message_is_blocked_before_persistence_or_dispatch(
         },
     )
 
-    assert response.status_code == 403
-    assert response.get_json()["code"] == "remote_execution_disabled"
+    assert response.status_code == 202
+    assert len(dispatch_calls) == 1
+    assert dispatch_calls[0]["text"] == "Run it"
     with engine.connect() as conn:
+        stored = message_deliveries.get_delivery(conn, response.get_json()["id"])
         after_ids = {
             row["id"]
             for row in messages_service.list_session_messages(
@@ -511,6 +538,14 @@ def test_remote_message_is_blocked_before_persistence_or_dispatch(
                 limit=500,
             )["messages"]
         }
+    assert stored is not None
+    stored_metadata = message_deliveries.delivery_payload(stored)["metadata"]
+    assert stored_metadata["resource_user_context"]["sub"] == "user-editor-alice@example.com"
+    assert stored_metadata["resource_user_context"]["vibe_instance_role"] == "editor"
+    assert stored_metadata["_web_push_authorization_contexts"][0]["sub"] == (
+        "user-editor-alice@example.com"
+    )
+    assert "spoofed" not in json.dumps(stored_metadata)
     assert after_ids == before_ids
 
 
