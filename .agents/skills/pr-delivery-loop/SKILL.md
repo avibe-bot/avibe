@@ -37,8 +37,11 @@ description: The implementation-lane standard for delivering a PR across the Avi
 
 ## 0. Scope & branch
 
-- Branch from the **latest** origin default branch (`git fetch origin` first).
-  In avibe, use a task worktree under the workspace's
+- If the owner or orchestrator gives you an existing branch or worktree, treat
+  it as the assigned task context and continue there after verifying its head;
+  do not create a fresh default-branch lane that abandons or duplicates it.
+- Otherwise branch from the **latest** origin default branch (`git fetch
+  origin` first). In avibe, use a task worktree under the workspace's
   `.worktrees/avibe/<branch>` directory, or the equivalent sibling worktree
   directory in a standalone clone.
 - Stay inside your assigned file scope. A cross-lane interface gap is a
@@ -139,12 +142,13 @@ description: The implementation-lane standard for delivering a PR across the Avi
 ## 3a. Turn-final text = a delivered status line
 
 When you run as an async lane (`vibe agent run`), the FINAL TEXT of every turn
-you end is delivered to your orchestrator's conversation as a callback, exactly
-once. It is a report surface, not scratch space: end every turn with a short,
-meaningful status line — e.g. `PR #921 opened (head 41c088c5); review triggered
-(👀 confirmed); watch armed` — never a step narration ("Push branch, confirm
-repo"), a thinking fragment, or a bare next-action note. If a turn ends because
-you armed a watch and are waiting, say exactly that.
+you end is delivered to your orchestrator's conversation as an at-least-once
+callback. It is a report surface, not scratch space: include a stable PR/head
+or Run identifier so duplicate callback delivery can be deduplicated, and end
+every turn with a short, meaningful status line — e.g. `PR #921 head 41c088c5:
+review triggered (👀 confirmed); watch armed` — never a step narration ("Push
+branch, confirm repo"), a thinking fragment, or a bare next-action note. If a
+turn ends because you armed a watch and are waiting, say exactly that.
 
 ## 4. Review-loop discipline
 
@@ -173,6 +177,10 @@ you armed a watch and are waiting, say exactly that.
   delegated. Verify the watch name, target session, command, and `--pr <N>`
   together with `vibe watch show` and a live `wait_pr.py` process; never count
   unrelated global monitors as the lane watch.
+- Before each push, snapshot all current activity cursors with
+  `wait_pr.py --snapshot-cursors --cursor-file <file>`; after the push, pass
+  that file to the newly armed waiter so a review arriving during setup remains
+  observable.
 - Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
   settled: your own thread resolutions count as "review activity" to a watch
   armed earlier in the round, so it self-consumes on YOUR close-out actions and
@@ -290,11 +298,12 @@ you armed a watch and are waiting, say exactly that.
 ## 5. Close-out — all conditions, then stop
 
 1. Bot review of the current head with no real findings;
-2. CI fully green;
+2. CI fully green: the repository's expected check set is present (unless the
+   repository explicitly defines no CI), every applicable check is terminal,
+   and none is failing, cancelled, timed out, action-required, or pending;
 3. Zero unresolved review threads across the entire PR, regardless of the head
    on which each thread was opened;
-4. Remove your watches (nothing dangles);
-5. Post the final report: PR URL, what shipped, evidence layers, residual
+4. Post the final report: PR URL, what shipped, evidence layers, residual
    manual checks (state what end-to-end verification is deferred to the
    orchestrator's integration pass);
    **Delivery rule (same as escalations):** the final report must be
@@ -310,16 +319,19 @@ you armed a watch and are waiting, say exactly that.
    round where lanes forget this and stop after tidying watches. When you notice
    conditions 1–3 are already true at the start of a watch-triggered round, SEND
    THE FINAL REPORT FIRST, then do cleanup;
+5. Remove your watches only after report delivery is verified (nothing
+   dangles, and a failed delivery still has recovery liveness);
 6. **Do not merge on your own initiative** — hand back; the orchestrator does
    the final review and merge. If the user or your orchestrator explicitly
    tells you to merge, that instruction IS the final review: check the
    mechanical gate yourself in one guarded shell conditional that evaluates
    every condition together — either a bot-authored pass-phrase issue comment
    naming the current head or a head-bound Codex `+1` captured by the current
-   phase's waiter, zero unresolved threads across the entire PR, and
+   phase's waiter, zero unresolved threads across the entire PR, the expected
+   CI check set is present and fully successful, and
    `gh pr view --json mergeStateStatus` == `CLEAN` — so that a check which
-   errors or returns empty reads as *do not merge* rather than as a pass. Then
-   merge with `gh pr merge --match-head-commit <validated-head-sha>` — no
+   errors, returns empty, or omits an expected check reads as *do not merge*.
+   Then merge with `gh pr merge --match-head-commit <validated-head-sha>` — no
    re-review, no spawning anyone. If the gate is not CLEAN, report exactly
    what's missing instead of refusing by role.
 
@@ -345,8 +357,8 @@ for dependent lanes, and your final-report draft.
   head, or a third findings-bearing head after a model rewrite, pauses the lane
   and requires the orchestrator to make and record a whole-model decision before
   work resumes.
-- At gate: verify pass-on-current-head + zero unresolved + CLEAN yourself from
-  GitHub, re-scan the final diff against the granted file scope (plus any
-  ratified extensions), confirm the lane session is quiesced (no running or
-  queued runs), then merge in dependency order and ff your local default
-  branch before any deploy.
+- At gate: verify pass-on-current-head + all expected CI green + zero unresolved
+  across the entire PR + CLEAN yourself from GitHub, re-scan the final diff
+  against the granted file scope (plus any ratified extensions), confirm the
+  lane session is quiesced (no running or queued runs), then merge in dependency
+  order and ff your local default branch before any deploy.
