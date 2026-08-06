@@ -4194,6 +4194,8 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
     }
     show_page_claim_present = "vibe_show_page_id" in claims
     if access_source == "show_page_email":
+        if instance_role != "viewer":
+            raise OAuthCodeExchangeError("invalid_instance_role")
         show_page_id = _oidc_claim_string(
             claims.get("vibe_show_page_id"),
             reason="invalid_show_page_id",

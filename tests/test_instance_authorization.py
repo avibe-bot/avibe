@@ -128,6 +128,16 @@ def test_show_page_email_context_requires_and_matches_one_exact_target() -> None
     assert missing_target.can_read_instance is False
     assert unexpected_target.can_read_instance is False
 
+    elevated_role = context_from_session_payload(
+        {
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "show_page_email",
+            "vibe_show_page_id": "session-one",
+        }
+    )
+    assert elevated_role.can_read_instance is False
+    assert elevated_role.can_use_show_page("session-one") is False
+
 
 def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("GET", "/api/projects") == "viewer"

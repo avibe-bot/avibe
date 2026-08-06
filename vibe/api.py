@@ -1477,7 +1477,7 @@ def get_show_page_access(session_id: str) -> dict:
     }
 
 
-def _require_show_page_email_access_management(session_id: str) -> None:
+def _require_show_page_email_access_owner(session_id: str) -> None:
     from core.show_pages import ShowPageError, ShowPageStore
     from storage import resource_access_service
 
@@ -1488,8 +1488,9 @@ def _require_show_page_email_access_management(session_id: str) -> None:
         if page is None:
             raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
         with store.engine.connect() as connection:
-            if not resource_access_service.can_manage_show_page_access(
+            if not resource_access_service.can_control_resource_sharing(
                 context,
+                "show_page",
                 page.session_id,
                 connection=connection,
             ):
@@ -1526,7 +1527,7 @@ def get_show_page_authorized_emails(session_id: str) -> dict:
 
     from vibe import remote_access
 
-    _require_show_page_email_access_management(session_id)
+    _require_show_page_email_access_owner(session_id)
     try:
         result = remote_access.get_show_page_authorized_emails(session_id)
     except Exception as exc:
@@ -1539,7 +1540,7 @@ def replace_show_page_authorized_emails(session_id: str, emails: list[str]) -> d
 
     from vibe import remote_access
 
-    _require_show_page_email_access_management(session_id)
+    _require_show_page_email_access_owner(session_id)
     normalized = sorted({str(email).strip().lower() for email in emails if str(email).strip()})
     try:
         result = remote_access.replace_show_page_authorized_emails(session_id, normalized)

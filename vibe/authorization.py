@@ -213,6 +213,8 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
     show_page_id = _optional_string(payload.get("vibe_show_page_id"), limit=200)
     if (access_source == "show_page_email") != (show_page_id is not None):
         return AuthorizationContext(is_remote=True)
+    if access_source == "show_page_email" and role != "viewer":
+        return AuthorizationContext(is_remote=True)
     raw_groups = payload.get("vibe_group_ids", payload.get("group_ids", []))
     group_ids = (
         frozenset(value for item in raw_groups if (value := _optional_string(item)) is not None)

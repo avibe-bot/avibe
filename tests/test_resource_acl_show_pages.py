@@ -606,8 +606,19 @@ def test_show_page_owner_can_read_and_replace_exact_email_grants(monkeypatch, tm
     ]
 
 
-def test_show_page_email_grants_reject_non_manager_without_contacting_backend(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("subject", "organization_role", "instance_role"),
+    [
+        ("member-1", "member", "viewer"),
+        ("admin-1", "admin", "owner"),
+    ],
+)
+def test_show_page_email_grants_reject_non_owner_without_contacting_backend(
+    monkeypatch,
+    tmp_path,
+    subject: str,
+    organization_role: str,
+    instance_role: str,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = _seed_show_pages_with_policies()
@@ -615,7 +626,11 @@ def test_show_page_email_grants_reject_non_manager_without_contacting_backend(
     monkeypatch.setattr(
         resource_access_service,
         "resolve_resource_access_context",
-        lambda _value=None: _organization_context("member-1"),
+        lambda _value=None: _organization_context(
+            subject,
+            organization_role=organization_role,
+            instance_role=instance_role,
+        ),
     )
     monkeypatch.setattr(
         remote_access,
