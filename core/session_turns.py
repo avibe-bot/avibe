@@ -430,8 +430,8 @@ class Turn:
       turn STARTED under (so Stop interrupts the backend it actually ran on, even if
       the Chat header later swapped agent/model). ``task`` is the Stop target
       (``/internal/cancel``) and the ``/turn-state`` source.
-    Queue policy is deliberately absent. The durable Session hold and Turn control
-    slot decide whether backlog may drain across both process lifetime and restart.
+    Persistent queue policy is deliberately absent. Durable Delivery/Turn ownership
+    decides whether backlog may drain across both process lifetime and restart.
 
     The streaming SINK is deliberately NOT held here: it is keyed by the
     thread-scoped turn-sink key (platform-prefixed, e.g. ``avibe::<id>``) not
@@ -452,6 +452,11 @@ class Turn:
     #: reconciliation is not reported as if the user pressed Stop (Codex P1). It
     #: rides on the Turn so it retires when the turn is popped.
     cancel_settled_by: Optional[str] = None
+    #: Transient instruction from the cancellation owner. Service teardown and
+    #: backend drain must not start replacement work in the process they are
+    #: stopping, even when the semantic outcome is a user Stop. This is Turn-local
+    #: cancellation state, not a persistent Session queue hold.
+    cancel_defers_queue_resume: bool = False
     logical_turn_id: Optional[str] = None
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
@@ -1795,7 +1800,6 @@ class SessionTurnManager:
 
         if (
             delivery_store.active_turn(conn, session_id) is not None
-            or delivery_store.queue_is_held(conn, session_id)
             or backend in self._draining_backends
         ):
             return None
@@ -2377,25 +2381,10 @@ class SessionTurnManager:
                 delivery = queued
             active = delivery_store.active_turn(conn, request.session_id)
             while active is None and not backend_draining:
-                held = delivery_store.queue_is_held(conn, request.session_id)
                 queued_payloads = delivery_store.claimable_fifo_prefix(
                     conn, request.session_id
                 )
-                held_fence = (
-                    delivery_store.ordering_head(
-                        conn,
-                        request.session_id,
-                        include_claimable=False,
-                    )
-                    if held
-                    else None
-                )
-                if held and held_fence is not None:
-                    segment_payloads = []
-                elif held:
-                    segment_payloads = [delivery_store.delivery_payload(delivery)]
-                else:
-                    segment_payloads = _collect_delivery_segment(queued_payloads)
+                segment_payloads = _collect_delivery_segment(queued_payloads)
                 segment = [
                     delivery_store.get_delivery(conn, str(row["id"]))
                     for row in segment_payloads
@@ -2729,8 +2718,6 @@ class SessionTurnManager:
                 self._delivery_has_attachment_references(row)
                 for row in delivery_rows
             ):
-                if not delivery_store.set_queue_hold(conn, session_id, held=False):
-                    raise RuntimeError("attachment queue promotion lost its Session hold CAS")
                 return DeliveryResult(
                     delivery_id,
                     None,
@@ -2774,8 +2761,6 @@ class SessionTurnManager:
                 )
             if not claimed_rows:
                 return DeliveryResult(delivery_id, None, "refused", reason="claim_lost")
-            if not delivery_store.set_queue_hold(conn, session_id, held=False):
-                raise RuntimeError("successful queue promotion lost its Session hold CAS")
 
         leader = claimed_rows[0]
         if leader["state"] == "claimed" and turn_id:
@@ -3013,19 +2998,6 @@ class SessionTurnManager:
             current_id = str((current or {}).get("id") or "") or None
             if current is None:
                 if request.content is None:
-                    observed_turn_id = str(request.expected_turn_id or "").strip()
-                    if observed_turn_id:
-                        observed_turn = delivery_store.get_turn(conn, observed_turn_id)
-                        if (
-                            observed_turn is not None
-                            and observed_turn["session_id"] == request.session_id
-                            and observed_turn["state"] == "terminal"
-                        ):
-                            delivery_store.set_queue_hold(
-                                conn,
-                                request.session_id,
-                                held=True,
-                            )
                     return DeliveryResult(None, None, "settled", reason="not_active")
                 delivery = self._insert_delivery(
                     conn,
@@ -3049,10 +3021,19 @@ class SessionTurnManager:
             else:
                 interrupt_target_id = current_id
                 delivery = None
-                queue_was_held = delivery_store.queue_is_held(
-                    conn,
-                    request.session_id,
-                )
+                expected_turn_id = str(request.expected_turn_id or "").strip()
+                if (
+                    request.content is None
+                    and expected_turn_id
+                    and current_id != expected_turn_id
+                ):
+                    return DeliveryResult(
+                        None,
+                        None,
+                        "settled",
+                        current_id,
+                        "target_turn_changed",
+                    )
                 control_in_progress = current.get("control_state") in {
                     "pending",
                     "interrupting",
@@ -3119,11 +3100,6 @@ class SessionTurnManager:
                         )
                         if not terminalized.get("changed") or retired is None:
                             raise RuntimeError("replacement supersession lost")
-                        delivery_store.set_queue_hold(
-                            conn,
-                            request.session_id,
-                            held=True,
-                        )
                         superseded = delivery_store.cas_turn(
                             conn,
                             current_id,
@@ -3155,15 +3131,6 @@ class SessionTurnManager:
                         if queued is None:
                             raise RuntimeError("concurrent P0 loser queue claim lost")
                 else:
-                    # Only an empty-P0 Stop establishes a backlog hold. A content-P0
-                    # replacement preserves whatever policy already existed; its
-                    # successor may bypass that policy but must not rewrite it.
-                    if delivery_id is None:
-                        delivery_store.set_queue_hold(
-                            conn,
-                            request.session_id,
-                            held=True,
-                        )
                     if delivery_id is not None:
                         successor_id = delivery_store.new_turn_id()
                         delivery_store.insert_turn(
@@ -3209,10 +3176,7 @@ class SessionTurnManager:
                             "control_attempt_id": attempt_id,
                             "control_expected_native_turn_id": current.get("native_turn_id"),
                             "control_receipt_outcome": None,
-                            "control_receipt_json": json.dumps(
-                                {"queue_hold_was_held": queue_was_held},
-                                sort_keys=True,
-                            ),
+                            "control_receipt_json": "{}",
                             "control_successor_delivery_id": delivery_id,
                             "control_successor_turn_id": successor_id,
                         },
@@ -3445,22 +3409,6 @@ class SessionTurnManager:
                     if not terminalized.get("changed") or queued is None:
                         raise RuntimeError("definitive P0 refusal fallback lost")
                     fallback_state = "queued"
-            if (
-                definitive
-                and not terminal_proven
-                and durable_turn.get("control_mode") == "replace"
-            ):
-                try:
-                    control_context = json.loads(
-                        str(durable_turn.get("control_receipt_json") or "{}")
-                    )
-                except (TypeError, ValueError):
-                    control_context = {}
-                delivery_store.set_queue_hold(
-                    conn,
-                    session_id,
-                    held=bool(control_context.get("queue_hold_was_held")),
-                )
             saved = delivery_store.cas_turn(
                 conn,
                 str(logical_turn_id),
@@ -3907,7 +3855,7 @@ class SessionTurnManager:
                 "changed": False,
                 "successor_turn_id": None,
                 "delivery_id": None,
-                "preserve_queue": False,
+                "defer_queue_resume": False,
             }
         result: dict[str, Any]
         materialized_id: str | None = None
@@ -3939,9 +3887,7 @@ class SessionTurnManager:
                     "changed": False,
                     "successor_turn_id": None,
                     "delivery_id": None,
-                    "preserve_queue": delivery_store.queue_is_held(
-                        conn, str((turn or {}).get("session_id") or "")
-                    ),
+                    "defer_queue_resume": False,
                 }
             else:
                 if outcome not in {"completed", "failed", "canceled", "not_written"}:
@@ -3977,7 +3923,7 @@ class SessionTurnManager:
                         "changed": False,
                         "successor_turn_id": None,
                         "delivery_id": None,
-                        "preserve_queue": True,
+                        "defer_queue_resume": True,
                         "reason": "start_acceptance_unproven",
                     }
                 if initial_batch and all(row["state"] == "claimed" for row in initial_batch):
@@ -4121,7 +4067,7 @@ class SessionTurnManager:
                         "changed": False,
                         "successor_turn_id": None,
                         "delivery_id": materialized_id,
-                        "preserve_queue": delivery_store.queue_is_held(conn, session_id),
+                        "defer_queue_resume": False,
                     }
                 else:
                     # A never-called steer has definitive negative evidence once
@@ -4266,8 +4212,8 @@ class SessionTurnManager:
                     if (
                         claimed_successor is None
                         and resume_successors
-                        and outcome == "completed"
                         and session_status == "active"
+                        and (outcome != "not_written" or bool(forced_retire_ids))
                     ):
                         claimed_successor = self._claim_fifo_batch_in_transaction(
                             conn,
@@ -4281,6 +4227,17 @@ class SessionTurnManager:
                             is not None
                         ):
                             start_deferred = True
+                    elif (
+                        claimed_successor is None
+                        and (
+                            not resume_successors
+                            or (outcome == "not_written" and not forced_retire_ids)
+                        )
+                        and session_status == "active"
+                        and delivery_store.claimable_fifo_head(conn, session_id)
+                        is not None
+                    ):
+                        start_deferred = True
                     latest_turn = delivery_store.get_turn(conn, turn_id)
                     if (
                         not linked_activation_deferred
@@ -4308,10 +4265,7 @@ class SessionTurnManager:
                         "changed": True,
                         "successor_turn_id": claimed_successor,
                         "delivery_id": materialized_id,
-                        "preserve_queue": (
-                            delivery_store.queue_is_held(conn, session_id)
-                            or start_deferred
-                        ),
+                        "defer_queue_resume": start_deferred,
                         "unknown_start_exhausted": unknown_start_exhausted,
                     }
                     terminal_run_ids = (
@@ -4410,7 +4364,7 @@ class SessionTurnManager:
         )
         if result.get("changed"):
             self._publish_queue_update(session_id)
-            if not result.get("preserve_queue"):
+            if not result.get("defer_queue_resume"):
                 asyncio.create_task(
                     self._resume_after_native_terminal(session_id, turn_id),
                     name=f"durable-terminal-resume:{session_id}",
@@ -4442,13 +4396,18 @@ class SessionTurnManager:
         definitive_prewrite_exit: bool,
         settled_by: str | None,
         terminal_is_error: bool,
+        cancel_defers_queue_resume: bool = False,
     ) -> dict[str, Any]:
         """Contain post-native ownership writes so runner cleanup always finishes."""
 
         try:
             if cancelled:
-                interruption = settled_by or SETTLED_BY_STOPPED
-                return self._terminalize_durable_turn(
+                interruption = settled_by or SETTLED_BY_NO_TERMINAL_RESULT
+                resume_after_cancel = bool(
+                    interruption == SETTLED_BY_STOPPED
+                    and not cancel_defers_queue_resume
+                )
+                result = self._terminalize_durable_turn(
                     turn_id,
                     "canceled" if interruption == SETTLED_BY_STOPPED else "failed",
                     settled_by=interruption,
@@ -4462,8 +4421,11 @@ class SessionTurnManager:
                         if interruption == SETTLED_BY_RESTARTED
                         else None
                     ),
-                    resume_successors=interruption != SETTLED_BY_RESTARTED,
+                    resume_successors=resume_after_cancel,
                 )
+                if not resume_after_cancel:
+                    result["defer_queue_resume"] = True
+                return result
             if failed:
                 # Dispatch may have written before raising. Preserve starting work
                 # for exact-evidence recovery instead of replaying it.
@@ -4477,7 +4439,7 @@ class SessionTurnManager:
                             expected_version=int(turn["version"]),
                             receipt={"reason": "runner_dispatch_failure"},
                         )
-                return {}
+                return {"defer_queue_resume": True}
             if prewrite_refused:
                 return self._settle_durable_prewrite_failure(
                     turn_id,
@@ -4503,7 +4465,7 @@ class SessionTurnManager:
                 "normal turn durable terminal reconciliation deferred for Turn=%s",
                 turn_id,
             )
-        return {}
+        return {"defer_queue_resume": True}
 
     async def terminalize_turn(self, turn_id: str, *, outcome: str = "completed") -> bool:
         result = self._terminalize_durable_turn(
@@ -4515,7 +4477,7 @@ class SessionTurnManager:
         successor_id = str(result.get("successor_turn_id") or "")
         if successor_id:
             await self._start_persisted_turn(successor_id)
-        elif result.get("changed") and not result.get("preserve_queue"):
+        elif result.get("changed") and not result.get("defer_queue_resume"):
             with self._sqlite_engine().connect() as conn:
                 terminal = delivery_store.get_turn(conn, turn_id)
             if terminal is not None:
@@ -4847,7 +4809,7 @@ class SessionTurnManager:
         )
         current = self.in_flight.get(session_id)
         should_resume = bool(result.get("successor_turn_id")) or (
-            current is None and not bool(result.get("preserve_queue"))
+            current is None and not bool(result.get("defer_queue_resume"))
         )
         if result.get("changed") and should_resume:
             return asyncio.create_task(
@@ -4910,7 +4872,6 @@ class SessionTurnManager:
                 .join(delivery_rows, delivery_rows.c.id == head_id)
                 .where(
                     agent_sessions.c.status == "active",
-                    agent_sessions.c.queue_hold_state == "open",
                     ~live_turn,
                 )
                 .order_by(
@@ -6144,10 +6105,9 @@ class SessionTurnManager:
         A no-op chunk sink keeps ``dispatch_turn`` alive for the turn's lifetime so
         ``in_flight`` stays populated (Stop works) and the session-level
         ``turn.start`` / ``turn.end`` lifecycle is published for the browser's
-        working indicator. On NATURAL completion the queue is flushed: messages the
-        user sent while this turn ran are merged + run as the next turn when the
-        durable Session hold is open. Stop and replacement policy lives in that
-        hold plus the durable Turn control slot, not on this process task.
+        working indicator. After every definitive terminal outcome, the oldest
+        compatible queued segment starts immediately. A real safety fence can defer
+        that resume, but an idle Session never keeps claimable backlog by policy.
 
         ``source`` selects the human vs. scheduler turn path in ``dispatch_turn``;
         a scheduled / watch run passes ``SOURCE_SCHEDULED`` so it goes through the
@@ -6217,9 +6177,9 @@ class SessionTurnManager:
                 cancelled = True
                 # Do NOT decide the reason here: the canceller knows it, and it is
                 # recorded on the Turn (``cancel_settled_by``) which is only popped
-                # in the ``finally`` below. A plain Stop leaves it unset and reads
-                # as ``SETTLED_BY_STOPPED``; a backend runtime refresh sets its own
-                # value so it is not misreported as a user stop (Codex P1).
+                # in the ``finally`` below. The Stop path sets ``stopped`` before
+                # cancellation; an unrelated task cancellation remains unknown and
+                # must not release queued work as though the user had stopped it.
                 raise
             except Exception:
                 # Preserve the exact boundary phase even when the handler's own
@@ -6251,6 +6211,9 @@ class SessionTurnManager:
                     terminal_is_error = bool(
                         turn is not None and turn.terminal_is_error
                     )
+                    cancel_defers_queue_resume = bool(
+                        turn is not None and turn.cancel_defers_queue_resume
+                    )
                     if turn is not None:
                         self.in_flight.pop(session_id, None)
                     if turn is not None:
@@ -6261,12 +6224,11 @@ class SessionTurnManager:
                     if cancelled:
                         # Attribute the cancellation to whoever caused it. The Turn
                         # carries the cause when the canceller had a more specific one
-                        # than "the user stopped this"; a plain Stop / send-now leaves
-                        # it unset, and ``stopped`` (→ ``canceled``) stays the default
-                        # reading of a cancelled turn.
+                        # than an unrelated runner cancellation. Only an explicit
+                        # Stop is allowed to project ``stopped`` and release backlog.
                         settled_by = (
                             getattr(turn, "cancel_settled_by", None) if turn is not None else None
-                        ) or SETTLED_BY_STOPPED
+                        ) or SETTLED_BY_NO_TERMINAL_RESULT
                     self._settle_model_hub_turn(context, settled_by)
                     if logical_turn_id and durable_turn_registered:
                         durable_terminal_result = self._reconcile_durable_runner_release(
@@ -6277,6 +6239,7 @@ class SessionTurnManager:
                             definitive_prewrite_exit=definitive_prewrite_exit,
                             settled_by=settled_by,
                             terminal_is_error=terminal_is_error,
+                            cancel_defers_queue_resume=cancel_defers_queue_resume,
                         )
                     # Only definitive pre-write failure may synthesize an empty
                     # terminal result. Once native work may have produced output, a
@@ -6302,20 +6265,14 @@ class SessionTurnManager:
                     # emit above so the honest outbound terminal writes first and this
                     # guarded write degrades to a no-op.
                     self._settle_turn_owned_agent_runs(context, settled_by)
-                    # Durable Session policy is the only backlog authority. Legacy
-                    # non-DB turns conservatively avoid draining after Stop/failure.
-                    preserve_durable_queue = bool(
+                    # A real start/reconciliation fence may defer resume. Stop,
+                    # failure, and natural completion are all terminal and therefore
+                    # all release the Session to its oldest claimable queue segment.
+                    defer_durable_resume = bool(
                         durable_turn_registered
-                        and durable_terminal_result.get("preserve_queue")
+                        and durable_terminal_result.get("defer_queue_resume")
                     )
-                    should_flush = (
-                        not preserve_durable_queue
-                        and not cancelled
-                        and not failed
-                        and not prewrite_refused
-                        and not definitive_prewrite_exit
-                        and settled_by != SETTLED_BY_STOPPED
-                    )
+                    should_flush = not defer_durable_resume
                     backend = self._context_backend(context)
                     if should_flush and backend in self._draining_backends:
                         self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
@@ -6750,6 +6707,7 @@ class SessionTurnManager:
             )
             if terminal.get("changed"):
                 released_sessions.add(session_id)
+            projected.cancel_defers_queue_resume = True
             if not projected.task.done():
                 projected.cancel_settled_by = settled_by
                 projected.task.cancel()
@@ -6809,6 +6767,7 @@ class SessionTurnManager:
             # ``canceled`` with the user-stop explanation (Codex P1). ``_run`` reads
             # it off the Turn when it pops it.
             turn.cancel_settled_by = SETTLED_BY_BACKEND_REFRESH
+            turn.cancel_defers_queue_resume = True
             if turn.task.done():
                 self.in_flight.pop(session_id, None)
                 from core.inbox_events import bus
@@ -7126,7 +7085,7 @@ class SessionTurnManager:
             return
         current = self.in_flight.get(session_id)
         should_resume = bool(terminal.get("successor_turn_id")) or not bool(
-            terminal.get("preserve_queue")
+            terminal.get("defer_queue_resume")
         )
         if (
             terminal.get("changed")
@@ -7420,6 +7379,13 @@ class SessionTurnManager:
                 terminal_is_error = bool(
                     turn is not None and turn.terminal_is_error
                 )
+                cancel_defers_queue_resume = bool(
+                    turn is not None and turn.cancel_defers_queue_resume
+                )
+                queue_resume_deferred = bool(
+                    cancel_defers_queue_resume
+                    or effective_settled_by == SETTLED_BY_RESTARTED
+                )
                 if turn is not None:
                     self.in_flight.pop(session_id, None)
                 if turn is not None:
@@ -7452,17 +7418,20 @@ class SessionTurnManager:
                                 if isinstance(terminal_evidence, dict)
                                 else None
                             ),
+                            resume_successors=not queue_resume_deferred,
                         )
+                        if queue_resume_deferred:
+                            durable_terminal_result["defer_queue_resume"] = True
                     except Exception:
                         logger.exception(
                             "agent-initiated durable terminal reconciliation deferred "
                             "for Turn=%s",
                             turn_token,
                         )
-                should_flush = (
-                    not bool(durable_terminal_result.get("preserve_queue"))
-                    and not cancelled
-                    and settled_by != SETTLED_BY_STOPPED
+                        durable_terminal_result = {"defer_queue_resume": True}
+                should_flush = not (
+                    queue_resume_deferred
+                    or bool(durable_terminal_result.get("defer_queue_resume"))
                 )
                 if should_flush:
                     try:

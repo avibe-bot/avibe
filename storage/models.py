@@ -196,11 +196,6 @@ agent_sessions = Table(
     # ``running`` while a turn is in flight, ``failed`` when the most recent
     # turn errored, ``idle`` otherwise. Drives the workbench sidebar status dot.
     Column("agent_status", String, nullable=False, server_default="idle"),
-    # Session-level policy/state. The hold blocks only autonomous backlog drain;
-    # explicit admission and empty-P1 release remain Delivery-manager decisions.
-    Column("queue_hold_state", String, nullable=False, server_default="open"),
-    Column("queue_hold_version", Integer, nullable=False, server_default="1"),
-    Column("queue_held_at", String, nullable=True),
     # Composer state is one value per Session, not a communication record.
     Column("composer_draft_text", Text, nullable=True),
     Column("composer_draft_updated_at", String, nullable=True),
@@ -229,10 +224,6 @@ agent_sessions = Table(
         "id",
     ),
     Index("ix_agent_sessions_native_session", "native_session_id"),
-    CheckConstraint(
-        "queue_hold_state in ('open', 'held')",
-        name="ck_agent_sessions_queue_hold_state",
-    ),
 )
 
 runtime_records = Table(

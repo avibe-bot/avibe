@@ -28,7 +28,7 @@ from storage.settings_service import SQLiteSettingsService, upsert_scope
 from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260804_0047"
+HEAD_REVISION = "20260806_0047"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -156,6 +156,45 @@ def test_message_transcript_order_upgrade_normalizes_and_indexes_exact_time(
         "coalesce(delivered_at, created_at)" in sql.lower()
         for sql in dependent_index_sql.values()
     )
+
+
+def test_session_queue_hold_removal_is_schema_complete_and_reversible(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260804_0046")
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "scope_queue_hold")
+        _insert_agent_session(
+            conn,
+            row_id="ses_queue_hold",
+            scope_id="scope_queue_hold",
+            anchor="queue-hold",
+            workdir=None,
+            backend="codex",
+            native="native-queue-hold",
+            last_active="now",
+        )
+        conn.execute(
+            "update agent_sessions set queue_hold_state='held', "
+            "queue_hold_version=7, queue_held_at='now' where id='ses_queue_hold'"
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("pragma table_info(agent_sessions)")}
+        version = conn.execute("select version_num from alembic_version").fetchone()
+    assert not {"queue_hold_state", "queue_hold_version", "queue_held_at"} & columns
+    assert version == (HEAD_REVISION,)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260804_0046")
+    with sqlite3.connect(db_path) as conn:
+        restored = conn.execute(
+            "select queue_hold_state, queue_hold_version, queue_held_at "
+            "from agent_sessions where id='ses_queue_hold'"
+        ).fetchone()
+    assert restored == ("open", 1, None)
 
 
 def test_scoped_native_message_identity_upgrade_and_safe_downgrade(
@@ -442,9 +481,9 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
             "select state, dedupe_key, snapshot_json from message_deliveries "
             "where id = 'msg_fsm_agent_run'"
         ).fetchone()
-        hold_state = conn.execute(
-            "select queue_hold_state from agent_sessions where id = 'ses_fsm'"
-        ).fetchone()
+        session_columns = {
+            row[1] for row in conn.execute("pragma table_info(agent_sessions)")
+        }
         draft_state = conn.execute(
             "select composer_draft_text, composer_draft_updated_at "
             "from agent_sessions where id = 'ses_fsm'"
@@ -481,7 +520,7 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     assert json.loads(migrated_dedupe[2])["type"] == "harness"
     assert migrated_agent_run[0:2] == ("queued", "avibe:agent_run:run-legacy")
     assert json.loads(migrated_agent_run[2])["type"] == "harness"
-    assert hold_state == ("held",)
+    assert not {"queue_hold_state", "queue_hold_version", "queue_held_at"} & session_columns
     assert draft_state == ("unfinished thought", now)
     assert message_session_fk[6] == "NO ACTION"
     assert version == (HEAD_REVISION,)
@@ -491,11 +530,9 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
-            assert message_deliveries.queued_session_ids_without_live_turns(conn) == []
-            assert message_deliveries.queued_session_ids_without_live_turns(
-                conn,
-                include_held=True,
-            ) == ["ses_fsm"]
+            assert message_deliveries.queued_session_ids_without_live_turns(conn) == [
+                "ses_fsm"
+            ]
     finally:
         engine.dispose()
 
@@ -741,8 +778,7 @@ def test_session_delivery_migration_binds_each_live_scheduled_run(
     with sqlite3.connect(db_path) as conn:
         migrated = conn.execute(
             """
-            select r.id, r.delivery_id, d.state, d.dedupe_key,
-                   s.queue_hold_state
+            select r.id, r.delivery_id, d.state, d.dedupe_key
             from agent_runs r
             join message_deliveries d on d.id = r.delivery_id
             join agent_sessions s on s.id = r.session_id
@@ -756,7 +792,6 @@ def test_session_delivery_migration_binds_each_live_scheduled_run(
             f"msg_{name}_migration",
             "queued",
             f"avibe:{name}:migration",
-            "open",
         )
         for name, _trigger_kind, _run_status in sorted(cases)
     ]

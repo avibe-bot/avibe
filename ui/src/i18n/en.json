@@ -1141,6 +1141,7 @@
     "qualityUnknown": "Measuring",
     "qualityRecovering": "Optimizing",
     "qualityDegraded": "Degraded",
+    "qualityLatency": "Latency {{latency}}",
     "protocolAutomatic": "{{protocol}} (Auto)",
     "protocolUnknown": "Detecting",
     "connectorConnectionsHealthy": "Cloudflare connections healthy",

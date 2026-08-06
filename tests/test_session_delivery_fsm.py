@@ -18,7 +18,11 @@ from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
 )
-from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import (
+    SETTLED_BY_RESTARTED,
+    SETTLED_BY_STOPPED,
+    SETTLED_BY_TERMINAL_RESULT,
+)
 from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
@@ -1425,11 +1429,11 @@ def test_older_reserved_submission_fences_later_queue_drain(managers) -> None:
     assert _row(engine, "msg_queued_second")["state"] == "queued"
 
 
-def test_hold_bypass_still_respects_an_unresolved_reservation_fence(managers) -> None:
+def test_idle_admission_still_respects_an_unresolved_reservation_fence(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     with engine.begin() as conn:
         for delivery_id, state, submitted_at in (
-            ("msg_held_backlog", "queued", "2026-08-01T00:00:01Z"),
+            ("msg_older_backlog", "queued", "2026-08-01T00:00:01Z"),
             ("msg_reserved_fence", "reserved", "2026-08-01T00:00:02Z"),
         ):
             delivery_store.insert_delivery(
@@ -1450,23 +1454,23 @@ def test_hold_bypass_still_respects_an_unresolved_reservation_fence(managers) ->
                 dispatch_text=delivery_id,
                 now=submitted_at,
             )
-        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
-
     admitted = asyncio.run(
         manager.deliver(
             DeliveryRequest(
                 session_id="ses_fsm",
                 priority="p3",
-                content="new held admission",
+                content="new idle admission",
             ),
             context=_context(),
         )
     )
 
     assert admitted.state == "queued"
-    assert starts == []
+    assert [text for _turn, text in starts] == ["msg_older_backlog"]
     with engine.connect() as conn:
-        assert delivery_store.active_turn(conn, "ses_fsm") is None
+        active = delivery_store.active_turn(conn, "ses_fsm")
+    assert active is not None
+    assert active["initial_delivery_id"] == "msg_older_backlog"
     assert _row(engine, "msg_reserved_fence")["state"] == "reserved"
 
 
@@ -2025,7 +2029,7 @@ def test_definitive_refusal_racing_idle_drain_starts_same_delivery_once(managers
     assert matching_starts[0][0] == row["turn_id"]
 
 
-def test_definitive_p1_refusal_requeues_behind_existing_fifo_head(managers) -> None:
+def test_definitive_p1_refusal_stays_behind_the_started_fifo_head(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     turn_id, _ = asyncio.run(_activate(manager))
     older = asyncio.run(
@@ -2034,8 +2038,6 @@ def test_definitive_p1_refusal_requeues_behind_existing_fifo_head(managers) -> N
             context=_context(),
         )
     )
-    with engine.begin() as conn:
-        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
     entered = threading.Event()
     release = threading.Event()
 
@@ -2055,8 +2057,6 @@ def test_definitive_p1_refusal_requeues_behind_existing_fifo_head(managers) -> N
         )
         assert await asyncio.to_thread(entered.wait, 5)
         assert await manager.terminalize_turn(turn_id)
-        with engine.begin() as conn:
-            assert delivery_store.set_queue_hold(conn, "ses_fsm", held=False)
         release.set()
         return await pending
 
@@ -2064,9 +2064,8 @@ def test_definitive_p1_refusal_requeues_behind_existing_fifo_head(managers) -> N
     older_row = _row(engine, str(older.delivery_id))
     fallback_row = _row(engine, str(fallback.delivery_id))
     assert older_row["state"] == "claimed"
-    assert fallback_row["state"] == "claimed"
-    assert fallback_row["turn_id"] == older_row["turn_id"]
-    assert [text for _turn, text in starts].count("older backlog\nfallback") == 1
+    assert fallback_row["state"] == "queued"
+    assert [text for _turn, text in starts].count("older backlog") == 1
 
 
 def test_p0_successor_persistence_failure_never_calls_stop(managers, monkeypatch) -> None:
@@ -2105,13 +2104,15 @@ def test_p0_successor_persistence_failure_never_calls_stop(managers, monkeypatch
     assert all(row["dispatch_text"] != "replacement" for row in _rows(engine))
 
 
-def test_definitive_p0_refusal_restores_preexisting_queue_hold(managers) -> None:
+def test_definitive_p0_refusal_leaves_backlog_behind_the_active_turn(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 
     async def run() -> None:
         turn_id, context = await _activate(manager)
-        with engine.begin() as conn:
-            assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
+        queued = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="backlog"),
+            context=_context(),
+        )
         holder = asyncio.create_task(asyncio.Event().wait())
         manager.in_flight["ses_fsm"] = Turn(
             task=holder,
@@ -2133,13 +2134,16 @@ def test_definitive_p0_refusal_restores_preexisting_queue_hold(managers) -> None
             holder.cancel()
             await asyncio.gather(holder, return_exceptions=True)
         assert result.state == "refused"
+        return str(queued.delivery_id), turn_id
 
-    asyncio.run(run())
+    queued_id, turn_id = asyncio.run(run())
     with engine.connect() as conn:
-        assert delivery_store.queue_is_held(conn, "ses_fsm") is True
+        active = delivery_store.active_turn(conn, "ses_fsm")
+    assert active is not None and active["id"] == turn_id
+    assert _row(engine, queued_id)["state"] == "queued"
 
 
-def test_empty_p0_establishes_durable_hold_before_stop(managers) -> None:
+def test_empty_p0_uses_the_control_slot_without_creating_a_message_delivery(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 
     async def run() -> None:
@@ -2150,6 +2154,7 @@ def test_empty_p0_establishes_durable_hold_before_stop(managers) -> None:
             context=context,
             logical_turn_id=turn_id,
         )
+        before = {row["id"] for row in _rows(engine)}
         try:
             result = await manager.deliver(
                 DeliveryRequest(session_id="ses_fsm", priority="p0", content=None),
@@ -2157,7 +2162,10 @@ def test_empty_p0_establishes_durable_hold_before_stop(managers) -> None:
             )
             assert result.state == "waiting_terminal"
             with engine.connect() as conn:
-                assert delivery_store.queue_is_held(conn, "ses_fsm") is True
+                controlled = delivery_store.get_turn(conn, turn_id)
+            assert controlled is not None
+            assert controlled["control_mode"] == "stop_only"
+            assert {row["id"] for row in _rows(engine)} == before
         finally:
             holder.cancel()
             await asyncio.gather(holder, return_exceptions=True)
@@ -2165,7 +2173,7 @@ def test_empty_p0_establishes_durable_hold_before_stop(managers) -> None:
     asyncio.run(run())
 
 
-def test_empty_p0_preserves_hold_when_observed_turn_terminalizes_before_claim(
+def test_empty_p0_terminal_race_still_resumes_the_queued_head(
     managers,
     monkeypatch,
 ) -> None:
@@ -2195,11 +2203,9 @@ def test_empty_p0_preserves_hold_when_observed_turn_terminalizes_before_claim(
 
     assert result["ok"] is True
     assert result["status"] == "stale_released"
-    with engine.connect() as conn:
-        assert delivery_store.queue_is_held(conn, "ses_fsm") is True
     asyncio.run(manager._resume_post_terminal("ses_fsm"))
-    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
-    assert [text for _turn, text in starts].count("backlog") == 0
+    assert _row(engine, str(queued.delivery_id))["state"] == "claimed"
+    assert [text for _turn, text in starts].count("backlog") == 1
 
 
 def test_content_p0_preserves_open_hold_and_claims_successor_once(managers) -> None:
@@ -2237,8 +2243,6 @@ def test_content_p0_preserves_open_hold_and_claims_successor_once(managers) -> N
     assert manager.controller.command_handler.handle_stop.await_count == 1
     delivery = _row(engine, delivery_id)
     assert delivery["state"] == "claimed"
-    with engine.connect() as conn:
-        assert delivery_store.queue_is_held(conn, "ses_fsm") is False
 
 
 def test_stopped_runner_starts_successor_already_activated_by_terminal_result(
@@ -2627,7 +2631,6 @@ def test_empty_p0_supersedes_in_flight_content_replacement(managers) -> None:
                 agent_runs.c.id == run_id
             )
         ).one()
-        assert delivery_store.queue_is_held(conn, "ses_fsm") is True
     assert target is not None and target["control_mode"] == "stop_only"
     assert target["control_successor_turn_id"] is None
     assert target["control_successor_delivery_id"] is None
@@ -3019,11 +3022,11 @@ async def test_permanent_start_rejection_retires_delivery_without_retry(managers
     assert delivery["state"] == "retired"
     history = json.loads(delivery["delivery_history_json"])["events"]
     assert history[-1]["outcome"] == "invalid_input"
-    assert _row(engine, str(following.delivery_id))["state"] == "queued"
+    assert _row(engine, str(following.delivery_id))["state"] == "claimed"
     assert len(starts) == 1
     with engine.connect() as conn:
         terminal = delivery_store.get_turn(conn, str(admitted.turn_id))
-        assert delivery_store.claimable_fifo_head(conn, "ses_fsm") is not None
+        assert delivery_store.claimable_fifo_head(conn, "ses_fsm") is None
     assert terminal is not None
     assert terminal["terminal_outcome"] == "not_written"
 
@@ -3468,7 +3471,7 @@ def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
     assert status == "failed"
 
 
-def test_backend_refresh_preserves_successor_activated_by_old_turn_cancellation(
+def test_backend_refresh_defers_successor_activated_by_old_turn_cancellation(
     managers,
     monkeypatch,
 ) -> None:
@@ -3539,8 +3542,8 @@ def test_backend_refresh_preserves_successor_activated_by_old_turn_cancellation(
         successor = delivery_store.get_turn(conn, successor_turn_id)
         replacement = delivery_store.get_delivery(conn, replacement_delivery_id)
     assert old_turn is not None and old_turn["state"] == "terminal"
-    assert successor is not None and successor["state"] == "starting"
-    assert replacement is not None and replacement["state"] == "claimed"
+    assert successor is not None and successor["state"] == "terminal"
+    assert replacement is not None and replacement["state"] == "queued"
     assert manager._deferred_restart_sessions == {"codex": {"ses_fsm"}}
 
 
@@ -4175,13 +4178,11 @@ def test_send_now_retires_head_whose_agent_run_can_no_longer_start(
     _insert_queued_delivery_with_run(
         engine,
         delivery_id=poisoned_id,
-        text="held head whose run failed",
+        text="head whose run failed",
         now="2026-08-01T00:00:01Z",
-        run_id="run_settled_behind_hold",
+        run_id="run_settled_at_head",
         run_status="failed",
     )
-    with engine.begin() as conn:
-        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
 
     promoted = asyncio.run(
         manager.deliver(
@@ -4199,8 +4200,6 @@ def test_send_now_retires_head_whose_agent_run_can_no_longer_start(
     assert promoted.reason == "stale_head"
     assert _row(engine, poisoned_id)["state"] == "retired"
     assert starts == []
-    with engine.connect() as conn:
-        assert delivery_store.queue_is_held(conn, "ses_fsm")
 
 
 def test_p3_admission_retires_poisoned_backlog_and_still_starts(
@@ -4508,15 +4507,15 @@ def test_unresolved_p1_fence_blocks_later_but_not_older_fifo(managers) -> None:
     assert [text for _, text in starts].count("later") == 0
 
 
-def test_held_old_backlog_does_not_block_new_idle_p3(managers) -> None:
-    """MESSAGE-DELIVERY-102: hold blocks autonomous backlog only."""
+def test_stop_terminalization_resumes_oldest_queued_segment(managers) -> None:
+    """MESSAGE-DELIVERY-102: an idle Session cannot retain claimable backlog."""
 
     manager, other, engine, _engine_b, starts = managers
 
     async def run() -> None:
         turn_id, context = await _activate(manager)
         await manager.deliver(
-            DeliveryRequest(session_id="ses_fsm", priority="p3", content="held-old"),
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="queued-after-stop"),
             context=_context(),
         )
         holder = asyncio.create_task(asyncio.Event().wait())
@@ -4533,18 +4532,93 @@ def test_held_old_backlog_does_not_block_new_idle_p3(managers) -> None:
         assert await other.terminalize_turn(turn_id)
         holder.cancel()
         await asyncio.gather(holder, return_exceptions=True)
-        admitted = await other.deliver(
-            DeliveryRequest(session_id="ses_fsm", priority="p3", content="new-idle"),
-            context=_context(),
-        )
-        assert admitted.state == "claimed"
 
     asyncio.run(run())
     rows = _rows(engine)
-    assert next(row for row in rows if row["dispatch_text"] == "held-old")["state"] == "queued"
-    assert [text for _, text in starts].count("new-idle") == 1
+    queued = next(row for row in rows if row["dispatch_text"] == "queued-after-stop")
+    assert queued["state"] == "claimed"
+    assert [text for _, text in starts].count("queued-after-stop") == 1
+
+
+@pytest.mark.parametrize(
+    "settled_by",
+    [SETTLED_BY_RESTARTED, SETTLED_BY_STOPPED],
+)
+def test_canceled_shutdown_runner_preserves_deferred_queue(
+    managers,
+    settled_by: str,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+    queued = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="resume after service restart",
+            ),
+            context=_context(),
+        )
+    )
+    terminal = manager._terminalize_durable_turn(
+        turn_id,
+        "canceled" if settled_by == SETTLED_BY_STOPPED else "failed",
+        settled_by=settled_by,
+        evidence_kind=(
+            "service_shutdown_after_user_stop"
+            if settled_by == SETTLED_BY_STOPPED
+            else "service_shutdown"
+        ),
+        resume_successors=False,
+    )
+    assert terminal["changed"] is True
+
+    released = manager._reconcile_durable_runner_release(
+        turn_id,
+        cancelled=True,
+        failed=False,
+        prewrite_refused=False,
+        definitive_prewrite_exit=False,
+        settled_by=settled_by,
+        terminal_is_error=True,
+        cancel_defers_queue_resume=True,
+    )
+
+    assert released["defer_queue_resume"] is True
+    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+
+
+def test_ambiguous_start_failure_defers_runner_queue_resume(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="start exactly once",
+            ),
+            context=_context(),
+        )
+    )
+    assert admitted.turn_id
+
+    released = manager._reconcile_durable_runner_release(
+        admitted.turn_id,
+        cancelled=False,
+        failed=True,
+        prewrite_refused=False,
+        definitive_prewrite_exit=False,
+        settled_by=None,
+        terminal_is_error=True,
+    )
+
     with engine.connect() as conn:
-        assert delivery_store.queue_is_held(conn, "ses_fsm") is True
+        turn = delivery_store.get_turn(conn, admitted.turn_id)
+    assert released["defer_queue_resume"] is True
+    assert turn is not None
+    assert turn["state"] == "starting"
+    assert turn["start_receipt_outcome"] == "unknown"
+    assert [text for _turn_id, text in starts] == ["start exactly once"]
 
 
 def test_open_backlog_starts_oldest_before_new_idle_p3(managers) -> None:
@@ -5121,9 +5195,14 @@ def test_repeated_refusal_then_acceptance_preserves_attempt_history(managers) ->
         )
     )
     assert _row(engine, str(first_attempt.delivery_id))["state"] == "queued"
-    with engine.begin() as conn:
-        delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
-    assert asyncio.run(other.terminalize_turn(t1))
+    terminal = other._terminalize_durable_turn(
+        t1,
+        "completed",
+        settled_by="service_shutdown",
+        evidence_kind="test_deferred_resume",
+        resume_successors=False,
+    )
+    assert terminal["changed"] is True
     t2, context2 = asyncio.run(
         _activate(other, text="new priority work", priority="p1")
     )
@@ -5146,21 +5225,26 @@ def test_repeated_refusal_then_acceptance_preserves_attempt_history(managers) ->
     assert row["current_attempt_id"] is None
 
 
-def test_stale_send_now_does_not_release_the_queue_hold(managers) -> None:
+def test_stale_send_now_does_not_mutate_the_deferred_queue(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     old_turn_id, _ = asyncio.run(_activate(manager, text="old turn"))
     queued = asyncio.run(
         manager.deliver(
-            DeliveryRequest(session_id="ses_fsm", priority="p3", content="held backlog"),
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="deferred backlog"),
             context=_context(),
         )
     )
     with engine.connect() as conn:
         old_turn = delivery_store.get_turn(conn, old_turn_id)
     assert old_turn is not None
-    with engine.begin() as conn:
-        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
-    assert asyncio.run(manager.terminalize_turn(old_turn_id))
+    terminal = manager._terminalize_durable_turn(
+        old_turn_id,
+        "completed",
+        settled_by="service_shutdown",
+        evidence_kind="test_deferred_resume",
+        resume_successors=False,
+    )
+    assert terminal["changed"] is True
     replacement_turn_id, replacement_context = asyncio.run(
         _activate(manager, text="replacement turn", priority="p1")
     )
@@ -5184,7 +5268,6 @@ def test_stale_send_now_does_not_release_the_queue_hold(managers) -> None:
     assert result.state == "refused"
     assert result.reason == "stale_turn"
     with engine.connect() as conn:
-        assert delivery_store.queue_is_held(conn, "ses_fsm")
         current = delivery_store.active_turn(conn, "ses_fsm")
     assert current is not None and current["id"] == replacement_turn_id
     assert _row(engine, str(queued.delivery_id))["state"] == "queued"
@@ -5222,8 +5305,6 @@ def test_send_now_keeps_attachment_head_for_the_next_turn(
             context=_context(),
         )
     )
-    with engine.begin() as conn:
-        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
     manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
 
     promoted = asyncio.run(
@@ -5242,8 +5323,6 @@ def test_send_now_keeps_attachment_head_for_the_next_turn(
     assert promoted.reason == "attachments_wait_for_new_turn"
     manager._steer.assert_not_awaited()
     assert _row(engine, str(queued.delivery_id))["state"] == "queued"
-    with engine.connect() as conn:
-        assert not delivery_store.queue_is_held(conn, "ses_fsm")
 
 
 def test_content_p1_with_attachment_queues_behind_an_active_turn(

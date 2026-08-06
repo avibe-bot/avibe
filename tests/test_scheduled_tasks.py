@@ -3003,7 +3003,7 @@ def test_task_definition_projection_follows_the_exact_terminal_cas_winner(
 
 @pytest.mark.parametrize("shutdown_entrypoint", ["stop", "lease_loss"])
 @pytest.mark.parametrize("user_stopped", [False, True])
-def test_service_teardown_terminalizes_transferred_durable_turn_without_draining_held_queue(
+def test_service_teardown_terminalizes_transferred_turn_without_starting_queued_work(
     tmp_path: Path,
     monkeypatch,
     shutdown_entrypoint: str,
@@ -3092,7 +3092,6 @@ def test_service_teardown_terminalizes_transferred_durable_turn_without_draining
             turn_id=turn_id,
             evidence={"kind": "native_acceptance"},
         )
-        message_deliveries.set_queue_hold(conn, session_id, held=True)
         queued = message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
@@ -3100,7 +3099,7 @@ def test_service_teardown_terminalizes_transferred_durable_turn_without_draining
             author="user",
             source="user",
             message_type="user",
-            text="keep me held",
+            text="keep me queued",
             native_message_id="held-after-shutdown",
         )
         successor_delivery_id = None
@@ -3200,6 +3199,7 @@ def test_service_teardown_terminalizes_transferred_durable_turn_without_draining
     service.scheduler = _StubScheduler()
     manager = SessionTurnManager(controller)
     manager._engine = engine
+    manager._resume_post_terminal = AsyncMock()
     controller.session_turns = manager
     controller.scheduled_task_service = service
     context = MessageContext(
@@ -3271,7 +3271,6 @@ def test_service_teardown_terminalizes_transferred_durable_turn_without_draining
             if successor_delivery_id
             else None
         )
-        assert message_deliveries.queue_is_held(conn, session_id) is True
     assert terminal_turn is not None
     assert terminal_turn["state"] == "terminal"
     assert terminal_turn["terminal_outcome"] == expected_status
@@ -3292,6 +3291,7 @@ def test_service_teardown_terminalizes_transferred_durable_turn_without_draining
         assert successor_delivery["priority"] == "p3"
         assert successor_delivery["turn_id"] is None
     assert manager.in_flight == {}
+    manager._resume_post_terminal.assert_not_awaited()
     assert prompts == ["durable prompt interrupted by shutdown"]
 
 

@@ -2343,7 +2343,7 @@ scenarios:
     kind: cancellation
     layer: scenario
     backend: shared
-    test: tests/test_scheduled_tasks.py::test_service_teardown_terminalizes_transferred_durable_turn_without_draining_held_queue
+    test: tests/test_scheduled_tasks.py::test_service_teardown_terminalizes_transferred_turn_without_starting_queued_work
   - id: HFR-104
     name: restart recovery fails executed Runs and preserves separately owned rows
     status: covered
@@ -2380,12 +2380,12 @@ scenarios:
     backend: codex
     test: tests/test_runtime_ownership.py::test_hfr_131_open_head_wakes_survives_reclaim_and_claims_exact_head
   - id: HFR-132
-    name: a held head survives reclamation and starts only after explicit release
+    name: a queued head wakes without an explicit Session policy release
     status: covered
     kind: recovery
     layer: scenario
     backend: codex
-    test: tests/test_runtime_ownership.py::test_hfr_132_held_head_survives_reclaim_then_explicit_release_starts
+    test: tests/test_runtime_ownership.py::test_hfr_132_queued_head_wakes_without_an_explicit_release
   - id: HFR-133
     name: unresolved Delivery fences and Turn ownership block reclamation
     status: covered
