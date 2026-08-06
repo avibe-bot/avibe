@@ -26,10 +26,13 @@ def test_remote_roles_keep_management_monotonic_but_execution_disabled() -> None
 
     assert viewer.can_read_instance is True
     assert viewer.can_chat is False
+    assert viewer.can_use_cloud_asr is False
     assert editor.can_read_instance is True
     assert editor.can_chat is False
+    assert editor.can_use_cloud_asr is True
     assert editor.can_manage_projects is False
     assert owner.can_chat is False
+    assert owner.can_use_cloud_asr is True
     assert owner.can_manage_projects is True
     assert owner.can_manage_agents is True
     assert owner.can_use_terminal is False
@@ -37,6 +40,7 @@ def test_remote_roles_keep_management_monotonic_but_execution_disabled() -> None
     assert owner.can_use_system is False
     assert trusted_local_context().can_manage_instance is True
     assert trusted_local_context().can_chat is True
+    assert trusted_local_context().can_use_cloud_asr is False
 
 
 @pytest.mark.parametrize(

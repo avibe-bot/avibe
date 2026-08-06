@@ -5389,13 +5389,22 @@ async def config_post():
                         agent_backend_runtime["restart_code"] = restart_result.get("code")
             else:
                 agent_backend_runtime["apply_on_next_start"] = True
-    response_payload = api.client_config_payload(config)
-    if remote_access_runtime is not None:
-        response_payload["remote_access_runtime"] = remote_access_runtime
-    if platform_runtime is not None:
-        response_payload["platform_runtime"] = platform_runtime
-    if agent_backend_runtime is not None:
-        response_payload["agent_backend_runtime"] = agent_backend_runtime
+    authorization_context = getattr(g, "authorization_context", None)
+    is_remote = bool(authorization_context is not None and authorization_context.is_remote)
+    response_payload = (
+        api.remote_config_payload(config)
+        if is_remote
+        else api.client_config_payload(config)
+    )
+    # Remote config writes are restricted to preferences. Runtime reconciliation
+    # results belong to trusted-local configuration and can expose local state.
+    if not is_remote:
+        if remote_access_runtime is not None:
+            response_payload["remote_access_runtime"] = remote_access_runtime
+        if platform_runtime is not None:
+            response_payload["platform_runtime"] = platform_runtime
+        if agent_backend_runtime is not None:
+            response_payload["agent_backend_runtime"] = agent_backend_runtime
     return jsonify(response_payload)
 
 

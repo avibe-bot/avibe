@@ -2414,12 +2414,40 @@ def test_mint_cloud_token_returns_none_on_backend_error(monkeypatch) -> None:
     assert remote_access.mint_cloud_token(config, sub="u", email="e@x.com") is None
 
 
-def test_cloud_token_for_request_does_not_mint_when_remote_chat_is_disabled(
+@pytest.mark.parametrize("role", ("editor", "owner"))
+def test_cloud_token_for_request_mints_for_authorized_remote_asr(
     monkeypatch,
+    role,
 ) -> None:
     config = _cloud_broker_config()
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
-    cookie = _session_cookie(config)
+    cookie = _session_cookie(config, role=role)
+    captured: dict = {}
+
+    def fake_json_request(*args, **kwargs):
+        captured["payload"] = args[1]
+        return {"access_token": "ct_xyz", "expires_in": 43200}
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
+
+    token = remote_access.cloud_token_for_request(config, cookie)
+
+    assert token is not None
+    assert token["base_url"] == "https://avibe.bot"
+    assert token["token"] == "ct_xyz"
+    assert token["scope"] == "asr"
+    assert token["expires_at"] > int(time.time())
+    assert captured["payload"] == {
+        "sub": "user-1",
+        "email": "alex@example.com",
+        "scope": "asr",
+    }
+
+
+def test_cloud_token_for_request_rejects_non_asr_scope(monkeypatch) -> None:
+    config = _cloud_broker_config()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    cookie = _session_cookie(config, role="owner")
     called = False
 
     def fake_json_request(*args, **kwargs):
@@ -2429,7 +2457,7 @@ def test_cloud_token_for_request_does_not_mint_when_remote_chat_is_disabled(
 
     monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
 
-    assert remote_access.cloud_token_for_request(config, cookie) is None
+    assert remote_access.cloud_token_for_request(config, cookie, scope="future") is None
     assert called is False
 
 
@@ -2480,6 +2508,8 @@ def test_cloud_token_for_request_requires_editor_role(monkeypatch) -> None:
 
     assert remote_access.cloud_token_for_request(config, cookie) is None
     assert called is False
+
+
 def test_ra_tq_029_connector_environment_applies_ip_and_interface_controls() -> None:
     config = _config()
     cloud = config.remote_access.vibe_cloud

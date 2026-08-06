@@ -210,9 +210,9 @@ def _project_for_context(
             str(project.get("id") or ""),
         )
     }
-    if not context.is_instance_owner:
-        # Remote collaborators need Project identity and routing defaults, but
-        # never the host's absolute workdir or arbitrary local metadata.
+    if context.is_remote:
+        # A remote Instance owner is still not trusted to inspect the host's
+        # absolute workdir or arbitrary local metadata.
         payload["folder_path"] = ""
         payload["metadata"] = {}
     return payload

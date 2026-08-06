@@ -805,6 +805,39 @@ def test_remote_config_uses_the_safe_projection_for_an_instance_owner(monkeypatc
     assert "memory" not in payload
 
 
+def test_remote_config_post_uses_the_safe_projection_for_an_instance_owner(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    config.runtime.default_cwd = "/private/local-agent-workdir"
+    config.agents.codex.cli_path = "/opt/avibe/bin/codex"
+    config.save()
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner", role="owner"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.post(
+        "/api/config",
+        json={"ui": {"instance_name": "Remote Workbench"}},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ui"]["instance_name"] == "Remote Workbench"
+    assert set(payload) == {"language", "mode", "setup_state", "ui", "version"}
+    assert "runtime" not in payload
+    assert "agents" not in payload
+    assert "memory" not in payload
+    assert "remote_access_runtime" not in payload
+    assert "platform_runtime" not in payload
+    assert "agent_backend_runtime" not in payload
+
+
 def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -950,6 +983,31 @@ def test_remote_agent_termination_is_blocked_before_controller_access(
         path,
         json=json_body,
         headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize("path", ("/api/running-agents", "/api/agents-graph"))
+def test_remote_runtime_snapshots_are_blocked_before_controller_access(monkeypatch, tmp_path, path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner", role="owner"),
+        domain="alex.avibe.bot",
+    )
+
+    async def unexpected_snapshot(*args, **kwargs):
+        raise AssertionError("remote runtime snapshot reached the local controller")
+
+    monkeypatch.setattr("vibe.internal_client.list_running_agents", unexpected_snapshot)
+    response = client.get(
+        path,
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )

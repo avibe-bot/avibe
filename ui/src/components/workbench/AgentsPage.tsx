@@ -71,7 +71,7 @@ export const AgentsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const { capabilities } = useInstanceAuthorization();
+  const { capabilities, remote } = useInstanceAuthorization();
   const [agentsTab, setAgentsTab] = useState<AgentsTabKey>('definitions');
   const [runningActiveCount, setRunningActiveCount] = useState<number | null>(null);
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
@@ -91,6 +91,8 @@ export const AgentsPage: React.FC = () => {
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
+  const visibleTabs = remote ? (['definitions'] as const) : AGENTS_TAB_ORDER;
+  const activeTab = remote ? 'definitions' : agentsTab;
 
   const refreshOnboarding = useCallback(async () => {
     if (!capabilities.can_manage_agents) {
@@ -151,6 +153,10 @@ export const AgentsPage: React.FC = () => {
   }, [selected]);
 
   const fetchRunningActiveCount = useCallback(async () => {
+    if (remote) {
+      setRunningActiveCount(null);
+      return;
+    }
     try {
       const result = await api.getRunningAgents();
       if (result.ok && result.counts) {
@@ -165,7 +171,7 @@ export const AgentsPage: React.FC = () => {
     } catch {
       setRunningActiveCount(null);
     }
-  }, [api]);
+  }, [api, remote]);
 
   // Keep the badge fresh on every tab (including 运行) so it never depends on
   // the graph view's filters.
@@ -174,6 +180,10 @@ export const AgentsPage: React.FC = () => {
   }, [fetchRunningActiveCount]);
 
   useEffect(() => {
+    if (remote) {
+      setEventBridgeConnected(false);
+      return;
+    }
     return api.connectWorkbenchEvents({
       onConnected: (data) => {
         if (data.source === 'controller') {
@@ -192,9 +202,10 @@ export const AgentsPage: React.FC = () => {
       onSessionStatus: () => fetchRunningActiveCount(),
       onAuthorizationChanged: () => void refresh(),
     });
-  }, [api, fetchRunningActiveCount, refresh]);
+  }, [api, fetchRunningActiveCount, refresh, remote]);
 
   useEffect(() => {
+    if (remote) return;
     // Reconcile the badge even while SSE is connected: process death / orphan /
     // reap is a sampled snapshot with no run/session SSE event, so a slow
     // liveness poll keeps the count fresh (30s connected, 8s disconnected),
@@ -244,7 +255,7 @@ export const AgentsPage: React.FC = () => {
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, fetchRunningActiveCount]);
+  }, [eventBridgeConnected, fetchRunningActiveCount, remote]);
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
@@ -420,10 +431,10 @@ export const AgentsPage: React.FC = () => {
         }
       />
 
-      {/* Sub-tab row: Definitions | Running */}
+      {/* Local runtime diagnostics are intentionally unavailable remotely. */}
       <div className="flex items-center gap-0 overflow-x-auto border-b border-border">
-        {AGENTS_TAB_ORDER.map((key) => {
-          const active = agentsTab === key;
+        {visibleTabs.map((key) => {
+          const active = activeTab === key;
           return (
             <button
               key={key}
@@ -459,10 +470,10 @@ export const AgentsPage: React.FC = () => {
         })}
       </div>
 
-      {/* 运行 tab body — the run graph (replaces the old flat running list). */}
-      {agentsTab === 'running' && <AgentGraphTab />}
+      {/* The run graph is a trusted-local process diagnostic. */}
+      {!remote && activeTab === 'running' && <AgentGraphTab />}
 
-      {agentsTab === 'definitions' && onboardingInventory && (
+      {activeTab === 'definitions' && onboardingInventory && (
         <OrganizationAgentOnboarding
           inventory={onboardingInventory}
           expanded={onboardingExpanded}
@@ -474,7 +485,7 @@ export const AgentsPage: React.FC = () => {
       )}
 
       {/* Toolbar — design.pen Imduv: search + backend filter + spacer + Import + 新建 Agent */}
-      <div className={clsx('flex flex-wrap items-center gap-2.5', agentsTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
+      <div className={clsx('flex flex-wrap items-center gap-2.5', activeTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
         <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
@@ -497,7 +508,7 @@ export const AgentsPage: React.FC = () => {
         </Button>
       </div>
 
-      {agentsTab === 'definitions' && error && (
+      {activeTab === 'definitions' && error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
           {error}
         </div>
@@ -512,7 +523,7 @@ export const AgentsPage: React.FC = () => {
       <div
         className={clsx(
           'grid gap-5',
-          agentsTab === 'running' && 'hidden',
+          activeTab === 'running' && 'hidden',
           // `minmax(0,1fr)` + `min-w-0` keep the list column shrinkable; bare
           // `1fr` would let a long agent row push the fixed detail card off-screen.
           selected ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px]' : 'grid-cols-1',

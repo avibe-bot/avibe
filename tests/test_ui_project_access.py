@@ -371,12 +371,11 @@ def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path
         "publish",
         lambda event_type, data: published.append((event_type, data)),
     )
-    owner = _remote_client(config, role="owner", email="owner@example.com")
-    archive = owner.delete(
+    local = app.test_client()
+    archive = local.delete(
         f"/api/projects/{ids['project_a']}",
-        base_url=REMOTE_ORIGIN,
-        environ_base=REMOTE_PEER,
-        headers=csrf_headers(owner, REMOTE_ORIGIN),
+        base_url="http://localhost",
+        headers=csrf_headers(local, "http://localhost"),
     )
     assert archive.status_code == 200
     assert (
@@ -518,6 +517,14 @@ def test_remote_message_is_blocked_before_persistence_or_dispatch(
 def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            scopes.update()
+            .where(scopes.c.native_id == ids["project_a"])
+            .values(metadata_json=json.dumps({"host_path_hint": "/private/host"}))
+        )
+    engine.dispose()
 
     viewer = _remote_client(config, role="viewer", email="alice@example.com")
     assert _get(viewer, f"/api/sessions/{ids['session_a']}").status_code == 200
@@ -579,15 +586,28 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     assert _get(organization_member, f"/api/media/{ids['media_a']}").status_code == 404
 
     owner = _remote_client(config, role="owner", email="owner@example.com")
-    assert {row["id"] for row in _get(owner, "/api/projects").get_json()["projects"]} == {
+    owner_projects = _get(owner, "/api/projects").get_json()["projects"]
+    assert {row["id"] for row in owner_projects} == {
         ids["project_a"],
         ids["project_b"],
     }
+    assert all(row["folder_path"] == "" and row["metadata"] == {} for row in owner_projects)
+    owner_project = _get(owner, f"/api/projects/{ids['project_a']}").get_json()
+    assert owner_project["folder_path"] == ""
+    assert owner_project["metadata"] == {}
+    owner_bootstrap = _get(owner, "/api/workbench/projects-bootstrap").get_json()
+    assert all(
+        row["folder_path"] == "" and row["metadata"] == {}
+        for row in owner_bootstrap["projects"]
+    )
     assert _get(owner, f"/api/sessions/{ids['unscoped']}").status_code == 200
 
     local = app.test_client()
     local_projects = local.get("/api/projects", base_url="http://localhost").get_json()["projects"]
     assert {row["id"] for row in local_projects} == {ids["project_a"], ids["project_b"]}
+    local_project_a = next(row for row in local_projects if row["id"] == ids["project_a"])
+    assert local_project_a["folder_path"] == str((tmp_path / "project-a").resolve())
+    assert local_project_a["metadata"] == {"host_path_hint": "/private/host"}
     assert local.get(f"/api/sessions/{ids['unscoped']}", base_url="http://localhost").status_code == 200
 
 

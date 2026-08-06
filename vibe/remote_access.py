@@ -1391,19 +1391,24 @@ def cloud_token_for_request(
     cookie_value: str | None,
     scope: str = "asr",
 ) -> dict[str, Any] | None:
-    """Resolve the logged-in user from the remote-access session cookie and mint a
-    short-lived cloud token for them.
+    """Mint a short-lived, subject-bound Cloud ASR token for a remote editor.
 
     Returns ``{base_url, token, expires_at, scope}`` for the frontend, or ``None``
-    when there is no authenticated user or the mint fails.
+    when the request is not an eligible remote ASR request or the mint fails.
+
+    This deliberately does not reuse ``can_chat``: that capability authorizes a
+    local Agent turn and must remain false for every remote caller. New Cloud
+    scopes require their own explicit entitlement instead of inheriting ASR.
     """
+    if scope != "asr":
+        return None
     config = config or V2Config.load()
     payload = parse_session_cookie(config, cookie_value)
     if payload is None or session_needs_authorization_refresh(payload):
         return None
     from vibe.authorization import context_from_session_payload
 
-    if not context_from_session_payload(payload).can_chat:
+    if not context_from_session_payload(payload).can_use_cloud_asr:
         return None
     email = str(payload.get("email", "")).strip()
     sub = str(payload.get("sub", "")).strip()

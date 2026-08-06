@@ -29,6 +29,10 @@ entitlement mirror before remote recurring execution can be enabled.
   are a separate sharing surface, not remote Workbench authorization.
 - Make every remote Workbench capability read-only with respect to local Agent,
   terminal, file, and Harness execution.
+- The sole remote Cloud service exception is subject-bound Cloud ASR for a
+  current remote editor or owner. It mints only a short-lived `asr` token for
+  direct browser-to-Cloud audio transfer; it never authorizes a local Agent turn
+  or the local ASR relay. Viewers and stale authorization claims are denied.
 - Reject remote Task and Watch creation or update at the definition service
   boundary when an explicit remote `AuthorizationContext` is present.
 - Suspend previously persisted remote-origin Tasks and Watches before any Agent,
@@ -67,7 +71,10 @@ entitlement mirror before remote recurring execution can be enabled.
    protected fields are stripped before persistence so a concurrent local update
    cannot be overwritten by a stale remote round-trip. Explicit
    Session/Project display fields and explicit UI/config preferences remain
-   available.
+   available. The same remote projection is used after a config save, and all
+   remote Project reads redact local paths and arbitrary metadata regardless of
+   Instance role. Live Agent process snapshots and graph diagnostics remain
+   trusted-local rather than receiving a partial remote projection.
 3. The durable Delivery owner retires remote-origin queue entries before the
    FIFO claim that starts an Agent turn.
 4. Task and Watch stores reject explicit remote definition writes.
@@ -102,6 +109,10 @@ substitute for either dependency.
   local runtime or filesystem services.
 - Remote logs, Doctor reads/runs, UI reloads, and legacy OpenCode helpers fail
   before any file read, diagnostic, process spawn, service exit, or config write.
+- Remote Cloud ASR tokens mint only for current editors/owners and only with the
+  `asr` scope; viewers, stale sessions, and other scopes never reach the broker.
+- Remote config saves and every Project read surface omit local configuration,
+  filesystem paths, arbitrary metadata, and local runtime diagnostics.
 - An unknown owner-only API route is trusted-local by default; remote exposure
   requires an exact method/path policy entry and regression evidence. A new path
   under an already approved namespace does not inherit remote access.

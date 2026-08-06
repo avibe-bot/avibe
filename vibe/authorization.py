@@ -90,6 +90,12 @@ class AuthorizationContext:
         return not self.is_remote and self.has_role("editor")
 
     @property
+    def can_use_cloud_asr(self) -> bool:
+        """Allow the explicit remote Cloud ASR capability, not local execution."""
+
+        return self.is_remote and self.has_role("editor")
+
+    @property
     def can_manage_projects(self) -> bool:
         return self.has_role("owner")
 
@@ -373,7 +379,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         (frozenset({"GET", "HEAD", "POST"}), r"^/api/agent-onboarding$"),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/(?:agents/[^/]+|agents-graph|running-agents|settings)$",
+            r"^/api/(?:agents/[^/]+|settings)$",
         ),
         (
             frozenset({"GET", "HEAD"}),
