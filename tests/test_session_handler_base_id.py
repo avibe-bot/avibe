@@ -324,6 +324,108 @@ def test_finalize_scheduled_delivery_can_alias_into_delivery_scope() -> None:
     assert controller.sessions.thread_marks == [("scheduled", "C999", "181818.456")]
 
 
+def test_finalize_scheduled_delivery_never_clears_a_reserved_definition_anchor() -> None:
+    """A ``--create-session`` definition Session survives its first visible delivery.
+
+    Regression for the orphaning bug: ``clear_source`` is decided upstream from
+    ``session_target.thread_id is None``, which a durable definition anchor also
+    satisfies, and the clear is a HARD delete. Deleting the row leaves
+    ``run_definitions.session_id`` dangling, so every later fire dies at dispatch.
+    The alias must still happen; only the delete is refused.
+    """
+    controller = _Controller(platform="discord", dm_threads=False)
+    handler = SessionHandler(controller)
+    definition_anchor = "discord_C123:definition_ab12cd34ef56"
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="discord",
+        platform_specific={
+            "is_dm": False,
+            "turn_source": "scheduled",
+            "turn_base_session_id": definition_anchor,
+            "agent_session_target": {
+                "id": "sess-durable-1",
+                "session_anchor": definition_anchor,
+            },
+            "delivery_override": {"channel_id": "C123"},
+            "scheduled_delivery_alias": {
+                "mode": "sent_message",
+                "session_key": "discord::C123",
+                "clear_source": True,
+            },
+        },
+    )
+
+    handler.finalize_scheduled_delivery(context, "919191.777")
+
+    assert controller.sessions.alias_calls == [
+        ("discord::C123", definition_anchor, "discord_919191.777")
+    ]
+    assert controller.sessions.clear_calls == []
+
+
+def test_finalize_scheduled_delivery_still_clears_a_throwaway_provisional_anchor() -> None:
+    """The guard is not a blanket disable: an unbound provisional anchor still clears."""
+    controller = _Controller(platform="discord", dm_threads=False)
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="discord",
+        platform_specific={
+            "is_dm": False,
+            "turn_source": "scheduled",
+            "turn_base_session_id": "discord_scheduled-8f2c",
+            "delivery_override": {"channel_id": "C123"},
+            "scheduled_delivery_alias": {
+                "mode": "sent_message",
+                "session_key": "discord::C123",
+                "clear_source": True,
+            },
+        },
+    )
+
+    handler.finalize_scheduled_delivery(context, "929292.888")
+
+    assert controller.sessions.clear_calls == [("discord::C123", "discord_scheduled-8f2c")]
+
+
+def test_finalize_scheduled_delivery_clears_when_reserved_row_is_a_different_anchor() -> None:
+    """Only the reserved row's own anchor is protected.
+
+    A context may carry a reserved Session while the turn ran off a separate provisional
+    anchor. Protecting that unrelated anchor would leak throwaway rows, so the guard
+    compares anchors rather than merely observing that a reserved row exists.
+    """
+    controller = _Controller(platform="discord", dm_threads=False)
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="discord",
+        platform_specific={
+            "is_dm": False,
+            "turn_source": "scheduled",
+            "turn_base_session_id": "discord_scheduled-7a1b",
+            "agent_session_target": {
+                "id": "sess-durable-2",
+                "session_anchor": "discord_C123:definition_ffeeddccbbaa",
+            },
+            "delivery_override": {"channel_id": "C123"},
+            "scheduled_delivery_alias": {
+                "mode": "sent_message",
+                "session_key": "discord::C123",
+                "clear_source": True,
+            },
+        },
+    )
+
+    handler.finalize_scheduled_delivery(context, "939393.999")
+
+    assert controller.sessions.clear_calls == [("discord::C123", "discord_scheduled-7a1b")]
+
+
 def test_alias_session_base_clears_source_even_when_alias_already_exists() -> None:
     controller = _Controller(platform="slack", dm_threads=False)
     controller.sessions.alias_result = False
