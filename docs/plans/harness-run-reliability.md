@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under thirteen review rounds
+#### PR7R status (2026-08-06) — first increment, revised under fourteen review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
@@ -1242,12 +1242,12 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through thirteen changed how the
-findings are demonstrated, two question verdicts, and fifteen degenerate guards
-(three of them in round ten, two more in round eleven that were in this unit's
-own new code, two in round twelve that were round eleven's fixes, and two in
-round thirteen that were round twelve's — the newest guard is now reliably the
-likeliest defect).
+rounds and has held at 168 since; rounds four through fourteen changed how the
+findings are demonstrated, two question verdicts, and seventeen degenerate
+guards (three of them in round ten, two more in round eleven that were in this
+unit's own new code, two in round twelve that were round eleven's fixes, two in
+round thirteen that were round twelve's, and two in round fourteen that were
+round thirteen's — the newest guard is now reliably the likeliest defect).
 Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
@@ -1707,6 +1707,43 @@ round-8-added, round-9-retracted claim, and the phrasing is a new
 `RETRACTED_PHRASINGS` row so `HFR-201` enforces it corpus-wide. **Making the
 retractions data fixed the enforcement, not the enrolment — a ledger only holds
 what someone remembered to put in it.**
+
+Round 14 — two findings, both accepted, and both are round 13's shape again: the
+guards under review are `HFR-198` and `HFR-201` for the second round running, and
+both failed at their **input** rather than in their logic. No new scenario id and
+no budget move. The first: `_collectible_class` decided collectibility from the
+class name plus, since round 13, its resolved base — and pytest lets a module, a
+class or a function overrule its own name with `__test__`. A future PR7R class
+named `Test*` that sets `__test__ = False` was therefore collectible on both
+readers, so `HFR-192` could report a covered scenario whose assertions never
+execute. Every branch was probed against this repo's pytest rather than reasoned
+about, which is why the fix is not a one-liner: the flag is **bidirectional**
+(`class FlaggedIn` and `def plain_named` with `__test__ = True` *are* collected,
+so an opt-out-only reading would have under-reported), it beats unittest ancestry
+in the negative direction, it does **not** excuse the round-12 constructor rule,
+at module level it takes the whole file down including a bare `def test_top`, and
+the function spelling is written one scope *out* from the function it applies to.
+**When a guard predicts another system's behaviour, enumerate that system's
+inputs before trusting the one you happened to start from — three rounds running,
+this predicate was wrong not because its logic was wrong but because it read too
+few things.**
+
+The second is the third narrowing of one rule. `_marker_near` scopes a retraction
+to "the phrase's own sentence", and the sentence was computed over a whole
+flattened file; a YAML field ends with no terminal punctuation, so a stale `name:`,
+the `detail:` below it and the comment after that were one sentence, and a marker
+in any of them vouched for a claim in the others — after the 400-character window
+(round 11) and the substring markers (round 12). The rule is unchanged; the corpus
+is now split into prose **units** before it runs: one per scalar value and one per
+contiguous comment block in YAML, the whole file in Python and Markdown, where a
+wrapped `#` comment or a pair of adjacent string literals genuinely is one
+continuous statement. Comments are units rather than dropped, because
+`catalog.yaml` keeps thousands of lines of prose in them that `yaml.safe_load`
+would discard. Both over-corrections are pinned by fixture: whole-file flattening
+lets the stale field pass, and a per-source-line split chops a folded block scalar
+so a wrapped phrase becomes invisible. **A proximity rule is a claim about a unit
+of authorship, so it has to be told where the units are; flattening structured
+data into prose just moves the blindness somewhere it will not be noticed.**
 
 Question verdicts:
 

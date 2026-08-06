@@ -243,6 +243,41 @@ def _unittest_ancestry(
     return False
 
 
+def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | None:
+    """The static ``__test__`` value stated in ``body``, or ``None`` if it says nothing.
+
+    ``attribute_of`` looks for the OTHER spelling -- ``test_fn.__test__ = False``
+    written in the scope that defines ``test_fn`` -- because pytest reads one
+    attribute and does not care which statement set it.
+
+    Only a literal counts. A computed ``__test__`` is not statically knowable,
+    and reporting "no opinion" for it lands on the name rule, which is the
+    conservative side: a false rejection is loud, a false acceptance is silent.
+    """
+    for node in body:
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target]
+            if isinstance(node, ast.AnnAssign) and node.value is not None
+            else []
+        )
+        for target in targets:
+            named = (
+                isinstance(target, ast.Name)
+                and target.id == "__test__"
+                and attribute_of is None
+            ) or (
+                isinstance(target, ast.Attribute)
+                and target.attr == "__test__"
+                and attribute_of is not None
+                and _root_name(target) == attribute_of
+            )
+            if named and isinstance(node.value, ast.Constant):
+                return bool(node.value.value)
+    return None
+
+
 def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
     """pytest's own default rule, read off the AST: ``Test*`` or a TestCase base.
 
@@ -250,12 +285,25 @@ def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
     only if its name starts with ``Test`` or the unittest plugin claims it as a
     ``TestCase`` subclass. The second half is decided by ``_unittest_ancestry``,
     which resolves the base rather than reading its name.
+
+    Round 14 puts ``__test__`` in front of both, and it is BIDIRECTIONAL --
+    checked against this repo's pytest, not reasoned, because the finding named
+    only the opt-out and encoding half a rule is how this predicate has been
+    wrong three rounds running. ``__test__ = False`` excludes the class whatever
+    its name and whatever it inherits, unittest ancestry included.
+    ``__test__ = True`` includes one whose name says nothing -- ``class Helper``
+    with the flag really is collected -- and does NOT excuse it from the
+    constructor rule, which refuses ``Test``-named and flag-opted-in classes
+    alike.
     """
+    flag = _test_flag(node.body)
+    if flag is False:
+        return False
     if _unittest_ancestry(node, module_body):
         # The unittest plugin claims these, constructor and all: TestCase
         # itself defines ``__init__``, so the rule below cannot apply here.
         return True
-    if not node.name.startswith("Test"):
+    if not (node.name.startswith("Test") or flag):
         return False
     # Round 12, verified against this repo's pytest rather than reasoned: a
     # name-collected class that defines ``__init__`` or ``__new__`` is REFUSED
@@ -298,6 +346,13 @@ def _collected_tests(
     # its sibling class definitions -- neither of which is visible from a class
     # body.
     module = body if module_body is None else module_body
+    # Round 14, and it is round 10's lesson at the OUTERMOST level: a module
+    # that sets ``__test__ = False`` is skipped whole, so every id in it is a
+    # citation to something that never runs. Checked here rather than reasoned
+    # about -- this repo's pytest collects nothing from such a file, not even a
+    # bare ``def test_top``.
+    if module_body is None and _test_flag(body) is False:
+        return []
     found: list[tuple[str, ast.stmt]] = []
     for node in body:
         if isinstance(node, ast.ClassDef):
@@ -306,7 +361,12 @@ def _collected_tests(
                     _collected_tests(node.body, prefix + (node.name,), module)
                 )
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name.startswith("test_"):
+            # The same bidirectional flag one scope out: ``test_fn.__test__``
+            # is written by the enclosing body, so that is where it is read.
+            flag = _test_flag(body, attribute_of=node.name)
+            if flag is False:
+                continue
+            if node.name.startswith("test_") or flag:
                 found.append(("::".join(prefix + (node.name,)), node))
     return found
 
@@ -333,19 +393,29 @@ def _assert_node_exists(node_id: str) -> None:
     assert node_id.split("::")[0].startswith("tests/"), node_id
     module_body, chain = _assert_symbol_exists(node_id)
     *containers, leaf = chain
+    assert _test_flag(module_body) is not False, (
+        f"{node_id}: the module sets ``__test__ = False``, so pytest skips the "
+        f"whole file and nothing in it runs"
+    )
     for container in containers:
         assert isinstance(container, ast.ClassDef) and _collectible_class(
             container, module_body
         ), (
             f"{node_id}: pytest does not collect class {container.name!r} "
-            f"(not Test*-named, no resolved unittest TestCase base), so nothing "
-            f"inside it runs"
+            f"(not Test*-named, no resolved unittest TestCase base, or opted out "
+            f"with ``__test__``), so nothing inside it runs"
         )
     assert isinstance(leaf, (ast.FunctionDef, ast.AsyncFunctionDef)), (
         f"{node_id}: a node id must name a test function, not a "
         f"{type(leaf).__name__.removesuffix('Def').lower()}"
     )
-    assert leaf.name.startswith("test_"), (
+    # The leaf's own ``__test__``, read from the scope that would have set it.
+    enclosing = containers[-1].body if containers else module_body
+    leaf_flag = _test_flag(enclosing, attribute_of=leaf.name)
+    assert leaf_flag is not False, (
+        f"{node_id}: {leaf.name!r} is opted out with ``__test__ = False``"
+    )
+    assert leaf.name.startswith("test_") or leaf_flag, (
         f"{node_id}: {leaf.name!r} is not collected by pytest"
     )
 
@@ -883,6 +953,14 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     relearning is that a rule fixed at one nesting level does not travel; the
     corpus below therefore names a collectible container, an uncollectible one,
     and the same leaf under both.
+
+    Round 14 adds the one input that outranks every rule above it: ``__test__``.
+    Each level had been decided from the NAME, and pytest lets a file, a class
+    or a function overrule its own name in either direction. The fixture pins
+    all six combinations, because the tempting single-line reading -- "if the
+    flag is set, believe it" -- is wrong twice: a flagged-in class with a
+    constructor is still refused, and a flagged-out module takes everything
+    inside it down with it.
     """
     cited = {
         detail if kind == "covered" else _detail_node(detail)
@@ -909,6 +987,19 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "    pass\n"
         "class Derived(Intermediate):\n"
         "    def test_case(self): ...\n"
+        "class TestOptOut:\n"
+        "    __test__ = False\n"
+        "    def test_case(self): ...\n"
+        "class OptOutTests(unittest.TestCase):\n"
+        "    __test__ = False\n"
+        "    def test_case(self): ...\n"
+        "class FlaggedIn:\n"
+        "    __test__ = True\n"
+        "    def test_case(self): ...\n"
+        "class TestFlaggedCtor:\n"
+        "    __test__ = True\n"
+        "    def __init__(self): ...\n"
+        "    def test_case(self): ...\n"
         "class Owner:\n"
         "    def method(self): ...\n"
         "    def test_case(self): ...\n"
@@ -927,7 +1018,11 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "    async def test_case(self): ...\n"
         "def _helper(): ...\n"
         "def test_real(): ...\n"
-        "async def test_async_real(): ...\n",
+        "async def test_async_real(): ...\n"
+        "def test_muted(): ...\n"
+        "test_muted.__test__ = False\n"
+        "def plain_named(): ...\n"
+        "plain_named.__test__ = True\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -996,20 +1091,73 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     with pytest.raises(AssertionError, match="pytest does not collect class 'Helper'"):
         _assert_node_exists(f"{rel}::Helper::test_case")
 
+    # Round 14: ``__test__``, which every rule above had been reasoning around.
+    # It is not a second name rule -- it OVERRIDES the name in both directions,
+    # and each direction was probed against this repo's pytest rather than
+    # assumed. Opting out beats even unittest ancestry (``OptOutTests`` is a
+    # real ``TestCase`` and pytest still skips it), while opting in admits a
+    # class with no ``Test`` prefix at all (``FlaggedIn``). What it does NOT do
+    # is excuse the constructor rule: ``TestFlaggedCtor`` sets the flag true and
+    # is still refused, which is the case that would have turned a naive "flag
+    # wins" reading into a discovery walk citing tests that never run.
+    _assert_node_exists(f"{rel}::FlaggedIn::test_case")
+    for opted_out in ("TestOptOut", "OptOutTests", "TestFlaggedCtor"):
+        with pytest.raises(
+            AssertionError, match=f"pytest does not collect class '{opted_out}'"
+        ):
+            _assert_node_exists(f"{rel}::{opted_out}::test_case")
+
+    # The same flag on a FUNCTION, which is written one scope out from the
+    # function it applies to -- pytest reads an attribute and does not care
+    # which statement set it, so the resolver reads the enclosing body.
+    _assert_node_exists(f"{rel}::plain_named")
+    with pytest.raises(AssertionError, match="'test_muted' is opted out"):
+        _assert_node_exists(f"{rel}::test_muted")
+
     discovered = {suffix for suffix, _node in _collected_tests(ast.parse(
         module.read_text(encoding="utf-8")
     ).body)}
     assert discovered == {
         "test_real",
         "test_async_real",
+        "plain_named",
         "TestGood::test_case",
         "OwnerTests::test_case",
         "CtorTests::test_case",
         "AliasedTests::test_case",
         "Derived::test_case",
+        "FlaggedIn::test_case",
     }, discovered
-    assert "Owner::test_case" not in discovered
-    assert "Helper::test_case" not in discovered
+    for absent in (
+        "Owner::test_case",
+        "Helper::test_case",
+        "TestOptOut::test_case",
+        "OptOutTests::test_case",
+        "TestFlaggedCtor::test_case",
+        "test_muted",
+    ):
+        assert absent not in discovered, absent
+
+    # And the outermost level, which is round 10's lesson yet again: a module
+    # setting ``__test__ = False`` is skipped WHOLE, so a bare ``def test_top``
+    # in it never runs. Discovery returns nothing and every citation into it is
+    # rejected -- checked on a separate module because the flag is file-scoped
+    # and would have silenced the fixture above.
+    muted = tmp_path / "tests" / "muted_module.py"
+    muted.write_text(
+        "__test__ = False\n"
+        "def test_top(): ...\n"
+        "class TestInside:\n"
+        "    def test_case(self): ...\n",
+        encoding="utf-8",
+    )
+    muted_rel = Path("tests/muted_module.py")
+    assert (
+        _collected_tests(ast.parse(muted.read_text(encoding="utf-8")).body) == []
+    )
+    for node_id in (f"{muted_rel}::test_top", f"{muted_rel}::TestInside::test_case"):
+        with pytest.raises(AssertionError, match="the module sets"):
+            _assert_node_exists(node_id)
 
     # And the real citations still pass under the tightened rule -- the point of
     # a stricter guard is that the corpus already satisfies it, checked here
@@ -1074,13 +1222,87 @@ _LEDGER_LITERALS = frozenset(
 )
 
 
-def _normalized_prose(path: Path, span: tuple[int, int] | None = None) -> str:
-    """One flat lowercase line: comment markers gone, string joins closed up.
+def _flatten(text: str) -> str:
+    """One flat lowercase line, with the adjacent-literal join closed up."""
+    flat = re.sub(r'"\s+"', "", text)  # adjacent literals: "...the " "rest..."
+    return re.sub(r"\s+", " ", flat).strip().lower()
+
+
+#: A YAML mapping key, with or without the sequence dash that may precede it.
+_YAML_KEY = re.compile(r"^\s*(?:-\s+)?[A-Za-z_][\w.-]*:(?:\s|$)")
+_YAML_ITEM = re.compile(r"^\s*-\s")
+#: The block-scalar indicators, which are syntax rather than prose.
+_BLOCK_INDICATORS = frozenset({">", "|", ">-", "|-", ">+", "|+"})
+
+
+def _yaml_prose_units(lines: list[str]) -> list[str]:
+    """One unit per YAML scalar and per contiguous comment block.
+
+    Round 14. A structured file is not continuous prose, and flattening it as if
+    it were is what let a marker in one field vouch for a claim in another: the
+    fields have no terminal punctuation, so ``name: ...`` and the ``detail:``
+    six lines below it merged into a single "sentence" and the proximity rule
+    scoped over both. The unit here is what an author actually writes as one
+    statement -- a scalar value, however many lines the block folds over -- so a
+    retraction has to sit in the same field as the claim it retracts.
+
+    Comments are units in their own right rather than dropped: ``catalog.yaml``
+    carries substantial prose in ``#`` blocks that ``yaml.safe_load`` would
+    discard, and a guard that cannot see half the file is the failure this
+    ledger exists to prevent. They are their own scope for the same reason the
+    fields are -- a comment above a row does not retract what the row asserts.
+    """
+    units: list[str] = []
+    buffer: list[str] = []
+    in_comment = False
+
+    def flush() -> None:
+        nonlocal buffer, in_comment
+        if buffer:
+            joined = _flatten(" ".join(buffer))
+            if joined:
+                units.append(joined)
+        buffer, in_comment = [], False
+
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped in _LEDGER_LITERALS:
+            flush()
+            continue
+        if stripped.startswith("#"):
+            if not in_comment:
+                flush()
+                in_comment = True
+            buffer.append(re.sub(r"^#+\s?", "", stripped))
+            continue
+        if in_comment:
+            flush()
+        if _YAML_KEY.match(raw):
+            flush()
+            value = stripped.split(":", 1)[1].strip()
+            buffer = [] if value in _BLOCK_INDICATORS else [value]
+        elif _YAML_ITEM.match(raw):
+            flush()
+            buffer = [stripped[1:].strip()]
+        else:
+            # A continuation line of the folded scalar opened above.
+            buffer.append(stripped)
+    flush()
+    return units
+
+
+def _prose_units(path: Path, span: tuple[int, int] | None = None) -> list[str]:
+    """The searchable prose of one artefact, split into independent scopes.
 
     A phrase in this corpus is routinely split across a line break, wrapped in a
     ``#`` comment, or spread over two adjacent Python string literals, so a
     naive substring search over the raw file finds none of them -- which would
-    make the ledger below a guard that passes because it cannot see.
+    make the ledger below a guard that passes because it cannot see. Python and
+    Markdown are therefore still flattened whole: a wrapped comment or a folded
+    docstring IS one continuous statement there, and cutting it at line
+    boundaries would hide every phrase that spans one.
+
+    YAML is not, for the reason in ``_yaml_prose_units``.
 
     The ledger's OWN row literals are dropped. Leaving them in would make every
     row trivially findable by its own definition, which is precisely how the
@@ -1089,13 +1311,11 @@ def _normalized_prose(path: Path, span: tuple[int, int] | None = None) -> str:
     lines = path.read_text(encoding="utf-8").splitlines()
     if span is not None:
         lines = lines[span[0] : span[1]]
-    flat = " ".join(
-        re.sub(r"^#+\s?", "", line.strip())
-        for line in lines
-        if line.strip() not in _LEDGER_LITERALS
-    )
-    flat = re.sub(r'"\s+"', "", flat)  # adjacent literals: "...the " "rest..."
-    return re.sub(r"\s+", " ", flat).lower()
+    lines = [line for line in lines if line.strip() not in _LEDGER_LITERALS]
+    if path.suffix in {".yaml", ".yml"}:
+        return _yaml_prose_units(lines)
+    flat = _flatten(" ".join(re.sub(r"^#+\s?", "", line.strip()) for line in lines))
+    return [flat] if flat else []
 
 
 def _pr7r_plan_span(path: Path) -> tuple[int, int]:
@@ -1156,7 +1376,7 @@ def _marker_near(prose: str, start: int, end: int) -> bool:
     )
 
 
-def test_no_retracted_phrasing_survives_outside_its_own_retraction():
+def test_no_retracted_phrasing_survives_outside_its_own_retraction(tmp_path):
     """HFR-201: a claim this unit retracted may only appear next to its retraction.
 
     Round 11's finding is that round 10 retracted the codex overlap claim in
@@ -1178,6 +1398,15 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction():
     first draft was itself too loose to fail on the real stale text). Quoting an
     error to correct it is the point; restating it as an assertion is what
     recurred three times.
+
+    Round 14 fixes the input rather than the rule: "its own sentence" was being
+    computed over a whole flattened file, and a YAML field ends with no full
+    stop, so several fields and the comment after them were one sentence and a
+    marker in any of them vouched for all. The corpus is now searched per prose
+    UNIT -- a scalar value or a comment block in YAML, the whole file in Python
+    and Markdown, where a wrapped comment really is one statement. Three rounds
+    have now narrowed this one guard (window, then whole words, now scope), each
+    time because the previous width passed text it was written to fail.
     """
     repo_root = Path(__file__).resolve().parents[1]
     plan = repo_root / "docs" / "plans" / "harness-run-reliability.md"
@@ -1222,6 +1451,51 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction():
     # case that says so.
     assert not _accepts(f"the two {banned} in the narrower gate.")
 
+    # Round 14: the sentence rule is only as good as what counts as ONE piece of
+    # prose. A YAML field ends with no full stop, so flattening the file joined
+    # a stale ``name:`` to whatever field came next and the "own sentence" scope
+    # spanned both -- a marker anywhere downstream vouching for a claim it has
+    # nothing to do with. The fixture is a real two-field row, and both halves
+    # matter: the stale field must be caught, and the neighbour that legitimately
+    # carries the retraction must still be accepted.
+    low = banned.lower()
+
+    def _unrescued(units: list[str]) -> list[str]:
+        return [
+            unit
+            for unit in units
+            for m in [re.search(re.escape(low), unit)]
+            if m is not None and not _marker_near(unit, m.start(), m.end())
+        ]
+
+    sample = tmp_path / "sample.yaml"
+    sample.write_text(
+        "scenarios:\n"
+        "  - id: HFR-999\n"
+        f"    name: the two {low}\n"
+        "    detail: round 9 wrote that; round 10 retracted it\n"
+        "# a trailing comment that merely says retracted\n",
+        encoding="utf-8",
+    )
+    units = _prose_units(sample)
+    assert f"the two {low}" in units, units
+    assert _unrescued(units) == [f"the two {low}"], units
+    # ...while a field that carries its own retraction passes, and a folded
+    # block scalar is NOT chopped at its line breaks -- the over-correction
+    # here would be to make every SOURCE line its own scope, which would hide
+    # any phrase that wraps.
+    folded = tmp_path / "folded.yaml"
+    folded.write_text(
+        "detail: >-\n"
+        "  round 9 wrote that the two\n"
+        f"  {low}; round 10 retracted it.\n",
+        encoding="utf-8",
+    )
+    assert _prose_units(folded) == [
+        f"round 9 wrote that the two {low}; round 10 retracted it."
+    ]
+    assert _unrescued(_prose_units(folded)) == []
+
     # A phrase that matches nothing is a ledger row that enforces nothing, and a
     # renamed subject would turn every row into one silently. Each row must
     # still be FINDABLE somewhere -- next to its retraction, which is where the
@@ -1229,15 +1503,15 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction():
     hits: dict[str, int] = {phrase: 0 for phrase, _round, _why in RETRACTED_PHRASINGS}
     offenders: list[str] = []
     for path, span in corpus:
-        prose = _normalized_prose(path, span)
-        for phrase, round_name, why in RETRACTED_PHRASINGS:
-            for match in re.finditer(re.escape(phrase.lower()), prose):
-                hits[phrase] += 1
-                if not _marker_near(prose, match.start(), match.end()):
-                    offenders.append(
-                        f"{path.name}: {phrase!r} was retracted in {round_name} "
-                        f"but is stated here as fact -- {why}"
-                    )
+        for prose in _prose_units(path, span):
+            for phrase, round_name, why in RETRACTED_PHRASINGS:
+                for match in re.finditer(re.escape(phrase.lower()), prose):
+                    hits[phrase] += 1
+                    if not _marker_near(prose, match.start(), match.end()):
+                        offenders.append(
+                            f"{path.name}: {phrase!r} was retracted in {round_name} "
+                            f"but is stated here as fact -- {why}"
+                        )
     assert not offenders, "\n".join(offenders)
     unfindable = sorted(phrase for phrase, count in hits.items() if not count)
     assert not unfindable, (

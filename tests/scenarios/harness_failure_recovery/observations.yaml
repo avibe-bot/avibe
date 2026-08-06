@@ -980,3 +980,58 @@ observations:
       enforcement, not the enrolment -- a ledger only holds what someone
       remembered to put in it, so every accepted retraction finding has to end
       with a row, not just an edit.
+
+  - id: HFR-OBS-039
+    area: run-terminal-truth
+    summary: >-
+      Round 14, two findings, both accepted. Both are the same shape as round
+      13's: the guards under review are HFR-198 and HFR-201 again, and both
+      failed at their INPUT rather than in their logic. No new scenario id and
+      no budget move.
+      Finding one: ``_collectible_class`` had been decided entirely from the
+      class NAME plus, since round 13, its resolved base -- and pytest lets a
+      module, a class or a function overrule its own name with ``__test__``. A
+      future PR7R class named ``Test*`` that sets ``__test__ = False`` was
+      therefore collectible on both readers, so HFR-192 could report a covered
+      scenario whose assertions never execute. Every branch was probed against
+      this repo's pytest rather than reasoned about, and the probes are why the
+      fix is not a one-liner: the flag is BIDIRECTIONAL (``class FlaggedIn`` and
+      ``def plain_named`` with ``__test__ = True`` ARE collected, so treating it
+      as an opt-out only would have under-reported), it beats unittest ancestry
+      in the negative direction (a real ``TestCase`` with the flag false is
+      skipped), it does NOT excuse the round-12 constructor rule (``__test__ =
+      True`` plus ``__init__`` is still refused), and at module level it takes
+      the whole file down including a bare ``def test_top``. The function
+      spelling is written one scope OUT from the function it applies to
+      (``test_fn.__test__ = False``), because pytest reads an attribute and does
+      not care which statement set it. THE DURABLE RULE: when a guard predicts
+      another system's behaviour, enumerate that system's actual INPUTS before
+      trusting the one input you happened to start from -- three rounds running,
+      this predicate was wrong not because its logic was wrong but because it
+      was reading too few things.
+      Finding two: ``_marker_near`` scopes a retraction to "the phrase's own
+      sentence", and the sentence was being computed over a whole flattened
+      file. A YAML field ends with no terminal punctuation, so a stale ``name:``
+      and the ``detail:`` below it and the comment after that were one sentence,
+      and a marker in any of them vouched for a claim in the others -- the third
+      time this one rule has been too wide, after the 400-character window
+      (round 11) and the substring markers (round 12). The rule is unchanged;
+      the corpus is now split into prose UNITS before it runs: in YAML, one unit
+      per scalar value and one per contiguous comment block; in Python and
+      Markdown, the whole file as before, because a wrapped ``#`` comment or a
+      pair of adjacent string literals genuinely is one continuous statement
+      there. Comments are units rather than dropped because ``catalog.yaml``
+      keeps thousands of lines of prose in them that ``yaml.safe_load`` would
+      discard, and a guard that cannot see half its corpus is the failure the
+      ledger exists to prevent. Both over-corrections are pinned by fixture: a
+      whole-file flatten lets the stale field pass, and a per-source-line split
+      chops a folded block scalar so a wrapped phrase becomes invisible.
+      THE DURABLE RULE: a proximity rule is a claim about a UNIT of authorship,
+      so it has to be told where the units are -- flattening structured data
+      into prose does not make it prose, it just moves the guard's blindness
+      somewhere it will not be noticed.
+      UNPROVEN_BUDGET stays 168: nothing this round touches a matrix cell.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` now trails FOUR of this unit's fixes --
+      leaf-only, container collectibility, ancestry and ``__test__`` -- and is
+      still deliberately untouched (HFR-OBS-028).
