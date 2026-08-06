@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under four review rounds
+#### PR7R status (2026-08-06) — first increment, revised under five review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`) and fed by
@@ -1240,9 +1240,9 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and held at 168 through the fourth, which changed only how two findings
-are demonstrated and one Q2 verdict. Why it moved is the most useful thing this
-increment produced. Cells were marked
+rounds and has held at 168 since; rounds four and five changed how the findings
+are demonstrated, one Q2 verdict, and one degenerate guard. Why it moved is the
+most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
 cell rather than about the cell. The first round found fifty such cells, in four
 substitutions, each of which reads as coverage until the cited test's body is
@@ -1345,6 +1345,28 @@ session-creation path and observe the registries — was rejected, because it wo
 turn an End probe into a session-creation test and would need a live SDK.
 Accepting a finding's gap while rejecting its prescription is a third review
 outcome, distinct from accepting or rejecting whole.
+
+Round 5 found that round 4's fixture fix stopped one step short, and one more
+degenerate guard. The codex probe's live transport was necessary and not
+sufficient: the fixture still made the session its cwd's last, so `_end_codex`
+stopped the shared app-server and the failed-interrupt run's turn died by process
+kill. Two runs that both end the turn — one by interrupt, one by kill — report
+`ended` truthfully, so the identical payloads were *accurate* rather than
+evidence. Only a **co-tenant** session on the same cwd keeps the transport up and
+leaves the un-interrupted turn genuinely executing, and the probe now asserts
+that survival instead of inferring it from the fixture's shape. Generalised: when
+the claim is "these two worlds are indistinguishable to the caller", the two
+worlds have to be shown to actually **differ** first, and a teardown side effect
+can quietly collapse them into one.
+
+The degenerate guard is the third of its kind. The finding ↔ matrix tie compared
+`referenced` against `set(PR7R_FINDINGS)` — two sets that shrink together, so
+deleting a finding from both the dict and every cell detail kept it green, and an
+empty matrix passed it. It sat two lines below a block that pins the five
+question ids literally. The finding ids are now pinned the same way. The rule
+worth carrying: a guard built from a comparison between two **derived**
+collections proves consistency, never existence, so anything the plan advertises
+has to be named literally somewhere in the guard.
 
 One method note, since an evidence-only unit has no production diff to stash: new
 assertions are counter-checked by **mutating the production fact** and confirming
@@ -1482,8 +1504,14 @@ Reproduced defects, both on the direct-IM / agent-run lane and both owned by
   exactly one field back out. That `process_killed` survives while `interrupted`
   does not is the tell — a field the caller forgot, not information it never had
   — so the remediation is forwarding an existing value, not new plumbing. The
-  reproducer now runs a **live** transport twice, with `turn/interrupt` raising
-  and succeeding, and shows the two payloads byte-identical to the caller.
+  reproducer runs a **live** transport twice, with `turn/interrupt` raising and
+  succeeding, and shows the two payloads byte-identical to the caller. Round 5
+  added the condition that makes that pair mean something: the two runs must be
+  on a cwd with a **co-tenant** session, or `_end_codex` stops the shared
+  app-server and the un-interrupted turn dies by process kill anyway. The
+  transport's survival is asserted, and the last-session variant is kept only to
+  show that `process_killed` *is* forwarded — the evidence that the caller can
+  copy a teardown field and copied one of two.
 
 Both are characterization tests: they assert current behavior, so the
 implementation PR that fixes them must flip them. Neither is fixed here. Their

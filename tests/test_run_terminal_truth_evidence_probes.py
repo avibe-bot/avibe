@@ -365,15 +365,30 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
 # ----- HFR-181: PR7R-F2 ----------------------------------------------------
 
 
-def _codex_end_controller(*, interrupt_raises: bool, cleared: dict, sent: list):
+def _codex_end_controller(
+    *, interrupt_raises: bool, co_tenant: bool, cleared: dict, sent: list
+):
     """A codex End fixture with a LIVE transport and a live thread + turn.
 
-    Round 4's correction, and it is the whole point of the probe. The previous
-    fixture left ``_transports`` empty and ``get_thread_id`` returning ``None``,
-    which is precisely the stale-row case ``_end_codex`` is DESIGNED to clean up
-    -- an app-server that already died, with nothing left to interrupt. Staging
-    that and then complaining the payload reports no interrupt was staging the
-    absence of the thing being measured. There is a live transport here.
+    Two corrections live in this fixture, one per review round, and the second
+    reverses part of the first.
+
+    Round 4: the original left ``_transports`` empty and ``get_thread_id``
+    returning ``None``, which is precisely the stale-row case ``_end_codex`` is
+    DESIGNED to clean up -- an app-server that already died, with nothing left
+    to interrupt. Staging that and then complaining the payload reports no
+    interrupt was staging the absence of the thing being measured.
+
+    Round 5: a live transport was necessary and not sufficient. With
+    ``sessions_for_cwd`` returning ``[]`` this session is the cwd's last, so
+    ``_end_codex`` stops the shared app-server -- and a killed app-server ends
+    the turn just as surely as an interrupt does. Both runs therefore terminated
+    the turn, by different means, which makes ``ended`` a TRUE report in both
+    and establishes nothing. ``co_tenant`` is the fix: another session on the
+    same cwd keeps the transport up, so a failed interrupt leaves the backend
+    turn genuinely running. The lesson is the same one this unit keeps
+    relearning at a new depth -- a fixture has to stage the state the claim is
+    about, and "live transport" was not yet that state.
     """
 
     class _Transport:
@@ -390,7 +405,9 @@ def _codex_end_controller(*, interrupt_raises: bool, cleared: dict, sent: list):
         get_cwd=lambda b: "/w",
         get_thread_id=lambda b: "thread-1",  # live thread
         clear=lambda b: cleared.__setitem__("session_mgr", b),
-        sessions_for_cwd=lambda cwd: [],
+        # Production calls this AFTER ``clear``, so it lists the sessions that
+        # remain on the cwd. A co-tenant means the shared app-server stays up.
+        sessions_for_cwd=lambda cwd: (["b2"] if co_tenant else []),
     )
     turn_registry = types.SimpleNamespace(
         get_active_turn=lambda b: "turn-1",  # live turn
@@ -412,7 +429,7 @@ def _codex_end_controller(*, interrupt_raises: bool, cleared: dict, sent: list):
         session_turns=types.SimpleNamespace(is_in_flight=lambda sid: False, cancel=_AsyncFlag()),
         command_handler=types.SimpleNamespace(handle_stop=handle_stop),
     )
-    return controller, handle_stop
+    return controller, handle_stop, codex
 
 
 def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
@@ -430,11 +447,19 @@ def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
     signal is not missing from the system -- it is produced, and then dropped
     by the caller that is supposed to report it.
 
-    The demonstration is two runs against the SAME live-transport fixture whose
-    only difference is whether ``turn/interrupt`` succeeds. One leaves the
-    backend turn genuinely running, the other genuinely interrupts it, and both
-    return a byte-identical payload. A caller cannot distinguish them, which is
-    what makes this a reporting defect rather than a teardown one.
+    The demonstration is two runs against the SAME fixture whose only difference
+    is whether ``turn/interrupt`` succeeds. One leaves the backend turn genuinely
+    running, the other genuinely interrupts it, and both return a byte-identical
+    payload. A caller cannot distinguish them, which is what makes this a
+    reporting defect rather than a teardown one.
+
+    Round 5 fixed what "genuinely running" required. The fixture used to make
+    this session the cwd's last, which means ``_end_codex`` stops the shared
+    app-server -- so the failed-interrupt run's turn died anyway, by process
+    kill, and ``ended`` was a true report in both runs. The turn only survives a
+    failed interrupt when a co-tenant session keeps the transport up, so that is
+    what the primary pair stages, and the survival is asserted rather than
+    assumed: the transport is never stopped and is still registered afterwards.
 
     Scope: this builds only the codex session/turn registries and a transport,
     so there is no Run row and the probe claims nothing about the Run's terminal
@@ -442,12 +467,14 @@ def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
     from the missing interrupt, not observed. The IM lane's ``user_stop`` cells
     carry the probe that would settle it.
     """
-    payloads = []
-    for interrupt_raises in (True, False):
+    def _run(*, interrupt_raises: bool, co_tenant: bool):
         cleared: dict = {}
         sent: list = []
-        controller, handle_stop = _codex_end_controller(
-            interrupt_raises=interrupt_raises, cleared=cleared, sent=sent
+        controller, handle_stop, codex = _codex_end_controller(
+            interrupt_raises=interrupt_raises,
+            co_tenant=co_tenant,
+            cleared=cleared,
+            sent=sent,
         )
         result = asyncio.run(
             running_agents.end_running_agent(
@@ -466,28 +493,53 @@ def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
         ], sent
         assert cleared["session_mgr"] == "b1"
         assert cleared["turn_registry"] == "b1"
-        payloads.append(result)
+        return result, cleared, codex
 
-    not_interrupted, interrupted = payloads
+    # --- the pair that establishes the finding: a co-tenant keeps the shared
+    # app-server up, so the two runs really do differ in whether the backend
+    # turn is still executing.
+    not_interrupted, cleared_alive, codex_alive = _run(
+        interrupt_raises=True, co_tenant=True
+    )
+    interrupted, _, _ = _run(interrupt_raises=False, co_tenant=True)
+
+    # The turn survives -- asserted, not assumed. Nothing stopped the transport
+    # and it is still registered, so the only thing that could have ended that
+    # turn was the interrupt, and the interrupt raised.
+    assert "transport_stopped" not in cleared_alive
+    assert "/w" in codex_alive._transports
+
     # Current master's answer: identical. No ``stop_failed``, no ``interrupted``,
     # no ``settled`` -- and, critically, no difference between a turn still
     # running on the backend and one that was actually stopped.
-    assert not_interrupted == {
-        "ok": True,
-        "action": "ended",
-        "backend": "codex",
-        # This was THIS cwd's last session, so the shared app-server was stopped.
-        "process_killed": True,
-    }
+    assert not_interrupted == {"ok": True, "action": "ended", "backend": "codex"}
     assert interrupted == not_interrupted, (
         "a real interrupt and a failed one are byte-identical to the caller"
     )
     assert "stop_failed" not in not_interrupted
     assert "interrupted" not in not_interrupted
-    # ``process_killed`` is the tell. The failed-stop branch copies exactly one
-    # field out of the teardown result and leaves ``interrupted`` behind, so
-    # this is a field the caller forgot rather than information it never had.
-    assert "process_killed" in not_interrupted
+    assert "process_killed" not in not_interrupted
+
+    # --- the last-session variant, kept for one narrow purpose. Here the turn
+    # DOES die even when the interrupt fails, because stopping the cwd's last
+    # transport kills the app-server running it, so ``ended`` is a true report
+    # and this pair proves nothing about misreporting. What it does show is that
+    # the failed-stop branch is perfectly capable of copying a field out of the
+    # teardown result -- it copies ``process_killed`` and leaves ``interrupted``
+    # behind. That makes the omission a field the caller forgot rather than
+    # information it never had, which is why the fix is a one-line forward.
+    last_session, cleared_killed, codex_killed = _run(
+        interrupt_raises=True, co_tenant=False
+    )
+    assert cleared_killed["transport_stopped"] is True
+    assert "/w" not in codex_killed._transports
+    assert last_session == {
+        "ok": True,
+        "action": "ended",
+        "backend": "codex",
+        "process_killed": True,
+    }
+    assert "interrupted" not in last_session
 
     # The signal exists one frame down and is dropped by the frame above. Both
     # halves asserted, because a fix belongs in the second one and a probe that

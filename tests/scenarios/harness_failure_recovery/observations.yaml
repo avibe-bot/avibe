@@ -334,7 +334,20 @@ observations:
       of the thing it measured -- an empty ``_transports`` and a ``None`` thread
       id are the deliberate stale-row case ``_end_codex`` exists to clean up -- so
       it now runs a LIVE transport twice, once with ``turn/interrupt`` raising and
-      once with it succeeding, and shows the two payloads byte-identical.
+      once with it succeeding, and shows the two payloads byte-identical. Round 5
+      found that a live transport was necessary and not sufficient: with
+      ``sessions_for_cwd`` returning ``[]`` the session is the cwd's last, so
+      ``_end_codex`` stops the shared app-server -- and a killed app-server ends
+      the turn as surely as an interrupt does. Both runs had therefore terminated
+      the turn by different means, which makes ``ended`` a TRUE report in both
+      and establishes nothing. The pair that establishes the finding needs a
+      CO-TENANT session on the same cwd: the transport stays up, the failed
+      interrupt leaves the backend turn genuinely executing, and the probe now
+      asserts that survival (transport never stopped, still registered) instead
+      of assuming it. The last-session variant is kept for one narrow purpose --
+      it is where ``process_killed`` IS forwarded, which is what shows the
+      failed-stop branch can copy a field out of the teardown result and copied
+      only one.
   - id: HFR-OBS-024
     date: 2026-08-06
     source: PR7R current-master evidence matrix (HFR-183, HFR-184)
@@ -523,3 +536,31 @@ observations:
       PRODUCTION fact and confirm the probe fails -- and that check must itself be
       checked, since one round's mutation was a no-op comment that left the
       asserted substring intact and produced a false pass.
+  - id: HFR-OBS-030
+    date: 2026-08-06
+    source: fifth adversarial review of the PR7R matrix (PR #1212)
+    result: confirmed
+    detail: >-
+      Fixing a fixture is not the same as fixing it ENOUGH, and a guard can be
+      degenerate in the same way an evidence cell can. Round 4 gave the codex End
+      probe a live transport, which was the right direction and stopped one step
+      short: the fixture still made the session its cwd's last, so ``_end_codex``
+      stopped the shared app-server and the failed-interrupt run's turn died by
+      process kill. Two runs that both end the turn, by different means, report
+      ``ended`` truthfully in both -- the byte-identical payloads were accurate,
+      not evidence. Only a co-tenant session on the same cwd keeps the transport
+      up and leaves the un-interrupted turn genuinely executing, and the probe
+      now ASSERTS that survival rather than inferring it from the fixture's
+      shape. Generalised: when a probe's claim is "these two worlds are
+      indistinguishable to the caller", the two worlds must first be shown to
+      actually DIFFER, and a teardown side effect can silently collapse them into
+      one. Separately, the finding-to-matrix tie compared two sets that shrink
+      together -- delete a finding from both ``PR7R_FINDINGS`` and every cell
+      detail and the equality still holds, including for an empty matrix. That is
+      the third instance of the round-3 lesson about assertions that read like a
+      floor and enforce nothing (after ``UNPROVEN_BUDGET < len(_CELLS)``), and it
+      sat two lines below a block that pins the five question ids explicitly. The
+      finding ids are now pinned the same way. The transferable rule: a guard
+      built from a comparison between two derived collections proves consistency,
+      never existence, so anything the plan advertises has to be named literally
+      somewhere in the guard.

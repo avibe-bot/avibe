@@ -180,6 +180,15 @@ def test_every_question_and_finding_names_a_real_consuming_test() -> None:
         for node_id in entry["evidence"]:
             _assert_node_exists(node_id)
 
+    # Pinned explicitly, exactly as the five questions are one block up. The
+    # tie below compares two sets that SHRINK TOGETHER: delete a finding from
+    # both ``PR7R_FINDINGS`` and every cell detail and the equality still holds
+    # -- an empty matrix passes it. That is the same shape of mistake round 3
+    # found in ``UNPROVEN_BUDGET < len(_CELLS)``: an assertion that reads like a
+    # floor and enforces nothing. The plan and the HFR-180/HFR-181 catalog
+    # entries keep advertising these two, so the guard has to name them.
+    assert set(PR7R_FINDINGS) == {"PR7R-F1", "PR7R-F2"}
+
     for finding_id, finding in PR7R_FINDINGS.items():
         assert finding_id.startswith("PR7R-F"), finding_id
         assert finding["title"].strip() and finding["detail"].strip(), finding_id
