@@ -860,3 +860,69 @@ observations:
       contains no such typo, so UNPROVEN_BUDGET stays 168. A defaulted lookup
       cannot fail; if a key is meaningful, the code that reads it must be able to
       say it does not recognise it.
+
+  - id: HFR-OBS-037
+    area: run-terminal-truth
+    summary: >-
+      Round 12, four findings, four factual cores accepted and one proposed
+      remedy rejected. Three of the four are audits of round 11's own fixes,
+      which is now the shape of this review: the newest guard is the likeliest
+      defect.
+      Finding one: ``_collectible_class`` was taught in round 10 that a
+      container class must be collectible, and it checked the name and the base
+      list. pytest also refuses a ``Test*``-named class that defines
+      ``__init__`` or ``__new__`` -- ``cannot collect test class ... because it
+      has a __init__ constructor`` -- so a scenario could cite a test that never
+      runs and be discovered. Verified against this repo's pytest rather than
+      reasoned, including the negative case that keeps the fix from being a
+      blanket ban: a ``unittest.TestCase`` subclass with ``__init__`` IS
+      collected, because the unittest plugin claims it. THE DURABLE RULE: a
+      collectibility predicate has to be run against the collector, not derived
+      from what you remember of it.
+      Finding two: nothing in the repo asserted that a catalog id names exactly
+      one row. Every reader de-duplicates before it looks -- HFR-192 builds
+      ``{id: test}`` and compares ``{ids}`` against the discovered set -- so two
+      rows answering to one id collapse to one element and pass the count, the
+      tie and the orphan checks, while consumers keep whichever row they read
+      last. HFR-202 checks the whole catalog for that collision and deliberately
+      does NOT ban the reverse: seven tests legitimately prove more than one
+      scenario. THE DURABLE RULE: a set built from a key silently accepts a
+      duplicate key; if the key is a primary key, something has to compare
+      lengths before the set is built.
+      Finding three is the sharpest, because it is round 11's fix reproducing
+      the exact accident round 11 named. HFR-201's marker list held the stem
+      ``"narrow"`` matched with ``in``, and the word that had rescued the stale
+      text was "narrower" -- so the guard against a false rescue could itself be
+      satisfied by the very word that caused it. Markers are now whole-word with
+      every inflection spelled out, and the finding's counterexample is a
+      fixture. THE DURABLE RULE: when a postmortem names the word that fooled
+      you, the fix has to be checked AGAINST THAT WORD; naming it is not
+      excluding it.
+      Finding four's fact was right and its remedy was not. Every probe behind
+      Q2's Run clause built rows with ``platform="avibe"``, so the three
+      ``direct_im`` cells asserted per-Turn RUN attribution from durable-lane
+      rows plus a belief that the write path is platform-blind. The belief
+      holds: ``_submit_scheduled_turn`` gates on session id,
+      ``_start_persisted_turn`` stamps the token unconditionally, and
+      ``accepted_agent_run_ids_for_turn`` filters on state and turn id -- none
+      reads a platform. So the remedy of reopening the cells was rejected and
+      the belief was driven instead: the probe now builds a telegram-scoped
+      Scope and Session, takes a Delivery through claim, native bind and
+      materialized acceptance, binds an ``agent_runs`` row and reads the same
+      attribution. THE DURABLE RULE, and it is the round's: the belief was cheap
+      to check, and cheap to check is not checked.
+      Two schema facts appear only on the IM lane and are pinned with it.
+      Acceptance MATERIALIZES the snapshot into a ``messages`` row (afterwards
+      ``snapshot_json`` is NULL), so ``messages.scope_id`` needs a real Scope
+      row, and ``messages.session_id`` is a DEFERRED foreign key that fails at
+      COMMIT rather than at insert. The Workbench probe passes ``scope_id=None``
+      and persists no Message, so it met neither and neither was known.
+      The one real bypass of the whole chain is sessionless CLI dispatch, which
+      writes no Delivery and no Turn: EMPTY attribution rather than wrong
+      attribution, and outside both lanes, which are Session-scoped by their own
+      definitions. It is asserted as an empty result rather than left implied.
+      UNPROVEN_BUDGET stays 168: nothing this round touches a matrix cell.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` has the leaf-only and container
+      weaknesses of the round-10 and round-12 fixes both, still deliberately
+      untouched (HFR-OBS-028).

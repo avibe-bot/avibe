@@ -3,7 +3,7 @@
 Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
 PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
 PR4 (#1173) are complete. Only PR7R remains as the next unit, and it is
-evidence-only; its first increment is in flight (`HFR-180…201`, see §7). PR4's
+evidence-only; its first increment is in flight (`HFR-180…202`, see §7). PR4's
 conditional transport-attempt delta (PR4B) opens only if a current-master
 reproducer proves a missing durable fact.**
 
@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…201`, `HFR-202…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn and per-emit Run attribution is derived from that Turn, so the inactivity timeout is no longer blocked on attribution; the one residual is the per-session activity timestamp; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…202`, `HFR-203…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn and per-emit Run attribution is derived from that Turn, so the inactivity timeout is no longer blocked on attribution; the one residual is the per-session activity timestamp; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,11 +1227,11 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under eleven review rounds
+#### PR7R status (2026-08-06) — first increment, revised under twelve review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
-`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…201`) and fed by
+`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…202`) and fed by
 `tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
 `HFR-191`, `HFR-195`, `HFR-197`, `HFR-199`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
@@ -1242,10 +1242,11 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through eleven changed how the
-findings are demonstrated, two question verdicts, and eleven degenerate guards
-(three of them in round ten, and two more in round eleven that were in this
-unit's own new code, found by counter-checking it against the real prior text).
+rounds and has held at 168 since; rounds four through twelve changed how the
+findings are demonstrated, two question verdicts, and thirteen degenerate guards
+(three of them in round ten, two more in round eleven that were in this unit's
+own new code, and two in round twelve that were round eleven's fixes — the
+newest guard is now reliably the likeliest defect).
 Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
@@ -1615,6 +1616,59 @@ present. `_validate_matrix` now whitelists both key levels and `HFR-200` pins al
 three rejections. The checked-in matrix was audited before the guard landed and
 holds no such typo, so the budget stays at 168.
 
+Round 12 — four findings, four factual cores accepted, one proposed remedy
+rejected. Three of the four audit round 11's own fixes, which is now the settled
+shape of this review: the newest guard is the likeliest defect. The first is that
+`_collectible_class`, taught in round 10 that a container class must be
+collectible, checked the name and the base list and stopped there — pytest also
+*refuses* a `Test*`-named class that defines `__init__` or `__new__`
+(`cannot collect test class ... because it has a __init__ constructor`), so a row
+could cite a test that never runs and still be discovered. The fix was verified
+against this repo's pytest rather than reasoned, including the negative case that
+keeps it from becoming a blanket ban: a `unittest.TestCase` subclass with
+`__init__` *is* collected, because the unittest plugin claims it. **A
+collectibility predicate has to be run against the collector, not derived from
+what you remember of it.**
+
+The second is a guard that was never written. Nothing asserted that a catalog id
+names exactly one row, and every reader de-duplicates before it looks — `HFR-192`
+builds `{id: test}` and compares `{ids}` against the discovered set — so two rows
+answering to one id collapse to one element and pass the count, tie and orphan
+checks while consumers keep whichever row they read last. `HFR-202` checks the
+whole catalog for that collision, and deliberately does not ban the reverse: seven
+tests legitimately prove more than one scenario. **A set built from a key silently
+accepts a duplicate key.**
+
+The third is the sharpest, because it is round 11's fix reproducing the accident
+round 11 named. `HFR-201`'s marker list held the stem `"narrow"` matched with
+`in` — and "narrower" is precisely the word that had rescued the stale sentence
+the guard was written to catch, so the guard against a false rescue could be
+satisfied by the word that caused it. Markers are now whole-word with every
+inflection spelled out, and the finding's counterexample is a fixture. **When a
+postmortem names the word that fooled you, the fix has to be checked against that
+word; naming it is not excluding it.**
+
+The fourth had a right fact and a wrong remedy. Every probe behind Q2's Run clause
+built rows with `platform="avibe"`, so the three `direct_im` cells asserted
+per-Turn **Run** attribution from durable-lane rows plus a belief that the write
+path is platform-blind — the finding asked to reopen the cells. The belief holds:
+`_submit_scheduled_turn` gates on session id, `_start_persisted_turn` stamps the
+token unconditionally, and `accepted_agent_run_ids_for_turn` filters on state and
+turn id; not one reads a platform. So the remedy was rejected and the belief was
+driven instead — `HFR-197` now builds a telegram-scoped Scope and Session, takes a
+Delivery through claim, native bind and materialized acceptance, binds an
+`agent_runs` row and reads back the same attribution. **The belief was cheap to
+check, and cheap to check is not checked.** Two schema facts surface only on that
+lane and are pinned with it: acceptance *materializes* the snapshot into a
+`messages` row, so `messages.scope_id` needs a real Scope and `messages.session_id`
+is a **deferred** foreign key that fails at commit rather than at insert; the
+Workbench probe passes `scope_id=None` and persists no Message, so it met neither.
+The one genuine bypass is sessionless CLI dispatch, which writes no Delivery and no
+Turn: empty attribution rather than wrong attribution, outside both lanes — which
+are Session-scoped by their own definitions — and asserted as an empty result
+rather than left implied. Nothing this round touches a matrix cell, so the budget
+stays at 168.
+
 Question verdicts:
 
 1. **Q1 — open, do not close the claim yet.** On the durable Workbench lane,
@@ -1910,8 +1964,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…201` — occupied by PR7R's first increment (`HFR-188…201` were
-  taken by its round-6 through round-11 reviews); `HFR-202…219` still reserved for
+- PR7: `HFR-180…202` — occupied by PR7R's first increment (`HFR-188…202` were
+  taken by its round-6 through round-12 reviews); `HFR-203…219` still reserved for
   the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is

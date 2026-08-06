@@ -1766,6 +1766,119 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     assert read(live_dispatcher, _ctx({"turn_token": "turn-a"})) == ["run-a1", "run-a2"]
     assert read(live_dispatcher, _ctx({"turn_token": "turn-b"})) == ["run-b1"]
 
+    # (7) The same rows on the OTHER lane, which round 12's finding is right
+    # that nothing here built. Everything above stamps ``platform="avibe"`` --
+    # the Workbench -- so "Run attribution holds on direct_im too" was carried
+    # by the durable-lane rows plus the belief that the path is platform-blind.
+    # It is platform-blind, and that is now driven rather than believed: an
+    # IM-scoped Session, a telegram snapshot, and a Harness Run bound through
+    # the same ``attach_agent_run_delivery`` resolve per Turn identically. The
+    # belief was cheap to check, and cheap to check is not checked -- the same
+    # sentence round 10 wrote about the stub it replaced.
+    # A fourth and fifth schema lesson, and both appear only on this lane:
+    # acceptance MATERIALIZES the Delivery into a ``messages`` row, whose
+    # ``scope_id`` is a plain foreign key and whose ``session_id`` is a DEFERRED
+    # one (so it fails at COMMIT, not at insert). Part (6) passes
+    # ``scope_id=None`` and never persists a Message at all, so it meets
+    # neither. An IM Delivery carries the scope it arrived in -- which is what
+    # makes a Workbench-only fixture unable to discover this, and what makes
+    # "the path is platform-blind" worth driving instead of asserting.
+    from storage.models import agent_sessions, scopes
+
+    with engine.begin() as conn:
+        conn.execute(
+            scopes.insert().values(
+                id="scp-im", platform="telegram", scope_type="dm",
+                native_id="tg-1", is_private=1, supports_threads=0,
+                metadata_json="{}", first_seen_at=_STAMP, last_seen_at=_STAMP,
+                updated_at=_STAMP,
+            )
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses-im", agent_backend="claude", agent_variant="default",
+                session_anchor="scp-im", native_session_id="native-im",
+                status="active", visibility="foreground", pinned=0,
+                agent_status="idle", metadata_json="{}",
+                created_at=_STAMP, updated_at=_STAMP,
+            )
+        )
+        im_batch = [
+            durable_deliveries.insert_delivery(
+                conn,
+                delivery_id="del-im1",
+                session_id="ses-im",
+                priority="p3",
+                state="queued",
+                snapshot=durable_deliveries.message_snapshot(
+                    scope_id="scp-im", session_id="ses-im", platform="telegram",
+                    author="harness", source="harness", message_type="user",
+                    text="scheduled prompt", metadata={},
+                ),
+                dispatch_text="scheduled prompt",
+            )
+        ]
+        im_claimed = durable_deliveries.claim_start_batch(
+            conn, turn_id="turn-im", session_id="ses-im", backend="claude",
+            deliveries=im_batch, dispatch_text="scheduled prompt",
+        )
+        durable_deliveries.bind_native_start(
+            conn, "turn-im",
+            expected_version=int(im_claimed["turn"]["version"]),
+            runtime_key="ses-im:/w", runtime_turn_id="turn-im",
+            native_turn_id="turn-im",
+        )
+        durable_deliveries.materialize_start_acceptance(
+            conn, turn_id="turn-im", evidence={"kind": "probe"},
+        )
+        conn.execute(
+            agent_runs.insert().values(
+                id="run-im1", definition_id=None, run_type="agent_run",
+                status="running", cancel_requested=0, session_id="ses-im",
+                created_at=_STAMP, updated_at=_STAMP, metadata_json="{}",
+            )
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn, "run-im1", session_id="ses-im", delivery_id="del-im1"
+        )
+
+    # The row really is on the IM lane -- otherwise this part re-runs part (6)
+    # under a different Turn id and proves nothing about platforms. Read off
+    # the MATERIALIZED Message rather than the snapshot, because acceptance
+    # consumes the snapshot (``snapshot_json`` is NULL by now) and the Message
+    # is what actually reached telegram.
+    from sqlalchemy import select
+
+    from storage.models import messages as messages_table
+
+    with engine.begin() as conn:
+        landed = conn.execute(
+            select(messages_table.c.platform, messages_table.c.scope_id).where(
+                messages_table.c.session_id == "ses-im"
+            )
+        ).all()
+        stored = durable_deliveries.deliveries_for_turn(conn, "turn-im")
+    assert landed == [("telegram", "scp-im")], landed
+    assert [row["snapshot_json"] for row in stored] == [None]
+
+    assert durable.accepted_agent_run_ids_for_turn("turn-im") == ["run-im1"]
+    assert read(live_dispatcher, _ctx({"turn_token": "turn-im"})) == ["run-im1"]
+    # ...and the two lanes do not leak into each other, which is the failure a
+    # session-keyed read would produce and a Turn-keyed one cannot.
+    assert durable.accepted_agent_run_ids_for_turn("turn-a") == ["run-a1", "run-a2"]
+
+    # Why one lane's rows carry the other's conclusion, stated rather than
+    # assumed: the write path takes no branch on platform. ``_submit_scheduled_turn``
+    # inserts the Delivery, binds the Run and calls ``deliver`` gated on the
+    # SESSION id, not the scope's surface (core/internal_server.py), and the only
+    # platform comparison anywhere near the Turn write chooses which string
+    # becomes ``context.message_id``. The one real bypass is sessionless,
+    # CLI-style dispatch, which writes no Delivery and no Turn at all -- so its
+    # attribution is empty rather than exact. That is outside both lanes here,
+    # since both are defined by having a Session, and it is recorded so the next
+    # unit does not read "all six cells" as covering it.
+    assert durable.accepted_agent_run_ids_for_turn("") == []
+
     # Scope that survives round 10: whether every Run a Turn really executed is
     # bound to one of that Turn's Deliveries in the first place is a question
     # about the WRITE side, on Q5's boundary, and this probe assumes it.

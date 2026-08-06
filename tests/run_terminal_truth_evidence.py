@@ -726,14 +726,30 @@ RETRACTED_PHRASINGS: Final = (
 #: ``_RETRACTION_RADIUS`` characters of one of these and nowhere else: quoting an
 #: error in order to correct it is the point of the ledger, repeating it as an
 #: assertion is what the ledger forbids.
+#: Matched as WHOLE words, which round 12 had to be told. The first list held
+#: the stem ``"narrow"`` and was compared with ``in``, so "narrower" -- the
+#: adjective this unit uses constantly for scope, as in "the real consequence is
+#: narrower" -- read as a retraction marker. That is the same defect the marker
+#: rule was written to stop, reintroduced by the rule itself: round 11 named
+#: "narrower" as the word that rescued the stale text and then left a pattern
+#: that matches it. Every inflection a retraction actually uses is therefore
+#: spelled out, and nothing is matched by prefix.
 RETRACTION_MARKERS: Final = (
     "retract",
+    "retracts",
+    "retracted",
+    "retraction",
     "is false",
     "was false",
     "too strong",
-    "narrow",
+    "narrowed",
+    "narrows",
     "correction",
+    "corrects",
+    "corrected",
     "supersede",
+    "supersedes",
+    "superseded",
     "round 9 wrote",
     "used to",
 )
@@ -774,6 +790,16 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # plain IM request carries a freshly generated per-Turn token by the time
     # the adopt path looks for one. Driven, not read: the probe runs the real
     # ``handle_message`` twice and asserts the two tokens differ.
+    #
+    # Round 12 pays the other half of that bill. The Turn token was driven on
+    # this lane; the RUNS the question also asks about were not -- every row
+    # behind ``_Q2_RUNS`` was stamped ``platform="avibe"``, and the IM cells
+    # rode a belief that the Delivery/Turn write path is platform-blind. It is
+    # (the three writers gate on session id, state and turn id, never on
+    # platform), and ``_Q2_RUNS`` now builds a telegram-scoped Session with a
+    # bound ``agent_runs`` row and reads the identical per-Turn attribution off
+    # it. The exception is sessionless CLI dispatch, which writes no Delivery
+    # and no Turn: empty attribution, and outside both lanes by definition.
     ("claude", "direct_im"): covered(_Q2_ADMISSION),
     # Codex is the exception, and the first draft of this table got it wrong by
     # reading only the base-session projection. The app-server's ``item/*`` and
@@ -815,6 +841,11 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # consumer still throws attribution away -- the activity timestamp stamped
     # per SESSION rather than per Turn -- and that one is unretracted.
     ("codex", "durable_workbench"): covered(_Q2_SIGNALS),
+    # The ``turnId`` is on the notification whatever surface asked for the
+    # turn, so the signal half of this cell never depended on the lane. Its RUN
+    # half did, and round 12 drove it: see the note on ``("claude",
+    # "direct_im")`` -- the attribution query filters on state and turn id and
+    # reads no platform, and ``_Q2_RUNS`` now proves that on real IM rows.
     ("codex", "direct_im"): covered(_Q2_SIGNALS),
     # OpenCode was read the same wrong way as codex, one round later, and for
     # the same reason: ``_active_requests[base]`` is a LIVENESS map -- one
@@ -830,7 +861,8 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # writers; both are Workbench owners, which is what made the lane split look
     # real. ``_stamp_runtime_turn`` is a third writer and it is upstream of
     # both, so ``logical_turn_id`` is NOT empty on IM -- ``_process_message``
-    # reads a token that the admission layer put there.
+    # reads a token that the admission layer put there. Round 12 adds the Run
+    # half on real IM rows, for the reason given on ``("claude", "direct_im")``.
     ("opencode", "direct_im"): covered(_Q2_ADMISSION),
 }
 
@@ -967,7 +999,40 @@ PR7R_QUESTIONS: Final = {
             "really costs is narrower: a cwd change turns queue-and-run-after "
             "into interrupt-and-replace, and "
             "``runtime_turn_keys_for_session_key`` cannot address the replaced "
-            "turn. A generic inactivity timeout is therefore UNBLOCKED on the "
+            "turn. "
+            "The EIGHTH correction, round 12, is not a fact in this answer but "
+            "how much of it was DRIVEN, and it lands on the Run half. Every "
+            "probe behind the Run clause built its rows with "
+            "``platform=\"avibe\"`` -- the Workbench surface -- so the three "
+            "``direct_im`` cells asserted per-Turn RUN attribution on the "
+            "strength of a belief that the write path takes no branch on "
+            "platform. The belief holds, and it was cheap to check, and cheap "
+            "to check is not checked: ``_submit_scheduled_turn`` inserts the "
+            "Delivery, binds the Run through "
+            "``attach_agent_run_delivery_in_connection`` and calls ``deliver`` "
+            "gated on the SESSION id (core/internal_server.py); "
+            "``_start_persisted_turn`` hydrates the accepted ids and stamps "
+            "``platform_specific['turn_token']`` (core/session_turns.py); and "
+            "``accepted_agent_run_ids_for_turn`` filters on ``state`` and "
+            "``turn_id`` alone (storage/message_deliveries.py). Not one of the "
+            "three reads a platform. It is now driven rather than believed: "
+            "the probe builds a telegram-scoped Scope and Session, takes a real "
+            "Delivery through claim, native bind and materialized acceptance, "
+            "binds an ``agent_runs`` row to it, and gets back the same exact "
+            "per-Turn attribution the Workbench rows give. Two schema facts "
+            "surface only on that lane and are pinned with it: acceptance "
+            "MATERIALIZES the snapshot into a ``messages`` row, so "
+            "``messages.scope_id`` needs a real Scope and ``messages.session_id`` "
+            "is a DEFERRED foreign key that fails at COMMIT rather than at "
+            "insert -- which is why the Workbench probe, passing "
+            "``scope_id=None`` and persisting no Message, never met either. "
+            "The one write path that does bypass all of this is sessionless "
+            "CLI dispatch (core/internal_server.py), which persists neither "
+            "Delivery nor Turn and so has EMPTY attribution rather than wrong "
+            "attribution; it sits outside both lanes as this unit defines them, "
+            "since ``direct_im`` and ``durable_workbench`` are each "
+            "Session-scoped by their own wording. "
+            "A generic inactivity timeout is therefore UNBLOCKED on the "
             "attribution question -- an exact signal exists on all three "
             "backends and both lanes, and the Runs come with it -- and "
             "remediation is ONE item: a per-Turn activity timestamp instead of "

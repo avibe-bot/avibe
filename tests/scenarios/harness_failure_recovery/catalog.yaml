@@ -2902,6 +2902,20 @@ scenarios:
     # places and left it standing in this file -- the canonical record -- plus an
     # observation. RETRACTED_PHRASINGS is now data and this enforces it corpus-wide.
     test: tests/test_run_terminal_truth_matrix.py::test_no_retracted_phrasing_survives_outside_its_own_retraction
+  - id: HFR-202
+    name: one scenario id names exactly one catalog row
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Every reader of this file de-duplicates before it looks: HFR-192 builds
+    # {id: test} and compares {ids} against the discovered set, so two rows
+    # answering to one id collapse to one element and pass the count, the tie and
+    # the orphan check while consumers keep whichever row they read last. Two
+    # canonical definitions for one stable id is the record disagreeing with
+    # itself, invisibly. Scope is the whole catalog: a primary key is not a
+    # PR7R convention.
+    test: tests/test_run_terminal_truth_matrix.py::test_one_scenario_id_names_exactly_one_catalog_row
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

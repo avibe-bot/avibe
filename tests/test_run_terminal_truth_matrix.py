@@ -171,13 +171,26 @@ def _collectible_class(node: ast.ClassDef) -> bool:
     fix; a false acceptance is the silent citation rot this resolver exists to
     stop.
     """
-    if node.name.startswith("Test"):
-        return True
     for base in node.bases:
         tail = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
         if tail.endswith("TestCase"):
+            # The unittest plugin claims these, constructor and all: TestCase
+            # itself defines ``__init__``, so the rule below cannot apply here.
             return True
-    return False
+    if not node.name.startswith("Test"):
+        return False
+    # Round 12, verified against this repo's pytest rather than reasoned: a
+    # name-collected class that defines ``__init__`` or ``__new__`` is REFUSED
+    # with ``PytestCollectionWarning: cannot collect test class ... because it
+    # has a __init__ constructor``, and its tests never run. Believing the name
+    # alone would let a catalog row cite a green-looking scenario that pytest
+    # skips in silence -- the exact rot this resolver exists to stop, one
+    # attribute deeper than round 11 looked.
+    return not any(
+        isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and child.name in ("__init__", "__new__")
+        for child in node.body
+    )
 
 
 def _collected_tests(
@@ -534,6 +547,55 @@ def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None
     ), "every PR7R test owns exactly one catalog row and vice versa"
 
 
+def test_one_scenario_id_names_exactly_one_catalog_row() -> None:
+    """HFR-202: a scenario id is a stable name, so two rows may not answer to it.
+
+    Round 12's finding, and it is the set-collapse defect one layer above the
+    ones rounds 10 and 11 found. Every check in HFR-192 reads the catalog
+    through ``{row["id"]: row["test"]}`` or compares ``{ids}`` against
+    ``discovered`` -- both of which SHRINK a duplicate to one element. So two
+    rows carrying the same id pass the count, the tie and the orphan check,
+    while ``by_id`` keeps whichever came last and every other consumer keeps
+    whichever it happened to read. The catalog is the canonical record the plan
+    and the next unit read to decide what is proven; two canonical definitions
+    for one stable id is not a formatting problem, it is the record disagreeing
+    with itself, and the disagreement is invisible precisely because the
+    de-duplication happens before anything looks.
+
+    Scope is the WHOLE catalog rather than the PR7R modules. Everywhere else
+    this unit narrows to its own rows because it is asserting a convention the
+    rest of the suite has not adopted; uniqueness of a primary key is not a
+    convention, and ``by_id`` is built from every row regardless of scope.
+
+    What is deliberately NOT asserted: that a test is cited once. Seven tests
+    in this catalog legitimately prove more than one scenario, and a guard that
+    banned that would be a guard someone turns off.
+    """
+    yaml = pytest.importorskip("yaml")
+    catalog_path = (
+        Path(__file__).resolve().parent
+        / "scenarios"
+        / "harness_failure_recovery"
+        / "catalog.yaml"
+    )
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+
+    seen: dict[str, dict] = {}
+    collisions: list[str] = []
+    for row in scenarios:
+        first = seen.setdefault(row["id"], row)
+        if first is not row:
+            same = "identical" if first == row else "CONFLICTING"
+            collisions.append(
+                f"{row['id']}: two rows ({same}) -- first cites "
+                f"{first.get('test')!r}, second cites {row.get('test')!r}"
+            )
+    assert not collisions, "\n".join(collisions)
+    # A floor, so an empty or mis-parsed catalog cannot pass this vacuously.
+    assert len(seen) == len(scenarios) >= 200, (len(seen), len(scenarios))
+
+
 _PLAN = Path(__file__).resolve().parents[1] / "docs" / "plans" / "harness-run-reliability.md"
 
 
@@ -711,6 +773,15 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "    def test_case(self): ...\n"
         "class OwnerTests(unittest.IsolatedAsyncioTestCase):\n"
         "    async def test_case(self): ...\n"
+        "class TestCtor:\n"
+        "    def __init__(self): ...\n"
+        "    def test_case(self): ...\n"
+        "class TestNew:\n"
+        "    def __new__(cls): ...\n"
+        "    def test_case(self): ...\n"
+        "class CtorTests(unittest.IsolatedAsyncioTestCase):\n"
+        "    def __init__(self, *a, **kw): super().__init__(*a, **kw)\n"
+        "    async def test_case(self): ...\n"
         "def _helper(): ...\n"
         "def test_real(): ...\n"
         "async def test_async_real(): ...\n",
@@ -749,6 +820,23 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     # of HFR-192 while pytest collected nothing. Discovery and citation are two
     # readings of one question and now share one predicate, which is checked
     # here on the same fixture rather than in two places that can drift.
+    # Round 12 adds the constructor rule to the same fixture, on both readers.
+    # ``TestCtor`` and ``TestNew`` are named exactly as pytest requires and are
+    # still not collected -- this repo's pytest says so out loud
+    # (``PytestCollectionWarning: cannot collect test class 'TestCtor' because
+    # it has a __init__ constructor``) -- while ``CtorTests`` defines the same
+    # constructor and IS collected, because the unittest plugin claims it. So
+    # the rule is not "no constructor"; it is "no constructor on a class
+    # collected by NAME", and asserting the third case is what keeps the fix
+    # from being a blanket ban that quietly drops real tests.
+    for node_id in (f"{rel}::CtorTests::test_case",):
+        _assert_node_exists(node_id)
+    for rejected_class in ("TestCtor", "TestNew"):
+        with pytest.raises(
+            AssertionError, match=f"pytest does not collect class '{rejected_class}'"
+        ):
+            _assert_node_exists(f"{rel}::{rejected_class}::test_case")
+
     discovered = {suffix for suffix, _node in _collected_tests(ast.parse(
         module.read_text(encoding="utf-8")
     ).body)}
@@ -757,6 +845,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "test_async_real",
         "TestGood::test_case",
         "OwnerTests::test_case",
+        "CtorTests::test_case",
     }, discovered
     assert "Owner::test_case" not in discovered
 
@@ -895,7 +984,14 @@ def _marker_near(prose: str, start: int, end: int) -> bool:
     scope = "".join(
         prose[lo:hi] for lo, hi in spans if lo <= start < hi or lo < end <= hi
     )
-    return any(marker in scope for marker in RETRACTION_MARKERS)
+    # Whole words, round 12. Substring matching let the stem "narrow" be
+    # satisfied by "narrower", so one sentence asserting a banned claim and
+    # using that adjective for anything at all passed the guard -- the rule
+    # reproducing the accident it was written to catch, one round after naming
+    # the very word. The fixtures in HFR-201 spell the case out.
+    return any(
+        re.search(rf"\b{re.escape(marker)}\b", scope) for marker in RETRACTION_MARKERS
+    )
 
 
 def test_no_retracted_phrasing_survives_outside_its_own_retraction():
@@ -958,6 +1054,11 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction():
         f"the two {banned}, and the mute turn was interrupted. the real "
         f"consequence of the split is narrower: it replaces rather than queues."
     )
+    # Round 12: the same sentence, with the accident word moved INSIDE it. The
+    # sentence rule alone does not save a substring marker -- "narrower"
+    # contains "narrow" -- so the markers are whole words now, and this is the
+    # case that says so.
+    assert not _accepts(f"the two {banned} in the narrower gate.")
 
     # A phrase that matches nothing is a ledger row that enforces nothing, and a
     # renamed subject would turn every row into one silently. Each row must
