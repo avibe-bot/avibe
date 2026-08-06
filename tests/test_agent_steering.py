@@ -32,8 +32,7 @@ from modules.im import MessageContext
 
 
 STEER_TEXT = "补充：**不要改写**\n```python\nprint('λ')\n```"
-ORDERED_ATTEMPT_ID = "atm_1234567890000123456789abcd"
-ORDERED_NATIVE_MESSAGE_ID = "msg_1234567890000123456789abcd"
+ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
 
 
 def test_steer_outcomes_are_exhaustive() -> None:
@@ -151,13 +150,17 @@ class _OpenCodeServer:
             await self.release_prompt.wait()
         if self.error is not None:
             raise self.error
+        attempt_id = kwargs.get("attempt_id")
+        part = {"type": "text", "text": kwargs["text"]}
+        if attempt_id:
+            part["id"] = f"prt_{attempt_id.removeprefix('atm_')}"
         self.messages.append(
             {
                 "info": {
-                    "id": kwargs.get("message_id") or f"steer-user-{len(self.prompt_calls)}",
+                    "id": f"steer-user-{len(self.prompt_calls)}",
                     "role": "user",
                 },
-                "parts": [{"type": "text", "text": kwargs["text"]}],
+                "parts": [part],
             }
         )
 
@@ -661,7 +664,7 @@ async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> 
     server = _OpenCodeServer()
     agent = _opencode_agent(primary, gate_task, server)
     controller = _controller_with_active_gate(agent, primary, gate_task)
-    attempt_id = ORDERED_ATTEMPT_ID
+    attempt_id = ATTEMPT_ID
     try:
         identity = active_steer_identity(controller, "opencode", "avibe-session")
         assert identity is not None
@@ -677,7 +680,8 @@ async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> 
             ),
         )
         assert receipt.outcome is SteerOutcome.ACCEPTED
-        assert server.prompt_calls[0]["message_id"] == ORDERED_NATIVE_MESSAGE_ID
+        assert server.prompt_calls[0]["attempt_id"] == ATTEMPT_ID
+        assert "message_id" not in server.prompt_calls[0]
 
         reconciled = await reconcile_steer_attempt(
             controller,
@@ -691,7 +695,7 @@ async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> 
         )
 
         assert reconciled.outcome is SteerOutcome.ACCEPTED
-        assert reconciled.details["native_message_id"] == ORDERED_NATIVE_MESSAGE_ID
+        assert reconciled.details["native_message_id"] == "steer-user-1"
         assert len(server.prompt_calls) == 1
     finally:
         await _cancel_tasks(gate_task)
@@ -965,7 +969,7 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
     reconciliation_fails: bool,
 ) -> None:
     primary = _primary_request(backend="opencode")
-    primary.context.platform_specific["delivery_start_attempt_id"] = ORDERED_ATTEMPT_ID
+    primary.context.platform_specific["delivery_start_attempt_id"] = ATTEMPT_ID
     events: list[str] = []
 
     class _Server:
@@ -1086,9 +1090,9 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
     await agent._process_message(primary)
 
     expected_reconciliation = (
-        f"invalid:logical-turn:{ORDERED_ATTEMPT_ID}:opencode"
+        f"invalid:logical-turn:{ATTEMPT_ID}:opencode"
         if status == 400
-        else f"reconcile:logical-turn:{ORDERED_ATTEMPT_ID}:opencode"
+        else f"reconcile:logical-turn:{ATTEMPT_ID}:opencode"
     )
     assert events[:3] == [
         "persist_poll",
@@ -1105,7 +1109,7 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
     monkeypatch,
 ) -> None:
     primary = _primary_request(backend="opencode")
-    primary.context.platform_specific["delivery_start_attempt_id"] = ORDERED_ATTEMPT_ID
+    primary.context.platform_specific["delivery_start_attempt_id"] = ATTEMPT_ID
     events: list[str] = []
 
     class _Server:

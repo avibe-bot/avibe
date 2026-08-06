@@ -471,10 +471,9 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         body = fake_session.posts[0]["json"]
         self.assertEqual(body["tools"], {"question": False})
 
-    async def test_prompt_async_uses_opencode_native_message_id(self):
+    async def test_prompt_async_uses_opencode_native_attempt_part(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()
-        manager._wait_for_native_message_slot = AsyncMock()  # type: ignore[method-assign]
 
         async def _fake_get_http_session():
             return fake_session
@@ -485,59 +484,37 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             session_id="ses-1",
             directory="/tmp/work",
             text="hello",
-            message_id="msg_exact_evidence",
+            attempt_id="atm_1234567890abcdef1234567890abcdef",
         )
 
+        body = fake_session.posts[0]["json"]
+        self.assertNotIn("messageID", body)
         self.assertEqual(
-            fake_session.posts[0]["json"]["messageID"],
-            "msg_exact_evidence",
-        )
-        manager._wait_for_native_message_slot.assert_awaited_once_with(  # type: ignore[attr-defined]
-            "msg_exact_evidence"
-        )
-
-    def test_durable_attempt_maps_between_surrounding_native_messages(self):
-        """MESSAGE-DELIVERY-021: durable attempts preserve native message order."""
-        timestamp_ms = 1_775_630_400_000
-        with patch.object(delivery_store.time, "time", return_value=timestamp_ms / 1000):
-            first_attempt_id = delivery_store.new_attempt_id()
-            second_attempt_id = delivery_store.new_attempt_id()
-
-        first_native_message_id = SERVER_MODULE.native_message_id_for_attempt(
-            first_attempt_id
-        )
-        second_native_message_id = SERVER_MODULE.native_message_id_for_attempt(
-            second_attempt_id
-        )
-        previous_order = (timestamp_ms * 0x1000 + 0xFFF) & ((1 << 48) - 1)
-        first_assistant_order = ((timestamp_ms + 1) * 0x1000 + 1) & (
-            (1 << 48) - 1
+            body["parts"],
+            [
+                {
+                    "type": "text",
+                    "text": "hello",
+                    "id": "prt_1234567890abcdef1234567890abcdef",
+                }
+            ],
         )
 
-        self.assertRegex(first_native_message_id, r"^msg_[0-9a-f]{26}$")
-        self.assertLess(
-            f"msg_{previous_order:012x}{'z' * 14}", first_native_message_id
-        )
-        self.assertLess(
-            first_native_message_id,
-            f"msg_{first_assistant_order:012x}{'0' * 14}",
-        )
-        self.assertLess(
-            f"msg_{first_assistant_order:012x}{'z' * 14}",
-            second_native_message_id,
-        )
+    def test_durable_attempt_maps_to_opencode_part_evidence(self):
+        """MESSAGE-DELIVERY-021: OpenCode owns native message ordering."""
+        attempt_id = delivery_store.new_attempt_id()
+
+        self.assertRegex(attempt_id, r"^atm_[0-9a-f]{32}$")
         self.assertEqual(
-            SERVER_MODULE.native_message_not_before_ms(first_native_message_id),
-            timestamp_ms + 1,
-        )
-        self.assertEqual(
-            SERVER_MODULE.native_message_not_before_ms(second_native_message_id),
-            timestamp_ms + 2,
+            SERVER_MODULE.native_part_id_for_attempt(attempt_id),
+            f"prt_{attempt_id.removeprefix('atm_')}",
         )
 
-    def test_legacy_random_attempt_identity_is_rejected(self):
+    def test_unreleased_ordered_attempt_identity_is_rejected(self):
         with self.assertRaises(ValueError):
-            SERVER_MODULE.native_message_id_for_attempt("atm_exact_evidence")
+            SERVER_MODULE.native_part_id_for_attempt(
+                "atm_1234567890000123456789abcd"
+            )
 
     async def test_prompt_async_exposes_definitive_http_rejection(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

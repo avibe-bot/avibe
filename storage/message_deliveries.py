@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -30,8 +29,6 @@ from storage.models import (
 TURN_OWNER_STATES = ("starting", "active")
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
-_ATTEMPT_ID_LOCK = threading.Lock()
-_LAST_ATTEMPT_NOT_BEFORE_MS = -1
 
 
 def utc_now_iso() -> str:
@@ -53,17 +50,7 @@ def new_delivery_id() -> str:
 
 
 def new_attempt_id() -> str:
-    # Give every attempt its own future native millisecond. The backend waits
-    # for that boundary before writing, so an existing assistant is always
-    # earlier and OpenCode's following assistant is always later.
-    global _LAST_ATTEMPT_NOT_BEFORE_MS
-
-    wall_ms = int(time.time() * 1_000)
-    with _ATTEMPT_ID_LOCK:
-        not_before_ms = max(wall_ms + 1, _LAST_ATTEMPT_NOT_BEFORE_MS + 1)
-        _LAST_ATTEMPT_NOT_BEFORE_MS = not_before_ms
-    order_key = (not_before_ms * 0x1000) & ((1 << 48) - 1)
-    return f"atm_{order_key:012x}{not_before_ms:011x}{uuid.uuid4().hex[:3]}"
+    return f"atm_{uuid.uuid4().hex}"
 
 
 def _canonical_json(value: Any) -> str:

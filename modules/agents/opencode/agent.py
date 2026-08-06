@@ -56,7 +56,7 @@ from .poll_loop import OpenCodePollLoop, restored_platform_from_poll_info, resto
 from .server import (
     OpenCodePromptRejectedError,
     OpenCodeServerManager,
-    native_message_id_for_attempt,
+    native_part_id_for_attempt,
 )
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
@@ -1078,8 +1078,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await server.mark_run_active(session_id)
             run_registered = True
             # Persist the complete recovery address before the first native write.
-            # A crash after OpenCode accepts the exact message ID can now rebuild the
-            # poll and Turn owner even if no post-prompt Python statement ran.
+            # A crash after OpenCode accepts the exact attempt part can now rebuild
+            # the poll and Turn owner even if no post-prompt Python statement ran.
             self.sessions.add_active_poll(
                 opencode_session_id=session_id,
                 base_session_id=request.base_session_id,
@@ -1106,11 +1106,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 session_id=session_id,
                 directory=request.working_path,
                 text=prompt_text,
-                message_id=(
-                    native_message_id_for_attempt(start_attempt_id)
-                    if start_attempt_id
-                    else None
-                ),
+                attempt_id=start_attempt_id or None,
                 agent=agent_to_use,
                 model=model_dict,
                 reasoning_effort=reasoning_effort,
@@ -1433,9 +1429,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         "tools": {"question": False},
                     }
                     if request.attempt_id:
-                        prompt_kwargs["message_id"] = native_message_id_for_attempt(
-                            request.attempt_id
-                        )
+                        prompt_kwargs["attempt_id"] = request.attempt_id
                     await server.prompt_async(
                         **prompt_kwargs,
                     )
@@ -1540,7 +1534,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         request: SteerReconcileRequest,
         target: ActiveSteerTarget,
     ) -> SteerResult:
-        """Resolve one prior OpenCode write by its native message identity."""
+        """Resolve one prior OpenCode write by its exact native part identity."""
 
         if not request.attempt_id:
             return steer_result(
@@ -1575,11 +1569,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reason="runtime_unavailable",
                 backend=self.name,
             )
-        native_message_id = native_message_id_for_attempt(request.attempt_id)
+        native_part_id = native_part_id_for_attempt(request.attempt_id)
         try:
-            message = await server.get_message(
+            messages = await server.list_messages(
                 native_session_id,
-                native_message_id,
                 directory,
             )
         except Exception as exc:  # noqa: BLE001 - absence is not negative proof
@@ -1589,18 +1582,26 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 backend=self.name,
                 diagnostic=str(exc),
             )
-        info = message.get("info") if isinstance(message, dict) else None
-        if (
-            isinstance(info, dict)
-            and str(info.get("id") or "") == native_message_id
-            and info.get("role") == "user"
-        ):
-            return steer_result(
-                SteerOutcome.ACCEPTED,
-                reason="native_message_found",
-                backend=self.name,
-                native_message_id=native_message_id,
-            )
+        for message in messages:
+            info = message.get("info") if isinstance(message, dict) else None
+            parts = message.get("parts") if isinstance(message, dict) else None
+            if (
+                isinstance(info, dict)
+                and info.get("role") == "user"
+                and isinstance(parts, list)
+                and any(
+                    isinstance(part, dict)
+                    and str(part.get("id") or "") == native_part_id
+                    for part in parts
+                )
+            ):
+                return steer_result(
+                    SteerOutcome.ACCEPTED,
+                    reason="native_attempt_part_found",
+                    backend=self.name,
+                    native_message_id=str(info.get("id") or ""),
+                    native_part_id=native_part_id,
+                )
         return steer_result(
             SteerOutcome.UNKNOWN,
             reason="untrusted_attempt_evidence",
@@ -1783,16 +1784,19 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 verification_unknown = True
 
             baseline_message_ids = set(poll_info.baseline_message_ids)
-            start_attempt_message_id = (
-                native_message_id_for_attempt(start_attempt_id)
+            start_attempt_part_id = (
+                native_part_id_for_attempt(start_attempt_id)
                 if start_attempt_id
                 else ""
             )
             start_attempt_found = any(
-                start_attempt_message_id
+                start_attempt_part_id
                 and message.get("info", {}).get("role") == "user"
-                and str(message.get("info", {}).get("id") or "")
-                == start_attempt_message_id
+                and any(
+                    isinstance(part, dict)
+                    and str(part.get("id") or "") == start_attempt_part_id
+                    for part in (message.get("parts") or [])
+                )
                 for message in messages
             )
             has_in_progress = False
