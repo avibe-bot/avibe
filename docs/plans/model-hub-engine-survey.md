@@ -555,3 +555,145 @@ Performed against the pinned sources and assets:
 Not verified: live OAuth exchanges, live model entitlements, billable provider
 requests, vendor ToS/billing, macOS notarization/code signing, maintainer release
 signatures, or mutation behavior of startup-owned CPA config fields.
+
+## S4. M0 agentic-fidelity spike: Anthropic <-> OpenAI
+
+Status: **blocked before live execution**, checked 2026-08-07. This section
+extends S1; it does not revisit S1 section 3's finding that syntax conversion
+exists, is registry-driven, and covers both directions. The question here is
+semantic fidelity under an agentic workload.
+
+### 13. Evidence boundary and stop condition
+
+The required vendor credentials were looked up only through the Vault CLI:
+
+```text
+vibe vault list
+vibe vault find --q anthropic
+vibe vault find --q openai
+```
+
+The Vault contained no Anthropic or OpenAI API-key capability. The available
+entries were unrelated to this spike. Per the charter, the lane stopped before
+obtaining or starting the CPA binary through the runtime pipeline, and before
+making any upstream request. No Avibe service, user
+configuration, CLI login state, auth file, or account session was inspected.
+
+The results below therefore use a conservative gate decision:
+**NO-GO (unverified)** means that the pair cannot be accepted for the v2.1
+fixed-menu decision. It is not a claim that the pinned engine was observed to
+drop a field. A later run with both keys must replace these rows with measured
+evidence before implementation can proceed.
+
+### 14. Conversion matrix and decisions
+
+S1's source inspection identifies all four directions as built-in translator
+paths in CPA v7.2.95. The plugin host is disabled in the managed runtime and no
+plugin is named by the translator registrations. That is an engine-core
+classification, not a semantic-fidelity result.
+
+| Conversion pair | Direction exercised by the fixture | Translation owner | Plugin dependency in v7.2.95 | M0 gate |
+| --- | --- | --- | --- | --- |
+| Anthropic Messages <-> OpenAI Responses | Messages -> Responses; Responses -> Messages | CPA engine-core registry and stream translators | None identified; plugins remain disabled | **NO-GO (unverified)** |
+| Anthropic Messages <-> OpenAI Chat Completions | Messages -> Chat; Chat -> Messages | CPA engine-core registry and OpenAI-compatible executor | None identified; plugins remain disabled | **NO-GO (unverified)** |
+
+The direction-level evidence ledger is explicit because a pair is accepted only
+when both directions pass:
+
+| Client request | Target API-key source | Live result | Reason for M0 no-go |
+| --- | --- | --- | --- |
+| Anthropic Messages | OpenAI Responses | Not run | Missing OpenAI and Anthropic Vault keys; no real request was authorized |
+| OpenAI Responses | Anthropic Messages | Not run | Missing OpenAI and Anthropic Vault keys; no real request was authorized |
+| Anthropic Messages | OpenAI Chat Completions | Not run | Missing OpenAI and Anthropic Vault keys; no real request was authorized |
+| OpenAI Chat Completions | Anthropic Messages | Not run | Missing OpenAI and Anthropic Vault keys; no real request was authorized |
+
+### 15. Agentic capability matrix
+
+The fixture covers the following invariants once credentials are supplied. A
+passing HTTP status alone is insufficient: the response must preserve the
+observable protocol contract and the agentic state transition.
+
+| Capability | Minimal workload | Required invariant | Owner | M0 evidence |
+| --- | --- | --- | --- | --- |
+| Single tool call | One prompt with `lookup_weather` | Tool name, JSON arguments, call id, and terminal stop reason survive the conversion | Engine-core translator plus caller adapter | Not run |
+| Parallel tools | One prompt requesting `lookup_weather` and `lookup_time` together | Both calls remain addressable and are not silently serialized or merged | Engine-core translator | Not run |
+| Multi-turn loop | Assistant tool call followed by a tool result and a final answer | Tool call id links the result to the same call; the second turn sees the tool output | Engine-core translator plus caller adapter | Not run |
+| Streaming text | Short streamed answer | Every data event is valid JSON, ordering is monotonic, and the stream terminates with the protocol's done event | Engine-core stream translator | Not run |
+| Streaming tool fragments | Stream a tool call with split arguments | Fragments can be reassembled into exactly one valid JSON argument object and one call id | Engine-core stream translator | Not run |
+| System prompt | System/instructions text containing a marker | Marker reaches the target model and does not appear as an ordinary user message | Engine-core translator | Not run |
+| Thinking/reasoning | Anthropic `thinking` budget and OpenAI `reasoning.effort` | Mapped fields are recorded; unsupported detail is either preserved, explicitly omitted, or rejected, never silently mislabelled as user text | Engine-core translator; upstream model semantics | Not run |
+| Context length/truncation | Prompt with a tail marker, then increasing prefix sizes | The first rejected/truncated size and error shape are recorded; no silent loss of the tail marker is accepted | Upstream model plus engine request limits; no plugin | Not run (optional low-cost probe) |
+
+Thinking and reasoning are deliberately treated as a fidelity question. The
+fixture sends both parameter families, but this report does not infer that a
+budget maps to an OpenAI effort level (or vice versa) from field-name
+similarity. CPA's engine-core translation may carry, clamp, or drop a field;
+the target model's own behavior determines whether the result is useful.
+
+### 16. Minimum reproductions for each no-go
+
+These are the smallest replayable cases for the four unverified directions.
+They are descriptions of the acceptance probe, not claims that the failure was
+observed.
+
+1. **Messages -> Responses.** POST `/v1/messages` with two tools, a system
+   marker, `thinking: {type: enabled, budget_tokens: 64}`, and `stream: true`.
+   Reassemble tool-call deltas, send one `tool_result`, and require a final
+   answer. No-go on a missing/changed call id, invalid JSON arguments, a lost
+   system marker, an unterminated SSE stream, or an unreported reasoning-field
+   drop.
+2. **Responses -> Messages.** POST `/v1/responses` with `instructions`, two
+   function tools, `reasoning: {effort: low}`, a `function_call`, and a matching
+   `function_call_output`; repeat with `stream: true`. Require Anthropic
+   `tool_use`/`tool_result` correlation and a final text block. No-go on a
+   missing call id, a result attached to the wrong call, or a reasoning field
+   that is silently presented as user content.
+3. **Messages -> Chat Completions.** POST `/v1/messages` with the parallel-tool
+   prompt and the same system/thinking fields. Require Chat `tool_calls` and
+   `delta.tool_calls` fragments to reconstruct both calls, then send the Chat
+   `tool` messages back through the loop. No-go on serialisation, argument
+   truncation, or loss of the Anthropic stop reason.
+4. **Chat Completions -> Messages.** POST `/v1/chat/completions` with an
+   assistant `tool_calls` item and a matching `tool` result, then repeat as a
+   short stream. Require an Anthropic `tool_use` block, matching
+   `tool_result`, system marker, and a terminal message event. No-go on a
+   missing `tool_call_id`, an invalid Anthropic content block, or an SSE stream
+   that cannot be deterministically reassembled.
+
+For the optional context probe, keep the request count small: send a marker at
+the end of a progressively larger system/user prefix, record the first 4xx or
+provider limit response, and separately verify whether the marker is present in
+the model-visible tool/final-answer behavior. A silent marker disappearance is
+NO-GO even if CPA returns HTTP 200. This probe was not run in M0.
+
+### 17. Fixture and rerun contract
+
+`docs/plans/fixtures/cpa-agentic-fidelity/` contains the standard-library-only
+`probe.py` runner and its run instructions. It has seven cases covering both
+directions of both pairs, single and parallel tools, tool-result round trips,
+streaming, system text, and thinking/reasoning parameters. It fails closed before any
+network request when `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is absent, and it
+never logs request/response bodies or environment values. Its JSON output only
+reports transport and stream-termination shape; the semantic invariants in the
+matrix remain the reviewer's redacted acceptance record, so a 2xx response is
+never treated as a fidelity pass by itself.
+
+The runner is intentionally not an Avibe integration test: the CPA process must
+be obtained through `vibe/model_hub_runtime/` and bound to `127.0.0.1`, while
+source selection and API-key injection remain runtime-owned. The later live run
+must use `vibe vault run --env ANTHROPIC_API_KEY,OPENAI_API_KEY -- <command>`;
+the keys must not be copied into the fixture, a config file, or this document.
+
+### 18. M0 conclusion and remaining coverage
+
+Both conversion pairs are **NO-GO for v2.1 adoption** because the required
+Anthropic and OpenAI credentials were absent and no semantic-fidelity evidence
+was produced. Both are classified as **engine-core** in CPA v7.2.95; no plugin
+dependency was identified, and the managed runtime keeps plugins disabled.
+
+Not covered by this blocked run: any real agentic request, actual stream
+fragments, model-specific thinking behavior, context-limit thresholds,
+provider error taxonomy, latency/cost, OAuth or subscription behavior, and
+cross-vendor subscription paths. The scope guard remains unchanged: this spike
+concerns API-key sources only; subscriptions stay bound to their own vendor's
+backend.
