@@ -100,7 +100,7 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("GET", "/api/projects/proj-1") == "viewer"
     assert required_instance_role("GET", "/api/projects/proj-1/agents-md") == "owner"
     assert required_instance_role("GET", "/api/agents") == "editor"
-    assert required_instance_role("GET", "/api/skills") == "owner"
+    assert required_instance_role("GET", "/api/skills") == "editor"
     assert required_instance_role("GET", "/api/vault/secrets") == "editor"
     assert required_instance_role("GET", "/api/vault/tags") == "editor"
     assert required_instance_role("POST", "/api/vault/requests/access") == "editor"

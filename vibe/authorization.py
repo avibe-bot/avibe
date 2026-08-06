@@ -320,6 +320,7 @@ _EDITOR_HTTP_RULES = tuple(
     for method, pattern in (
         ("GET", r"^/api/agents$"),
         ("GET", r"^/api/agent-backends$"),
+        ("GET", r"^/api/skills$"),
         ("GET", r"^/api/vault/(?:secrets|tags)$"),
         ("GET", r"^/api/cloud/token$"),
         ("GET", r"^/api/asr/status$"),
