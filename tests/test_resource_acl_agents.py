@@ -414,7 +414,7 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
         environ_base=_remote_peer(),
     )
     assert blocked_legacy_turn.status_code == 403
-    assert blocked_legacy_turn.get_json()["code"] == "remote_execution_disabled"
+    assert blocked_legacy_turn.get_json()["code"] == "agent_access_forbidden"
     assert dispatch_calls == []
 
     with engine.begin() as connection:
@@ -435,7 +435,7 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
         environ_base=_remote_peer(),
     )
     assert revoked_turn.status_code == 403
-    assert revoked_turn.get_json()["code"] == "remote_execution_disabled"
+    assert revoked_turn.get_json()["code"] == "agent_access_forbidden"
     assert dispatch_calls == []
 
     with pytest.raises(

@@ -860,7 +860,7 @@ def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_pat
         "capabilities": {
             "is_instance_owner": True,
             "can_read_instance": True,
-            "can_chat": False,
+            "can_chat": True,
             "can_manage_projects": True,
             "can_manage_agents": True,
             "can_manage_instance": True,
