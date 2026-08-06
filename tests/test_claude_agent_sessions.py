@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -14,6 +14,7 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
+from core.session_activities import SessionActivity, activity_completion_output
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
@@ -2011,6 +2012,53 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assert_uncontained_settlement(controller.emit_agent_message, "SIGTERM")
+
+    async def test_receiver_exception_requeues_a_claimed_activity_batch(self):
+        """A dying receiver must not take an Activity claim down with it.
+
+        The EOF path already requeues before its terminal emit; this one only
+        peeked at the FIFO head, so the request still owned the batch and the
+        ``run_ids`` on its ``activity_completion_output``. With the contained
+        settlement declining to complete the Run, emitting on that output would
+        skip those Runs AND drop the claim -- the batch would be neither
+        delivered nor redeliverable. Requeueing restores it and strips the
+        provenance the release can no longer honour.
+        """
+
+        key = "session-exc-activity:/tmp/work"
+        controller, agent, request = self._receiver_exception_agent(key, contained=True)
+        activity = SessionActivity(
+            id="activity-1",
+            backend="claude",
+            runtime_key=key,
+            session_id="ses-1",
+            kind="background_task",
+            status="completed",
+            run_id="run-1",
+        )
+        request.output_activities = [activity]
+        request.output = activity_completion_output(
+            activity,
+            activities=[activity],
+            detached=False,
+            completes_turn=True,
+        )
+        registry = SimpleNamespace(requeue_completed_outputs=Mock())
+        agent._activity_registry = lambda: registry
+
+        await agent._handle_receiver_exception(
+            key,
+            request.context,
+            RuntimeError("Cannot write to terminated process (exit code: -15)"),
+        )
+
+        registry.requeue_completed_outputs.assert_called_once_with([activity])
+        self.assertEqual(request.output_activities, [])
+        self.assert_contained_settlement(controller.emit_agent_message)
+        released = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(released.activity_ids, ())
+        self.assertIsNone(released.activity_batch_id)
+        self.assertEqual(released.run_ids, ())
 
     async def test_direct_query_contained_teardown_settles_as_backend_refresh(self):
         """The third path: the query itself fails, no receiver ever runs."""

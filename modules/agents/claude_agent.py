@@ -2142,6 +2142,18 @@ class ClaudeAgent(BaseAgent):
                 await self._clear_pending_reactions(composite_key, context)
                 self._mark_session_idle_if_no_pending_requests(composite_key)
             else:
+                # Give a claimed Activity batch back to the Registry BEFORE the
+                # terminal emit, exactly as ``_handle_receiver_eof`` does. This
+                # path only ever peeked at the FIFO head, so a request carrying
+                # an ``activity_completion_output`` still owned that batch and
+                # its ``run_ids`` when the receiver died. Emitting on it either
+                # terminalizes those Runs from an empty body or -- once the
+                # settlement stops completing the Run -- skips them entirely and
+                # discards the claim with them. Requeueing resets the request's
+                # output to the plain terminal shape, so the release below
+                # carries no provenance it can no longer honour and the batch
+                # stays deliverable by whoever claims it next.
+                self._requeue_request_activity(pending_request)
                 contained = await self.session_handler.handle_session_error(
                     composite_key,
                     context,
