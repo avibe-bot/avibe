@@ -213,6 +213,10 @@ _Q2_SERIALIZED = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
     "test_one_runtime_key_admits_one_live_turn_at_a_time"
 )
+_Q2_KEY_SPLIT = (
+    "tests/test_run_terminal_truth_evidence_probes.py::"
+    "test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot"
+)
 _Q3_PROBE = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
     "test_the_accepted_run_batch_records_no_per_run_source_or_deadline"
@@ -701,13 +705,20 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # request from THAT id through ``get_request_for_turn`` -- a per-turn map,
     # not a per-session one. The exact-Turn signal therefore exists. An earlier
     # round said the signal is then DISCARDED by ``should_emit_progress``, which
-    # gates on the single ``_active_turns[base]`` slot -- an over-claim. The
-    # runtime gate is acquired in ``AgentService.handle_message`` and held for
-    # the whole turn, so one runtime key admits one live turn at a time and that
-    # slot names the only live turn there is; the gate is DRIVEN in
-    # ``test_one_runtime_key_admits_one_live_turn_at_a_time``. What is left is
-    # narrower: the activity timestamp is stamped per SESSION, so the exact
-    # attribution is available and then aggregated away at the last step.
+    # gates on the single ``_active_turns[base]`` slot. Round 6 called that an
+    # over-claim, on the ground that the runtime gate admits one live turn per
+    # key; round 8 reinstated it, because the gate's key and that slot's key are
+    # DIFFERENT KEY SPACES. The gate keys on the composite
+    # ``<base>:<working_path>``; ``_active_turns`` keys on the base alone. A
+    # working-path change therefore admits a second live turn into the same
+    # slot, evicts the first, and mutes a turn that is still running -- driven
+    # in ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``.
+    # The cell stays ``covered`` because the question is whether the exact-Turn
+    # signal EXISTS, and it does: the ``turnId`` is on the notification and
+    # ``_find_request_for_notification`` resolves it before any filtering. What
+    # is defective is the CONSUMER, and there are now two of them: the
+    # base-keyed emission filter, and the activity timestamp that is stamped per
+    # SESSION. The attribution is available and then thrown away twice.
     ("codex", "durable_workbench"): covered(_Q2_SIGNALS),
     ("codex", "direct_im"): covered(_Q2_SIGNALS),
     # OpenCode was read the same wrong way as codex, one round later, and for
@@ -797,23 +808,36 @@ PR7R_QUESTIONS: Final = {
             "``handle_message`` twice on one runtime key and asserts the two "
             "tokens differ, i.e. per-Turn and not per-session, and that a "
             "pre-existing Workbench token is preserved rather than overwritten. "
-            "What remains is NOT attribution but its downstream use: the "
-            "activity timestamp every backend stamps is per SESSION, and codex "
-            "additionally filters at ``should_emit_progress`` on the single "
-            "``_active_turns[base]`` slot. That filter is correct as written -- "
-            "the runtime gate is held across the whole backend call and "
-            "released only by the outbound dispatcher, so one runtime key "
-            "admits one live turn at a time (driven, second test) and the slot "
-            "is not lossy for live turns. So a generic inactivity timeout is "
-            "UNBLOCKED on the attribution question: an exact signal exists on "
-            "all three backends and both lanes, and the remaining work is to "
-            "carry it into a per-Turn timestamp instead of a per-session one -- "
-            "remediation, not a missing capability. Note claude's attribution "
+            "What remains is NOT attribution but its downstream use, and round "
+            "8 made that residual bigger rather than smaller. Two consumers "
+            "discard the signal. First, the activity timestamp every backend "
+            "stamps is per SESSION. Second, codex filters at "
+            "``should_emit_progress`` on the single ``_active_turns[base]`` "
+            "slot -- which round 6 declared correct on the ground that the "
+            "runtime gate admits one live turn per key, and which is NOT "
+            "correct, because the gate's key and the slot's key are different "
+            "key spaces. The gate keys on ``BaseAgent.runtime_turn_key``, the "
+            "composite ``<base>:<working_path>``; ``_active_turns`` keys on the "
+            "base session alone, and ``handle_message`` moves the tracked cwd "
+            "to whatever the latest request carried. So a working-path change "
+            "on a live session opens a SECOND gate, admits a second live turn "
+            "into the same slot, and mutes the first while it is still running "
+            "(driven, third test). Round 6's mistake was a new one rather than "
+            "a fifth repeat of the projection error: a true statement about one "
+            "key was carried across to a different key, and the assertion meant "
+            "to tie the two read a substring out of a function the gate never "
+            "calls. A generic inactivity timeout is therefore UNBLOCKED on the "
+            "attribution question -- an exact signal exists on all three "
+            "backends and both lanes -- but it may not be built on codex's "
+            "emission path as it stands, because that path can go silent on a "
+            "live turn. Remediation is now two items: a per-Turn timestamp "
+            "instead of a per-session one, and a turn slot keyed the way the "
+            "gate is. Note claude's attribution "
             "is a FIFO POSITION rather than an id the event carries: exact "
             "under per-key serialization, weaker than codex's ``turnId``, and "
             "the remediation has to build on it as it is."
         ),
-        "evidence": (_Q2_SIGNALS, _Q2_ADMISSION, _Q2_SERIALIZED),
+        "evidence": (_Q2_SIGNALS, _Q2_ADMISSION, _Q2_SERIALIZED, _Q2_KEY_SPLIT),
     },
     "Q3": {
         "question": (

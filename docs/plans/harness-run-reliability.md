@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…194`, `HFR-195…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn, so the inactivity timeout is no longer blocked on attribution; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…196`, `HFR-197…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn, so the inactivity timeout is no longer blocked on attribution, though codex's base-keyed emission filter still mutes a live turn after a working-path change; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,13 +1227,13 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under seven review rounds
+#### PR7R status (2026-08-06) — first increment, revised under eight review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
-`HFR-192…194`) and fed by
+`HFR-192…194`, `HFR-196`) and fed by
 `tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
-`HFR-191`). It expands
+`HFR-191`, `HFR-195`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
 (lane, trigger, outcome) with a `per_backend` override wherever the backend
 demonstrably changes the answer, because the durable owner chain is chosen by
@@ -1242,8 +1242,8 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through seven changed how the
-findings are demonstrated, two question verdicts, and four degenerate guards. Why it moved is the
+rounds and has held at 168 since; rounds four through eight changed how the
+findings are demonstrated, two question verdicts, and five degenerate guards. Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
 cell rather than about the cell. The first round found fifty such cells, in four
@@ -1390,8 +1390,9 @@ Workbench token is preserved. All six cells are `covered`, the guard forces Q2 t
 is left is that the activity timestamp is per **session**, which is remediation.
 `HFR-191` narrows the companion over-claim: codex's `should_emit_progress` filter
 reads the single `_active_turns[base]` slot, and the runtime gate is held across
-the whole backend call, so one runtime key admits one live turn at a time and the
-slot is not lossy. The filter is correct as written.
+the whole backend call, so one runtime key admits one live turn at a time. Round 8
+had to reinstate the over-claim — see below — because that says nothing about a
+slot keyed differently.
 
 This is the **fourth** correction of the same underlying error (see HFR-OBS-024),
 and the first where the previously-stated rule — read the producer, not its
@@ -1444,6 +1445,40 @@ id this unit already owns. Both are now tied to code rather than to diligence:
 the range this document calls reserved. Prose in a plan drifts; the one token an
 implementer greps for should not be prose.
 
+Round 8 took back round 6's codex narrowing. The claim was that
+`should_emit_progress` is lossless because the runtime gate admits one live turn
+per key — true of the gate's key, and irrelevant, because the two are **different
+key spaces**. The gate keys on `BaseAgent.runtime_turn_key`, the composite
+`<base>:<working_path>`, which codex does not override; `_active_turns` keys on
+`request.base_session_id` alone, and `CodexAgent.handle_message` moves the tracked
+cwd to whatever the latest request carried. A working-path change on a live
+session therefore opens a *second* gate, admits a second live turn into the *same*
+slot, evicts the first, and mutes a turn that is still running — and
+`runtime_turn_keys_for_session_key` then reports only the newer key, so nothing
+can even address the silenced turn. `HFR-195` drives all of it: the two key
+functions, the overlap through the real `AgentService.handle_message`, and the
+filter returning `False` for the live turn. This also closes the probe the codex
+cell had carried since round 4 ("can anything put two live turns on one base
+session"), against the conclusion.
+
+The error is a new shape, not a fifth repeat of the projection mistake: a correct
+fact about one key was carried across to a different key. Worse, the assertion
+written to tie the two — `"base_session_id" in getsource(_runtime_turn_key_for_base_session)`
+— was a substring read of a function the gate never calls, i.e. the exact
+nearby-passing-assertion this unit was created to eliminate, committed by the unit
+itself. The rule that follows: **when a conclusion joins two mechanisms, the join
+is the claim, and an identifier that appears in both is not the same identifier
+until it is computed and compared.** Q2 stays `answered` — the question is whether
+an exact-Turn signal exists, and it does on all six cells — but its residual grew:
+two consumers throw the attribution away, the per-session activity timestamp and
+now codex's base-keyed emission filter. Round 8's second finding was the same
+staleness class as round 7's: `HFR-183`'s docstring still described the
+4-cells-covered lane split its own assertions had contradicted for two rounds,
+invisible to every guard because `HFR-192` reads only the scenario id out of a
+docstring. `HFR-196` ties the one sentence shape that went stale — a spelled-out
+number of cells said to be covered or open — to the real table, across both PR7R
+test modules, the matrix module and this document.
+
 Question verdicts:
 
 1. **Q1 — open, do not close the claim yet.** A Delivery reservation and an
@@ -1475,11 +1510,13 @@ Question verdicts:
    **FIFO position** among pending requests rather than by an id the event
    carries — exact only while per-key serialization holds, which
    `HFR-191` drives — so the remediation must build on a weaker mechanism there
-   than on codex. The earlier reading that codex *discards* its signal at
-   `should_emit_progress` does not survive that same serialization: the gate is
-   held past the backend's return and released at terminal delivery, so the
-   single `_active_turns[base]` slot names the only live turn there is and the
-   filter is correct.
+   than on codex. Third, and reinstated in round 8: codex **does** discard its
+   signal at `should_emit_progress`. Round 6 acquitted the filter by appealing to
+   the runtime gate, but the gate keys on the composite `<base>:<working_path>`
+   and `_active_turns` keys on the base session alone, so a working-path change
+   puts two live turns in one slot and mutes the older one. `HFR-195` drives it.
+   An inactivity timeout may not be built on codex's emission path until that
+   slot is keyed the way the gate is.
 3. **Q3 — open, split, and narrower than it was.** Established: the *Turn's*
    accepted-run record cannot discriminate between participants — a flat
    `accepted_agent_run_ids` list and one Turn-level `source_kind` stamped by
@@ -1609,10 +1646,14 @@ ordering is by how many cells one harness closes:
 4. **Per-backend** overrides for codex and opencode wherever step 2 or 3 shows
    the answer differs: the pending-output and local-settlement rows are
    Claude-only in production today, which is also what Q4 turns on.
-5. Q2 is closed; what it leaves behind is a **per-Turn activity timestamp** —
-   every backend has an exact-Turn attribution and every backend then stamps
-   activity per session, so the signal is aggregated away at the last step. That
-   is remediation for the implementation unit, not evidence work. Still open on
+5. Q2 is closed; what it leaves behind is two remediation items. A **per-Turn
+   activity timestamp** — every backend has an exact-Turn attribution and every
+   backend then stamps activity per session, so the signal is aggregated away at
+   the last step. And a **codex turn slot keyed like the gate**: `_active_turns`
+   is keyed by base session while the admission gate is keyed by
+   `<base>:<working_path>`, so a cwd change mutes a live turn (`HFR-195`); an
+   inactivity timeout built on that emission path would time out a Run that is
+   still working. Both are for the implementation unit, not evidence work. Still open on
    the evidence side: the **Q5 crash-gap probe** (kill between
    `mark_task_result` and `request_store.complete` and check whether anything
    reconciles the definition stamp with the Run's terminal status), the Q3
@@ -1710,8 +1751,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…194` — occupied by PR7R's first increment (`HFR-188…194` were
-  taken by its round-6 and round-7 reviews); `HFR-195…219` still reserved for
+- PR7: `HFR-180…196` — occupied by PR7R's first increment (`HFR-188…196` were
+  taken by its round-6 through round-8 reviews); `HFR-197…219` still reserved for
   the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is

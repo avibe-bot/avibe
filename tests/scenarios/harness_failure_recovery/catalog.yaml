@@ -2820,6 +2820,24 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_run_terminal_truth_matrix.py::test_the_plans_reserved_scenario_range_is_actually_free
+  - id: HFR-195
+    name: a working-path change splits the gate key but not the codex turn slot
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: codex
+    # The admission gate keys on the composite <base>:<working_path>; codex's
+    # _active_turns keys on the base session alone. A cwd change therefore opens
+    # a second gate, admits a second live turn into the same slot, and mutes the
+    # first while it is still running.
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot
+  - id: HFR-196
+    name: no PR7R prose states a Q2 cell count the table disagrees with
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_no_prose_states_a_q2_cell_count_the_table_disagrees_with
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

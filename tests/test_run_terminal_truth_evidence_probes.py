@@ -14,7 +14,7 @@ be about. Where the real subject is out of reach in this unit, the claim is
 narrowed to what is reached and the rest becomes a named probe in the matrix,
 never a green test that reads like coverage.
 
-Scenario ids: HFR-180 .. HFR-183, HFR-188, HFR-191.
+Scenario ids: HFR-180 .. HFR-183, HFR-188, HFR-191, HFR-195.
 """
 
 import ast
@@ -640,7 +640,7 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
 
 
 def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
-    """HFR-183 / Q2: the durable Workbench lane has the signal; direct IM mostly does not.
+    """HFR-183 / Q2: all six backend/lane cells carry an exact-Turn signal.
 
     The plan forbids a generic inactivity timeout unless every backend and lane
     has an exact-Turn progress signal, and states that session-wide activity is
@@ -665,12 +665,18 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     "The attribution is discarded" and "the attribution does not exist" call
     for different fixes, which is what makes the distinction load-bearing.
 
-    With all three read the same way the answer splits by LANE, not by backend.
-    ``turn_token`` is stamped into a context only by ``SessionTurnManager`` and
-    by the streaming turn dispatch, both Workbench owners -- so claude has
-    nothing to adopt and opencode nothing to forward on direct IM. Codex is the
-    exception because its ``turnId`` rides the notification rather than the
-    context. Four cells covered, two open, and the two are one fix.
+    Draft 5 was a fourth instance of the same shape and is the reason this
+    summary was stale for two rounds: it concluded the answer splits by LANE,
+    on the ground that ``turn_token`` is stamped only by ``SessionTurnManager``
+    and the streaming turn dispatch, both Workbench owners. That came from
+    grepping the LITERAL string and missing the constant-keyed write in
+    ``AgentService._stamp_runtime_turn``, which every request on every lane
+    passes through. There is no lane split: ALL SIX cells carry an exact-Turn
+    signal, driven in
+    ``test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im``.
+
+    What is NOT settled by that is what the consumer does with the signal, and
+    for codex it drops it -- see the closing section here and HFR-195.
 
     Claude's attribution is a FIFO POSITION, not an id the event carries: the
     head of ``_pending_requests[composite_key]`` is taken to be the turn
@@ -795,17 +801,17 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     assert registry.should_emit_progress("turn-2") is True
     assert registry.should_emit_progress("turn-1") is False
 
-    # That is a fact about the REGISTRY, and this probe deliberately stops
-    # claiming more. It used to conclude the gate "throws away" live progress,
-    # which requires turn-1 to still be running when turn-2 becomes active --
-    # a state this fixture postulates by registering both turns by hand and
-    # never shows to occur. It does not occur: the runtime gate admits one turn
-    # per key at a time (driven in
-    # ``test_one_runtime_key_admits_one_live_turn_at_a_time``), so by the time
-    # turn-2 is active turn-1 is finished and the drop is correct filtering.
-    # What remains unproven is narrower and is carried as a probe on the matrix:
-    # whether any state -- steering, a supersede, a key collision -- can put two
-    # live turns on one base session.
+    # For two rounds this was only a fact about the REGISTRY. The fixture
+    # registers both turns by hand, so it postulates the state it needs -- and
+    # round four rightly refused to call that a defect, then round six went
+    # further and called the drop CORRECT, on the ground that the runtime gate
+    # admits one turn per key at a time. That last step was wrong: it is true of
+    # the gate's key and says nothing about this slot's key, which is the base
+    # session alone. The remaining state -- "can anything put two LIVE turns on
+    # one base session" -- was carried as a probe, and round eight closed it
+    # against the conclusion. A working-path change does exactly that, driven in
+    # ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``. So
+    # the drop above is a discarded live signal, not correct filtering.
 
     # OpenCode. ``_active_requests`` really is one asyncio task slot per base
     # session id -- by annotation and by every read/write site -- and that is
@@ -1019,11 +1025,19 @@ def test_one_runtime_key_admits_one_live_turn_at_a_time():
     discarded signal. Same standard this unit applied to PR7R-F1 in round 4: an
     ordering is not a defect until the state is shown to occur.
 
-    It does not occur. The gate is acquired in ``handle_message`` before the
+    It does not occur ON ONE RUNTIME KEY, and that qualifier is the whole of
+    what this test proves. The gate is acquired in ``handle_message`` before the
     backend is invoked and is NOT released when the backend returns -- the
     outbound dispatcher releases it at terminal delivery -- so a second turn on
     the same key cannot enter the backend while the first is live. Driven here
     rather than read off the production comment that says so.
+
+    Round eight had to add the qualifier because round six dropped it and
+    concluded codex's ``should_emit_progress`` is therefore lossless. It is not:
+    the gate key and the codex turn slot are DIFFERENT KEY SPACES, so "one live
+    turn per gate key" says nothing about "one live turn per slot". That is
+    ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``, and
+    this test deliberately stops at its own key.
 
     The second half is the half that carries the claim, and the first draft of
     this probe was missing it. Holding a lock ACROSS a call is what any mutex
@@ -1075,9 +1089,159 @@ def test_one_runtime_key_admits_one_live_turn_at_a_time():
     assert len(agent.seen) == 2
     assert agent.seen[0][AGENT_TURN_TOKEN] != agent.seen[1][AGENT_TURN_TOKEN]
 
-    # Codex's ``_active_turns`` is keyed by base session and its runtime key is
-    # derived from that same base session, so the serialization above governs
-    # exactly the slot the codex half of the Q2 probe reads.
-    assert "base_session_id" in inspect.getsource(
-        CodexAgent._runtime_turn_key_for_base_session
+    # What this does NOT establish is the codex conclusion an earlier round
+    # hung on it. "One runtime key admits one live turn" is a statement about a
+    # KEY, and codex's ``_active_turns`` slot is keyed by something else, so the
+    # two do not compose. The first draft of that step was a substring read of
+    # ``_runtime_turn_key_for_base_session`` -- exactly the nearby-passing-
+    # assertion this file forbids, and it was reading the wrong function on top
+    # of that: the gate never calls it. Driven properly in
+    # ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``,
+    # which shows the two key spaces disagreeing and two live turns landing in
+    # one slot.
+
+
+def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
+    """HFR-195 / Q2: two live codex turns share one slot, and the older goes silent.
+
+    This closes the probe the codex cell has been carrying since round four --
+    "whether any state can put two live turns on one base session" -- and it
+    closes it the way that costs the previous round's conclusion. A key
+    collision can.
+
+    The mechanism is that two identifiers which look like the same thing are
+    not. The admission gate keys on ``BaseAgent.runtime_turn_key``, which is the
+    COMPOSITE session identity ``<base>:<working_path>``; codex's
+    ``_active_turns`` keys on ``request.base_session_id`` ALONE. Same session,
+    two working paths, and the gate sees two keys where the registry sees one
+    slot. Both turns are admitted, the second's ``register_turn`` overwrites the
+    slot, and ``should_emit_progress`` then reports False for a turn that is
+    still running -- the exact-Turn attribution reaches the filter and is
+    discarded there.
+
+    Round six's error is worth naming because it is a new one rather than a
+    fifth repeat. It was not a lossy projection read as an event stream; it was
+    a correct fact about one key ("the gate holds it for the whole turn")
+    carried across to a DIFFERENT key without checking that the keys are the
+    same. And the assertion that was supposed to check exactly that read a
+    substring out of ``_runtime_turn_key_for_base_session`` -- a function the
+    gate never calls, which computes ``<base>:<cwd>`` for the registry's own
+    bookkeeping. It passed, it looked like a key-space tie, and it was neither.
+
+    So every step below is driven on production objects: the two key spaces are
+    compared by calling them, the concurrency is shown by running the real
+    ``AgentService.handle_message``, and the silencing is shown on the real
+    ``CodexTurnRegistry``.
+    """
+    from modules.agents.base import BaseAgent
+    from modules.agents.codex.session import CodexSessionManager
+
+    def _codex_request(working_path: str):
+        return types.SimpleNamespace(
+            context=types.SimpleNamespace(platform_specific={}),
+            message="m",
+            base_session_id="base-1",
+            working_path=working_path,
+            composite_session_id=f"base-1:{working_path}",
+        )
+
+    first_request = _codex_request("/w1")
+    second_request = _codex_request("/w2")
+
+    # (1) The gate key. Codex does not override it -- asserted by identity, not
+    # by grepping for an absent ``def`` -- so the gate uses the composite key,
+    # which the two requests do NOT share even though the base session is one.
+    assert CodexAgent.runtime_turn_key is BaseAgent.runtime_turn_key
+    codex = object.__new__(CodexAgent)
+    gate_keys = [codex.runtime_turn_key(req) for req in (first_request, second_request)]
+    assert gate_keys == ["base-1:/w1", "base-1:/w2"], gate_keys
+    assert first_request.base_session_id == second_request.base_session_id
+
+    # ...and ``AgentService`` really routes through that method rather than
+    # falling back to its own composite-id default, which would make the point
+    # accidental rather than structural.
+    assert AgentService._runtime_turn_key(codex, first_request) == gate_keys[0]
+
+    # (2) The slot key. ``_active_turns`` is written by base session id, so the
+    # registry cannot tell the two requests apart at all.
+    registry = CodexTurnRegistry()
+    registry.register_turn("turn-1", first_request)
+    assert registry.get_active_turn("base-1") == "turn-1"
+    assert registry.should_emit_progress("turn-1") is True
+
+    # (3) Both turns are LIVE at once. Two distinct gate keys means two gates,
+    # so the second request enters the backend while the first is still inside
+    # it -- the state the round-four narrowing said could not occur. Driven on
+    # the real service with the real key function.
+    class _CodexKeyedAgent(_AdmissionAgent):
+        name = "codex"
+
+        def runtime_turn_key(self, request):
+            return BaseAgent.runtime_turn_key(self, request)
+
+    async def _drive():
+        service = AgentService(controller=types.SimpleNamespace(session_turns=None))
+        release = asyncio.Event()
+        agent = _CodexKeyedAgent(release=release)
+        service.register(agent)
+
+        first = asyncio.create_task(service.handle_message("codex", first_request))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert len(agent.seen) == 1
+
+        second = asyncio.create_task(service.handle_message("codex", second_request))
+        await asyncio.sleep(0.05)
+        # THE FINDING. On one runtime key this second call is still queued
+        # outside the backend (HFR-191). A working-path change is enough to make
+        # it a different key, and then both turns are inside the backend.
+        overlapped = len(agent.seen)
+
+        # Drained with the exceptions swallowed on purpose: under a mutation
+        # that gives the two requests ONE gate the second call never enters the
+        # backend, and the failure this probe should report is the count above,
+        # not a hang in the teardown.
+        release.set()
+        await asyncio.gather(
+            *(asyncio.wait_for(task, timeout=2) for task in (first, second)),
+            return_exceptions=True,
+        )
+        service.release_runtime_turn(first_request.context)
+        service.release_runtime_turn(second_request.context)
+        return overlapped
+
+    assert asyncio.run(_drive()) == 2
+
+    # (4) The consequence. The second live turn registers into the same slot and
+    # evicts the first, which is still running -- so its progress is filtered
+    # out. ``should_emit_progress`` is therefore lossy for LIVE turns, and the
+    # round-six claim that it is "correct as written" is retracted.
+    registry.register_turn("turn-2", second_request)
+    assert registry.get_active_turn("base-1") == "turn-2"
+    assert registry.get_turn("turn-1") is not None  # turn-1 is not gone, just mute
+    assert registry.should_emit_progress("turn-1") is False
+    assert registry.should_emit_progress("turn-2") is True
+
+    # (5) And the registry's own derived key cannot name the silenced turn
+    # either, because ``handle_message`` moves the tracked cwd to whatever the
+    # latest request carried. Driven on the real session manager, replacing the
+    # substring read this probe was written to retire.
+    session_mgr = CodexSessionManager()
+    codex._session_mgr = session_mgr
+    session_mgr.set_session_key("base-1", "sk")
+    session_mgr.set_cwd("base-1", first_request.working_path)
+    assert codex._runtime_turn_key_for_base_session("base-1") == "base-1:/w1"
+    session_mgr.set_cwd("base-1", second_request.working_path)
+    assert codex._runtime_turn_key_for_base_session("base-1") == "base-1:/w2"
+    # One base session, so ONE derived key -- and it is the newer turn's. Any
+    # consumer that enumerates runtime keys to find live turns (a stop, a
+    # timeout sweep) cannot even address the turn that is being silenced.
+    assert codex.runtime_turn_keys_for_session_key("sk") == {"base-1:/w2"}
+    assert gate_keys[0] not in codex.runtime_turn_keys_for_session_key("sk")
+
+    # ...and that move is what ``handle_message`` does per request, which is the
+    # production text making the collision reachable rather than hypothetical.
+    assert (
+        "self._session_mgr.set_cwd(request.base_session_id, request.working_path)"
+        in inspect.getsource(CodexAgent.handle_message)
     )

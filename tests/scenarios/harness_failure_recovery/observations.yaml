@@ -664,3 +664,37 @@ observations:
       range the plan calls reserved. The general rule: when a document states a
       fact the code also states, the document's copy is a cache, and an unchecked
       cache goes stale.
+  - id: HFR-OBS-033
+    date: 2026-08-06
+    source: eighth adversarial review of the PR7R matrix (PR #1212)
+    result: confirmed
+    detail: >-
+      When a conclusion joins two mechanisms, the JOIN is the claim -- and an
+      identifier that appears in both is not the same identifier until it is
+      computed and compared. Round 6 acquitted codex's ``should_emit_progress``
+      by appealing to the admission gate: the gate is held for the whole turn, so
+      one runtime key admits one live turn, so the single ``_active_turns[base]``
+      slot names the only live turn there is. Every clause is true and the
+      conclusion is false, because the gate keys on
+      ``BaseAgent.runtime_turn_key`` -- the composite ``<base>:<working_path>``,
+      which codex does not override -- while ``_active_turns`` keys on
+      ``request.base_session_id`` alone, and ``CodexAgent.handle_message`` moves
+      the tracked cwd to whatever the latest request carried. A working-path
+      change on a live session opens a SECOND gate, admits a second live turn into
+      the SAME slot, evicts the first and mutes a turn that is still running;
+      ``runtime_turn_keys_for_session_key`` then reports only the newer key, so no
+      sweep can address the silenced turn. HFR-195 drives all of it and closes,
+      against the conclusion, the probe the codex cell had carried since round 4.
+      This is a NEW error shape rather than a fifth repeat of "a projection is not
+      the event stream" -- and the assertion written to tie the two key spaces was
+      ``"base_session_id" in getsource(_runtime_turn_key_for_base_session)``, a
+      substring read of a function the gate never calls: the exact
+      nearby-passing-assertion this unit exists to eliminate, committed by the
+      unit itself. A guard against a class of error is not immunity from it.
+      Round 8's second finding was round 7's staleness rule recurring one file
+      over: HFR-183's docstring still described the four-cells-covered lane split
+      that its own assertions had contradicted for two rounds, and HFR-192 checks
+      only the scenario id in that docstring, so the contradiction stayed green.
+      HFR-196 now ties the one sentence shape that went stale -- a spelled-out
+      number of cells said to be covered or open -- to the real table, across
+      both PR7R test modules, the matrix module and the plan.

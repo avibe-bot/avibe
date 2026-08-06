@@ -440,3 +440,60 @@ def test_the_plans_reserved_scenario_range_is_actually_free() -> None:
     assert ours <= set(occupied), sorted(ours - set(occupied))
     taken = {int(row["id"].removeprefix("HFR-")) for row in scenarios}
     assert not (taken & set(reserved)), sorted(taken & set(reserved))
+
+
+_WORD_COUNTS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "all six": 6,
+}
+_CELL_COUNT_CLAIM = re.compile(
+    r"\b(one|two|three|four|five|six|all six)\s+cells?\s+(?:are\s+|is\s+)?(covered|open)\b",
+    re.IGNORECASE,
+)
+
+
+def test_no_prose_states_a_q2_cell_count_the_table_disagrees_with() -> None:
+    """HFR-196: a sentence counting Q2's covered cells must count the real table.
+
+    The regression this pins is round 8's second finding, and it is round 7's
+    lesson recurring one artefact over. ``HFR-183``'s docstring summary still
+    read "the durable Workbench lane has the signal; direct IM mostly does not"
+    and its body still explained "4 cells covered, 2 open" -- two rounds
+    after the same test's own assertions began requiring all six to be
+    ``covered``. Nothing caught it: ``HFR-192`` reads only the scenario id out of
+    a docstring, and the assertions and the prose describing them sat in the same
+    function disagreeing with each other.
+
+    The narrowness is deliberate and is the honest description of this guard: it
+    does not police prose. It ties exactly one sentence SHAPE -- a spelled-out
+    number of cells said to be covered or open -- to the table, because that is
+    the shape that went stale, in a document and in a docstring, in successive
+    rounds. Anything a summary line asserts in other words is still on the
+    reader.
+    """
+    covered = sum(1 for kind, _ in EXACT_TURN_PROGRESS_SIGNALS.values() if kind == "covered")
+    actual = {"covered": covered, "open": len(EXACT_TURN_PROGRESS_SIGNALS) - covered}
+
+    repo_root = Path(__file__).resolve().parents[1]
+    sources = (
+        "tests/test_run_terminal_truth_matrix.py",
+        "tests/test_run_terminal_truth_evidence_probes.py",
+        "tests/run_terminal_truth_evidence.py",
+        "docs/plans/harness-run-reliability.md",
+    )
+    checked = 0
+    for rel in sources:
+        # Backticks are markup around the same word, not part of the claim.
+        text = (repo_root / rel).read_text(encoding="utf-8").replace("`", "")
+        for word, kind in _CELL_COUNT_CLAIM.findall(text):
+            checked += 1
+            assert _WORD_COUNTS[word.lower()] == actual[kind.lower()], (
+                f"{rel} says {word} cells {kind}; the table has "
+                f"{actual[kind.lower()]}"
+            )
+    assert checked, "no cell-count claim found at all -- this guard is asserting nothing"
