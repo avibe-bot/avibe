@@ -100,9 +100,23 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
         self.assertIn(
-            "If the user asks you to configure, repair, or operate Avibe itself, read `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` before making changes.",
+            "Use the `use-avibe` playbook for Avibe configuration, repair, explanation, "
+            "and operations",
             prompt,
         )
+        self.assertIn(
+            "Before changing Avibe state or disrupting its running service, consult that playbook",
+            prompt,
+        )
+        self.assertIn(
+            "use `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` "
+            "when it is not installed locally",
+            prompt,
+        )
+        self.assertIn("skills/use-avibe/SKILL.md", prompt)
+        self.assertNotIn("new user turn", prompt)
+        self.assertNotIn("active Agent Session context", prompt)
+        self.assertNotIn("context compaction removed the guidance", prompt)
         self.assertIn("## Send files", prompt)
         self.assertIn("Avibe provides optional capabilities:", prompt)
         self.assertNotIn("If you generate an image with Codex", prompt)
