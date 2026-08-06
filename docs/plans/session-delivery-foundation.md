@@ -92,10 +92,11 @@ that batch and releases the Session. OpenCode retains its stronger exact-attempt
 reconciliation. A definitive pre-write start failure requeues the entire claimed
 batch in its original order. A late event for T1 cannot mutate T2.
 
-OpenCode writes the persisted Delivery attempt ID as the native `messageID`.
-After restart, reconciliation reads that exact native Message without issuing a
-second prompt: exact presence accepts, while absence or transport uncertainty
-remains blocked.
+OpenCode generates every native `messageID` at the actual write and stores the
+persisted Delivery attempt ID as the exact ID of the user Message's text part.
+After restart, reconciliation lists that native Session's Messages without
+issuing a second prompt: an exact user-part match accepts and returns its native
+Message ID, while absence or transport uncertainty remains blocked.
 
 Terminal settlement, the next compatible FIFO claim, and the Session status
 projection share one writer transaction. Result evidence is committed only after

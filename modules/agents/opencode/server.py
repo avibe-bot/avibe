@@ -46,6 +46,7 @@ OPENCODE_LOG_TAIL_BYTES = 2_000_000
 MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
 _CURRENT_OWNER_PID = os.getpid()
+_DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
 
 
 def _percent_encode_path(path: str) -> str:
@@ -59,26 +60,14 @@ def _percent_encode_path(path: str) -> str:
     return _url_quote(path, safe="/")
 
 
-def native_message_id_for_attempt(attempt_id: str) -> str:
-    """Map one durable attempt identity into OpenCode's message namespace."""
+def native_part_id_for_attempt(attempt_id: str) -> str:
+    """Map one durable attempt into OpenCode's part namespace."""
 
     value = str(attempt_id or "").strip()
-    if not value.startswith("atm") or len(value) == 3:
-        raise ValueError("OpenCode prompt attempt identity must start with 'atm'")
-    return f"msg{value[3:]}"
-
-
-def native_message_ids_for_attempt(attempt_id: str) -> tuple[str, ...]:
-    """Return current and legacy native identities for exact evidence reads."""
-
-    value = str(attempt_id or "").strip()
-    if not value:
-        return ()
-    try:
-        current = native_message_id_for_attempt(value)
-    except ValueError:
-        return (value,)
-    return (current, value) if current != value else (value,)
+    match = _DURABLE_ATTEMPT_ID_RE.fullmatch(value)
+    if match is None:
+        raise ValueError("OpenCode prompt attempt identity is not canonical")
+    return f"prt_{match.group(1)}"
 
 
 class OpenCodePromptRejectedError(RuntimeError):
@@ -1590,7 +1579,7 @@ class OpenCodeServerManager:
         session_id: str,
         directory: str,
         text: str,
-        message_id: Optional[str] = None,
+        attempt_id: Optional[str] = None,
         agent: Optional[str] = None,
         model: Optional[Dict[str, str]] = None,
         reasoning_effort: Optional[str] = None,
@@ -1603,11 +1592,12 @@ class OpenCodeServerManager:
         async with self._request_scope():
             session = await self._get_http_session()
 
+            text_part: Dict[str, Any] = {"type": "text", "text": text}
+            if attempt_id:
+                text_part["id"] = native_part_id_for_attempt(attempt_id)
             body: Dict[str, Any] = {
-                "parts": [{"type": "text", "text": text}],
+                "parts": [text_part],
             }
-            if message_id:
-                body["messageID"] = message_id
             if agent:
                 body["agent"] = agent
             if model:

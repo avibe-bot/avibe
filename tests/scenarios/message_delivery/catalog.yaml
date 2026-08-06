@@ -134,6 +134,12 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_permanent_start_rejection_retires_delivery_without_retry
+  - id: MESSAGE-DELIVERY-021
+    name: Durable OpenCode attempts preserve native order through exact part evidence
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_agent_steering.py::test_message_delivery_021_opencode_preserves_native_order_and_recovers_exact_part
   - id: MESSAGE-DELIVERY-101
     name: Unresolved fallback-capable delivery fences only later FIFO submissions
     status: covered

@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from storage import message_deliveries as delivery_store
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
 
 
@@ -469,7 +471,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         body = fake_session.posts[0]["json"]
         self.assertEqual(body["tools"], {"question": False})
 
-    async def test_prompt_async_uses_opencode_native_message_id(self):
+    async def test_prompt_async_uses_opencode_native_attempt_part(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()
 
@@ -482,29 +484,36 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             session_id="ses-1",
             directory="/tmp/work",
             text="hello",
-            message_id="msg_exact_evidence",
+            attempt_id="atm_1234567890abcdef1234567890abcdef",
         )
 
+        body = fake_session.posts[0]["json"]
+        self.assertNotIn("messageID", body)
         self.assertEqual(
-            fake_session.posts[0]["json"]["messageID"],
-            "msg_exact_evidence",
+            body["parts"],
+            [
+                {
+                    "type": "text",
+                    "text": "hello",
+                    "id": "prt_1234567890abcdef1234567890abcdef",
+                }
+            ],
         )
 
-    def test_durable_attempt_maps_to_opencode_message_namespace(self):
+    def test_durable_attempt_maps_to_opencode_part_evidence(self):
+        attempt_id = delivery_store.new_attempt_id()
+
+        self.assertRegex(attempt_id, r"^atm_[0-9a-f]{32}$")
         self.assertEqual(
-            SERVER_MODULE.native_message_id_for_attempt("atm_exact_evidence"),
-            "msg_exact_evidence",
+            SERVER_MODULE.native_part_id_for_attempt(attempt_id),
+            f"prt_{attempt_id.removeprefix('atm_')}",
         )
 
-    def test_attempt_evidence_accepts_current_and_legacy_native_ids(self):
-        self.assertEqual(
-            SERVER_MODULE.native_message_ids_for_attempt("atm_exact_evidence"),
-            ("msg_exact_evidence", "atm_exact_evidence"),
-        )
-        self.assertEqual(
-            SERVER_MODULE.native_message_ids_for_attempt("legacy-evidence"),
-            ("legacy-evidence",),
-        )
+    def test_unreleased_ordered_attempt_identity_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SERVER_MODULE.native_part_id_for_attempt(
+                "atm_1234567890000123456789abcd"
+            )
 
     async def test_prompt_async_exposes_definitive_http_rejection(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

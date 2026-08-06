@@ -56,8 +56,7 @@ from .poll_loop import OpenCodePollLoop, restored_platform_from_poll_info, resto
 from .server import (
     OpenCodePromptRejectedError,
     OpenCodeServerManager,
-    native_message_id_for_attempt,
-    native_message_ids_for_attempt,
+    native_part_id_for_attempt,
 )
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
@@ -68,6 +67,9 @@ _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
 # OpenCode returns 204 after forking prompt work, before that worker necessarily
 # registers the session as busy.
 _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS = 5.0
+# OpenCode can report idle just before the completed assistant message becomes
+# visible through the message-list endpoint.
+_ASYNC_PROMPT_RESULT_CONFIRMATION_TIMEOUT_SECONDS = 5.0
 # A prompt accepted at the end of the previous native turn can race its final
 # status transition. Let that transition settle before trusting the write as a
 # same-turn steer.
@@ -100,6 +102,7 @@ class _OpenCodeSteerState:
     awaiting_user_text: str | None = None
     awaiting_start_confirmation_deadline: float | None = None
     awaiting_active_status_observed: bool = False
+    awaiting_result_confirmation_deadline: float | None = None
     idle_reconciliation_message: str = ""
     restored: bool = False
     reconcile_initial_status: bool = False
@@ -245,6 +248,7 @@ class _SteeringAwareOpenCodeServer:
         self._state.awaiting_user_text = None
         self._state.awaiting_start_confirmation_deadline = None
         self._state.awaiting_active_status_observed = False
+        self._state.awaiting_result_confirmation_deadline = None
 
     def _terminal_reconciliation_failure(
         self,
@@ -345,6 +349,7 @@ class _SteeringAwareOpenCodeServer:
                                 >= 0
                             ):
                                 self._state.awaiting_active_status_observed = True
+                                self._state.awaiting_result_confirmation_deadline = None
                             if reconcile_initial_status and awaiting is None:
                                 self._state.awaiting_after_message_ids = (
                                     self._completed_assistant_boundary(messages)
@@ -400,6 +405,26 @@ class _SteeringAwareOpenCodeServer:
                                     and time.monotonic() < start_deadline
                                 ):
                                     wait_for_insert = True
+                                elif self._state.awaiting_active_status_observed:
+                                    result_deadline = (
+                                        self._state.awaiting_result_confirmation_deadline
+                                    )
+                                    if result_deadline is None:
+                                        self._state.awaiting_result_confirmation_deadline = (
+                                            time.monotonic()
+                                            + _ASYNC_PROMPT_RESULT_CONFIRMATION_TIMEOUT_SECONDS
+                                        )
+                                        wait_for_insert = True
+                                    elif time.monotonic() < result_deadline:
+                                        wait_for_insert = True
+                                    else:
+                                        self._clear_awaiting_reconciliation()
+                                        return self._terminal_reconciliation_failure(
+                                            session_id,
+                                            messages,
+                                            name="NativeSessionEndedBeforeResult",
+                                            message=self._idle_reconciliation_error_text(),
+                                        )
                                 else:
                                     self._clear_awaiting_reconciliation()
                                     return self._terminal_reconciliation_failure(
@@ -1053,8 +1078,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await server.mark_run_active(session_id)
             run_registered = True
             # Persist the complete recovery address before the first native write.
-            # A crash after OpenCode accepts the exact message ID can now rebuild the
-            # poll and Turn owner even if no post-prompt Python statement ran.
+            # A crash after OpenCode accepts the exact attempt part can now rebuild
+            # the poll and Turn owner even if no post-prompt Python statement ran.
             self.sessions.add_active_poll(
                 opencode_session_id=session_id,
                 base_session_id=request.base_session_id,
@@ -1081,11 +1106,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 session_id=session_id,
                 directory=request.working_path,
                 text=prompt_text,
-                message_id=(
-                    native_message_id_for_attempt(start_attempt_id)
-                    if start_attempt_id
-                    else None
-                ),
+                attempt_id=start_attempt_id or None,
                 agent=agent_to_use,
                 model=model_dict,
                 reasoning_effort=reasoning_effort,
@@ -1408,9 +1429,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         "tools": {"question": False},
                     }
                     if request.attempt_id:
-                        prompt_kwargs["message_id"] = native_message_id_for_attempt(
-                            request.attempt_id
-                        )
+                        prompt_kwargs["attempt_id"] = request.attempt_id
                     await server.prompt_async(
                         **prompt_kwargs,
                     )
@@ -1515,7 +1534,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         request: SteerReconcileRequest,
         target: ActiveSteerTarget,
     ) -> SteerResult:
-        """Resolve one prior OpenCode write by its native message identity."""
+        """Resolve one prior OpenCode write by its exact native part identity."""
 
         if not request.attempt_id:
             return steer_result(
@@ -1550,40 +1569,43 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reason="runtime_unavailable",
                 backend=self.name,
             )
-        diagnostics: list[str] = []
-        observed_evidence = False
-        for native_message_id in native_message_ids_for_attempt(request.attempt_id):
-            try:
-                message = await server.get_message(
-                    native_session_id,
-                    native_message_id,
-                    directory,
-                )
-            except Exception as exc:  # noqa: BLE001 - absence is not negative proof
-                diagnostics.append(str(exc))
-                continue
-            observed_evidence = True
+        native_part_id = native_part_id_for_attempt(request.attempt_id)
+        try:
+            messages = await server.list_messages(
+                native_session_id,
+                directory,
+            )
+        except Exception as exc:  # noqa: BLE001 - absence is not negative proof
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+        for message in messages:
             info = message.get("info") if isinstance(message, dict) else None
+            parts = message.get("parts") if isinstance(message, dict) else None
             if (
                 isinstance(info, dict)
-                and str(info.get("id") or "") == native_message_id
                 and info.get("role") == "user"
+                and isinstance(parts, list)
+                and any(
+                    isinstance(part, dict)
+                    and str(part.get("id") or "") == native_part_id
+                    for part in parts
+                )
             ):
                 return steer_result(
                     SteerOutcome.ACCEPTED,
-                    reason="native_message_found",
+                    reason="native_attempt_part_found",
                     backend=self.name,
-                    native_message_id=native_message_id,
+                    native_message_id=str(info.get("id") or ""),
+                    native_part_id=native_part_id,
                 )
         return steer_result(
             SteerOutcome.UNKNOWN,
-            reason=(
-                "untrusted_attempt_evidence"
-                if observed_evidence
-                else "attempt_evidence_unavailable"
-            ),
+            reason="untrusted_attempt_evidence",
             backend=self.name,
-            diagnostic="; ".join(diagnostics),
         )
 
     async def handle_stop(self, request: AgentRequest) -> bool:
@@ -1762,14 +1784,19 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 verification_unknown = True
 
             baseline_message_ids = set(poll_info.baseline_message_ids)
-            start_attempt_message_ids = set(
-                native_message_ids_for_attempt(start_attempt_id)
+            start_attempt_part_id = (
+                native_part_id_for_attempt(start_attempt_id)
+                if start_attempt_id
+                else ""
             )
             start_attempt_found = any(
-                start_attempt_message_ids
+                start_attempt_part_id
                 and message.get("info", {}).get("role") == "user"
-                and str(message.get("info", {}).get("id") or "")
-                in start_attempt_message_ids
+                and any(
+                    isinstance(part, dict)
+                    and str(part.get("id") or "") == start_attempt_part_id
+                    for part in (message.get("parts") or [])
+                )
                 for message in messages
             )
             has_in_progress = False
