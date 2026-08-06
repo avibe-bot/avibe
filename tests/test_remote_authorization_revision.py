@@ -156,14 +156,14 @@ def test_revision_advance_revokes_active_editor_http_session(
     tmp_path,
     hosted_change,
 ):
-    """I1057-AC1/AC2: narrowing invalidates a remote session with chat disabled."""
+    """I1057-AC1/AC2: narrowing invalidates a remote session with chat enabled."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _paired_config(tmp_path)
     cookie = _organization_cookie(config)
     payload = remote_access.parse_session_cookie(config, cookie)
     assert payload is not None
-    assert context_from_session_payload(payload).can_chat is False
+    assert context_from_session_payload(payload).can_chat is True
 
     client = app.test_client()
     client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")

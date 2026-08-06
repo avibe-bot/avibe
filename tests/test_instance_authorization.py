@@ -95,6 +95,53 @@ def test_malformed_role_context_fails_closed() -> None:
     assert context.can_read_instance is False
 
 
+def test_show_page_email_context_requires_and_matches_one_exact_target() -> None:
+    context = context_from_session_payload(
+        {
+            "sub": "guest-1",
+            "email": "guest@example.com",
+            "vibe_instance_id": "inst-1",
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "show_page_email",
+            "vibe_show_page_id": "session-one",
+            "vibe_instance_authorization_revision": 0,
+        }
+    )
+
+    assert context.can_use_show_page("session-one") is True
+    assert context.can_use_show_page("session-two") is False
+    assert context.show_page_id == "session-one"
+
+    missing_target = context_from_session_payload(
+        {
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "show_page_email",
+        }
+    )
+    broader_target = context_from_session_payload(
+        {
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "vibe_show_page_id": "session-one",
+        }
+    )
+    assert missing_target.can_read_instance is False
+    assert broader_target.can_read_instance is True
+    assert broader_target.can_chat is True
+    assert broader_target.can_use_show_page("session-one") is True
+    assert broader_target.can_use_show_page("session-two") is False
+
+    elevated_role = context_from_session_payload(
+        {
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "show_page_email",
+            "vibe_show_page_id": "session-one",
+        }
+    )
+    assert elevated_role.can_read_instance is False
+    assert elevated_role.can_use_show_page("session-one") is False
+
+
 def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("GET", "/api/projects") == "viewer"
     assert required_instance_role("GET", "/api/projects/proj-1") == "viewer"
@@ -108,6 +155,10 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("POST", "/api/vault/secrets") == "owner"
     assert required_instance_role("POST", "/api/skills") == "owner"
     assert required_instance_role("GET", "/api/show-pages") == "viewer"
+    assert required_instance_role("POST", "/api/show-pages/ses-1/visibility") == "viewer"
+    assert required_instance_role("POST", "/api/show-pages/ses-1/rotate-share") == "viewer"
+    assert required_instance_role("POST", "/api/show-pages/ses-1/share-id") == "viewer"
+    assert required_instance_role("POST", "/api/show-pages/ses-1/ensure") == "viewer"
     assert required_instance_role("GET", "/api/config") == "viewer"
     assert required_instance_role("GET", "/api/workbench/prefs") == "viewer"
     assert required_instance_role("PUT", "/api/workbench/prefs") == "owner"

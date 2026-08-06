@@ -89,6 +89,19 @@ describe('ShowPagesInventoryStore', () => {
     release();
   });
 
+  it('withdraws a retained page immediately when access is lost', async () => {
+    const store = new ShowPagesInventoryStore({
+      getShowPages: vi.fn().mockResolvedValue({ pages: [page()] }),
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    });
+
+    await store.reload();
+    expect(store.getSnapshot().pages).toHaveLength(1);
+
+    store.removePage('session-1');
+    expect(store.getSnapshot().pages).toEqual([]);
+  });
+
   it('serves stale icon metadata immediately on reopen and revalidates in the background', async () => {
     const initial = deferred<{ pages: ShowPage[] }>();
     const refresh = deferred<{ pages: ShowPage[] }>();

@@ -85,6 +85,45 @@ def _grant(browser_id: str = "browser-1", *, subject: str = "user-1") -> cloud_m
     )
 
 
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        ("/chat/session-1?tab=show-page", "/chat/session-1?tab=show-page"),
+        ("/admin/organization/members?tab=access", "/admin/organization/members?tab=access"),
+        ("https://example.com/chat/session-1", "/admin/organization/overview"),
+        ("//example.com/chat/session-1", "/admin/organization/overview"),
+        ("/admin/organization-impersonation", "/admin/organization/overview"),
+        ("/chat/session-1/extra", "/admin/organization/overview"),
+        ("/api/show-pages/session-1/access", "/admin/organization/overview"),
+    ],
+)
+def test_management_return_path_allows_only_supported_same_origin_workflows(
+    candidate: str,
+    expected: str,
+) -> None:
+    assert cloud_management.validate_next_path(candidate) == expected
+
+
+def test_management_return_path_is_visible_only_to_the_bound_browser(monkeypatch, tmp_path) -> None:
+    config = _save_config(monkeypatch, tmp_path)
+    backend = SimpleNamespace(base_url="https://avibe.bot")
+    monkeypatch.setattr(cloud_management, "_validated_backend", lambda _config: backend)
+    _, state = cloud_management.begin_authorization(
+        config,
+        browser_id="browser-1",
+        remote_subject="user-1",
+        callback_origin=REMOTE_ORIGIN,
+        next_path="/chat/session-1?tab=show-page",
+        silent=False,
+    )
+
+    assert cloud_management.handshake_next_path(state, "browser-1") == (
+        "/chat/session-1?tab=show-page"
+    )
+    assert cloud_management.handshake_next_path(state, "browser-2") is None
+    assert cloud_management.handshake_next_path("missing-state", "browser-1") is None
+
+
 def test_local_start_uses_https_handoff_and_never_exposes_token(monkeypatch, tmp_path) -> None:
     _save_config(monkeypatch, tmp_path)
     captured: dict[str, object] = {}
@@ -358,6 +397,22 @@ def test_remote_viewer_can_use_identity_gate_but_only_allowlisted_proxy_paths(
     assert "secret-bearer-token" not in response.text
     assert not cloud_management.proxy_path_allowed(
         "GET", "/api/organizations/org_1/domains"
+    )
+
+
+@pytest.mark.parametrize("method", ["GET", "PATCH"])
+def test_resource_access_proxy_allows_read_and_patch(method: str) -> None:
+    assert cloud_management.proxy_path_allowed(
+        method,
+        "/api/organizations/org_1/resources/inst_123/show_page/session_1/access",
+    )
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE"])
+def test_resource_access_proxy_rejects_other_methods(method: str) -> None:
+    assert not cloud_management.proxy_path_allowed(
+        method,
+        "/api/organizations/org_1/resources/inst_123/show_page/session_1/access",
     )
 
 

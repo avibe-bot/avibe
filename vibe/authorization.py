@@ -9,7 +9,14 @@ from typing import Any, Mapping
 
 INSTANCE_ROLES = frozenset({"owner", "editor", "viewer"})
 INSTANCE_ACCESS_SOURCES = frozenset(
-    {"owner", "public_instance", "email", "email_domain", "organization_group"}
+    {
+        "owner",
+        "public_instance",
+        "email",
+        "email_domain",
+        "organization_group",
+        "show_page_email",
+    }
 )
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
@@ -61,6 +68,7 @@ class AuthorizationContext:
     membership_version: str | None = None
     claims_issued_at: int | None = None
     authorization_revision: int | None = None
+    show_page_id: str | None = None
     is_remote: bool = False
     is_trusted_local: bool = False
 
@@ -117,6 +125,11 @@ class AuthorizationContext:
 
         minimum_role = _RESOURCE_USE_MINIMUM_ROLES.get(resource_kind)
         return minimum_role is not None and self.has_role(minimum_role)
+
+    def can_use_show_page(self, show_page_id: str) -> bool:
+        """Return whether the signed session carries this exact page entitlement."""
+
+        return bool(self.show_page_id and self.show_page_id == show_page_id)
 
     @property
     def can_use_terminal_files(self) -> bool:
@@ -193,6 +206,11 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
     )
     if access_source not in INSTANCE_ACCESS_SOURCES:
         return AuthorizationContext(is_remote=True)
+    show_page_id = _optional_string(payload.get("vibe_show_page_id"), limit=200)
+    if access_source == "show_page_email" and show_page_id is None:
+        return AuthorizationContext(is_remote=True)
+    if access_source == "show_page_email" and role != "viewer":
+        return AuthorizationContext(is_remote=True)
     raw_groups = payload.get("vibe_group_ids", payload.get("group_ids", []))
     group_ids = (
         frozenset(value for item in raw_groups if (value := _optional_string(item)) is not None)
@@ -230,6 +248,7 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
                 payload.get("authorization_revision"),
             )
         ),
+        show_page_id=show_page_id,
         is_remote=True,
     )
 
@@ -311,7 +330,20 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/org/(?:context|groups)$",
         r"^/api/resource-policies$",
         r"^/api/show-pages$",
+        r"^/api/show-pages/[^/]+/access$",
+        r"^/api/show-pages/[^/]+/authorized-emails$",
         r"^/api/show-pages/[^/]+/icon$",
+    )
+)
+
+_VIEWER_HTTP_MUTATION_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("POST", r"^/api/show-pages/[^/]+/ensure$"),
+        ("POST", r"^/api/show-pages/[^/]+/visibility$"),
+        ("POST", r"^/api/show-pages/[^/]+/rotate-share$"),
+        ("POST", r"^/api/show-pages/[^/]+/share-id$"),
+        ("PUT", r"^/api/show-pages/[^/]+/authorized-emails$"),
     )
 )
 
@@ -390,6 +422,10 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         (
             frozenset({"POST"}),
             r"^/api/show-pages/[^/]+/(?:ensure|rotate-share|share-id|visibility)$",
+        ),
+        (
+            frozenset({"GET", "HEAD", "PUT"}),
+            r"^/api/show-pages/[^/]+/authorized-emails$",
         ),
         (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
         (frozenset({"POST"}), r"^/api/dock/pins$"),
@@ -491,15 +527,20 @@ def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy
         return HttpAuthorizationPolicy(None)
 
     minimum_role = "owner"
-    for rule_method, pattern in _EDITOR_HTTP_RULES:
-        if normalized_method == rule_method and pattern.fullmatch(path):
-            minimum_role = "editor"
-            break
+    if _http_rule_matches(normalized_method, path, _VIEWER_HTTP_MUTATION_RULES):
+        # These mutations enforce Show Page ownership and Organization authority
+        # in the resource service. Admit a viewer to that final authorization gate.
+        minimum_role = "viewer"
     else:
-        if normalized_method in {"GET", "HEAD", "OPTIONS"} and any(
-            pattern.fullmatch(path) for pattern in _VIEWER_HTTP_RULES
-        ):
-            minimum_role = "viewer"
+        for rule_method, pattern in _EDITOR_HTTP_RULES:
+            if normalized_method == rule_method and pattern.fullmatch(path):
+                minimum_role = "editor"
+                break
+        else:
+            if normalized_method in {"GET", "HEAD", "OPTIONS"} and any(
+                pattern.fullmatch(path) for pattern in _VIEWER_HTTP_RULES
+            ):
+                minimum_role = "viewer"
 
     if _http_rule_matches(normalized_method, path, _REMOTE_LOCAL_ONLY_HTTP_RULES):
         remote_access = REMOTE_HTTP_LOCAL_ONLY

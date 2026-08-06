@@ -12,6 +12,7 @@ import base64
 import hashlib
 import http.client
 import json
+import re
 import secrets
 import threading
 import time
@@ -144,7 +145,11 @@ def cloud_is_configured(config: V2Config | None) -> bool:
 def validate_next_path(value: object) -> str:
     path = str(value or "/admin/organization/overview")
     parsed = urllib.parse.urlsplit(path)
-    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/admin/organization"):
+    is_organization_path = parsed.path == "/admin/organization" or parsed.path.startswith(
+        "/admin/organization/"
+    )
+    is_workbench_chat = re.fullmatch(r"/chat/[^/]+", parsed.path) is not None
+    if parsed.scheme or parsed.netloc or not (is_organization_path or is_workbench_chat):
         return "/admin/organization/overview"
     return urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
 
@@ -252,6 +257,16 @@ def authorization_url_for_handoff(
     ):
         return None
     return _authorization_url(config, _validated_backend(config).base_url, handshake), handshake.browser_id
+
+
+def handshake_next_path(state: str | None, browser_id: str | None) -> str | None:
+    """Return a handshake's safe next path only to its bound browser."""
+    if not state or not browser_id:
+        return None
+    handshake = handshake_for_handoff(state)
+    if handshake is None or not secrets.compare_digest(handshake.browser_id, browser_id):
+        return None
+    return validate_next_path(handshake.next_path)
 
 
 def pop_handshake(state: str) -> ManagementHandshake | None:
@@ -401,7 +416,7 @@ _PROXY_RULES: tuple[tuple[str, str], ...] = (
     ("PUT", r"/api/organizations/[^/]+/groups/[^/]+/members"),
     ("GET", r"/api/organizations/[^/]+/instances"),
     ("GET", r"/api/organizations/[^/]+/resources"),
-    ("PATCH", r"/api/organizations/[^/]+/resources/[^/]+/[^/]+/[^/]+/access"),
+    ("GET|PATCH", r"/api/organizations/[^/]+/resources/[^/]+/[^/]+/[^/]+/access"),
     ("GET|POST|PUT|DELETE", r"/api/instances/[^/]+/authorized-users"),
     ("GET", r"/api/instances/[^/]+/projects"),
     ("GET|PUT", r"/api/instances/[^/]+/projects/[^/]+/access"),

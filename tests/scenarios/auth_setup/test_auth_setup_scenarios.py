@@ -30,6 +30,7 @@ from tests.scenario_harness.organization_management import (
     REMOTE_ORIGIN,
     OrganizationManagementScenarioHarness,
 )
+from tests.scenario_harness.show_page_email_access import ShowPageEmailAccessScenarioHarness
 from vibe import cloud_management
 from vibe.api import (
     get_claude_auth,
@@ -41,6 +42,47 @@ from vibe.claude_config import (
     materialize_claude_subprocess_env,
     read_claude_settings_env,
 )
+
+
+class ShowPageEmailAccessScenarioTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = ShowPageEmailAccessScenarioHarness()
+        self.addCleanup(self.harness.close)
+
+    def test_exact_email_login_is_confined_to_its_signed_show_page(self):
+        """Scenario: AUTH-SETUP-401"""
+        handshake = self.harness.begin_login("session-one")
+        self.assertEqual(handshake["show_page_id"], "session-one")
+
+        callback = self.harness.complete_login(handshake)
+        self.assertEqual(callback.status_code, 302)
+        self.assertEqual(callback.headers["Location"], handshake["next_path"])
+
+        exact = self.harness.get(handshake["next_path"])
+        other = self.harness.get("/show/session-two/__show/me")
+        api = self.harness.get("/api/show-pages")
+        self.assertEqual(exact.status_code, 200)
+        self.assertEqual(exact.get_json(), {"authenticated": False, "canAnnotate": False})
+        self.assertEqual(other.status_code, 403)
+        self.assertEqual(other.get_json()["error"], "show_page_access_forbidden")
+        self.assertEqual(api.status_code, 403)
+
+        self.harness.seed_broader_session()
+        existing_session_handshake = self.harness.begin_login("session-one")
+        existing_session_callback = self.harness.complete_login(
+            existing_session_handshake,
+            instance_role="editor",
+            access_source="email",
+        )
+        self.assertEqual(existing_session_callback.status_code, 302)
+        self.assertEqual(
+            existing_session_callback.headers["Location"],
+            existing_session_handshake["next_path"],
+        )
+        self.assertEqual(
+            self.harness.get(existing_session_handshake["next_path"]).status_code,
+            200,
+        )
 
 
 class _FakeNextTurnRuntime:
@@ -197,13 +239,14 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
     def test_remote_callback_keeps_the_bound_subject(self):
         """Scenario: AUTH-SETUP-307"""
         backend = SimpleNamespace(base_url="https://avibe.bot")
+        next_path = "/chat/session-1?tab=show-page"
         with patch.object(cloud_management, "_validated_backend", return_value=backend):
             _, state = cloud_management.begin_authorization(
                 self.harness.config,
                 browser_id="browser-1",
                 remote_subject="user-1",
                 callback_origin=REMOTE_ORIGIN,
-                next_path="/admin/organization/overview",
+                next_path=next_path,
                 silent=False,
             )
         client = self.harness.remote_client(subject="user-2")
@@ -229,7 +272,10 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
                 base_url=REMOTE_ORIGIN,
             )
         self.assertEqual(response.status_code, 302)
-        self.assertIn("cloud_management_error=cloud_management_subject_mismatch", response.headers["location"])
+        self.assertEqual(
+            response.headers["location"],
+            f"{next_path}&cloud_management_error=cloud_management_subject_mismatch",
+        )
         self.assertNotIn("not-exposed", response.text)
 
     def test_trusted_loopback_flow_can_establish_the_first_subject(self):
@@ -280,7 +326,7 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
             },
         )
 
-    def test_subject_mismatch_can_reenter_with_clean_return_path(self):
+    def test_subject_mismatch_can_reenter_with_workbench_return_path(self):
         """Scenario: AUTH-SETUP-310"""
         client = self.harness.remote_client()
         client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
@@ -303,7 +349,7 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
             mismatch.headers["location"],
         )
 
-        clean_next = "/admin/organization/overview"
+        clean_next = "/chat/session-1?tab=show-page"
         with patch.object(
             cloud_management,
             "begin_authorization",

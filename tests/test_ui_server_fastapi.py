@@ -555,6 +555,20 @@ def _machine_coded_error_builders():
             "share_id_taken",
             409,
         ),
+        (
+            "show_page_missing",
+            lambda: ui_server._show_page_error_response(_Coded("missing", "show_page_not_found")),
+            "show_page_not_found",
+            404,
+        ),
+        (
+            "show_page_email_transient",
+            lambda: ui_server._show_page_error_response(
+                _Coded("temporary failure", "show_page_email_access_transient")
+            ),
+            "show_page_email_access_transient",
+            503,
+        ),
         ("dock", lambda: ui_server._dock_error_response(_Coded("nope", "show_page_not_found")), "show_page_not_found", 404),
         (
             "show_page_icon",

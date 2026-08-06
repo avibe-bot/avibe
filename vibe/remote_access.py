@@ -55,7 +55,7 @@ _SESSION_AUTHORIZATION_REFERENCE_RE = re.compile(r"\A[A-Za-z0-9_-]{24,64}\Z")
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
 _INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset(
-    {"owner", "public_instance", "email", "email_domain", "organization_group"}
+    {"owner", "public_instance", "email", "email_domain", "organization_group", "show_page_email"}
 )
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _CONNECTOR_LOCK = threading.RLock()
@@ -114,7 +114,9 @@ _RESOURCE_ACL_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error
 _RESOURCE_ACL_MAX_REVISION = (1 << 53) - 1
 _RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX = "resource_acl_pending_vault_release:"
 _INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
-_INSTANCE_ACCESS_SOURCES = frozenset({"owner", "public_instance", "email", "email_domain", "organization_group"})
+_INSTANCE_ACCESS_SOURCES = frozenset(
+    {"owner", "public_instance", "email", "email_domain", "organization_group", "show_page_email"}
+)
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _BLOCKED_PAIRING_BACKEND_HOSTS = {
     "localhost",
@@ -1491,6 +1493,66 @@ def _device_json_request(
     return parsed
 
 
+def _show_page_email_grant_suffix(show_page_id: str) -> str:
+    encoded = urllib.parse.quote(show_page_id, safe="")
+    return f"show-pages/{encoded}/authorized-emails"
+
+
+def get_show_page_authorized_emails(
+    show_page_id: str,
+    config: V2Config | None = None,
+) -> dict[str, Any]:
+    """Load one Show Page's exact email grants through paired-device auth."""
+
+    config = config or V2Config.load()
+    if not _resource_acl_sync_configured(config):
+        raise RuntimeError("show_page_email_access_not_configured")
+    result = _device_json_request(
+        config,
+        "GET",
+        _show_page_email_grant_suffix(show_page_id),
+    )
+    emails = result.get("emails")
+    if not isinstance(emails, list) or any(not isinstance(email, str) for email in emails):
+        raise RuntimeError("show_page_email_access_invalid_response")
+    return {"emails": emails}
+
+
+def replace_show_page_authorized_emails(
+    show_page_id: str,
+    emails: list[str],
+    config: V2Config | None = None,
+) -> dict[str, Any]:
+    """Replace one Show Page's email grants without exposing the device secret."""
+
+    config = config or V2Config.load()
+    if not _resource_acl_sync_configured(config):
+        raise RuntimeError("show_page_email_access_not_configured")
+    result = _device_json_request(
+        config,
+        "PUT",
+        _show_page_email_grant_suffix(show_page_id),
+        {"emails": emails},
+    )
+    returned_emails = result.get("emails")
+    if not isinstance(returned_emails, list) or any(
+        not isinstance(email, str) for email in returned_emails
+    ):
+        raise RuntimeError("show_page_email_access_invalid_response")
+    changed = bool(result.get("changed"))
+    if changed and "authorization_revision" not in result:
+        raise RuntimeError("show_page_email_access_invalid_response")
+    if result.get("authorization_revision") is not None:
+        try:
+            _replace_authorization_revision(config, result["authorization_revision"])
+        except ValueError as exc:
+            raise RuntimeError("show_page_email_access_invalid_response") from exc
+    return {
+        "emails": returned_emails,
+        "changed": changed,
+    }
+
+
 def sync_authorization_revision_once(
     config: V2Config | None = None,
 ) -> dict[str, Any]:
@@ -1875,7 +1937,7 @@ def _sync_one_organization(
     acknowledged = 0
     skipped = 0
     ack_errors = 0
-    narrowed_resource_kinds: set[str] = set()
+    affected_resource_kinds: set[str] = set()
     engine = get_cached_sqlite_engine()
     for raw_intent in intents:
         try:
@@ -1915,8 +1977,6 @@ def _sync_one_organization(
                         outcome["policy"],
                     )
                 )
-                if policy_narrowed:
-                    narrowed_resource_kinds.add(resource_kind)
                 if resource_kind == "vault_secret" and outcome["status"] == "applied":
                     from storage import vault_service
 
@@ -1931,6 +1991,7 @@ def _sync_one_organization(
                 if release_key is not None:
                     release_scopes = _load_pending_vault_release_scopes(connection, release_key)
             if outcome["status"] == "applied":
+                affected_resource_kinds.add(resource_kind)
                 applied += 1
             if release_scopes:
                 try:
@@ -1993,14 +2054,14 @@ def _sync_one_organization(
         except Exception:
             logger.warning("failed to clear published empty resource organization", exc_info=True)
             ack_errors += 1
-    if narrowed_resource_kinds:
+    if affected_resource_kinds:
         from vibe.sse_broker import broker
 
         broker.publish(
             "authorization.changed",
             {
                 "project_ids": [],
-                "resource_kinds": sorted(narrowed_resource_kinds),
+                "resource_kinds": sorted(affected_resource_kinds),
             },
         )
     return {
@@ -4137,6 +4198,20 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
         "vibe_instance_role": instance_role,
         "vibe_instance_access_source": access_source,
     }
+    show_page_claim_present = "vibe_show_page_id" in claims
+    if show_page_claim_present:
+        show_page_id = _oidc_claim_string(
+            claims.get("vibe_show_page_id"),
+            reason="invalid_show_page_id",
+            limit=200,
+        )
+        if "/" in show_page_id or "\\" in show_page_id:
+            raise OAuthCodeExchangeError("invalid_show_page_id")
+        session_claims["vibe_show_page_id"] = show_page_id
+    elif access_source == "show_page_email":
+        raise OAuthCodeExchangeError("invalid_show_page_id")
+    if access_source == "show_page_email" and instance_role != "viewer":
+        raise OAuthCodeExchangeError("invalid_instance_role")
     raw_authorization_revision = claims.get(_AUTHORIZATION_REVISION_KEY)
     if raw_authorization_revision is None:
         if _authorization_revision_sync_configured(config):
@@ -4361,6 +4436,7 @@ def authorization_url(
     nonce: str,
     code_challenge: str,
     redirect_uri: str | None = None,
+    show_page_id: str | None = None,
 ) -> str:
     cloud = config.remote_access.vibe_cloud
     params = {
@@ -4375,6 +4451,8 @@ def authorization_url(
     }
     if cloud.dev_login_hint:
         params["login_hint"] = cloud.dev_login_hint
+    if show_page_id:
+        params["show_page_id"] = show_page_id
     return f"{cloud.authorization_endpoint}?{urllib.parse.urlencode(params)}"
 
 
@@ -4499,6 +4577,7 @@ def store_oauth_handshake(
     next_target: str,
     device_hash: str | None = None,
     redirect_uri: str | None = None,
+    show_page_id: str | None = None,
 ) -> None:
     """Persist a login handshake in memory, keyed by the signed state's random id.
 
@@ -4514,6 +4593,7 @@ def store_oauth_handshake(
         "next": next_target,
         "device_hash": device_hash,
         "redirect_uri": redirect_uri,
+        "show_page_id": show_page_id,
         "exp": now + OAUTH_HANDSHAKE_TTL_SECONDS,
     }
     with _OAUTH_STORE_LOCK:

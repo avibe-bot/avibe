@@ -23,6 +23,12 @@ import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { isVaultApprovalRequest, placeVaultProvisionRequests } from '../../lib/vaultRequestPlacement';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
+import {
+  showPageHeaderAccess,
+  showPageRestoreAccessDecision,
+  type ShowPageAccess,
+  type ShowPageAccessProbe,
+} from '../../lib/showPageAccess';
 import { showPageEmbeddedPath } from '../../apps/showPageAvatar';
 import { downloadFile, fileMeta } from '../../lib/filesApi';
 import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/filePreview';
@@ -193,7 +199,26 @@ export const ChatPage: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const [sessionCanChat, setSessionCanChat] = useState(false);
   const canChat = capabilities.can_chat && sessionCanChat;
-  const canManageShowPage = capabilities.can_manage_instance;
+  const [showPageAccessResult, setShowPageAccessResult] = useState<{
+    sessionId: string;
+    probe: ShowPageAccessProbe;
+  } | null>(null);
+  const showPageAccessProbeGenerationRef = useRef(0);
+  const currentShowPageAccessProbe = capabilities.can_use_show_pages
+    && showPageAccessResult?.sessionId === sessionId
+    ? showPageAccessResult?.probe ?? null
+    : null;
+  const showPageAccess = currentShowPageAccessProbe?.status === 'granted'
+    ? currentShowPageAccessProbe.access
+    : null;
+  const showPageRestoreAccess = showPageRestoreAccessDecision(
+    capabilities.can_manage_instance,
+    currentShowPageAccessProbe,
+  );
+  const { canOpen: canOpenShowPage, canManage: canManageShowPage } = showPageHeaderAccess(
+    capabilities.can_manage_instance,
+    showPageAccess,
+  );
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
@@ -268,7 +293,8 @@ export const ChatPage: React.FC = () => {
   // Derived rather than an effect on purpose: the fallback lands in the SAME
   // render that flips ``readOnly``. An effect would first commit one frame with
   // the chat surface still hidden and the iframe already gone — a blank chat.
-  const showPageActive = isShowPageActive(readOnly, showPageMode);
+  const showPageAccessDenied = showPageRestoreAccess === 'deny';
+  const showPageActive = isShowPageActive(readOnly, showPageMode, showPageAccessDenied);
   // True while the share popover is open. The popover floats over the Show Page
   // iframe; making the iframe inert lets an outside tap there reach the parent
   // document so the (non-modal) popover dismisses, without modal-blocking the
@@ -285,6 +311,37 @@ export const ChatPage: React.FC = () => {
   // show the stale enabled/mode and could send control messages to the freshly
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
   const annotation = useShowPageAnnotation(showPageActive ? showPageUrl : null);
+  useEffect(() => {
+    const sid = sessionId;
+    if (!sid || !showPageAccessDenied) return;
+    // The derived showPageActive value already withdrew the iframe in this
+    // render. Persist the fallback and invalidate any in-flight ensure so a
+    // late response cannot re-open content after access was revoked.
+    showPageRestoreAttemptRef.current = sid;
+    selectChatView(sid, true);
+    setShowPageUrl(null);
+  }, [selectChatView, sessionId, showPageAccessDenied]);
+  const probeShowPageAccess = useCallback(async (targetSessionId: string) => {
+    const generation = ++showPageAccessProbeGenerationRef.current;
+    try {
+      const nextProbe = await api.probeShowPageAccess(targetSessionId);
+      if (generation !== showPageAccessProbeGenerationRef.current) return;
+      setShowPageAccessResult({ sessionId: targetSessionId, probe: nextProbe });
+    } catch {
+      if (generation !== showPageAccessProbeGenerationRef.current) return;
+      setShowPageAccessResult({
+        sessionId: targetSessionId,
+        probe: { status: 'error', access: null },
+      });
+    }
+  }, [api]);
+  useEffect(() => {
+    if (!sessionId || !capabilities.can_use_show_pages) return undefined;
+    void probeShowPageAccess(sessionId);
+    return () => {
+      showPageAccessProbeGenerationRef.current += 1;
+    };
+  }, [capabilities.can_use_show_pages, probeShowPageAccess, sessionId]);
   // The mounted Show Page frame, so parent-level chords can also be bound inside
   // its document (see the ⌘⇧D effect). Stable callback + ref, never state: a ref
   // callback that set state would re-create itself on every commit and re-attach
@@ -1263,9 +1320,12 @@ export const ChatPage: React.FC = () => {
         void syncTurnState({ quiet: true });
         void refreshSessionRowUntilNativeBound();
       },
-      onAuthorizationChanged: () => {
+      onAuthorizationChanged: (data) => {
         const currentSessionId = sessionIdRef.current;
         if (!currentSessionId) return;
+        if (data.resource_kinds?.includes('show_page')) {
+          void probeShowPageAccess(currentSessionId);
+        }
         setSessionCanChat(false);
         void api.getSession(currentSessionId, { cache: false })
           .then((nextSession) => {
@@ -1285,7 +1345,7 @@ export const ChatPage: React.FC = () => {
       },
     });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refresh, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
+  }, [api, sessionId, appendMessage, reconcile, refresh, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive, probeShowPageAccess]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -1519,7 +1579,7 @@ export const ChatPage: React.FC = () => {
   // the inline target changes this chat's remembered surface.
   const performShowPageAction = useCallback(
     async (sid: string, target: 'inline' | 'prepare'): Promise<boolean> => {
-      if (!canManageShowPage || readOnly) return false;
+      if (!canOpenShowPage || readOnly) return false;
       const request = ++showPageRequestRef.current;
       setShowPageBusy(true);
       try {
@@ -1567,7 +1627,7 @@ export const ChatPage: React.FC = () => {
         }
       }
     },
-    [canManageShowPage, readOnly, api, sendMessage, t],
+    [canOpenShowPage, readOnly, api, sendMessage, t],
   );
 
   const openShowPage = useCallback(
@@ -1596,14 +1656,23 @@ export const ChatPage: React.FC = () => {
   useEffect(() => {
     const sid = sessionId;
     if (!sid || session?.id !== sid || showPageRestoreAttemptRef.current === sid) return;
-    showPageRestoreAttemptRef.current = sid;
     if (readOnly) {
+      showPageRestoreAttemptRef.current = sid;
       writeChatViewMode(sid, 'chat');
       return;
     }
-    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') return;
+    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') {
+      showPageRestoreAttemptRef.current = sid;
+      return;
+    }
+    if (showPageRestoreAccess === 'wait') return;
+    showPageRestoreAttemptRef.current = sid;
+    if (showPageRestoreAccess === 'deny') {
+      writeChatViewMode(sid, 'chat');
+      return;
+    }
     void openShowPage(sid);
-  }, [deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal]);
+  }, [deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal, showPageRestoreAccess]);
 
   // When the share control resolves the page (open) or flips its visibility, the
   // serving route changes (private → /show/, public → /p/). Re-point the iframe
@@ -2165,7 +2234,10 @@ export const ChatPage: React.FC = () => {
           onAnnotateOpenChange={setAnnotateOpen}
           readOnlyReason={readOnlyReason}
           writable={writable}
+          showPageAccess={showPageAccess}
+          canOpenShowPage={canOpenShowPage}
           canManageShowPage={canManageShowPage}
+          canManageInstance={capabilities.can_manage_instance}
           sessionActions={sessionActions}
           titleFieldRef={titleFieldRef}
         />
@@ -2252,7 +2324,7 @@ export const ChatPage: React.FC = () => {
             // BEFORE the archive still holds them in state, though — the same
             // stale-tab case that reaches the archived 409 — and their
             // approve/deny buttons would write to a session that can't accept it.
-            sessionId && !readOnly && canManageShowPage ? (
+            sessionId && !readOnly && capabilities.can_manage_instance ? (
               <VaultChatRequests
                 requests={transcriptTailVaultRequests}
                 onResolved={refreshVaultRequests}
@@ -2273,7 +2345,7 @@ export const ChatPage: React.FC = () => {
         {writable && (
           <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
         )}
-        {sessionId && !readOnly && canManageShowPage && pendingApprovals.length > 0 ? (
+        {sessionId && !readOnly && capabilities.can_manage_instance && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
         ) : null}
         {/* key by session so the composer remounts per session — its draft-seeding
@@ -2746,7 +2818,10 @@ interface ChatHeaderBarProps {
   // boolean, because it also picks the badge: a runtime-owned row is not "Archived".
   readOnlyReason: SessionReadOnlyReason | null;
   writable?: boolean;
+  showPageAccess?: ShowPageAccess | null;
+  canOpenShowPage?: boolean;
   canManageShowPage?: boolean;
+  canManageInstance?: boolean;
   // Shared session actions, rendered behind the mobile-only ⋯ at the far right.
   // Empty (or absent) withdraws the trigger — which is what a read-only session
   // yields, since every one of those writes is refused.
@@ -2759,11 +2834,15 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page. Note the
 // live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
 // read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, canManageShowPage = true, sessionActions, titleFieldRef }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
   const readOnly = !writable;
   const sessionReadOnly = readOnlyReason !== null;
   const showPageActions = showPageControlActions(sessionReadOnly, showPageMode);
+  const showLaunchControl = showPageActions.visualize && (showPageMode || canOpenShowPage);
+  const showShareControl = !sessionReadOnly
+    && canManageShowPage
+    && (showPageMode || showPageAccess !== null);
   // ``!readOnly`` twice over: useSessionActions already yields an empty list for a
   // read-only session, and the withdrawal is re-stated here so this header cannot
   // grow a ⋯ full of guaranteed-409 rows if a future caller passes actions anyway.
@@ -2878,17 +2957,9 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             the page + prompts the agent. It shows its label on desktop and stays
             icon-only on mobile. In Show Page mode a Share control sits beside the
             back-to-chat button. */}
-        {/* In Show Page mode the order is: annotation control · back-to-chat ·
-            Share. The annotation control sits immediately left of back-to-chat;
-            the Share control stays rightmost. In chat mode only the Visualize
-            toggle shows.
-
-            The whole cluster is withdrawn on an archived session — archive takes
-            its Show Page offline and refuses to create a missing one, so none of
-            the three can do anything but 409 or frame a dead page. There is no
-            read-only page-serving path to offer instead; see
-            showPageControlActions for the per-control reasoning. */}
-        {((showPageActions.visualize && (showPageMode || canManageShowPage)) || hasMobileSessionActions) && (
+        {/* In Show Page mode the order is: annotation control, launch/back, Share.
+            Access-only managers can open Share from chat without receiving page use. */}
+        {(showLaunchControl || showShareControl || hasMobileSessionActions) && (
           <div className="ml-auto flex items-center gap-1.5">
             {showPageActions.annotate && writable && (
               <ShowPageAnnotateControl
@@ -2899,7 +2970,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 onPopoverOpenChange={onAnnotateOpenChange}
               />
             )}
-            {showPageActions.visualize && (showPageMode || canManageShowPage) && (
+            {showLaunchControl && (
               <ShowPageLaunchControl
                 sessionId={session.id}
                 title={session.title}
@@ -2909,16 +2980,19 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 onPrepareLaunch={onPrepareShowPageLaunch}
               />
             )}
-            {showPageActions.share && canManageShowPage && (
+            {showShareControl && (
               <ShowPageShareControl
+                key={session.id}
                 sessionId={session.id}
+                initialAccess={showPageAccess}
+                canManageInstance={canManageInstance}
                 onPayloadChange={onShowPageVisibilityChange}
                 onOpenChange={onShareOpenChange}
               />
             )}
             {/* The chat-level session menu is a compact-mobile affordance. Desktop
                 keeps these operations in the sidebar instead of duplicating a
-                second ⋯ in the page header. */}
+                second menu in the page header. */}
             {hasMobileSessionActions && (
               <MobileChatSessionActionMenu
                 actions={mobileSessionActions}

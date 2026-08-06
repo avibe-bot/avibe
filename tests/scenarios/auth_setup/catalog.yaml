@@ -184,7 +184,7 @@ scenarios:
     backend: cloud_management
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_silent_reauthorization_stops_after_login_required
   - id: AUTH-SETUP-307
-    name: Remote Organization callback remains bound to the same subject
+    name: Remote Organization callback remains subject-bound and returns failures to its workflow
     status: covered
     kind: authorization
     layer: scenario
@@ -205,12 +205,19 @@ scenarios:
     backend: cloud_management
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_unbound_loopback_requires_interactive_sign_in
   - id: AUTH-SETUP-310
-    name: Organization subject mismatch can re-enter explicit authorization with a clean return path
+    name: Organization subject mismatch can re-enter explicit authorization and return to the initiating workbench route
     status: covered
     kind: retry
     layer: scenario
     backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_subject_mismatch_can_reenter_with_clean_return_path
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_subject_mismatch_can_reenter_with_workbench_return_path
+  - id: AUTH-SETUP-401
+    name: Exact-email Show Page login stays confined to its signed page
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: show_page_email
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::ShowPageEmailAccessScenarioTests::test_exact_email_login_is_confined_to_its_signed_show_page
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered

@@ -304,6 +304,11 @@ describe('read-only header withdraws the Show Page controls', () => {
     expect(isShowPageActive(true, false)).toBe(false);
   });
 
+  it('withdraws an active Show Page frame on a definitive access denial', () => {
+    expect(isShowPageActive(false, true, false)).toBe(true);
+    expect(isShowPageActive(false, true, true)).toBe(false);
+  });
+
   it('renders an archived header with the title and badge but no Show Page button', () => {
     // Only the read-only header is reachable here: the live one renders
     // AgentRoutePicker, which calls useApi() and throws without an ApiProvider.
