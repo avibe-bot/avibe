@@ -17,6 +17,9 @@ Anonymous Public links remain an independent sharing switch.
   `vibe_show_page_id` claim.
 - Existing Instance owner, email, domain, group, and public-instance access wins
   before the ShowPage-only grant so existing users keep their broader access.
+- When a broader user also has the target ShowPage email grant, the broader
+  source and role remain unchanged while the signed `vibe_show_page_id` is
+  retained as an independent exact-page entitlement.
 - A `show_page_email` browser session may serve only the exact
   `/show/<vibe_show_page_id>` route subtree and required public static assets.
   Workbench, Chat, other Sessions, Agents, files, Cloud capabilities, APIs, and

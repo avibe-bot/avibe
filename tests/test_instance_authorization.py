@@ -118,15 +118,18 @@ def test_show_page_email_context_requires_and_matches_one_exact_target() -> None
             "vibe_instance_access_source": "show_page_email",
         }
     )
-    unexpected_target = context_from_session_payload(
+    broader_target = context_from_session_payload(
         {
-            "vibe_instance_role": "viewer",
+            "vibe_instance_role": "editor",
             "vibe_instance_access_source": "email",
             "vibe_show_page_id": "session-one",
         }
     )
     assert missing_target.can_read_instance is False
-    assert unexpected_target.can_read_instance is False
+    assert broader_target.can_read_instance is True
+    assert broader_target.can_chat is True
+    assert broader_target.can_use_show_page("session-one") is True
+    assert broader_target.can_use_show_page("session-two") is False
 
     elevated_role = context_from_session_payload(
         {

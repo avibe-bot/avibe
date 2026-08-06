@@ -7,6 +7,7 @@ import {
   classifyShowPageAccessProbe,
   isShowPageVisibilityPayload,
   normalizeShowPageAuthorizedEmail,
+  requiresShowPageEmailRevocationConfirmation,
   showPageShareCapabilities,
   showPageHeaderAccess,
   showPageAudienceLabelKey,
@@ -51,6 +52,21 @@ describe('Show Page access policy helpers', () => {
     );
     expect(normalizeShowPageAuthorizedEmail('guest@example')).toBeNull();
     expect(normalizeShowPageAuthorizedEmail('guest@')).toBeNull();
+  });
+
+  it('requires confirmation only when saved email access is revoked', () => {
+    expect(requiresShowPageEmailRevocationConfirmation(
+      ['first@example.com', 'second@example.com'],
+      ['second@example.com'],
+    )).toBe(true);
+    expect(requiresShowPageEmailRevocationConfirmation(
+      ['first@example.com'],
+      ['first@example.com', 'second@example.com'],
+    )).toBe(false);
+    expect(requiresShowPageEmailRevocationConfirmation(
+      ['first@example.com', 'second@example.com'],
+      ['second@example.com', 'first@example.com'],
+    )).toBe(false);
   });
 
   it('requires at least one group for scoped access and normalizes duplicates', () => {

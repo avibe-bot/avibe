@@ -6167,7 +6167,7 @@ def remote_access_auth_callback():
         session_claims = result.get("session_claims")
         if not isinstance(session_claims, dict):
             raise remote_access.OAuthCodeExchangeError("invalid_session_claims")
-        if session_claims.get("vibe_instance_access_source") == "show_page_email" and (
+        if "vibe_show_page_id" in session_claims and (
             not isinstance(expected_show_page_id, str)
             or session_claims.get("vibe_show_page_id") != expected_show_page_id
         ):

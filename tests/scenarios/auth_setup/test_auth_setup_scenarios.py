@@ -30,6 +30,7 @@ from tests.scenario_harness.organization_management import (
     REMOTE_ORIGIN,
     OrganizationManagementScenarioHarness,
 )
+from tests.scenario_harness.show_page_email_access import ShowPageEmailAccessScenarioHarness
 from vibe import cloud_management
 from vibe.api import (
     get_claude_auth,
@@ -41,6 +42,30 @@ from vibe.claude_config import (
     materialize_claude_subprocess_env,
     read_claude_settings_env,
 )
+
+
+class ShowPageEmailAccessScenarioTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = ShowPageEmailAccessScenarioHarness()
+        self.addCleanup(self.harness.close)
+
+    def test_exact_email_login_is_confined_to_its_signed_show_page(self):
+        """Scenario: AUTH-SETUP-401"""
+        handshake = self.harness.begin_login("session-one")
+        self.assertEqual(handshake["show_page_id"], "session-one")
+
+        callback = self.harness.complete_login(handshake)
+        self.assertEqual(callback.status_code, 302)
+        self.assertEqual(callback.headers["Location"], handshake["next_path"])
+
+        exact = self.harness.get(handshake["next_path"])
+        other = self.harness.get("/show/session-two/__show/me")
+        api = self.harness.get("/api/show-pages")
+        self.assertEqual(exact.status_code, 200)
+        self.assertEqual(exact.get_json(), {"authenticated": False, "canAnnotate": False})
+        self.assertEqual(other.status_code, 403)
+        self.assertEqual(other.get_json()["error"], "show_page_access_forbidden")
+        self.assertEqual(api.status_code, 403)
 
 
 class _FakeNextTurnRuntime:

@@ -549,8 +549,10 @@ def _policy_allows(
 ) -> bool:
     if context.is_trusted_local:
         return True
+    if resource_kind == "show_page" and context.can_use_show_page(resource_id):
+        return True
     if context.instance_access_source == "show_page_email":
-        return resource_kind == "show_page" and context.can_use_show_page(resource_id)
+        return False
     if not context.can_use_resource(resource_kind):
         return False
     if policy is None:

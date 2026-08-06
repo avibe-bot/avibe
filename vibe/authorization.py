@@ -127,13 +127,9 @@ class AuthorizationContext:
         return minimum_role is not None and self.has_role(minimum_role)
 
     def can_use_show_page(self, show_page_id: str) -> bool:
-        """Return whether a Show Page-only session targets this exact page."""
+        """Return whether the signed session carries this exact page entitlement."""
 
-        return bool(
-            self.instance_access_source == "show_page_email"
-            and self.show_page_id
-            and self.show_page_id == show_page_id
-        )
+        return bool(self.show_page_id and self.show_page_id == show_page_id)
 
     @property
     def can_use_terminal_files(self) -> bool:
@@ -211,7 +207,7 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
     if access_source not in INSTANCE_ACCESS_SOURCES:
         return AuthorizationContext(is_remote=True)
     show_page_id = _optional_string(payload.get("vibe_show_page_id"), limit=200)
-    if (access_source == "show_page_email") != (show_page_id is not None):
+    if access_source == "show_page_email" and show_page_id is None:
         return AuthorizationContext(is_remote=True)
     if access_source == "show_page_email" and role != "viewer":
         return AuthorizationContext(is_remote=True)

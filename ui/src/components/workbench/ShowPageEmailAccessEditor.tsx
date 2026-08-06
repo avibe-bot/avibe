@@ -4,9 +4,13 @@ import { CloudOff, Loader2, Mail, Plus, RefreshCw, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { ApiError, useApi } from '@/context/ApiContext';
-import { normalizeShowPageAuthorizedEmail } from '@/lib/showPageAccess';
+import {
+  normalizeShowPageAuthorizedEmail,
+  requiresShowPageEmailRevocationConfirmation,
+} from '@/lib/showPageAccess';
 
 type EmailAccessGate = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error';
 
@@ -35,6 +39,7 @@ export function ShowPageEmailAccessEditor({
   const [draft, setDraft] = useState('');
   const [draftInvalid, setDraftInvalid] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [confirmNarrowing, setConfirmNarrowing] = useState(false);
   const generationRef = useRef(0);
 
   const load = useCallback(async () => {
@@ -61,6 +66,7 @@ export function ShowPageEmailAccessEditor({
     setDraft('');
     setDraftInvalid(false);
     setSaving(false);
+    setConfirmNarrowing(false);
     if (active && canManage) void load();
     return () => {
       generationRef.current += 1;
@@ -85,8 +91,9 @@ export function ShowPageEmailAccessEditor({
     setDraftInvalid(false);
   };
 
-  const save = async () => {
+  const commit = async () => {
     if (!dirty || saving || draft.trim()) return;
+    setConfirmNarrowing(false);
     setSaving(true);
     try {
       const result = await api.replaceShowPageAuthorizedEmails(sessionId, emails);
@@ -101,135 +108,154 @@ export function ShowPageEmailAccessEditor({
     }
   };
 
+  const save = () => {
+    if (!dirty || saving || draft.trim()) return;
+    if (requiresShowPageEmailRevocationConfirmation(savedEmails, emails)) {
+      setConfirmNarrowing(true);
+      return;
+    }
+    void commit();
+  };
+
   return (
-    <div className="space-y-2.5 border-t border-border pt-2.5">
-      <div className="flex items-start gap-2">
-        <Mail className="mt-0.5 size-3.5 shrink-0 text-muted" />
-        <div className="min-w-0">
-          <div className="text-xs font-medium">{t('chat.showPage.emailAccess')}</div>
-          <p className="mt-0.5 text-[11px] leading-snug text-muted">
-            {t('chat.showPage.emailAccessDesc')}
-          </p>
+    <>
+      <div className="space-y-2.5 border-t border-border pt-2.5">
+        <div className="flex items-start gap-2">
+          <Mail className="mt-0.5 size-3.5 shrink-0 text-muted" />
+          <div className="min-w-0">
+            <div className="text-xs font-medium">{t('chat.showPage.emailAccess')}</div>
+            <p className="mt-0.5 text-[11px] leading-snug text-muted">
+              {t('chat.showPage.emailAccessDesc')}
+            </p>
+          </div>
         </div>
-      </div>
 
-      {gate === 'loading' || gate === 'idle' ? (
-        <div className="flex items-center gap-1.5 text-[11px] text-muted">
-          <Loader2 className="size-3.5 animate-spin" />
-          {t('chat.showPage.loadingEmailAccess')}
-        </div>
-      ) : null}
+        {gate === 'loading' || gate === 'idle' ? (
+          <div className="flex items-center gap-1.5 text-[11px] text-muted">
+            <Loader2 className="size-3.5 animate-spin" />
+            {t('chat.showPage.loadingEmailAccess')}
+          </div>
+        ) : null}
 
-      {gate === 'unavailable' ? (
-        <div className="flex items-start gap-1.5 text-[11px] leading-snug text-muted">
-          <CloudOff className="mt-0.5 size-3.5 shrink-0" />
-          {t('chat.showPage.emailAccessUnavailable')}
-        </div>
-      ) : null}
+        {gate === 'unavailable' ? (
+          <div className="flex items-start gap-1.5 text-[11px] leading-snug text-muted">
+            <CloudOff className="mt-0.5 size-3.5 shrink-0" />
+            {t('chat.showPage.emailAccessUnavailable')}
+          </div>
+        ) : null}
 
-      {gate === 'error' ? (
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] leading-snug text-destructive">
-            {t('chat.showPage.emailAccessError')}
-          </span>
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            className="size-7 shrink-0"
-            onClick={() => void load()}
-            aria-label={t('common.retry')}
-            title={t('common.retry')}
-          >
-            <RefreshCw className="size-3.5" />
-          </Button>
-        </div>
-      ) : null}
-
-      {gate === 'ready' ? (
-        <>
-          <div className="flex items-start gap-1.5">
-            <div className="min-w-0 flex-1">
-              <Input
-                type="email"
-                value={draft}
-                disabled={saving || emails.length >= 64}
-                onChange={(event) => {
-                  setDraft(event.target.value);
-                  if (draftInvalid) setDraftInvalid(false);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== 'Enter') return;
-                  event.preventDefault();
-                  addDraft();
-                }}
-                placeholder={t('chat.showPage.emailPlaceholder')}
-                aria-label={t('chat.showPage.emailAccess')}
-                aria-invalid={draftInvalid || undefined}
-                className={clsx('h-8 text-xs', draftInvalid && 'border-destructive')}
-              />
-              {draftInvalid ? (
-                <p className="mt-1 text-[11px] text-destructive">
-                  {t('chat.showPage.emailInvalid')}
-                </p>
-              ) : null}
-            </div>
+        {gate === 'error' ? (
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] leading-snug text-destructive">
+              {t('chat.showPage.emailAccessError')}
+            </span>
             <Button
               type="button"
               size="icon"
-              variant="outline"
-              className="size-8 shrink-0"
-              disabled={saving || !draft.trim() || emails.length >= 64}
-              onClick={addDraft}
-              aria-label={t('chat.showPage.addEmail')}
-              title={t('chat.showPage.addEmail')}
+              variant="ghost"
+              className="size-7 shrink-0"
+              onClick={() => void load()}
+              aria-label={t('common.retry')}
+              title={t('common.retry')}
             >
-              <Plus className="size-3.5" />
+              <RefreshCw className="size-3.5" />
             </Button>
           </div>
+        ) : null}
 
-          {emails.length ? (
-            <div className="max-h-32 divide-y divide-border overflow-y-auto rounded-md border border-border">
-              {emails.map((email) => (
-                <div key={email} className="flex min-h-8 items-center gap-2 px-2">
-                  <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{email}</span>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    className="size-6 shrink-0"
-                    disabled={saving}
-                    onClick={() => setEmails((current) => current.filter((value) => value !== email))}
-                    aria-label={t('chat.showPage.removeEmail', { email })}
-                    title={t('chat.showPage.removeEmail', { email })}
-                  >
-                    <X className="size-3" />
-                  </Button>
-                </div>
-              ))}
+        {gate === 'ready' ? (
+          <>
+            <div className="flex items-start gap-1.5">
+              <div className="min-w-0 flex-1">
+                <Input
+                  type="email"
+                  value={draft}
+                  disabled={saving || emails.length >= 64}
+                  onChange={(event) => {
+                    setDraft(event.target.value);
+                    if (draftInvalid) setDraftInvalid(false);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter') return;
+                    event.preventDefault();
+                    addDraft();
+                  }}
+                  placeholder={t('chat.showPage.emailPlaceholder')}
+                  aria-label={t('chat.showPage.emailAccess')}
+                  aria-invalid={draftInvalid || undefined}
+                  className={clsx('h-8 text-xs', draftInvalid && 'border-destructive')}
+                />
+                {draftInvalid ? (
+                  <p className="mt-1 text-[11px] text-destructive">
+                    {t('chat.showPage.emailInvalid')}
+                  </p>
+                ) : null}
+              </div>
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="size-8 shrink-0"
+                disabled={saving || !draft.trim() || emails.length >= 64}
+                onClick={addDraft}
+                aria-label={t('chat.showPage.addEmail')}
+                title={t('chat.showPage.addEmail')}
+              >
+                <Plus className="size-3.5" />
+              </Button>
             </div>
-          ) : (
-            <p className="text-[11px] leading-snug text-muted">
-              {t('chat.showPage.emailAccessEmpty')}
-            </p>
-          )}
 
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[10px] text-muted">{t('chat.showPage.emailAccessLimit')}</span>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-7"
-              disabled={!dirty || saving || Boolean(draft.trim())}
-              onClick={() => void save()}
-            >
-              {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
-              {t('chat.showPage.applyEmailAccess')}
-            </Button>
-          </div>
-        </>
-      ) : null}
-    </div>
+            {emails.length ? (
+              <div className="max-h-32 divide-y divide-border overflow-y-auto rounded-md border border-border">
+                {emails.map((email) => (
+                  <div key={email} className="flex min-h-8 items-center gap-2 px-2">
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{email}</span>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="size-6 shrink-0"
+                      disabled={saving}
+                      onClick={() => setEmails((current) => current.filter((value) => value !== email))}
+                      aria-label={t('chat.showPage.removeEmail', { email })}
+                      title={t('chat.showPage.removeEmail', { email })}
+                    >
+                      <X className="size-3" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[11px] leading-snug text-muted">
+                {t('chat.showPage.emailAccessEmpty')}
+              </p>
+            )}
+
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[10px] text-muted">{t('chat.showPage.emailAccessLimit')}</span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7"
+                disabled={!dirty || saving || Boolean(draft.trim())}
+                onClick={save}
+              >
+                {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                {t('chat.showPage.applyEmailAccess')}
+              </Button>
+            </div>
+          </>
+        ) : null}
+      </div>
+      <ConfirmDialog
+        open={confirmNarrowing}
+        onOpenChange={setConfirmNarrowing}
+        title={t('organization.resources.narrowTitle')}
+        description={t('organization.resources.narrowBody')}
+        confirmLabel={t('organization.actions.saveChanges')}
+        onConfirm={commit}
+      />
+    </>
   );
 }

@@ -4193,9 +4193,7 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
         "vibe_instance_access_source": access_source,
     }
     show_page_claim_present = "vibe_show_page_id" in claims
-    if access_source == "show_page_email":
-        if instance_role != "viewer":
-            raise OAuthCodeExchangeError("invalid_instance_role")
+    if show_page_claim_present:
         show_page_id = _oidc_claim_string(
             claims.get("vibe_show_page_id"),
             reason="invalid_show_page_id",
@@ -4204,8 +4202,10 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
         if "/" in show_page_id or "\\" in show_page_id:
             raise OAuthCodeExchangeError("invalid_show_page_id")
         session_claims["vibe_show_page_id"] = show_page_id
-    elif show_page_claim_present:
+    elif access_source == "show_page_email":
         raise OAuthCodeExchangeError("invalid_show_page_id")
+    if access_source == "show_page_email" and instance_role != "viewer":
+        raise OAuthCodeExchangeError("invalid_instance_role")
     raw_authorization_revision = claims.get(_AUTHORIZATION_REVISION_KEY)
     if raw_authorization_revision is None:
         if _authorization_revision_sync_configured(config):

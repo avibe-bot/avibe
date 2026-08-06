@@ -46,6 +46,14 @@ export function normalizeShowPageAuthorizedEmail(raw: string): string | null {
   return SHOW_PAGE_EMAIL_PATTERN.test(normalized) ? normalized : null;
 }
 
+export function requiresShowPageEmailRevocationConfirmation(
+  savedEmails: string[],
+  nextEmails: string[],
+): boolean {
+  const next = new Set(nextEmails);
+  return savedEmails.some((email) => !next.has(email));
+}
+
 function isShowPageAccess(value: unknown): value is ShowPageAccess {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<ShowPageAccess>;

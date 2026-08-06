@@ -224,15 +224,18 @@ def test_show_page_oidc_claim_shape_fails_closed(monkeypatch, tmp_path):
 
     with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_show_page_id"):
         remote_access.session_claims_from_oidc(config, base)
-    with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_show_page_id"):
-        remote_access.session_claims_from_oidc(
-            config,
-            {
-                **base,
-                "vibe_instance_access_source": "email",
-                "vibe_show_page_id": "session-one",
-            },
-        )
+    broader = remote_access.session_claims_from_oidc(
+        config,
+        {
+            **base,
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "vibe_show_page_id": "session-one",
+        },
+    )
+    assert broader["vibe_instance_access_source"] == "email"
+    assert broader["vibe_instance_role"] == "editor"
+    assert broader["vibe_show_page_id"] == "session-one"
 
 
 def test_custom_hostname_uses_remote_auth_until_heartbeat_removes_it(monkeypatch, tmp_path):
@@ -3005,8 +3008,12 @@ def test_remote_callback_rejects_nonce_mismatch(monkeypatch, tmp_path):
     assert 'href="/dashboard"' in response.text
 
 
-def test_remote_callback_rejects_show_page_email_token_for_a_different_page(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("access_source", "instance_role"),
+    [("show_page_email", "viewer"), ("email", "editor")],
+)
+def test_remote_callback_rejects_signed_entitlement_for_a_different_page(
+    monkeypatch, tmp_path, access_source, instance_role
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -3039,8 +3046,8 @@ def test_remote_callback_rejects_show_page_email_token_for_a_different_page(
             },
             "session_claims": {
                 "vibe_instance_id": "inst_123",
-                "vibe_instance_role": "viewer",
-                "vibe_instance_access_source": "show_page_email",
+                "vibe_instance_role": instance_role,
+                "vibe_instance_access_source": access_source,
                 "vibe_show_page_id": "session-two",
             },
         },

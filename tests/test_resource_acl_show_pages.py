@@ -151,6 +151,39 @@ def test_show_page_email_context_bypasses_audience_only_for_its_signed_page(
         store.close()
 
 
+def test_broader_instance_context_unions_its_signed_show_page_entitlement(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = _seed_show_pages_with_policies()
+    context = resource_access_service.ResourceUserContext(
+        subject="member-1",
+        email="member@example.com",
+        instance_role="editor",
+        instance_access_source="email",
+        show_page_id="ses-private",
+        is_remote=True,
+    )
+    try:
+        with store.engine.connect() as connection:
+            assert resource_access_service.can_use_resource(
+                context,
+                "show_page",
+                "ses-private",
+                connection=connection,
+            )
+            assert not resource_access_service.can_use_resource(
+                context,
+                "show_page",
+                "ses-scope",
+                connection=connection,
+            )
+            assert context.can_chat
+            assert context.can_use_resource("agent")
+    finally:
+        store.close()
+
+
 def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
