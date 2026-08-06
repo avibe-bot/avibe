@@ -380,6 +380,22 @@ def test_remote_viewer_can_use_identity_gate_but_only_allowlisted_proxy_paths(
     )
 
 
+@pytest.mark.parametrize("method", ["GET", "PATCH"])
+def test_resource_access_proxy_allows_read_and_patch(method: str) -> None:
+    assert cloud_management.proxy_path_allowed(
+        method,
+        "/api/organizations/org_1/resources/inst_123/show_page/session_1/access",
+    )
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE"])
+def test_resource_access_proxy_rejects_other_methods(method: str) -> None:
+    assert not cloud_management.proxy_path_allowed(
+        method,
+        "/api/organizations/org_1/resources/inst_123/show_page/session_1/access",
+    )
+
+
 def test_chunked_proxy_request_is_bounded_before_json_parsing(monkeypatch, tmp_path) -> None:
     config = _save_config(monkeypatch, tmp_path)
     client = _remote_client(config, role="viewer")

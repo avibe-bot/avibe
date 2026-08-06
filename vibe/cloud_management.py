@@ -406,7 +406,7 @@ _PROXY_RULES: tuple[tuple[str, str], ...] = (
     ("PUT", r"/api/organizations/[^/]+/groups/[^/]+/members"),
     ("GET", r"/api/organizations/[^/]+/instances"),
     ("GET", r"/api/organizations/[^/]+/resources"),
-    ("PATCH", r"/api/organizations/[^/]+/resources/[^/]+/[^/]+/[^/]+/access"),
+    ("GET|PATCH", r"/api/organizations/[^/]+/resources/[^/]+/[^/]+/[^/]+/access"),
     ("GET|POST|PUT|DELETE", r"/api/instances/[^/]+/authorized-users"),
     ("GET", r"/api/instances/[^/]+/projects"),
     ("GET|PUT", r"/api/instances/[^/]+/projects/[^/]+/access"),
