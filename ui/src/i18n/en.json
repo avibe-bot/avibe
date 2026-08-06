@@ -2323,6 +2323,8 @@
     "audioTranscriptEchoHint": "Send recognized text back to the chat when transcription succeeds",
     "errorRetryLimit": "Error Retry Limit",
     "errorRetryLimitHint": "Auto-retry with 'continue' when LLM stream errors occur (0 = no retry)",
+    "opencodeActiveTurnTimeout": "OpenCode Turn Limit",
+    "opencodeActiveTurnTimeoutHint": "Abort and fail an accepted OpenCode turn that produces no result within this many minutes",
     "showDuration": "Show Duration",
     "showDurationHint": "Display task elapsed time in result messages",
     "includeTimeInfo": "Include Current Time",

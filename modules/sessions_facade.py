@@ -493,6 +493,7 @@ class SessionsFacade:
         opencode_session_id: str,
         seen_tool_calls: Optional[List[str]] = None,
         emitted_assistant_messages: Optional[List[str]] = None,
+        prompt_started_at: Optional[float] = None,
     ) -> None:
         poll_info = self.sessions_store.get_active_poll(opencode_session_id)
         if poll_info:
@@ -500,6 +501,8 @@ class SessionsFacade:
                 poll_info.seen_tool_calls = seen_tool_calls
             if emitted_assistant_messages is not None:
                 poll_info.emitted_assistant_messages = emitted_assistant_messages
+            if prompt_started_at is not None:
+                poll_info.prompt_started_at = prompt_started_at
             self.sessions_store.update_active_poll(poll_info)
 
     def get_all_active_polls(self) -> Dict[str, Any]:

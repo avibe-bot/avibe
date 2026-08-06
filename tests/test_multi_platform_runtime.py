@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.im.base import BaseIMClient, BaseIMConfig, MessageContext
@@ -683,6 +685,7 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
 def test_opencode_prompt_disables_question_tool_for_all_platforms():
     calls = []
     active_polls = []
+    active_poll_updates = []
     recovery_order = []
 
     class _Server:
@@ -749,6 +752,10 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
 
         def remove_active_poll(self, session_id):
             return None
+
+        def update_active_poll_state(self, session_id, **kwargs):
+            recovery_order.append("accepted")
+            active_poll_updates.append((session_id, kwargs))
 
     class _PollLoop:
         async def run_prompt_poll(self, *args, **kwargs):
@@ -832,7 +839,9 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
     assert calls[0]["message_id"] == "msg_initial_start"
-    assert recovery_order[:2] == ["poll", "prompt"]
+    assert recovery_order[:3] == ["poll", "prompt", "accepted"]
+    assert active_poll_updates[0][0] == "oc-session"
+    assert isinstance(active_poll_updates[0][1]["prompt_started_at"], float)
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
     assert steering_snapshot["system"] == calls[0]["system"]
 
@@ -1809,7 +1818,7 @@ def test_opencode_restored_poll_keeps_empty_completion_successful():
         platform="slack",
         model_dict={"providerID": "glm", "modelID": "glm-5.2"},
         reasoning_effort="high",
-        prompt_started_at=42.0,
+        prompt_started_at=time.time(),
     )
 
     loop = OpenCodePollLoop(_Agent())
@@ -1829,6 +1838,174 @@ def test_opencode_restored_poll_keeps_empty_completion_successful():
     assert results[0][0] == "(No response from OpenCode)"
     assert results[0][1]["subtype"] == "warning"
     assert isinstance(results[0][1]["started_at"], float)
+
+
+def test_opencode_restored_poll_consumes_original_timeout_budget():
+    emitted = []
+    removed = []
+    aborted = []
+    list_calls = []
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(
+            self, context, backend, message, *, output=None, terminal_error=None
+        ):
+            return False
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def __init__(self):
+            self.config = type(
+                "Config", (), {"platform": "slack", "ack_mode": "reaction", "language": "en"}
+            )()
+            self.processing_indicator = ProcessingIndicatorService(self)
+
+        def _t(self, key, **kwargs):
+            return f"{key}:{kwargs.get('seconds')}"
+
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+            terminal_error=None,
+        ):
+            emitted.append((message_type, text, is_error, level, terminal_error))
+
+    class _Sessions:
+        def remove_active_poll(self, session_id):
+            removed.append(session_id)
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            list_calls.append((session_id, directory))
+            return []
+
+        async def abort_session(self, session_id, directory):
+            aborted.append((session_id, directory))
+            return True
+
+    server = _Server()
+
+    class _Agent:
+        opencode_config = type(
+            "OpenCodeConfig",
+            (),
+            {"error_retry_limit": 0, "active_turn_timeout_seconds": 0.05},
+        )()
+        controller = _Controller()
+        sessions = _Sessions()
+
+        async def _get_server(self):
+            return server
+
+        async def _remove_ack_reaction(self, request):
+            return None
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            return False
+
+    poll = ActivePollInfo(
+        opencode_session_id="oc-restored-timeout",
+        base_session_id="base",
+        channel_id="c",
+        thread_id="t",
+        settings_key="c",
+        working_path="/tmp/work",
+        baseline_message_ids=[],
+        platform="slack",
+        prompt_started_at=time.time() - 1,
+    )
+
+    asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+
+    assert list_calls == []
+    assert aborted == [("oc-restored-timeout", "/tmp/work")]
+    assert removed == ["oc-restored-timeout"]
+    assert [item[0] for item in emitted] == ["notify", "notify", "result"]
+    assert emitted[1][1] == "error.opencodeActiveTurnTimeout:0.05"
+    assert emitted[2][1:] == (
+        "",
+        True,
+        "silent",
+        "OpenCode active turn exceeded the configured 0.05-second wall-clock limit",
+    )
+    assert all("No response from OpenCode" not in item[1] for item in emitted)
+
+
+def test_opencode_active_turn_poll_propagates_cancellation_without_settlement():
+    emitted = []
+    aborted = []
+    poll_started = asyncio.Event()
+
+    class _Controller:
+        async def emit_agent_message(self, *args, **kwargs):
+            emitted.append((args, kwargs))
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            poll_started.set()
+            await asyncio.Event().wait()
+
+        async def abort_session(self, session_id, directory):
+            aborted.append((session_id, directory))
+            return True
+
+    class _Agent:
+        opencode_config = type(
+            "OpenCodeConfig",
+            (),
+            {"error_retry_limit": 0, "active_turn_timeout_seconds": 60},
+        )()
+        controller = _Controller()
+
+        @staticmethod
+        def _extract_response_text(message):
+            return ""
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            return False
+
+    async def _run():
+        request = AgentRequest(
+            context=MessageContext(
+                user_id="user",
+                channel_id="channel",
+                platform="slack",
+            ),
+            message="stop me",
+            user_message="stop me",
+            working_path="/tmp/work",
+            base_session_id="base",
+            composite_session_id="composite",
+            session_key="slack::channel",
+        )
+        task = asyncio.create_task(
+            OpenCodePollLoop(_Agent()).run_prompt_poll(
+                request,
+                _Server(),
+                "oc-cancelled",
+                agent_to_use=None,
+                model_dict=None,
+                reasoning_effort=None,
+                baseline_message_ids=set(),
+            )
+        )
+        await asyncio.wait_for(poll_started.wait(), timeout=0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+
+    assert aborted == []
+    assert emitted == []
 
 
 def test_mh_chan_001_opencode_restored_poll_records_source_failure():

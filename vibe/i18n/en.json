@@ -303,7 +303,8 @@
     "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
     "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
-    "opencodeBackendError": "OpenCode error: {error}"
+    "opencodeBackendError": "OpenCode error: {error}",
+    "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted."
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",
