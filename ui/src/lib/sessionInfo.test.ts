@@ -1,10 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  canCreateLocalProject,
   DENIED_INSTANCE_CAPABILITIES,
   normalizeSessionInfo,
   OWNER_INSTANCE_CAPABILITIES,
 } from './sessionInfo';
+
+describe('canCreateLocalProject', () => {
+  it('requires project management and local file capabilities', () => {
+    expect(canCreateLocalProject(OWNER_INSTANCE_CAPABILITIES)).toBe(true);
+    expect(
+      canCreateLocalProject({
+        ...OWNER_INSTANCE_CAPABILITIES,
+        can_use_files: false,
+      }),
+    ).toBe(false);
+  });
+});
 
 describe('normalizeSessionInfo', () => {
   it('preserves legacy authenticated remote sessions as owners', () => {

@@ -432,7 +432,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/backend/(?:(?:claude|codex)/auth|[^/]+/auth/oauth/status/[^/]+)$",
+            r"^/api/backend/(?:(?:codex)/auth|[^/]+/auth/oauth/status/[^/]+)$",
         ),
         (
             frozenset({"GET", "HEAD"}),

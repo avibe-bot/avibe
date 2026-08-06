@@ -2137,6 +2137,12 @@ class Controller:
         # Reconciliation can start the sidecar, so settle it before closing the
         # runtime or it could race shutdown and leave a process behind.
         _stop_loop_coroutine(_cancel_memory_reconcile_task(), "Memory startup reconciliation")
+        message_handler = getattr(self, "message_handler", None)
+        if message_handler is not None:
+            _stop_loop_coroutine(
+                message_handler.drain_memory_capture_tasks(),
+                "Memory capture tasks",
+            )
         memory_runtime = getattr(self, "memory_runtime", None)
         if memory_runtime is not None:
             _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")

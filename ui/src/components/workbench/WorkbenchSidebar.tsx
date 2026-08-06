@@ -37,6 +37,7 @@ import { SESSION_ROW_MENU_POSITION_CLASS, sessionRowActionPaddingClass } from '.
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -210,7 +211,8 @@ const SessionRow: React.FC<{
   session: WorkbenchSession;
   unread: number;
   canChat: boolean;
-}> = ({ projectId, session, unread, canChat }) => {
+  canManageMetadata: boolean;
+}> = ({ projectId, session, unread, canChat, canManageMetadata }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { renameSession } = useWorkbenchProjectsTree();
@@ -227,7 +229,8 @@ const SessionRow: React.FC<{
 
   const { actions, archiveDialog } = useSessionActions({
     session,
-    writable: canChat,
+    writable: canManageMetadata,
+    lifecycleWritable: canChat,
     projectId,
     onRenameStart: () => {
       setDraft(session.title ?? '');
@@ -296,11 +299,11 @@ const SessionRow: React.FC<{
   const displayName = session.title?.trim() || t('workbench.untitledSession');
   return (
     <>
-    <Popover open={canChat && menuOpen} onOpenChange={(open) => canChat && setMenuOpen(open)}>
+    <Popover open={canManageMetadata && menuOpen} onOpenChange={(open) => canManageMetadata && setMenuOpen(open)}>
       <PopoverAnchor asChild>
         <div
           onContextMenu={(e) => {
-            if (!canChat) return;
+            if (!canManageMetadata) return;
             e.preventDefault();
             setMenuOpen(true);
           }}
@@ -338,7 +341,7 @@ const SessionRow: React.FC<{
               </span>
             )}
           </button>
-          {canChat && (
+          {canManageMetadata && (
             <>
               {pinAction && (
                 <SessionPinAction
@@ -389,6 +392,7 @@ const ProjectRow: React.FC<{
   onCreateSession: () => void;
   creatingSession: boolean;
   canChat: boolean;
+  canManageMetadata: boolean;
   canManageProjects: boolean;
   unreadBySession: Record<string, number>;
   onRename: (next: string) => Promise<void>;
@@ -405,6 +409,7 @@ const ProjectRow: React.FC<{
   onCreateSession,
   creatingSession,
   canChat,
+  canManageMetadata,
   canManageProjects,
   unreadBySession,
   onRename,
@@ -604,6 +609,7 @@ const ProjectRow: React.FC<{
                 session={session}
                 unread={unreadBySession[session.id] || 0}
                 canChat={canChat}
+                canManageMetadata={canManageMetadata}
               />
             ))}
           {hasMore && (
@@ -643,6 +649,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const navigate = useNavigate();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
   const { capabilities } = useInstanceAuthorization();
+  const canCreateProject = canCreateLocalProject(capabilities);
   const capabilityNav = CAPABILITY_NAV.filter(({ to }) => {
     if (to === '/agents' || to === '/harness') return capabilities.can_manage_agents;
     if (to === '/skills') return capabilities.can_use_skills;
@@ -845,7 +852,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             >
               <Search className="size-4" />
             </Button>}
-            <Button
+            {canCreateProject && <Button
               type="button"
               variant="ghost"
               size="icon"
@@ -854,7 +861,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               onClick={() => setShowNewProject(true)}
             >
               <FolderPlus className="size-4" />
-            </Button>
+            </Button>}
           </div>
         </div>
 
@@ -902,6 +909,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   }}
                   creatingSession={creatingSession(project.id)}
                   canChat={capabilities.can_chat && project.capabilities.can_chat}
+                  canManageMetadata={project.capabilities.can_chat}
                   canManageProjects={capabilities.can_manage_projects}
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}
@@ -912,7 +920,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </div>
       </div>
 
-      {showNewProject && capabilities.can_manage_projects && (
+      {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
           onCreated={(project) => {

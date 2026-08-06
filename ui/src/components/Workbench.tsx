@@ -9,6 +9,7 @@ import { Composer } from './workbench/Composer';
 import { ProjectPicker } from './workbench/ProjectPicker';
 import { AgentRoutePicker } from './workbench/AgentRoutePicker';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
+import { canCreateLocalProject } from '../lib/sessionInfo';
 
 // Mirrors design.pen DnkGJ "Workbench" canvas: a centered hero panel +
 // suggestion chips with the shared chat Composer below it. The Composer is
@@ -21,6 +22,7 @@ export const Workbench: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { capabilities } = useInstanceAuthorization();
+  const canCreateProject = canCreateLocalProject(capabilities);
   const ns = useNewSession({
     active: capabilities.can_chat,
     loadErrorText: t('newSession.loadError'),
@@ -45,7 +47,7 @@ export const Workbench: React.FC = () => {
 
   // Quick chips under the hero — three of the most common first moves.
   const suggestions = [
-    ...(capabilities.can_manage_projects
+    ...(canCreateProject
       ? [{ key: 'newProject', icon: FolderPlus, onClick: () => setNewProjectOpen(true) }]
       : []),
     ...(capabilities.can_manage_agents
@@ -133,7 +135,7 @@ export const Workbench: React.FC = () => {
         )}
       </div>
 
-      {newProjectOpen && capabilities.can_manage_projects && (
+      {newProjectOpen && canCreateProject && (
         <NewProjectDialog
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project) => {

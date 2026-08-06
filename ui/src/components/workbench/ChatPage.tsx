@@ -218,6 +218,7 @@ export const ChatPage: React.FC = () => {
   const readOnlyReason = sessionReadOnlyReason(session);
   const readOnly = isSessionReadOnly(session);
   const writable = canChat && !readOnly;
+  const metadataWritable = sessionCanChat && !readOnly;
 
   // Chat-page-wide drag-and-drop: dropping files anywhere over the chat surface
   // (not just the input row) stages them on the composer via its imperative
@@ -1930,7 +1931,8 @@ export const ChatPage: React.FC = () => {
     canArchive,
   } = useSessionActions({
     session,
-    writable,
+    writable: metadataWritable,
+    lifecycleWritable: writable,
     // Rename focuses the header's existing click-to-edit title instead of adding
     // a second editor for the same field.
     onRenameStart: () => titleFieldRef.current?.startEditing(),

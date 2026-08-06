@@ -115,6 +115,27 @@ def test_message_handler_retains_memory_capture_task_until_completion() -> None:
     asyncio.run(run())
 
 
+def test_message_handler_drains_memory_capture_tasks_before_shutdown() -> None:
+    handler = MessageHandler.__new__(MessageHandler)
+    handler._memory_capture_tasks = set()
+
+    async def run() -> None:
+        completed = False
+
+        async def capture() -> None:
+            nonlocal completed
+            await asyncio.sleep(0)
+            completed = True
+
+        handler._track_memory_capture_task(asyncio.create_task(capture()))
+        await handler.drain_memory_capture_tasks()
+
+        assert completed is True
+        assert handler._memory_capture_tasks == set()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("platform", ["slack", "discord", "telegram", "feishu", "wechat"])
 def test_capture_admits_every_enabled_bound_dm_user(platform: str) -> None:
     controller = _controller(user=SimpleNamespace(enabled=True, is_admin=False))

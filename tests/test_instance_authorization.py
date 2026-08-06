@@ -130,6 +130,7 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     [
         ("POST", "/api/show-pages/ses-1/visibility"),
         ("GET", "/api/backend/codex/runtime"),
+        ("GET", "/api/backend/claude/auth"),
         ("GET", "/api/global-prompts"),
         ("GET", "/api/harness/runs"),
         ("GET", "/api/harness/runs/run-1"),

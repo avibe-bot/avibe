@@ -258,3 +258,13 @@ describe('a read-only session', () => {
     expect(mount(options()).canArchive).toBe(true);
   });
 });
+
+describe('a metadata-only session', () => {
+  it('keeps organization actions but removes local lifecycle actions', () => {
+    const h = mount(options({ writable: true, lifecycleWritable: false }));
+
+    expect(h.actions.map((action) => action.id)).toEqual(['pin', 'rename', 'hide']);
+    expect(h.canArchive).toBe(false);
+    expect(h.archiveDialog).toBeNull();
+  });
+});

@@ -84,6 +84,19 @@ class MessageHandler(BaseHandler):
 
         task.add_done_callback(_on_done)
 
+    async def drain_memory_capture_tasks(self, timeout_seconds: float = 4.0) -> None:
+        """Finish queued Memory captures before the runtime closes on shutdown."""
+
+        pending = {task for task in self._memory_capture_tasks if not task.done()}
+        if not pending:
+            return
+        _done, pending = await asyncio.wait(pending, timeout=timeout_seconds)
+        if pending:
+            logger.warning("Cancelling %d Memory capture tasks after shutdown drain timeout", len(pending))
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
     async def handle_user_message(self, context: MessageContext, message: str):
         """Process regular human-originated messages and route to configured agent."""
         await self._handle_turn(context, message, source=self.TURN_SOURCE_HUMAN)
