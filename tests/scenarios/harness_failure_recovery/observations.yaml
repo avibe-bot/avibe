@@ -353,10 +353,15 @@ observations:
     source: PR7R current-master evidence matrix (HFR-183, HFR-184)
     result: confirmed
     detail: >-
-      ALL SIX backend/lane cells expose a per-Turn progress signal. Four rounds of
+      Every backend and lane exposes a per-Turn progress signal ON LIVE DISPATCH.
+      Four rounds of
       corrections got here; the intermediate verdicts ("no backend", then "codex
       only", then "four of six, split by lane") are kept below because each was
-      wrong for the same reason and the sequence is the lesson.
+      wrong for the same reason and the sequence is the lesson. Round 17 adds a
+      fifth to that sequence and it is why the qualifier is here: this
+      observation said "six backend/lane cells" expose one, unqualified, and
+      that is narrowed -- opencode's restart path discards the identity, see
+      HFR-OBS-042.
       Codex's ``item/*`` notifications carry a
       ``turnId`` and ``_find_request_for_notification`` resolves the participating
       Run's request from that id through a per-turn map, so the event IS attributable
@@ -1100,7 +1105,7 @@ observations:
       concatenation is one string to a reader.
       The fifth was found while enrolling the others: "no backend exposes a
       per-turn progress signal", retracted in round 3, was still standing in two
-      artefacts and in no ledger row. All six backend/lane cells expose one.
+      artefacts and in no ledger row; every cell exposes one on live dispatch.
       THE DURABLE RULE, and it is the same rule the ledger itself keeps
       teaching: a citation is not evidence until something reads it. A scenario
       id in prose, a retraction applied at the site where it was noticed, a
@@ -1124,10 +1129,10 @@ observations:
       asserted the opposite of the answer, in its summary, while its own later
       sections drove the correct reading: ``CodexAgent.handle_message`` holds
       ``_session_locks[base]`` across its whole body and sends
-      ``turn/interrupt`` before ``turn/start`` (HFR-193), so the older turn has
-      been interrupted by the time the filter drops it, and its late events are
-      handled rather than lost (HFR-195). Both sentences are now historical and
-      both wordings are enrolled.
+      ``turn/interrupt`` before ``turn/start``, so the older turn has been
+      interrupted by the time the filter drops it, and its late events are
+      handled rather than lost -- HFR-195 drives both halves. Both sentences are
+      now historical and both wordings are enrolled.
       What makes this worth a durable rule is that the ledger was NOT the thing
       that failed. Round 9's retraction was enrolled, in round 15, as
       "attribution is thrown away" -- and the same claim went on standing in two
@@ -1151,6 +1156,71 @@ observations:
       which is a habit, not a test.
       Rejected: nothing. The finding was real and in scope.
       UNPROVEN_BUDGET stays 168: nothing this round touches a matrix cell.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
+      and is still deliberately untouched (HFR-OBS-028).
+  - id: HFR-OBS-042
+    area: run-terminal-truth
+    summary: >-
+      Round 17, four findings, all four accepted, nothing rejected. Two new
+      scenario ids (HFR-205, HFR-206), one question verdict moved, and no budget
+      move -- UNPROVEN_BUDGET counts the 168-cell trigger/outcome matrix, and
+      everything this round touches is the Q2 signal table, the question answers
+      and the corpus, none of which it has ever counted. That is recorded
+      explicitly because "a verdict moved and the budget did not" is exactly the
+      shape that reads as a missed update.
+      FINDING 1, Q2 reopens. Every clause of Q2's answer walked a LIVE dispatch
+      path. OpenCode has a second emitting entry point, run_restored_poll_loop,
+      which is the one that runs after a daemon restart, and it was never
+      walked. It rebuilds its emit context through
+      ``ProcessingIndicatorHandle.from_snapshot``, whose rebuild is a fixed
+      three-key allowlist, so ``turn_token``, the runtime turn token and
+      ``accepted_agent_run_ids`` are dropped and all three of the loop's emits
+      carry the stripped context; the module names neither ``turn_token`` nor
+      ``logical_turn_id``. Both halves of the question fail there, Turn and
+      Runs, on both opencode lanes, since the discard is in the shared rebuild
+      and reads no platform. It is a DEFECT and not a gap, and that is what
+      decides the remediation: ``OpenCodeAgent._process_message`` writes
+      ``logical_turn_id`` into the SAME dict the rebuild is handed, under the
+      native steering key, and the restore path reads it back to steer; restored
+      ``additional_steer_targets`` are built with ``context=None``. The identity
+      survives the restart and is discarded one call later, so the fix is one
+      line at the rebuild rather than persisting more. HFR-205 is a
+      characterization test and is not a PR7R-F1/F2 reproducer.
+      FINDING 2, a corpus guard credited with production behaviour in five
+      artefacts -- round 16's own fix, misfiled. The guard that compares the
+      plan's verdict words against the matrix was named as the thing holding the
+      base-session lock and sending the interrupt; the scenario that drives that
+      sequence is HFR-195. Neither the docstring-id guard nor the
+      answer-citation guard could see it: one walks the ids a test claims about
+      itself, and four of the five sites are not answers. HFR-204 is the rule --
+      a scenario whose test lives in the matrix file is a guard over PR7R's own
+      text and can never make production serialize, interrupt or emit. Scoped to
+      the SENTENCE, measured rather than assumed: per prose unit it fires 14
+      times, 9 of them legitimate round narrations; per sentence 5 times, all 5
+      the defect. Crediting one probe with another probe's behaviour stays
+      unguarded and is named, not papered over.
+      FINDING 3, Q3's per-Run detector saw one shape. The assertion carrying the
+      verdict was a top-level comprehension for a dict whose keys intersect the
+      accepted ids, under a comment claiming any future per-Run field would fail
+      there. A record list, a map one level down and a scalar naming one Run all
+      passed it. It now walks recursively under a mention rule and a key-shape
+      rule, with five positive controls, because a detector whose EMPTINESS
+      carries a verdict has to be shown firing.
+      FINDING 4, Q4's established facts are Run-scoped and the answer claimed
+      Turn scope. Every cited test registers its activity with a run id, no turn
+      id, and the turn-completion flag off. The answer had written the
+      conflation down as if it were the reconciliation of an apparent
+      contradiction; that sentence is retracted and enrolled, and HFR-206 reads
+      the citations for what scope they bind so the prose cannot drift back.
+      THE DURABLE RULE, and it comes from findings 1 and 4 having one skeleton:
+      both are a claim about a LEVEL -- a lane, a Turn -- resting on evidence
+      gathered one level down, and in both the answer's own prose said so and
+      was read as a caveat. When an answer explains why its evidence does not
+      quite match its question, that is not a scope note, it is the finding.
+      Rejected: nothing. All four findings were real and in scope; none asked
+      for a fix to PR7R-F1 or PR7R-F2, which would have been out of scope by the
+      plan's own boundary.
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
       and is still deliberately untouched (HFR-OBS-028).

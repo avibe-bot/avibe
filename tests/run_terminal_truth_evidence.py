@@ -103,9 +103,17 @@ def not_applicable(reason: str) -> tuple[str, str]:
 def defect(finding_and_node: str) -> tuple[str, str]:
     """Current master is wrong here; a characterization test pins what it does.
 
-    Same ``" -- "`` shape as :func:`shared_owner`: finding id on the left, the
-    reproducing node id on the right. These tests assert CURRENT behavior, so
-    the implementation PR that fixes the finding must flip them.
+    Same ``" -- "`` shape as :func:`shared_owner`: what is wrong on the left,
+    the reproducing node id on the right. These tests assert CURRENT behavior,
+    so the implementation PR that fixes the finding must flip them.
+
+    Two conventions for the left side, and the difference is enforced rather
+    than stylistic. In the 168-cell matrix it must be a ``PR7R_FINDINGS`` id,
+    because HFR-186 ties those two tables together in both directions. In the
+    Q2 signal table it is a scenario id and a claim: round 17's opencode
+    defect is not about any trigger/outcome cell, and inventing a third
+    top-level finding to satisfy a guard scoped to a different table would put
+    a row in ``PR7R_FINDINGS`` that no matrix cell could honestly reference.
     """
 
     return "defect", finding_and_node
@@ -227,6 +235,10 @@ _Q2_KEY_SPLIT = (
 _Q2_RUNS = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
     "test_participating_run_attribution_is_resolved_per_turn_not_per_session"
+)
+_Q2_RESTORED = (
+    "tests/test_run_terminal_truth_evidence_probes.py::"
+    "test_a_restored_opencode_poll_loop_emits_without_its_turn_identity"
 )
 _Q1_RESERVATION = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
@@ -765,9 +777,45 @@ RETRACTED_PHRASINGS: Final = (
         "no backend exposes a per-turn progress signal",
         "round 3",
         "found while mechanising this ledger in round 15, not by a reviewer. "
-        "All six backend/lane cells expose one; the verdict went 'no backend' "
-        "-> 'codex only' -> 'four of six, split by lane' -> all six, and "
+        "Every backend exposes one on live dispatch; the verdict went 'no "
+        "backend' -> 'codex only' -> 'four of six, split by lane' -> every "
+        "cell -> four of six again once the restart path was walked, and "
         "HFR-183 drives it. The claim is only quotable as history.",
+    ),
+    # Round 17, and it is the round-15 back-fill lesson met from the other
+    # side: this claim is not FALSE, it is unqualified. Every clause behind it
+    # walked a live dispatch path, and OpenCode's restart path discards the
+    # identity the live path attributes. A narrowing gets a row here on the
+    # same terms a falsehood does -- round 10's overlap row is the precedent --
+    # because a reader quoting the unqualified sentence gets the wrong contract
+    # either way. Two rows and not one, because the corpus said it in two
+    # verbs, ``carry`` and ``expose``, and round 16's whole lesson is that a
+    # phrase ledger catches restatements and not paraphrases.
+    (
+        "all six cells",
+        "round 17",
+        "unqualified. On LIVE dispatch every cell carries the signal and that "
+        "half stands. ``OpenCodePollLoop.run_restored_poll_loop`` rebuilds its "
+        "emit context through a three-key allowlist that drops ``turn_token`` "
+        "and ``accepted_agent_run_ids``, so both opencode cells are defects "
+        "across a restart -- HFR-205 drives it. Say which dispatch path.",
+    ),
+    (
+        "pre-terminal evidence a turn carries",
+        "round 17",
+        "Q4's own scope note conflated the two levels while explaining a "
+        "different distinction, and every test the answer cites registers its "
+        "activity with a run id, no turn id, and the turn-completion flag off. "
+        "The established facts are RUN-scoped. Whether a Turn carries them is "
+        "not reached, and HFR-206 now reads the citations so the prose cannot "
+        "drift back.",
+    ),
+    (
+        "six backend/lane cells",
+        "round 17",
+        "same narrowing as the row above, in the corpus's other verb. The "
+        "count is four covered and two defect; the six-cell sentences are "
+        "quotable as history and as live-path statements, not as the answer.",
     ),
     # Round 16, and it is the SAME defect as round 15's back-fill one level
     # down: round 9's retraction WAS enrolled, as "attribution is thrown away",
@@ -782,8 +830,9 @@ RETRACTED_PHRASINGS: Final = (
         "the consumer does not drop it. ``should_emit_progress`` returns False "
         "for the older turn only after ``CodexAgent.handle_message`` has "
         "interrupted it under ``_session_locks[base]``, so it is correct "
-        "filtering -- HFR-193 for the serialization, HFR-195 for the late "
-        "events. Say what the consumer does with an INTERRUPTED turn.",
+        "filtering -- HFR-195 drives both halves of that, the serialization at "
+        "the lock and what becomes of the interrupted turn's late events. Say "
+        "what the consumer does with an INTERRUPTED turn.",
     ),
     (
         "discarded live signal, not correct filtering",
@@ -929,15 +978,51 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # assistant message with ``request.context``, and ``_process_message``
     # reads that same context's ``turn_token`` as ``logical_turn_id`` before
     # polling starts. So each progress emit carries its own Turn's token.
-    ("opencode", "durable_workbench"): covered(_Q2_SIGNALS),
-    # ...and the same admission stamp settles this lane too. The previous round
-    # named ``SessionTurnManager`` and ``core/services/dispatch.py`` as the only
-    # writers; both are Workbench owners, which is what made the lane split look
-    # real. ``_stamp_runtime_turn`` is a third writer and it is upstream of
-    # both, so ``logical_turn_id`` is NOT empty on IM -- ``_process_message``
-    # reads a token that the admission layer put there. Round 12 adds the Run
-    # half on real IM rows, for the reason given on ``("claude", "direct_im")``.
-    ("opencode", "direct_im"): covered(_Q2_ADMISSION),
+    #
+    # Round 17 reopens both opencode cells, and the reason is the FIFTH
+    # instance of this unit's recurring error -- reading one path and
+    # generalizing to the lane. ``run_prompt_poll`` was walked; the sibling
+    # ``run_restored_poll_loop`` was not, and after a restart that is the one
+    # that runs. It rebuilds its context from the persisted snapshot via
+    # ``ProcessingIndicatorHandle.from_snapshot``, whose rebuild is a fixed
+    # three-key allowlist -- platform, is_dm, context_token. ``turn_token``,
+    # the runtime turn token and ``accepted_agent_run_ids`` are all dropped,
+    # and all three of the restored loop's emits pass that stripped context.
+    # The whole module mentions neither ``turn_token`` nor ``logical_turn_id``,
+    # so nothing puts the identity back.
+    #
+    # The sharper half, and the reason this is a defect rather than a gap: the
+    # identity IS persisted. ``_process_message`` writes ``logical_turn_id``
+    # into the very dict handed to the rebuild, under the steering snapshot
+    # key, and the restore path reads it back for steering. So the Turn
+    # survives the restart and is discarded at the rebuild -- a one-line
+    # remediation on a path that already holds the value, not "persist more".
+    # ``additional_steer_targets`` builds its restored targets with
+    # ``context=None``, which is production's own admission of the same thing.
+    ("opencode", "durable_workbench"): defect(
+        "HFR-205: restart discards the persisted Turn id at handle rebuild -- "
+        + _Q2_RESTORED
+    ),
+    # ...and the same admission stamp settles the LIVE half of this lane too.
+    # The previous round named ``SessionTurnManager`` and
+    # ``core/services/dispatch.py`` as the only writers; both are Workbench
+    # owners, which is what made the lane split look real. ``_stamp_runtime_turn``
+    # is a third writer and it is upstream of both, so ``logical_turn_id`` is
+    # NOT empty on IM -- ``_process_message`` reads a token that the admission
+    # layer put there. Round 12 adds the Run half on real IM rows, for the
+    # reason given on ``("claude", "direct_im")``.
+    #
+    # The restart defect above is lane-blind, though, and that is exactly why
+    # this cell moves with its sibling: the discard is in the shared handle
+    # rebuild, which reads the persisted dict and never asks which surface
+    # wrote it. A live IM turn is attributed; the same turn after a daemon
+    # restart is not. ``_Q2_ADMISSION`` still holds for the live half and is
+    # kept in the question's evidence -- the cell is a defect because the lane
+    # is not covered end to end, not because the admission stamp was wrong.
+    ("opencode", "direct_im"): defect(
+        "HFR-205: restart discards the persisted Turn id at handle rebuild -- "
+        + _Q2_RESTORED
+    ),
 }
 
 
@@ -984,10 +1069,16 @@ PR7R_QUESTIONS: Final = {
             "Which observable assistant/tool events can be attributed to the "
             "exact Turn and participating Runs, per backend and per lane?"
         ),
-        "verdict": "answered",
+        "verdict": "open",
         "answer": (
-            "ALL SIX cells can, and it took four corrections to get here "
-            "because the same reading error was made four times in four "
+            "FOUR of the six cells can, and the two opencode cells are "
+            "defects as of round 17. This answer said ALL SIX for four rounds; "
+            "that wording is retracted and enrolled, and the reason it was "
+            "wrong is the same reading error the rest of this answer is a "
+            "history of, committed once more. See the closing paragraph -- the "
+            "clauses below are about the LIVE path and they still hold. "
+            "It took four corrections to get to the live-path answer "
+            "because the same error was made four times in four "
             "different disguises. The first three: each "
             "time, a backend's base-session PROJECTION was read -- "
             "``_active_turns[base]`` for codex, ``_active_requests[base]`` for "
@@ -1106,11 +1197,37 @@ PR7R_QUESTIONS: Final = {
             "attribution; it sits outside both lanes as this unit defines them, "
             "since ``direct_im`` and ``durable_workbench`` are each "
             "Session-scoped by their own wording. "
+            "The NINTH correction, round 17, reopens the question, and it is "
+            "the fifth instance of reading one path and generalizing to the "
+            "lane. Everything above walks LIVE dispatch. OpenCode has a second "
+            "entry point that was never walked -- ``run_restored_poll_loop``, "
+            "the one that runs after a daemon restart -- and it rebuilds its "
+            "emit context from the persisted snapshot through "
+            "``ProcessingIndicatorHandle.from_snapshot``, whose rebuild is a "
+            "fixed three-key allowlist. ``turn_token``, the runtime turn token "
+            "and ``accepted_agent_run_ids`` are dropped; all three of that "
+            "loop's emits pass the stripped context; and the module names "
+            "neither ``turn_token`` nor ``logical_turn_id`` anywhere, so "
+            "nothing restores them. Both halves of this question fail there at "
+            "once, Turn and Runs, on both opencode lanes -- the discard is in "
+            "the shared handle rebuild and reads no platform. "
+            "It is a DEFECT and not a gap, because the identity is not "
+            "missing from the snapshot: ``_process_message`` writes "
+            "``logical_turn_id`` into the very dict the rebuild is handed, "
+            "under the native steering key, and the restore path reads it back "
+            "to steer. The Turn survives the restart and is thrown away one "
+            "call later. ``additional_steer_targets`` constructing its "
+            "restored targets with ``context=None`` is production stating the "
+            "same thing in its own words. Remediation is one line at the "
+            "rebuild, not a persistence change. "
             "A generic inactivity timeout is therefore UNBLOCKED on the "
-            "attribution question -- an exact signal exists on all three "
-            "backends and both lanes, and the Runs come with it -- and "
-            "remediation is ONE item: a per-Turn activity timestamp instead of "
-            "a per-session one. Note claude's attribution "
+            "attribution question FOR LIVE DISPATCH -- an exact signal exists "
+            "on all three backends and both lanes while the process that "
+            "started the Turn is still up, and the Runs come with it -- and "
+            "its remediation is ONE item, a per-Turn activity timestamp "
+            "instead of a per-session one. Across a restart it is NOT "
+            "unblocked on opencode, and that is a second remediation item. "
+            "Note claude's attribution "
             "is a FIFO POSITION rather than an id the event carries: exact "
             "under per-key serialization, weaker than codex's ``turnId``, and "
             "the remediation has to build on it as it is."
@@ -1121,6 +1238,7 @@ PR7R_QUESTIONS: Final = {
             _Q2_SERIALIZED,
             _Q2_KEY_SPLIT,
             _Q2_RUNS,
+            _Q2_RESTORED,
         ),
     },
     "Q3": {
@@ -1172,8 +1290,20 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "Two facts are established, FOR CLAUDE ONLY, and a third and fourth "
-            "are named but unproven. Established: a durable pending-output fact "
+            "Two facts are established, FOR CLAUDE ONLY and RUN-SCOPED, and a "
+            "third and fourth "
+            "are named but unproven. The scope qualifier is round 17's, and it "
+            "is a correction to what this answer claimed rather than to a fact "
+            "in it: the question asks about a TURN, and every test cited below "
+            "registers its activity with a run id, no turn id, and the "
+            "turn-completion flag off. So what is established is that a RUN "
+            "carries this evidence before it settles. Whether the Turn owning "
+            "it does is a further step -- an activity is bound to a Turn only "
+            "when ``turn_id`` is passed, which none of these do -- and that "
+            "step is not reached here. A corpus guard reads the citations for "
+            "that binding rather than reading this sentence, so the scope note "
+            "and the evidence cannot drift apart again. Established: "
+            "a durable pending-output fact "
             "(an Activity output batch that survives restart and settles the Run "
             "once) and the ``activity_local_settlement_only`` marker that "
             "survives a failed local settlement without re-delivering. Both rest "
@@ -1199,12 +1329,18 @@ PR7R_QUESTIONS: Final = {
             "round 3 marked every ``pending_output_delivery`` and "
             "``post_delivery_local_settlement_failure`` matrix cell "
             "``unproven`` while this answer still calls two of those facts "
-            "established. Both are true because they are different questions. "
-            "Q4 asks what pre-terminal evidence a TURN carries, and "
-            "``_PENDING_OUTPUT`` answers it on a real Run. The matrix cell asks "
-            "whether THIS TRIGGER's Run reaches that evidence, and the same "
-            "test cannot answer that, because it admits through "
-            "``enqueue_agent_run``. A test may settle one and not the other."
+            "established. Both are true because they are different questions, "
+            "and round 17 retracted the sentence that used to explain how: "
+            "\"Q4 asks what pre-terminal evidence a TURN carries, and "
+            "``_PENDING_OUTPUT`` answers it on a real Run\" -- offered as a "
+            "distinction and stating a conflation, since answering a "
+            "Turn-level question with Run-level evidence is the defect and not "
+            "the reconciliation. The real distinction is one level lower and "
+            "survives intact: the cited node establishes that SOME Run reaches "
+            "the pending-output evidence, while the matrix cell asks whether "
+            "THIS TRIGGER's Run reaches it, and the same test cannot answer "
+            "that because it admits through ``enqueue_agent_run``. A test may "
+            "settle one and not the other. Neither of them settles the Turn."
         ),
         "evidence": (
             _PENDING_OUTPUT,

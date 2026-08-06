@@ -1,10 +1,13 @@
 """PR7R probes: what current master actually does at the terminal boundary.
 
 These are EVIDENCE tests for
-``docs/plans/harness-run-reliability.md`` §7. Two of them are characterization
+``docs/plans/harness-run-reliability.md`` §7. Three of them are characterization
 tests: they assert current, wrong behavior so the defect is executable rather
-than asserted in prose. The implementation PR that fixes ``PR7R-F1`` /
-``PR7R-F2`` must flip them -- that is the point, not an accident.
+than asserted in prose. Two are the reproducers for ``PR7R-F1`` / ``PR7R-F2``,
+and the implementation PR that fixes those must flip them -- that is the point,
+not an accident. The third, ``HFR-205``, reproduces a Q2 defect found in round
+17 that belongs to no top-level finding and adds no scope to this unit: it
+documents that OpenCode's restart path emits without its Turn identity.
 
 Every probe here is held to one rule, because review found the first draft
 breaking it in four places: **the subject of the test must be the subject of
@@ -14,12 +17,14 @@ be about. Where the real subject is out of reach in this unit, the claim is
 narrowed to what is reached and the rest becomes a named probe in the matrix,
 never a green test that reads like coverage.
 
-Scenario ids: HFR-180 .. HFR-183, HFR-188, HFR-191, HFR-195, HFR-197, HFR-199.
+Scenario ids: HFR-180 .. HFR-183, HFR-188, HFR-191, HFR-195, HFR-197, HFR-199,
+HFR-205.
 """
 
 import ast
 import asyncio
 import inspect
+import re
 import textwrap
 import types
 from pathlib import Path
@@ -590,6 +595,63 @@ def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
 # ----- HFR-182: Q3 merge cardinality ---------------------------------------
 
 
+#: A dict key that names a Run, whatever the value under it turns out to be.
+_RUN_ID_KEY = re.compile(r"(?:^|_)runs?_?ids?$|^run_?ids?$", re.IGNORECASE)
+
+
+def _per_run_provenance_sites(
+    recorded: dict, accepted: list[str], *, flat_list_key: str
+) -> list[str]:
+    """Every place in a Turn projection that records something PER Run.
+
+    Round 17's third finding. The previous detector was a one-line
+    comprehension over the projection's TOP level looking for a dict whose keys
+    intersect the accepted ids, and the comment above it claimed a future field
+    carrying per-Run provenance "would fail here". It would not: a list of
+    ``{"run_id": ..., "source_kind": ...}`` records, a nested map one level
+    down, or a scalar naming a single Run all slip past it. That is the
+    degenerate-assertion shape this unit keeps finding -- a check that reads
+    like the rule and enforces one special case of it -- and it was load-bearing
+    for Q3's verdict, since the verdict rests on this search coming back empty.
+
+    Two rules, because "per-Run" can be spelled two ways:
+
+    * MENTION -- an accepted run id appears anywhere below the projection as a
+      dict key or as a string leaf, outside the flat list that is supposed to
+      be the only place it appears. That catches maps keyed by run id at any
+      depth, record lists, and a scalar pointing at one Run.
+    * SHAPE -- a dict key that names a Run at all (``run_id``, ``runIds``,
+      ``source_run_id``). That catches a record whose ids are not ours, which a
+      mention rule alone would call clean on this fixture and let through on
+      the next.
+
+    Paths are returned rather than keys, because a hit two levels down that
+    reports only its leaf name is a failure message nobody can act on.
+    """
+    wanted = set(accepted)
+    sites: list[str] = []
+
+    def walk(node: object, path: str, *, skip_mentions: bool) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                where = f"{path}.{key}" if path else str(key)
+                if not skip_mentions and str(key) in wanted:
+                    sites.append(f"{where} (key names a Run)")
+                if _RUN_ID_KEY.search(str(key)) and where != flat_list_key:
+                    sites.append(f"{where} (key shape names a Run)")
+                walk(value, where, skip_mentions=where == flat_list_key)
+            return
+        if isinstance(node, (list, tuple)):
+            for index, item in enumerate(node):
+                walk(item, f"{path}[{index}]", skip_mentions=skip_mentions)
+            return
+        if not skip_mentions and isinstance(node, str) and node in wanted:
+            sites.append(f"{path} (value names a Run)")
+
+    walk(recorded, "", skip_mentions=False)
+    return sorted(sites)
+
+
 def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
     """HFR-182 / Q3: a Turn's accepted-run record cannot discriminate.
 
@@ -657,14 +719,43 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
     # The load-bearing assertion: for every accepted run id, the Turn holds no
     # keyed record of that run's source or deadline. Written as a search over
     # what was actually recorded rather than a check of two known keys, so a
-    # future field that DID carry per-Run provenance would fail here and force
-    # this verdict to be revisited.
-    per_run_keys = [
-        key
-        for key, value in recorded.items()
-        if isinstance(value, dict) and set(value) & set(accepted)
-    ]
-    assert per_run_keys == [], per_run_keys
+    # future field that DID carry per-Run provenance fails here and forces this
+    # verdict to be revisited.
+    #
+    # Positive controls first, because until round 17 this search was a
+    # top-level intersection that could only see ONE of these four shapes, and
+    # a detector whose emptiness carries a verdict has to be shown firing. The
+    # last fixture is the one the old form was blindest to: records whose ids
+    # are not even ours.
+    flat = "accepted_agent_run_ids"
+    probe_ids = ["run-a", "run-b"]
+    assert _per_run_provenance_sites(
+        {flat: probe_ids, "source_kind": "scheduler", "turn_token": "turn-1"},
+        probe_ids,
+        flat_list_key=flat,
+    ) == []
+    assert _per_run_provenance_sites(
+        {flat: probe_ids, "run_deadlines": {"run-a": 30}},
+        probe_ids,
+        flat_list_key=flat,
+    ) == ["run_deadlines.run-a (key names a Run)"]
+    assert _per_run_provenance_sites(
+        {flat: probe_ids, "batch": {"provenance": {"run-b": {"source": "cron"}}}},
+        probe_ids,
+        flat_list_key=flat,
+    ) == ["batch.provenance.run-b (key names a Run)"]
+    assert _per_run_provenance_sites(
+        {flat: probe_ids, "primary_run": "run-a"},
+        probe_ids,
+        flat_list_key=flat,
+    ) == ["primary_run (value names a Run)"]
+    assert _per_run_provenance_sites(
+        {flat: probe_ids, "runs": [{"run_id": "run-z", "source_kind": "manual_cli"}]},
+        probe_ids,
+        flat_list_key=flat,
+    ) == ["runs[0].run_id (key shape names a Run)"]
+
+    assert _per_run_provenance_sites(recorded, accepted, flat_list_key=flat) == []
     # One Turn-level label, and the append path is not what sets it: the second
     # participant carried ``manual_cli`` and the Turn still reads ``scheduler``.
     # This says the label cannot be corrected by a later Run, NOT that the first
@@ -692,11 +783,19 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
 
 
 def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
-    """HFR-183 / Q2: all six backend/lane cells carry an exact-Turn signal.
+    """HFR-183 / Q2: every backend and lane carries an exact-Turn signal LIVE.
 
     The plan forbids a generic inactivity timeout unless every backend and lane
     has an exact-Turn progress signal, and states that session-wide activity is
     never an acceptable substitute.
+
+    Scope, and round 17 narrowed it: everything below walks a LIVE dispatch
+    path. OpenCode has a second entry point after a daemon restart, which this
+    probe never reached and which discards the identity; that is
+    ``test_a_restored_opencode_poll_loop_emits_without_its_turn_identity`` and
+    the two opencode cells are ``defect`` because of it. The closing section
+    here reads the table, so it enforces that split rather than restating this
+    paragraph.
 
     This probe has now corrected itself three times, ALWAYS THE SAME WAY, and
     that pattern is worth more than the verdict. Draft 1 read
@@ -723,16 +822,19 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     and the streaming turn dispatch, both Workbench owners. That came from
     grepping the LITERAL string and missing the constant-keyed write in
     ``AgentService._stamp_runtime_turn``, which every request on every lane
-    passes through. There is no lane split: ALL SIX cells carry an exact-Turn
-    signal, driven in
+    passes through. There is no lane split on the live path, and round 17
+    narrows the wording draft 5 landed on -- "all six cells" carry an exact-Turn
+    signal was true of what this probe walks and is retracted as a statement
+    about the unit, since the restart path is neither. Driven in
     ``test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im``.
 
     What is NOT settled by that is what the consumer does with the signal.
     Round 8 said, and round 9 RETRACTED, "for codex it drops it". The settled
     reading is that ``should_emit_progress`` returning False for the older turn
     is correct filtering of a turn ``handle_message`` has already interrupted --
-    HFR-193 drives the serialization, HFR-195 drives what becomes of that turn's
-    late events, and the closing section here shows the slot the drop reads.
+    HFR-195 drives both halves, the serialization at the lock and what becomes
+    of that turn's late events, and the closing section here shows the slot the
+    drop reads.
 
     Claude's attribution is a FIFO POSITION, not an id the event carries: the
     head of ``_pending_requests[composite_key]`` is taken to be the turn
@@ -873,8 +975,8 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     # ``_session_locks[base]`` -- the REGISTRY's key space, not the gate's --
     # across its whole body and sends ``turn/interrupt`` before ``turn/start``,
     # so turn-1 has already been interrupted by the time turn-2 is the active
-    # turn and the drop above is correct filtering. HFR-193 drives that; HFR-195
-    # drives turn-1's late events, which is what makes the residual window
+    # turn and the drop above is correct filtering. HFR-195 drives that, and it
+    # drives turn-1's late events too, which is what makes the residual window
     # harmless rather than closed.
 
     # OpenCode. ``_active_requests`` really is one asyncio task slot per base
@@ -929,7 +1031,7 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     )
 
     # Consistency tie: the matrix must still say the same thing these probes
-    # just showed, for all six cells.
+    # just showed, cell by cell.
     from tests.run_terminal_truth_evidence import (
         BACKENDS,
         EXACT_TURN_PROGRESS_SIGNALS,
@@ -939,17 +1041,50 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     assert set(EXACT_TURN_PROGRESS_SIGNALS) == {
         (backend, lane) for backend in BACKENDS for lane in LANES
     }
-    # All six, after round 6. There is no lane split and no backend split: the
-    # two IM cells were open only because the shared admission layer had been
-    # missed, and the citation for those two is the probe that drives it.
+    # Every cell went covered after round 6: no lane split and no backend
+    # split, the two IM cells having been open only because the shared
+    # admission layer had been missed. Round 17 splits the table again, on a
+    # boundary neither the backend nor the lane predicts -- the restart path,
+    # which only opencode's probe reaches. The expectations are spelled out per
+    # cell rather than computed from ``cell[0]``/``cell[1]``, because the
+    # previous form encoded "the answer is a function of backend and lane" and
+    # that is precisely the belief round 17 falsified.
+    expectations = {
+        ("claude", "durable_workbench"): (
+            "covered",
+            "test_which_backends_attribute_a_progress_event_to_an_exact_turn",
+        ),
+        ("claude", "direct_im"): (
+            "covered",
+            "test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im",
+        ),
+        ("codex", "durable_workbench"): (
+            "covered",
+            "test_which_backends_attribute_a_progress_event_to_an_exact_turn",
+        ),
+        ("codex", "direct_im"): (
+            "covered",
+            "test_which_backends_attribute_a_progress_event_to_an_exact_turn",
+        ),
+        ("opencode", "durable_workbench"): (
+            "defect",
+            "test_a_restored_opencode_poll_loop_emits_without_its_turn_identity",
+        ),
+        ("opencode", "direct_im"): (
+            "defect",
+            "test_a_restored_opencode_poll_loop_emits_without_its_turn_identity",
+        ),
+    }
+    assert set(expectations) == set(EXACT_TURN_PROGRESS_SIGNALS)
     for cell, (kind, reason) in EXACT_TURN_PROGRESS_SIGNALS.items():
-        assert kind == "covered", cell
-        expected = (
-            "test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im"
-            if cell[1] == "direct_im" and cell[0] != "codex"
-            else "test_which_backends_attribute_a_progress_event_to_an_exact_turn"
-        )
-        assert reason.endswith(expected), cell
+        expected_kind, expected_node = expectations[cell]
+        assert kind == expected_kind, (cell, kind)
+        assert reason.endswith(expected_node), cell
+    # The live half this probe drives is still true of opencode, and the cells
+    # above no longer say so, so it is asserted here instead of inferred: the
+    # defect detail names the restart and not the poll loop walked above.
+    for lane in LANES:
+        assert "restart" in EXACT_TURN_PROGRESS_SIGNALS[("opencode", lane)][1]
 
 
 
@@ -1888,7 +2023,7 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     # CLI-style dispatch, which writes no Delivery and no Turn at all -- so its
     # attribution is empty rather than exact. That is outside both lanes here,
     # since both are defined by having a Session, and it is recorded so the next
-    # unit does not read "all six cells" as covering it.
+    # unit does not read the Q2 signal table as covering it.
     assert durable.accepted_agent_run_ids_for_turn("") == []
 
     # Scope that survives round 10: whether every Run a Turn really executed is
@@ -2013,3 +2148,166 @@ def test_no_step_of_the_durable_reservation_path_settles_the_run(tmp_path):
     ], trace
     assert {status for _s, status, done in trace if not done} == {"queued"}, trace
     assert trace[-1] == ("run_settled", "succeeded", True), trace[-1]
+
+
+# ----- HFR-205: Q2, the OpenCode path that survives a restart --------------
+
+
+def test_a_restored_opencode_poll_loop_emits_without_its_turn_identity():
+    """HFR-205 / Q2: restart strips the Turn off OpenCode's emit context.
+
+    Round 17's first finding, and it is the fifth instance of this unit's
+    oldest reading error in a new place. HFR-183 established that opencode's
+    progress emits carry a Turn -- and established it by walking exactly one
+    function, ``run_prompt_poll``. There is a second emitting entry point.
+    ``run_restored_poll_loop`` is what continues a poll that a restart
+    interrupted, it emits tool calls and assistant output like the live loop
+    does, and its context is not the live ``AgentRequest``'s: it is rebuilt by
+    ``ProcessingIndicatorHandle.from_snapshot``, which reads ``platform``,
+    ``is_dm`` and ``context_token`` out of ``platform_specific`` and drops
+    everything else -- ``turn_token`` and ``accepted_agent_run_ids`` included.
+
+    So a whole production path emits progress that cannot name its Turn or its
+    Runs, and the previous rounds' answer to Q2 -- "all six cells carry an
+    exact-Turn signal" -- is narrowed by this probe: it was true of the live
+    path and asserted of the cell.
+
+    The sharper half is what makes this a DEFECT rather than a gap. The turn id
+    is not lost in persistence: ``OpenCodeAgent`` writes it into the SAME
+    snapshot dict, under ``_STEERING_SNAPSHOT_KEY``, as ``logical_turn_id``,
+    and the restore path reads that key back for steering while handing the
+    emit context nothing. Production says so itself -- restored
+    ``additional_steer_targets`` are built with ``context=None``. The identity
+    survives the restart and is discarded at the rebuild, which is a one-line
+    remediation and a different one from "persist more".
+
+    This probe is a CHARACTERIZATION test in the sense this file's header
+    means: it asserts the current, wrong behaviour so the gap is executable.
+    It is NOT one of the two PR7R-F1/F2 probes and does not widen this unit's
+    scope -- PR7R adds no writer, and nothing here restamps the context.
+    """
+    from core.processing_indicator import ProcessingIndicatorHandle
+    from modules.im import MessageContext
+    from modules.agents.opencode.agent import _STEERING_SNAPSHOT_KEY
+    from modules.agents.opencode.poll_loop import OpenCodePollLoop
+
+    # The live turn, as the admission layer leaves it: a Turn token and the
+    # Runs that Turn accepted, both on ``platform_specific``. Driven through
+    # the real handle rather than a dict literal, so the round trip under test
+    # is production's own.
+    live = ProcessingIndicatorHandle(
+        context=MessageContext(
+            user_id="u-1",
+            channel_id="c-1",
+            platform="telegram",
+            thread_id="t-1",
+            message_id="m-1",
+            platform_specific={
+                "platform": "telegram",
+                "is_dm": True,
+                "turn_token": "wb-turn-1",
+                "agent_runtime_turn_token": "rt-1",
+                "accepted_agent_run_ids": ["run-1", "run-2"],
+            },
+        ),
+        ack_reaction_message_id="m-1",
+        ack_reaction_emoji="eyes",
+    )
+    snapshot = live.to_snapshot()
+
+    # What the snapshot keeps, and what it does not. Asserted as a search over
+    # the whole payload rather than two key lookups, so a future field that DID
+    # carry the Turn would fail here and force this verdict to be revisited.
+    assert snapshot["platform"] == "telegram"
+    assert "wb-turn-1" not in repr(snapshot), snapshot
+    assert "run-1" not in repr(snapshot), snapshot
+
+    # ...and the steering write puts the same Turn id back into that very dict,
+    # keyed for a different consumer. This is the line that makes the loss a
+    # discard: the restore is handed the identity and does not use it.
+    snapshot[_STEERING_SNAPSHOT_KEY] = {
+        "target_session_id": "ses-1",
+        "logical_turn_id": "wb-turn-1",
+    }
+    assert (
+        'logical_turn_id = str(platform_payload.get("turn_token") or "").strip()'
+        in inspect.getsource(
+            __import__(
+                "modules.agents.opencode.agent", fromlist=["OpenCodeAgent"]
+            ).OpenCodeAgent._process_message
+        )
+    )
+
+    restored = ProcessingIndicatorHandle.from_snapshot(snapshot).context
+    payload = restored.platform_specific or {}
+    assert payload.get("platform") == "telegram"
+    assert "turn_token" not in payload, payload
+    assert "agent_runtime_turn_token" not in payload, payload
+    assert "accepted_agent_run_ids" not in payload, payload
+    # The steering key is in the input and not in the output either, so the
+    # rebuild is not merely ignoring the two identity fields -- it rebuilds
+    # ``platform_specific`` from a fixed three-key allowlist.
+    assert _STEERING_SNAPSHOT_KEY not in payload, payload
+
+    # And that context is what the restored loop emits with. Walked the same
+    # way HFR-183 walks the live loop, so the two paths are compared on one
+    # criterion rather than one being read and the other described.
+    restored_tree = ast.parse(
+        textwrap.dedent(inspect.getsource(OpenCodePollLoop.run_restored_poll_loop))
+    )
+    emit_contexts = [
+        node.args[0]
+        for node in ast.walk(restored_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "emit_agent_message"
+        and node.args
+    ]
+    assert emit_contexts, "the restored loop emits no progress at all"
+    assert all(
+        isinstance(arg, ast.Name) and arg.id == "context" for arg in emit_contexts
+    ), ast.unparse(restored_tree)
+    # ``context`` there is the rebuilt one, not a live request's -- the two
+    # lines that make the walk above mean what it says.
+    restored_source = inspect.getsource(OpenCodePollLoop.run_restored_poll_loop)
+    assert "restored_request = self._build_restored_ack_request(poll_info)" in restored_source
+    assert "context = restored_request.context" in restored_source
+    assert "self._agent.controller.processing_indicator.handle_from_snapshot(snapshot)" in (
+        inspect.getsource(OpenCodePollLoop._build_restored_handle)
+    )
+    # Nothing puts a Turn back on it: the whole module never names either field.
+    poll_module = inspect.getsource(
+        __import__("modules.agents.opencode.poll_loop", fromlist=["OpenCodePollLoop"])
+    )
+    assert "turn_token" not in poll_module
+    assert "logical_turn_id" not in poll_module
+
+    # Production's own record of the same fact, on a different consumer: a
+    # restored steer target carries the persisted ``logical_turn_id`` and an
+    # explicitly absent context. Read out of the real method rather than
+    # restaged, because the claim is about what that method constructs.
+    steer_source = inspect.getsource(
+        __import__(
+            "modules.agents.opencode.agent", fromlist=["OpenCodeAgent"]
+        ).OpenCodeAgent.additional_steer_targets
+    )
+    assert "logical_turn_id=state.logical_turn_id" in steer_source
+    assert "context=None" in steer_source
+
+    # Consistency tie: the matrix must say what this probe just showed. Both
+    # opencode cells, because the restore path is reached from either lane --
+    # ``poll_info`` is rehydrated from durable state and carries the platform
+    # rather than branching on it.
+    from tests.run_terminal_truth_evidence import EXACT_TURN_PROGRESS_SIGNALS
+
+    for lane in ("durable_workbench", "direct_im"):
+        kind, detail = EXACT_TURN_PROGRESS_SIGNALS[("opencode", lane)]
+        assert kind == "defect", (lane, kind)
+        assert detail.endswith(
+            "test_a_restored_opencode_poll_loop_emits_without_its_turn_identity"
+        ), (lane, detail)
+    # The other four are untouched by this: claude and codex attribute from the
+    # event stream and the notification, neither of which is rebuilt from a
+    # processing-indicator snapshot.
+    for cell in (("claude", "durable_workbench"), ("codex", "durable_workbench")):
+        assert EXACT_TURN_PROGRESS_SIGNALS[cell][0] == "covered", cell

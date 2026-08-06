@@ -1227,13 +1227,13 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under sixteen review rounds
+#### PR7R status (2026-08-06) — first increment, revised under seventeen review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
-`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…203`) and fed by
+`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…204`, `HFR-206`) and fed by
 `tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
-`HFR-191`, `HFR-195`, `HFR-197`, `HFR-199`). It expands
+`HFR-191`, `HFR-195`, `HFR-197`, `HFR-199`, `HFR-205`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
 (lane, trigger, outcome) with a `per_backend` override wherever the backend
 demonstrably changes the answer, because the durable owner chain is chosen by
@@ -1242,13 +1242,16 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through sixteen changed how the
-findings are demonstrated, two question verdicts, and nineteen degenerate
+rounds and has held at 168 since; rounds four through seventeen changed how the
+findings are demonstrated, three question verdicts, and twenty degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
 round thirteen that were round twelve's, two in round fourteen that were round
 thirteen's, and two in round fifteen that were round fourteen's — the newest
-guard is now reliably the likeliest defect).
+guard is now reliably the likeliest defect). Round 17 moved Q2 from `answered`
+back to `open` without touching the budget, and the distinction is worth
+keeping straight: the 168 cells are the trigger/outcome matrix, and the Q2
+signal table is a separate six-cell table the budget has never counted.
 Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
@@ -1391,9 +1394,12 @@ constant-keyed — `platform_specific[AGENT_TURN_TOKEN]` in
 request on **both** lanes before the backend is invoked. The lane split does not
 exist. `HFR-188` now drives the real `handle_message` twice on one runtime key
 and asserts the tokens differ (per Turn, not per session) and that a pre-existing
-Workbench token is preserved. All six cells are `covered`, the guard forces Q2 to
-`answered`, and the inactivity timeout is no longer blocked on attribution — what
-is left is that the activity timestamp is per **session**, which is remediation.
+Workbench token is preserved. Six cells went `covered` at that round and the
+guard forced Q2 to `answered`; round 17 reopens the two opencode ones, so today
+**four cells are `covered`** and **two cells are `open`** and the same guard
+forces Q2 back to `open`. For live dispatch the inactivity timeout is no longer
+blocked on attribution — what is left there is that the activity timestamp is
+per **session**, which is remediation.
 `HFR-191` narrows the companion over-claim: codex's `should_emit_progress` filter
 reads the single `_active_turns[base]` slot, and the runtime gate is held across
 the whole backend call, so one runtime key admits one live turn at a time. Round 8
@@ -1788,7 +1794,7 @@ whole file pairs the close of one literal with the open of the next. Python is n
 split per string literal and per contiguous comment block, adjacent literals
 merged. The fifth, found while enrolling the rest: "no backend exposes a per-turn
 progress signal", retracted in round 3, was standing in two artefacts and in no
-ledger row; all six backend/lane cells expose one. **A citation is not evidence
+ledger row; every cell exposes one on live dispatch. **A citation is not evidence
 until something reads it — a scenario id in prose, a retraction applied only where
 it was noticed, a marker that merely shares a sentence: each looks like the corpus
 checking itself, and none of them was.**
@@ -1800,9 +1806,9 @@ reading, retracted in round 9 and narrowed again in round 10. The probe Q2 cites
 its evidence therefore contradicted the answer *in its own summary*, while its later
 sections drove the correct reading: `CodexAgent.handle_message` holds
 `_session_locks[base]` across its whole body and sends `turn/interrupt` before
-`turn/start` (`HFR-193`), so the older turn is already interrupted when the filter
-drops it, and its late events are handled rather than lost (`HFR-195`). Both
-sentences are now historical and both wordings are enrolled.
+`turn/start`, so the older turn is already interrupted when the filter drops it,
+and its late events are handled rather than lost — `HFR-195` drives both halves.
+Both sentences are now historical and both wordings are enrolled.
 
 The ledger is not what failed. Round 9's retraction *was* enrolled — as "attribution
 is thrown away", in round 15 — and the same claim went on standing in two other
@@ -1816,6 +1822,83 @@ residual risk is stated rather than guarded: a distant enough paraphrase still
 passes, and no mechanical rule distinguishes "restates a retracted claim" from
 "discusses the same subject correctly" — making the ledger semantic would be the
 degenerate shape it exists to prevent, so the remedy is a habit, not a test.
+
+Round 17 — four findings, all four accepted, none rejected; two new scenarios
+(`HFR-205`, `HFR-206`), one question verdict moved, and **no budget move**. The
+budget counts the 168-cell trigger/outcome matrix; everything below happens in
+the Q2 signal table, the question answers and the corpus, none of which it has
+ever counted. Saying so explicitly is part of the round, because "a verdict
+moved and the budget did not" is exactly the shape that looks like a missed
+update.
+
+1. **Q2 reopens, and it is the fifth instance of this unit's oldest reading
+   error.** Every clause of Q2's answer walks a live dispatch path. OpenCode has
+   a second emitting entry point, `run_restored_poll_loop`, which is what runs
+   after a daemon restart, and it was never walked. It rebuilds its emit context
+   through `ProcessingIndicatorHandle.from_snapshot`, whose rebuild is a fixed
+   three-key allowlist — `platform`, `is_dm`, `context_token` — so `turn_token`,
+   the runtime turn token and `accepted_agent_run_ids` are all dropped, and all
+   three of the loop's emits pass that stripped context. The module names
+   neither `turn_token` nor `logical_turn_id` anywhere. Both halves of Q2 fail
+   there at once, Turn and Runs, on both opencode lanes, because the discard is
+   in the shared rebuild and reads no platform. The sharper half, and the reason
+   both cells read `defect` rather than `unproven`: the identity is *persisted*.
+   `OpenCodeAgent._process_message` writes `logical_turn_id` into the very dict
+   the rebuild is handed, under the native steering key, and the restore path
+   reads it back to steer; restored `additional_steer_targets` are built with
+   `context=None`, which is production admitting the same thing in its own
+   words. The Turn survives the restart and is thrown away one call later, so
+   remediation is one line at the rebuild rather than a persistence change.
+   `HFR-205` is a characterization test asserting the current wrong behaviour;
+   it is not a `PR7R-F1`/`PR7R-F2` reproducer and adds no writer, status or
+   cursor to this unit. The kinds-to-verdict tie then moved Q2 to `open` on its
+   own, which is the guard working as intended.
+
+2. **A corpus guard was credited with production behaviour, in five
+   artefacts.** Round 16's own fix misfiled its citation: it attributed the
+   base-session lock and the interrupt-before-start to the guard that compares
+   the plan's verdict words against the matrix, when the scenario that drives
+   that production sequence is `HFR-195`. Neither the docstring-id guard nor the
+   answer-citation guard could see it — one walks the ids a test claims about
+   itself, and four of the five sites are not answers. The new rule is
+   mechanical and narrow: a scenario whose test lives in the matrix file is a
+   guard over PR7R's own prose, node ids and tables, so it can never be what
+   makes production serialize, interrupt or emit, and no sentence may put such
+   an id beside a production symbol or say it "drives" anything. Scoped to the
+   **sentence**, and that scope was measured rather than assumed — per prose
+   unit the rule fires 14 times, of which 9 are legitimate round narrations
+   listing which guards changed; per sentence it fires 5 times and all 5 are
+   round 16's defect. Crediting one *probe* with another probe's behaviour stays
+   unguarded and is named here rather than papered over.
+
+3. **Q3's per-Run detector could only see one shape.** The assertion carrying
+   Q3's verdict was a top-level comprehension looking for a dict whose keys
+   intersect the accepted run ids, above a comment claiming any future per-Run
+   field "would fail here". It would not: a list of `{"run_id": …}` records, a
+   map nested one level down, or a scalar naming a single Run all pass it. It
+   now walks the projection recursively under two rules — an accepted id
+   appearing as a key or a string leaf anywhere outside the flat list, and a key
+   whose *shape* names a Run at all — and five positive controls pin each shape,
+   because a detector whose emptiness carries a verdict has to be shown firing.
+
+4. **Q4's established facts are Run-scoped, and the answer claimed Turn
+   scope.** Q4 asks what a **Turn** carries before it goes terminal. Every test
+   it cites registers its activity with a run id, no turn id, and the
+   turn-completion flag off, so what is established is that a *Run* carries the
+   evidence. The answer had even written the conflation down as though it were
+   the reconciliation of an apparent contradiction. Two mechanisms, on purpose:
+   the retraction ledger holds the sentence so the wording cannot reappear
+   anywhere in the corpus, and `HFR-206` holds the evidence, reading the cited
+   tests for what scope they bind so the claim cannot be re-established by
+   leaving the prose alone.
+
+**The durable lesson of the round is findings 1 and 4 having the same
+skeleton.** Both are a claim about a *level* — a lane, a Turn — resting on
+evidence gathered one level down, and in both cases the answer's own prose said
+so and was read as a caveat instead of as the defect. Round 16's lesson was that
+enrolling a retraction means sweeping for the claim's subject. Round 17's is one
+step earlier: **when an answer explains why its evidence does not quite match
+its question, that is not a scope note, it is the finding.**
 
 Question verdicts:
 
@@ -1836,8 +1919,11 @@ Question verdicts:
    reservation or backend-acceptance path would leave it green. The
    premature-success claim may be closed once an IM-lane acceptance-boundary probe
    exists — not before.
-2. **Q2 — answered. All six backend/lane cells key a progress event by Turn,
-   and it no longer blocks the timeout.** Codex's `item/*` notifications carry a
+2. **Q2 — open. On LIVE dispatch every backend/lane cell keys a progress event
+   by Turn; across a daemon restart OpenCode does not, and that is a defect
+   round 17 reopened both of its cells for.** Everything in the rest of this
+   entry describes live dispatch and still holds; the restart hole is at the end.
+   Codex's `item/*` notifications carry a
    `turnId` and `_find_request_for_notification` resolves the participating
    Run's request from it through `get_request_for_turn`, a per-turn map.
    OpenCode's `run_prompt_poll` receives the exact `AgentRequest` and every
@@ -1873,7 +1959,23 @@ Question verdicts:
    production skips the interrupted-completion wait its own protocol note
    specifies — and what makes the window harmless is that both of its late
    arrivals are handled, which `HFR-195` now drives through the real event
-   handler.
+   handler. Reopened in round 17, and it is the fifth instance of the same
+   reading error the paragraph above is a history of: every clause here walks a
+   LIVE path, and OpenCode's restart path — `run_restored_poll_loop` — was
+   never walked. It rebuilds its emit context through
+   `ProcessingIndicatorHandle.from_snapshot`, whose rebuild is a fixed
+   three-key allowlist, so `turn_token`, the runtime turn token and
+   `accepted_agent_run_ids` are dropped and all three of its emits carry the
+   stripped context; the module mentions neither `turn_token` nor
+   `logical_turn_id` anywhere. Both halves of the question fail there, Turn and
+   Runs, on both lanes — the discard is in the shared rebuild and reads no
+   platform. It is a **defect rather than a gap** because the identity is
+   persisted: `_process_message` writes `logical_turn_id` into the very dict the
+   rebuild is handed, under the native steering key, and the restore path reads
+   it back to steer. `additional_steer_targets` building restored targets with
+   `context=None` is production saying the same thing. Remediation is one line
+   at the rebuild, and it is a second timeout item on top of the per-session
+   timestamp: `HFR-205` drives it.
 3. **Q3 — open, split, and narrower than it was.** Established: the *Turn's*
    accepted-run record cannot discriminate between participants — a flat
    `accepted_agent_run_ids` list and one Turn-level `source_kind` that a later
@@ -2116,8 +2218,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…203` — occupied by PR7R's first increment (`HFR-188…203` were
-  taken by its round-6 through round-15 reviews); `HFR-204…219` still reserved for
+- PR7: `HFR-180…206` — occupied by PR7R's first increment (`HFR-188…206` were
+  taken by its round-6 through round-17 reviews); `HFR-207…219` still reserved for
   the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is

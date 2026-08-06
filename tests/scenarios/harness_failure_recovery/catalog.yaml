@@ -2922,6 +2922,78 @@ scenarios:
     # as neighbouring context rather than as support -- a rule that fired on those would
     # be turned off rather than obeyed.
     test: tests/test_run_terminal_truth_matrix.py::test_a_scenario_id_named_in_an_answer_is_carried_as_that_answer_s_evidence
+  - id: HFR-204
+    name: a corpus guard is never credited with production behaviour
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Round 16 fixed HFR-183's summary and misfiled the fix: it attributed the base-session
+    # lock and the interrupt-before-start to HFR-193, which is the guard comparing the
+    # plan's verdict words against PR7R_QUESTIONS. HFR-195 is the scenario that drives that
+    # production sequence, and its own catalog row says so. The wrong id reached five
+    # artefacts. HFR-203 could not see it -- four of the five sites are not answers -- and
+    # HFR-192 could not either, since it walks the ids a test claims about ITSELF.
+    # RULE: a scenario whose test lives in test_run_terminal_truth_matrix.py is a CORPUS
+    # guard over PR7R's own prose, node ids and tables. It can never be what makes
+    # production serialize, interrupt or emit, so no sentence may put such an id beside a
+    # production symbol or say it "drives" anything.
+    # Scoped to the SENTENCE, measured: per prose unit the rule fires 14 times and 9 are
+    # legitimate round narrations listing which guards changed; per sentence it fires 5
+    # times and all 5 are round 16's defect. Crediting one PROBE with another probe's
+    # behaviour stays unguarded and is named rather than papered over.
+    test: tests/test_run_terminal_truth_matrix.py::test_a_corpus_guard_is_never_credited_with_production_behaviour
+  - id: HFR-206
+    name: Q4's evidence binds a Run and never a Turn
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Round 17's fourth finding. Q4 asks what a TURN carries before it goes terminal, and
+    # its answer called two facts established while every test it cites registers its
+    # activity with a run id, no turn id, and the turn-completion flag off. The answer even
+    # wrote the conflation down as if it were the reconciliation of an apparent
+    # contradiction, and this sentence is the one retracted: "Q4 asks what pre-terminal
+    # evidence a TURN carries, and the cited node answers it on a real Run."
+    # RULE, and it is split across two mechanisms on purpose. The retraction ledger holds
+    # the SENTENCE so the wording cannot reappear anywhere in the corpus; this row holds the
+    # EVIDENCE, reading the cited tests for what scope they bind so the claim cannot be
+    # re-established by leaving the prose alone. Asserted in both directions -- a run
+    # binding must be present, or a test registering nothing would satisfy "no turn
+    # binding" and pass while proving less than what it replaced.
+    # Scoped to Q4. Q1 and Q2 have Turn-level evidence and should fail a rule spelled this
+    # way; the rule is not "never bind a turn", it is "this answer is Run-scoped and has to
+    # say so".
+    test: tests/test_run_terminal_truth_matrix.py::test_q4s_evidence_binds_a_run_and_never_a_turn
+  - id: HFR-205
+    name: a restored OpenCode poll loop emits without its Turn identity
+    # ``covered`` here means the scenario has a test, which is what every other row
+    # in this file means by it, and HFR-180/181 -- the two PR7R characterization
+    # probes -- are recorded the same way. The BEHAVIOUR is wrong; that lives in the
+    # Q2 signal table, which says ``defect``, and inventing a status word one row
+    # uses and no reader consumes would record it nowhere.
+    status: covered
+    kind: observability
+    layer: contract
+    backend: opencode
+    # Round 17, and the fifth instance of this unit's recurring reading error: Q2's answer
+    # walked run_prompt_poll and generalized to the lane. run_restored_poll_loop is the
+    # second emitting entry point and the one that runs after a restart. It rebuilds its
+    # emit context via ProcessingIndicatorHandle.from_snapshot, whose rebuild is a fixed
+    # three-key allowlist -- platform, is_dm, context_token -- so turn_token, the runtime
+    # turn token and accepted_agent_run_ids are dropped. All three of the loop's emits pass
+    # that stripped context and the module names neither turn_token nor logical_turn_id.
+    # Both halves of Q2 fail there, Turn and Runs, on both lanes: the discard is in the
+    # shared rebuild and reads no platform.
+    # DEFECT and not a gap, which is what decides the remediation: OpenCodeAgent writes
+    # logical_turn_id into the SAME snapshot dict under the native steering key and the
+    # restore path reads it back to steer, so the identity survives the restart and is
+    # discarded one call later. Restored additional_steer_targets carrying context=None is
+    # production admitting the same thing. One line at the rebuild, not a persistence
+    # change.
+    # This is a CHARACTERIZATION test: it asserts the current wrong behaviour. It is not a
+    # PR7R-F1/F2 reproducer and adds no writer, no status and no cursor to this unit.
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_a_restored_opencode_poll_loop_emits_without_its_turn_identity
   - id: HFR-202
     name: one scenario id names exactly one catalog row
     status: covered

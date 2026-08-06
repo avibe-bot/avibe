@@ -1425,6 +1425,30 @@ def _pr7r_plan_span(path: Path) -> tuple[int, int]:
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 
 
+def _pr7r_prose_corpus() -> list[tuple[Path, tuple[int, int] | None]]:
+    """Every artefact whose prose this unit polices, with the plan's PR7R span.
+
+    Shared by HFR-201 and HFR-204 rather than spelled out twice: two guards
+    sweeping "the corpus" from two hand-maintained lists is the drift this unit
+    has already found four times in other shapes, and it would show up here as
+    a rule that is corpus-wide in its docstring and file-wide in its code.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    plan = repo_root / "docs" / "plans" / "harness-run-reliability.md"
+    scenarios = repo_root / "tests" / "scenarios" / "harness_failure_recovery"
+    corpus: list[tuple[Path, tuple[int, int] | None]] = [
+        (repo_root / "tests" / "run_terminal_truth_evidence.py", None),
+        (repo_root / "tests" / "test_run_terminal_truth_matrix.py", None),
+        (repo_root / "tests" / "test_run_terminal_truth_evidence_probes.py", None),
+        (scenarios / "catalog.yaml", None),
+        (scenarios / "observations.yaml", None),
+        (plan, _pr7r_plan_span(plan)),
+    ]
+    for path, _span in corpus:
+        assert path.exists(), path
+    return corpus
+
+
 def _inside_quotes(prose: str, start: int, end: int) -> bool:
     """Does a pair of double quotes enclose ``prose[start:end]``?
 
@@ -1534,21 +1558,7 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction(tmp_path):
     words, scope, quotation), each time because the previous width passed text
     it was written to fail.
     """
-    repo_root = Path(__file__).resolve().parents[1]
-    plan = repo_root / "docs" / "plans" / "harness-run-reliability.md"
-    corpus: list[tuple[Path, tuple[int, int] | None]] = [
-        (repo_root / "tests" / "run_terminal_truth_evidence.py", None),
-        (repo_root / "tests" / "test_run_terminal_truth_matrix.py", None),
-        (repo_root / "tests" / "test_run_terminal_truth_evidence_probes.py", None),
-        (repo_root / "tests" / "scenarios" / "harness_failure_recovery" / "catalog.yaml", None),
-        (
-            repo_root / "tests" / "scenarios" / "harness_failure_recovery" / "observations.yaml",
-            None,
-        ),
-        (plan, _pr7r_plan_span(plan)),
-    ]
-    for path, _span in corpus:
-        assert path.exists(), path
+    corpus = _pr7r_prose_corpus()
 
     # Guard the guard, on the three shapes that decided its width. Only a marker
     # in the phrase's own sentence counts: the third string below is the REAL
@@ -1774,3 +1784,242 @@ def test_a_scenario_id_named_in_an_answer_is_carried_as_that_answer_s_evidence(
                 f"its evidence -- cite the test or stop leaning on the scenario"
             )
     assert not offenders, "\n".join(offenders)
+
+
+#: A code span, in either of the two conventions this corpus uses: ``double``
+#: in Python and YAML, `single` in the Markdown plan.
+_CODE_SPAN = re.compile(r"`+([^`]+)`+")
+#: ``HFR-nnn`` and a "drives" within a clause of it, in either order. The verb
+#: is the one this unit actually writes when it attributes a behaviour to a
+#: scenario; "holds"/"sends"/"stamps" were measured too and add nothing but
+#: false positives, because those verbs take the SYMBOL as their subject.
+_DRIVES_CLAIM = re.compile(
+    r"\bhfr-\d{3}\b[^.]{0,40}?\b(?:drives|drove|driving)\b"
+    r"|\b(?:drives|drove|driving)\b[^.]{0,40}?\bhfr-\d{3}\b"
+)
+
+
+def _production_symbols() -> set[str]:
+    """Every ``def``/``class`` name defined outside the test tree, lowercased.
+
+    Lowercased because ``_prose_units`` flattens to lower case, and matched on
+    the leading dotted component of a span so ``CodexAgent.handle_message`` and
+    ``_session_locks[base]`` both resolve to something checkable.
+    """
+    names: set[str] = set()
+    repo_root = Path(__file__).resolve().parents[1]
+    for package in ("core", "modules", "storage"):
+        for module in (repo_root / package).rglob("*.py"):
+            names.update(
+                match.group(1).lower()
+                for match in re.finditer(
+                    r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)",
+                    module.read_text(encoding="utf-8"),
+                    re.M,
+                )
+            )
+    return names
+
+
+def _misattributed_guards(
+    prose: str, guard_ids: set[str], production: set[str]
+) -> list[str]:
+    """Corpus-guard ids this prose unit credits with production behaviour.
+
+    Sentence-scoped, and that scope is the whole design. Measured on the corpus
+    at the time of writing: per prose UNIT the rule fires 14 times, of which 9
+    are round-narration paragraphs that legitimately list which guards changed
+    next to which production symbols were read -- a rule that noisy gets
+    silenced. Per SENTENCE it fires 5 times and all 5 are round 16's defect.
+    """
+    found: list[str] = []
+    bounds = [0, *(m.end() for m in _SENTENCE_BOUNDARY.finditer(prose)), len(prose)]
+    for index in range(len(bounds) - 1):
+        sentence = prose[bounds[index] : bounds[index + 1]]
+        cited = sorted(set(re.findall(r"hfr-\d{3}", sentence)) & guard_ids)
+        if not cited:
+            continue
+        spans = {
+            re.split(r"[.\[(]", span)[0] for span in _CODE_SPAN.findall(sentence)
+        } & production
+        if spans or _DRIVES_CLAIM.search(sentence):
+            found.extend(cited)
+    return found
+
+
+def test_a_corpus_guard_is_never_credited_with_production_behaviour() -> None:
+    """HFR-204: a guard that reads this unit's text cannot drive the runtime.
+
+    Round 17's second finding, and it is round 16's own fix misfiling itself.
+    Round 16 rewrote HFR-183's summary to say that codex's drop is correct
+    filtering because ``CodexAgent.handle_message`` interrupts the older turn
+    under ``_session_locks[base]``. That reading is right. The scenario it
+    credited was not: HFR-193, whose test compares the plan's verdict words
+    against ``pr7r_questions`` and reaches no runtime at all. The row that
+    covers the lock and the interrupt-before-start is HFR-195, and its own
+    catalog entry spells the sequence out. The wrong id then reached five
+    artefacts: the probe docstring, the probe's closing comment, the evidence
+    ledger row, the plan's round-16 block and the round-16 observation.
+
+    This docstring is itself subject to the rule, which is why it argues the
+    way it does -- the offending id and the production symbols it was wrongly
+    attached to are kept in separate sentences. Round 15 hit the same wall from
+    the other side and solved it the same way.
+
+    HFR-203 does not reach it -- that guard requires an ANSWER's scenario
+    citations to appear in the answer's evidence, and four of the five sites
+    are not answers. HFR-192 does not either: it walks the ids a test claims in
+    its own docstring, and HFR-183's docstring claims HFR-183. Nothing checked
+    a scenario id cited in the middle of a paragraph, which is where this unit
+    does most of its arguing.
+
+    The rule is deliberately narrow, because "is this citation apt" is not
+    computable and a rule that pretends otherwise gets deleted. What IS
+    computable is the one distinction that was violated: a scenario whose test
+    lives in this file is a CORPUS guard -- it asserts about PR7R's own prose,
+    node ids and tables, and it can never be the thing that makes production
+    serialize, interrupt or emit. So prose may not put such an id in a sentence
+    that also names a production symbol, or say it "drives" anything.
+
+    Which leaves the misattributions this cannot catch: crediting one PROBE
+    with another probe's behaviour is still unguarded, because both sides are
+    then production-facing and the rule has no handle. That gap is real and
+    named rather than papered over -- HFR-203 covers it for answers, and this
+    covers the corpus-guard half everywhere else.
+    """
+    yaml = pytest.importorskip("yaml")
+    catalog_path = (
+        Path(__file__).resolve().parent
+        / "scenarios"
+        / "harness_failure_recovery"
+        / "catalog.yaml"
+    )
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    # Derived from the catalog's own ``test`` field rather than listed, so a
+    # guard moved into the probes file stops being policed automatically and a
+    # new guard added here starts being policed without an edit.
+    guard_ids = {
+        str(row["id"]).lower()
+        for row in scenarios
+        if Path(__file__).name in str(row.get("test") or "")
+    }
+    assert "hfr-193" in guard_ids, sorted(guard_ids)
+    assert "hfr-195" not in guard_ids, "HFR-195 is a codex probe, not a corpus guard"
+
+    production = _production_symbols()
+    assert {"codexagent", "should_emit_progress"} <= production
+
+    # Guard the guard, on the two shapes that occurred and the two that must
+    # stay legal. Every fixture is CONCATENATED from a bare id and a bare
+    # fragment rather than written out, because a literal spelling the whole
+    # offending sentence would make this file an offender -- which is how the
+    # first draft of this test failed, and the same trap round 15 hit when it
+    # mechanised the retraction ledger.
+    guard = "hfr-193"
+    symbol = "``should_emit_progress``"
+    assert _misattributed_guards(
+        guard + " for the serialization.", guard_ids, production
+    ) == []
+    assert _misattributed_guards(
+        symbol + " is correct filtering -- " + guard + " for the serialization.",
+        guard_ids,
+        production,
+    ) == [guard]
+    assert _misattributed_guards(guard + " drives that.", guard_ids, production) == [
+        guard
+    ]
+    # Legal: the guard described as what it is, next to the test-side symbol it
+    # reads. ``pr7r_questions`` is this unit's own table, not production.
+    assert (
+        _misattributed_guards(
+            guard + " compares the plan's verdict against ``pr7r_questions``.",
+            guard_ids,
+            production,
+        )
+        == []
+    )
+    # Legal: a narration sentence that says which guards CHANGED. It names no
+    # production symbol and claims no behaviour, and it is the shape that made
+    # unit scope unusable.
+    assert (
+        _misattributed_guards(
+            "the guards that changed are hfr-198, " + guard + " and hfr-201.",
+            guard_ids,
+            production,
+        )
+        == []
+    )
+
+    offenders: list[str] = []
+    for path, span in _pr7r_prose_corpus():
+        for prose in _prose_units(path, span):
+            for scenario in _misattributed_guards(prose, guard_ids, production):
+                offenders.append(
+                    f"{path.name}: {scenario.upper()} is a corpus guard over "
+                    f"PR7R's own text, but is cited here as driving production "
+                    f"behaviour -- name the probe that drives it"
+                )
+    assert not offenders, "\n".join(sorted(set(offenders)))
+
+
+def test_q4s_evidence_binds_a_run_and_never_a_turn() -> None:
+    """HFR-206: a question about Turns may not rest on Run-scoped evidence.
+
+    Round 17's fourth finding. Q4 asks what a TURN carries before it goes
+    terminal, and its answer called two facts established while every test it
+    cites registers its activity with a run id and no turn id, and emits with
+    the turn-completion flag off. Nothing those tests do is Turn-scoped. The
+    answer then said so out loud in one sentence -- that the question is about
+    a Turn and the cited node answers it on a Run -- which is not a caveat but
+    the conflation itself, written down.
+
+    Two mechanisms, deliberately, because the failure has two halves and a
+    single check would only ever catch one. The retraction ledger holds the
+    sentence, so the wording cannot come back anywhere in the corpus. This
+    guard holds the EVIDENCE, so a future round cannot re-establish the claim
+    by leaving the prose alone and hoping the citations grew a Turn: it reads
+    the cited tests and asserts what scope they actually bind.
+
+    Asserted in both directions. A run binding must be present, or a test that
+    registers nothing at all would satisfy "no turn binding" and pass this
+    guard while proving less than the ones it replaced.
+
+    Scope is Q4 and only Q4. Q1 and Q2 have Turn-level evidence and would fail
+    a rule spelled this way, which is correct -- the rule is not "never bind a
+    turn", it is "this answer's evidence is Run-scoped and the answer has to
+    say so".
+    """
+    activity_calls = 0
+    for node_id in PR7R_QUESTIONS["Q4"]["evidence"]:
+        _module_body, chain = _assert_symbol_exists(node_id)
+        function = chain[-1]
+        starts = [
+            call
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "start"
+            and any(keyword.arg == "activity_id" for keyword in call.keywords)
+        ]
+        assert starts, (
+            f"{node_id}: cited as Q4 evidence but it registers no activity at "
+            f"all -- the answer rests on the Activity output batch"
+        )
+        for call in starts:
+            passed = {keyword.arg for keyword in call.keywords}
+            activity_calls += 1
+            assert "run_id" in passed, (node_id, sorted(passed))
+            assert "turn_id" not in passed, (
+                f"{node_id}: this activity binds a turn, so Q4's evidence is no "
+                f"longer Run-scoped and the answer's scope disclaimer is stale"
+            )
+    assert activity_calls, "no activity registration inspected at all"
+
+    # The prose half is the ledger's, and this asserts the ledger is actually
+    # carrying it rather than assuming so: a row whose phrase drifted away from
+    # the sentence it bans is the failure mode that ledger has already had.
+    assert any(
+        "pre-terminal evidence a turn carries" in phrase
+        for phrase, _round, _why in RETRACTED_PHRASINGS
+    ), "the conflating sentence is not enrolled; this guard is half a rule"
