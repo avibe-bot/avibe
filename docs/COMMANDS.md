@@ -903,10 +903,9 @@ result later. Use `--sync` only when the terminal should wait for completion.
 With an existing `--session-id`, the default is P1: steer the new Run into an
 active native Turn, start it when idle, or move the same Delivery to P3 after a
 definitive refusal/not-active receipt. `--queue` selects P3 without attempting a
-steer. `--send-now` instead admits the new Run as content P0 and persists its
-replacement successor before stopping an active Turn. `vibe session send-now`
-adds no message; it promotes only the exact current P3 queue head, steering it
-when active or starting it when idle.
+steer. `--send-now` persists the new Run at P3, then promotes the exact FIFO head
+through P1, so it neither stops the active Turn nor jumps older work. `vibe
+session send-now` performs that exact-head promotion without adding a message.
 
 `--fork-session <session_id>` creates a new Agent Session by forking the source
 Session's native backend context. It is for alternate investigations or

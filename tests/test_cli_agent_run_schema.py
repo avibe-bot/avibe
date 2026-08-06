@@ -594,7 +594,7 @@ def test_agent_run_queue_persists_explicit_p3_intent(
     assert stored["metadata"]["delivery_intent"] == "queue"
 
 
-def test_agent_run_send_now_rejects_an_im_backed_session(
+def test_agent_run_send_now_accepts_an_im_backed_session(
     tmp_path: Path,
     capsys,
 ) -> None:
@@ -653,7 +653,7 @@ def test_agent_run_send_now_rejects_an_im_backed_session(
                 "--send-now",
                 "--no-callback",
                 "--message",
-                "interrupt this",
+                "steer this",
             ]
         )
 
@@ -664,14 +664,13 @@ def test_agent_run_send_now_rejects_an_im_backed_session(
         ):
             result = cli.cmd_agent_run(args)
 
-    assert result == 1
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "send_now_unsupported_target"
-    assert payload["details"] == {
-        "session_id": session["id"],
-        "platform": "slack",
-    }
-    assert request_store.list_runs() == []
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == session["id"]
+    assert payload["delivery_intent"] == "send_now"
+    stored = request_store.get_run(payload["run_id"])
+    assert stored is not None
+    assert stored["metadata"]["delivery_intent"] == "send_now"
 
 
 def test_agent_run_async_self_target_defaults_to_no_callback(

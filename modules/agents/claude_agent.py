@@ -85,6 +85,7 @@ class ClaudeAgent(BaseAgent):
         self._steering_locks: dict[str, asyncio.Lock] = {}
         self._steering_generations: dict[str, int] = {}
         self._steering_terminal_barriers: dict[str, list[str]] = {}
+        self._steering_response_generations: dict[str, int] = {}
         self._ambiguous_primary_results: dict[str, object] = {}
         self._ambiguous_input_shutdowns: set[str] = set()
         self._ambiguous_interrupts: set[str] = set()
@@ -763,6 +764,9 @@ class ClaudeAgent(BaseAgent):
         barriers = getattr(self, "_steering_terminal_barriers", None)
         if barriers is not None:
             barriers.pop(composite_key, None)
+        response_generations = getattr(self, "_steering_response_generations", None)
+        if response_generations is not None:
+            response_generations.pop(composite_key, None)
         ambiguous_results = getattr(self, "_ambiguous_primary_results", None)
         if ambiguous_results is not None:
             ambiguous_results.pop(composite_key, None)
@@ -809,10 +813,28 @@ class ClaudeAgent(BaseAgent):
         composite_key: str,
         expected_steering_generation: int,
     ) -> bool:
-        """Consume one pre-steer terminal frame, including SDK-buffered frames."""
+        """Consume a terminal frame that predates a native steer.
+
+        Claude's receiver can deliver a ResultMessage after the steering write,
+        even when the corresponding AssistantMessage was already emitted. That
+        result belongs to the steered continuation and must settle the Turn. Only
+        suppress the accepted barrier when no post-steer assistant response was
+        observed; this preserves the guard for a buffered pre-steer ResultMessage
+        without dropping the real steered answer.
+        """
         generation_changed = expected_steering_generation != self._steering_generation(
             composite_key
         )
+        barrier = self._next_terminal_barrier(composite_key)
+        response_generation = (
+            getattr(self, "_steering_response_generations", {}) or {}
+        ).get(composite_key)
+        if (
+            barrier == "accepted"
+            and response_generation == self._steering_generation(composite_key)
+        ):
+            self._consume_terminal_barrier(composite_key)
+            return generation_changed
         buffered_terminal = self._consume_terminal_barrier(composite_key) is not None
         return generation_changed or buffered_terminal
 
@@ -1155,8 +1177,14 @@ class ClaudeAgent(BaseAgent):
             message_stream = client.receive_messages().__aiter__()
             while True:
                 settling_ambiguous_primary = False
+                terminal_steering_generation = None
                 try:
                     message = await anext(message_stream)
+                    # Capture ownership at the receive boundary. The receiver may
+                    # yield while it captures session metadata or opens an
+                    # agent-initiated turn; sampling generation later can relabel a
+                    # buffered pre-steer frame as the steered continuation.
+                    terminal_steering_generation = self._steering_generation(composite_key)
                 except StopAsyncIteration:
                     message = self._ambiguous_primary_results.pop(composite_key, None)
                     if message is None:
@@ -1216,11 +1244,8 @@ class ClaudeAgent(BaseAgent):
                         continue
 
                     message_type = self._detect_message_type(message)
-                    terminal_steering_generation = (
-                        self._steering_generation(composite_key)
-                        if message_type in {"assistant", "result", "system"}
-                        else None
-                    )
+                    if message_type not in {"assistant", "result", "system"}:
+                        terminal_steering_generation = None
                     formatter = self._get_formatter(context)
                     is_model_refusal_fallback = self._is_model_refusal_fallback_message(message)
                     model_refusal_fallback_notice = (
@@ -1308,6 +1333,10 @@ class ClaudeAgent(BaseAgent):
                             if assistant_text:
                                 self._detached_assistant_text[composite_key] = assistant_text
                             continue
+                        if assistant_text and terminal_steering_generation:
+                            self._steering_response_generations[composite_key] = (
+                                terminal_steering_generation
+                            )
                         async with self._steering_lock(composite_key):
                             if composite_key in self._steering_closing_keys():
                                 logger.info(

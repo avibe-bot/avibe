@@ -85,6 +85,7 @@
         "canceled": "The run was canceled before producing a result.",
         "failed": "The run failed before producing a result."
       },
+      "sendNowGateUnavailable": "This send-now run could not be admitted because the Session turn gate is unavailable. Retry after the service finishes starting.",
       "bindingUnresolvedRetry": "Pinned agent session {session} cannot accept a turn ({attempt}/{threshold}). This definition will be paused after {threshold} consecutive unresolvable-target failures. Re-point it with: vibe task update {id} --session-id <id>.",
       "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}."
     },

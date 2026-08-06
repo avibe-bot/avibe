@@ -289,7 +289,7 @@ task definition. Use `--sync` only when the terminal should wait for completion.
 vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
+vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correction in the current turn.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
@@ -300,12 +300,12 @@ new Run into an active native Turn, starts it immediately when idle, or moves th
 same Delivery to the durable P3 queue after a definitive refusal/not-active
 receipt. It does not interrupt the active Turn.
 
-`--send-now` is valid only with an existing `--session-id`. It admits the new
-Run as content P0: with an active Turn, Avibe persists the replacement successor
-before calling Stop; when idle, it starts the new Run immediately. This is
-different from `vibe session send-now`, which adds no message and promotes only
-the exact current P3 queue head, steering it when active or starting it when
-idle. A stale head is refused rather than replaced by the next queued item.
+`--send-now` is valid only with an existing `--session-id`. Avibe persists the
+new Run at P3 first, then promotes the exact FIFO head through P1. With an active
+Turn that head steers the same native Turn; when idle it starts normally. Older
+queued work remains ahead of the new Run. `vibe session send-now` uses the same
+exact-head promotion without adding a message. A stale head is refused rather
+than replaced by the next queued item, and neither form calls Stop.
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
 an existing Session's native backend context instead of starting blank. The new

@@ -266,20 +266,17 @@ Session，且在目标 Session 已存在时仍然会被拒绝。
 vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
+vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correction in the current turn.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
-`--send-now` 只能和现有 `--session-id` 一起使用。Avibe 会先把 Agent Run
-持久化到该 Session 的队列，再执行与 Workbench“立即发送”相同的操作：通过共享
-Stop 路径打断活动 Turn，并把 FIFO 队头作为新 Turn 发送。它不会把输入注入同一个
-backend native Turn，也不会让新消息越过更早的排队工作。如果打断被拒绝，当前 Turn
-继续运行，Agent Run 保持排队。命令接受结果会显示 `delivery_intent`；Controller
-消费后，可通过 `vibe runs show <run-id>` 查看持久化的
-`metadata.delivery_outcome`（`interrupted`、`flushed`、`deferred` 或
-`stop_failed`）。
+`--send-now` 只能和现有 `--session-id` 一起使用。Avibe 会先把新的 Agent Run
+以 P3 持久化，再通过 P1 提升精确的 FIFO 队头。活动 Turn 存在时，队头会 steering
+进同一个 backend native Turn；Session 空闲时则正常启动。新消息不会越过更早的
+排队工作。`vibe session send-now` 执行相同的精确队头提升，但不会新增消息。
+两种形式都不会调用 Stop；过期或被拒绝的 steering 会保持持久化排队。
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
 使用 `--fork-session <session-id>`。新 Session 会保持源 Session 的 backend。

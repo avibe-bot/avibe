@@ -245,7 +245,7 @@ def test_send_now_dispatches_an_existing_queue_without_adding_a_message(
     }
 
 
-def test_send_now_surfaces_a_typed_interrupt_refusal(monkeypatch, tmp_path, capsys):
+def test_send_now_surfaces_a_typed_steer_refusal(monkeypatch, tmp_path, capsys):
     from vibe import internal_client
 
     engine = _setup(monkeypatch, tmp_path)
@@ -257,8 +257,8 @@ def test_send_now_surfaces_a_typed_interrupt_refusal(monkeypatch, tmp_path, caps
             "body": {
                 "ok": False,
                 "session_id": session_id,
-                "code": "stop_failed",
-                "detail": "backend refused Stop",
+                "code": "send_now_refused",
+                "detail": "backend refused steering",
             },
         }
 
@@ -271,8 +271,8 @@ def test_send_now_surfaces_a_typed_interrupt_refusal(monkeypatch, tmp_path, caps
     )
 
     assert code == 1
-    assert payload["code"] == "stop_failed"
-    assert payload["error"] == "backend refused Stop"
+    assert payload["code"] == "send_now_refused"
+    assert payload["error"] == "backend refused steering"
     assert payload["details"]["session_id"] == "sesaaa"
     assert payload["details"]["controller_status_code"] == 409
 
@@ -344,7 +344,7 @@ def test_send_now_requires_an_explicit_target(capsys):
     assert payload["help_command"] == "vibe session send-now --help"
 
 
-def test_send_now_and_queue_controls_reject_an_im_backed_session(
+def test_send_now_accepts_im_while_queue_management_remains_workbench_only(
     monkeypatch,
     tmp_path,
     capsys,
@@ -354,8 +354,15 @@ def test_send_now_and_queue_controls_reject_an_im_backed_session(
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesim", platform="slack", native="C123")
 
-    async def _send_now(_session_id):
-        raise AssertionError("IM-backed Session must not reach the Workbench controller")
+    async def _send_now(session_id):
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "status": "accepted",
+            },
+        }
 
     monkeypatch.setattr(internal_client, "send_now", _send_now)
 
@@ -375,8 +382,8 @@ def test_send_now_and_queue_controls_reject_an_im_backed_session(
         capsys,
     )
 
-    assert send_code == 1
-    assert send_payload["code"] == "send_now_unsupported_target"
+    assert send_code == 0
+    assert send_payload["status"] == "accepted"
     assert list_code == 1
     assert list_payload["code"] == "session_queue_unsupported_target"
     assert remove_code == 1

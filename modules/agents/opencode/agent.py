@@ -68,6 +68,10 @@ _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
 # OpenCode returns 204 after forking prompt work, before that worker necessarily
 # registers the session as busy.
 _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS = 5.0
+# A prompt accepted at the end of the previous native turn can race its final
+# status transition. Let that transition settle before trusting the write as a
+# same-turn steer.
+_STEER_POST_WRITE_STATUS_SETTLE_SECONDS = 0.1
 _RESTORED_IM_REGISTRATION_RETRY_DELAY_SECONDS = 0.25
 _RESTORED_IM_PLATFORMS = {"slack", "discord", "telegram", "lark", "wechat"}
 
@@ -1425,6 +1429,42 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
                 )
                 state.awaiting_active_status_observed = False
+                await asyncio.sleep(_STEER_POST_WRITE_STATUS_SETTLE_SECONDS)
+                try:
+                    status_after_write = await server.get_session_status(
+                        native_session_id,
+                        directory,
+                    )
+                except (asyncio.TimeoutError, TimeoutError, aiohttp.ClientConnectionError) as exc:
+                    # The native write may have been accepted, so leave the
+                    # reconciliation evidence armed for the poll owner.
+                    return steer_result(
+                        SteerOutcome.UNKNOWN,
+                        reason="post_write_status_unknown",
+                        backend=self.name,
+                        diagnostic=str(exc),
+                    )
+                except Exception as exc:  # noqa: BLE001 - write already happened
+                    return steer_result(
+                        SteerOutcome.UNKNOWN,
+                        reason="post_write_status_unknown",
+                        backend=self.name,
+                        diagnostic=str(exc),
+                    )
+                if (
+                    status_after_write is None
+                    or status_after_write.get("type") not in {"busy", "retry"}
+                ):
+                    # The prompt write is durable, but OpenCode can take longer
+                    # than this first status sample to register the continuation as
+                    # busy. Keep the five-second reconciliation evidence armed so
+                    # the poll owner can observe either start confirmation or the
+                    # exact native attempt before any retry is admitted.
+                    return steer_result(
+                        SteerOutcome.UNKNOWN,
+                        reason="native_turn_start_pending",
+                        backend=self.name,
+                    )
         except OpenCodePromptRejectedError as exc:
             outcome = SteerOutcome.NOT_ACTIVE if exc.status == 404 else SteerOutcome.REFUSED
             reason = "native_session_missing" if exc.status == 404 else "backend_refused"

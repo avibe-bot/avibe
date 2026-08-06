@@ -881,6 +881,187 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._pending_reactions[composite_key], [("m2", ":eyes:")])
         self.assertTrue(controller.session_manager.session.session_active[composite_key])
 
+    def test_steered_result_after_assistant_response_is_not_suppressed(self):
+        controller = _StubController()
+        agent = ClaudeAgent(controller)
+        composite_key = "session-1:/tmp/work"
+        agent._steering_generations[composite_key] = 1
+        agent._steering_terminal_barriers[composite_key] = ["accepted"]
+        agent._steering_response_generations[composite_key] = 1
+
+        self.assertFalse(agent._terminal_claim_superseded(composite_key, 1))
+        self.assertIsNone(agent._next_terminal_barrier(composite_key))
+
+    def test_buffered_result_without_steered_assistant_is_suppressed(self):
+        controller = _StubController()
+        agent = ClaudeAgent(controller)
+        composite_key = "session-1:/tmp/work"
+        agent._steering_generations[composite_key] = 1
+        agent._steering_terminal_barriers[composite_key] = ["accepted"]
+
+        self.assertTrue(agent._terminal_claim_superseded(composite_key, 1))
+        self.assertIsNone(agent._next_terminal_barrier(composite_key))
+
+    async def test_steered_assistant_and_result_settle_the_pending_turn(self):
+        """HFR-435: the steered Assistant owns its following terminal result."""
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-1:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._steering_generations[composite_key] = 1
+        agent._steering_terminal_barriers[composite_key] = ["accepted"]
+
+        text_block = TextBlock("steered final answer")
+        assistant_message = type(
+            "AssistantMessage",
+            (),
+            {"content": [text_block]},
+        )()
+        result_message = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "steered final answer",
+                "duration_ms": 1,
+            },
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield assistant_message
+                    yield result_message
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-1",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "steered final answer",
+            subtype="success",
+            duration_ms=1,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+        self.assertNotIn(composite_key, agent._pending_requests)
+
+    async def test_buffered_pre_steer_assistant_keeps_primary_result_ownership(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-buffered:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        assistant_received = asyncio.Event()
+        release_assistant = asyncio.Event()
+        terminal_processed = asyncio.Event()
+        end_stream = asyncio.Event()
+
+        original_begin = agent._maybe_begin_agent_initiated_turn
+
+        async def _hold_assistant(*args, **kwargs):
+            assistant_received.set()
+            await release_assistant.wait()
+            return await original_begin(*args, **kwargs)
+
+        agent._maybe_begin_agent_initiated_turn = _hold_assistant
+        terminal_claim = agent._terminal_claim_superseded
+
+        def _observe_terminal_claim(*args):
+            superseded = terminal_claim(*args)
+            if asyncio.current_task() is receiver_task:
+                terminal_processed.set()
+            return superseded
+
+        agent._terminal_claim_superseded = _observe_terminal_claim
+        assistant_message = type(
+            "AssistantMessage",
+            (),
+            {"content": [TextBlock("buffered primary answer")]},
+        )()
+        result_message = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "buffered primary answer",
+                "duration_ms": 1,
+            },
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield assistant_message
+                    yield result_message
+                    await end_stream.wait()
+
+                return _iterate()
+
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                _Client(),
+                "session-buffered",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        await assistant_received.wait()
+        agent._advance_steering_generation(composite_key)
+        release_assistant.set()
+        await asyncio.wait_for(terminal_processed.wait(), timeout=1)
+
+        self.assertEqual(agent._pending_requests[composite_key], [pending_request])
+        agent.emit_result_message.assert_not_awaited()
+
+        receiver_task.cancel()
+        await asyncio.gather(receiver_task, return_exceptions=True)
+
     async def test_toolcall_emit_adopts_current_pending_turn_token(self):
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
