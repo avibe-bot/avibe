@@ -392,11 +392,16 @@ async def reap_duplicate_claude_resume_processes(
     for pid in list(protected_pids):
         protected_pids.update(_descendant_pids(all_rows, pid, children))
 
+    # Protected rows stay in ``matches`` so the duplicate guard below can still
+    # see them: they are evidence that the session really is running more than
+    # one resume process. Dropping them here instead would let a keep_pid that
+    # has already left the process table hide a genuine orphan behind a single
+    # surviving owned replacement — one scoped match, guard satisfied, orphan
+    # left alive. Ownership decides what gets *signalled*, not what counts.
     matches = [
         row
         for row in all_rows
         if row.pid != os.getpid()
-        and row.pid not in protected_pids
         and _command_is_claude(row.command, cli_path=cli_path)
         and _command_has_resume(row.command, native_session_id)
     ]
@@ -405,9 +410,11 @@ async def reap_duplicate_claude_resume_processes(
 
     keep_pid = keep_pid if isinstance(keep_pid, int) and keep_pid > 0 else None
     scoped_matches = _same_runtime_rows(all_rows, matches, keep_pid=keep_pid)
-    target_rows = [row for row in scoped_matches if row.pid != keep_pid]
     if keep_pid is not None and len(scoped_matches) <= 1:
         return 0
+    target_rows = [
+        row for row in scoped_matches if row.pid != keep_pid and row.pid not in protected_pids
+    ]
     if not target_rows:
         return 0
 

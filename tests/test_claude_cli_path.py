@@ -2869,3 +2869,30 @@ def test_cleanup_records_no_teardown_intent_for_an_empty_key(monkeypatch, tmp_pa
     asyncio.run(handler.cleanup_session(composite_key))
 
     assert composite_key not in handler.claude_intentional_teardowns
+
+
+def test_tracking_a_create_retires_the_previous_teardown_record(monkeypatch, tmp_path: Path) -> None:
+    """The marker must not outlive the start of the replacement's creation.
+
+    A new generation that exits ``-9`` inside ``connect()`` never registers, so
+    its failure is reported with ``client=None``. Clearing only at registration
+    would leave the previous teardown's key-level marker standing to classify
+    that genuine crash as our own cleanup and swallow the user-facing error.
+    """
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.claude_intentional_teardowns[composite_key] = 1000.0
+
+    async def scenario() -> bool:
+        handler._track_claude_session_create(composite_key)
+        # No client was ever handed back, so the caller has none to pass.
+        return handler.claude_teardown_is_intentional(
+            composite_key, RuntimeError("Claude Code process exited with exit code: -9")
+        )
+
+    assert asyncio.run(scenario()) is False
+    assert composite_key not in handler.claude_intentional_teardowns

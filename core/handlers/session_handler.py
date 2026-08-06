@@ -641,6 +641,15 @@ class SessionHandler(BaseHandler):
     def _track_claude_session_create(self, composite_key: str) -> asyncio.Future:
         future = asyncio.get_running_loop().create_future()
         self.claude_session_creates[composite_key] = future
+        # Retire the key-level teardown record as soon as a replacement starts
+        # being built, not once it registers. A new generation that dies with
+        # ``-9`` inside ``connect()`` never reaches registration, so the caller
+        # reports it with ``client=None`` — and a marker still standing from the
+        # previous teardown would classify that genuine crash as our own
+        # cleanup, suppressing both the IM notification and the durable Web Chat
+        # error row. The old generation keeps its own coverage through the
+        # per-client ``_vibe_intentional_teardown`` attribute.
+        self._clear_claude_teardown_intent(composite_key)
         return future
 
     def _untrack_claude_session_create(self, composite_key: str, future: asyncio.Future) -> None:
@@ -1576,6 +1585,9 @@ class SessionHandler(BaseHandler):
             ),
         )
         self.claude_sessions[composite_key] = client
+        # Normally already cleared when the create was tracked; kept as the
+        # backstop for any path that builds a client without going through
+        # ``_track_claude_session_create``.
         self._clear_claude_teardown_intent(composite_key)
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")
 
