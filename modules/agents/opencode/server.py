@@ -47,6 +47,9 @@ MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
 _CURRENT_OWNER_PID = os.getpid()
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{26})$")
+_ORDERED_NATIVE_MESSAGE_ID_RE = re.compile(
+    r"^msg_([0-9a-f]{12})([0-9a-f]{11})[0-9a-f]{3}$"
+)
 
 
 def _percent_encode_path(path: str) -> str:
@@ -68,6 +71,20 @@ def native_message_id_for_attempt(attempt_id: str) -> str:
     if match is None:
         raise ValueError("OpenCode prompt attempt identity is not ordered")
     return f"msg_{match.group(1)}"
+
+
+def native_message_not_before_ms(message_id: str) -> int | None:
+    """Return the enforced write boundary encoded by an Avibe native ID."""
+
+    match = _ORDERED_NATIVE_MESSAGE_ID_RE.fullmatch(str(message_id or "").strip())
+    if match is None:
+        return None
+    order_key = int(match.group(1), 16)
+    not_before_ms = int(match.group(2), 16)
+    expected_order_key = (not_before_ms * 0x1000) & ((1 << 48) - 1)
+    if order_key != expected_order_key:
+        return None
+    return not_before_ms
 
 
 class OpenCodePromptRejectedError(RuntimeError):
@@ -1588,6 +1605,8 @@ class OpenCodeServerManager:
     ) -> None:
         """Start a prompt asynchronously without holding the HTTP request open."""
 
+        if message_id:
+            await self._wait_for_native_message_slot(message_id)
         started_at = time.time()
         async with self._request_scope():
             session = await self._get_http_session()
@@ -1619,6 +1638,15 @@ class OpenCodeServerManager:
                     error_text = await resp.text()
                     raise OpenCodePromptRejectedError(resp.status, error_text)
             self._last_prompt_started_at[session_id] = started_at
+
+    @staticmethod
+    async def _wait_for_native_message_slot(message_id: str) -> None:
+        not_before_ms = native_message_not_before_ms(message_id)
+        if not_before_ms is None:
+            return
+        delay_seconds = (not_before_ms - int(time.time() * 1_000)) / 1_000
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
 
     async def list_messages(self, session_id: str, directory: str) -> List[Dict[str, Any]]:
         async with self._request_scope():
