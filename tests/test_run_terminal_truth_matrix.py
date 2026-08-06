@@ -49,27 +49,38 @@ def _expand() -> list[tuple[str, str, str, str, tuple[str, str]]]:
 _CELLS = _expand()
 
 
-def _assert_node_exists(node_id: str) -> None:
-    """Resolve the COMPLETE pytest node id, one nesting level at a time.
+def _assert_symbol_exists(qualified: str) -> None:
+    """Resolve a COMPLETE ``path::Class::symbol`` id, one nesting level at a time.
 
     Matching only the trailing function name and walking the whole module --
-    which is what HFR-105 does, and what this guard did first -- accepts a node
-    id whose class component is misspelled, renamed, or absent, as long as some
+    which is what HFR-105 does, and what this guard did first -- accepts an id
+    whose class component is misspelled, renamed, or absent, as long as some
     same-named function exists anywhere in the file. For a matrix whose entire
     value is that its citations are real, that is the wrong failure mode: the
     citation would stay green while pointing at a test that no longer runs.
-    """
-    test_path, *node_parts = node_id.split("::")
-    assert test_path.startswith("tests/"), node_id
-    assert node_parts, node_id
 
-    scope: list[ast.stmt] = ast.parse(
-        Path(test_path).read_text(encoding="utf-8")
-    ).body
-    for depth, name in enumerate(node_parts):
-        is_leaf = depth == len(node_parts) - 1
-        wanted = (
-            (ast.FunctionDef, ast.AsyncFunctionDef) if is_leaf else (ast.ClassDef,)
+    Used for BOTH halves of the unit. Test citations were validated this way
+    from the start; finding OWNERS were not -- the guard split on ``::`` and
+    checked only that the module file existed, so
+    ``running_agents.py::end_running_agent`` stayed green through a rename and
+    the unit went on advertising a contract owner no amendment could locate.
+    Applying full validation to citations and none to owners was the same
+    asymmetry twice over, so there is now one resolver.
+    """
+    module_path, *parts = qualified.split("::")
+    assert parts, qualified
+    source = Path(module_path)
+    assert source.exists(), f"{qualified}: no module at {module_path}"
+
+    scope: list[ast.stmt] = ast.parse(source.read_text(encoding="utf-8")).body
+    for depth, name in enumerate(parts):
+        is_leaf = depth == len(parts) - 1
+        # A leaf may be a function; a non-leaf must be a class. A leaf that is
+        # itself a class is allowed -- an owner may legitimately be a type.
+        wanted: tuple[type[ast.AST], ...] = (
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            if is_leaf
+            else (ast.ClassDef,)
         )
         match = next(
             (
@@ -80,10 +91,16 @@ def _assert_node_exists(node_id: str) -> None:
             None,
         )
         assert match is not None, (
-            f"{node_id}: no {'test function' if is_leaf else 'class'} "
+            f"{qualified}: no {'symbol' if is_leaf else 'class'} "
             f"named {name!r} at this level"
         )
         scope = match.body
+
+
+def _assert_node_exists(node_id: str) -> None:
+    """A pytest node id: the same resolution, rooted under ``tests/``."""
+    assert node_id.split("::")[0].startswith("tests/"), node_id
+    _assert_symbol_exists(node_id)
 
 
 def _detail_node(detail: str) -> str:
@@ -138,9 +155,19 @@ def test_the_unproven_count_matches_the_checked_in_budget() -> None:
     assert len(unproven) == UNPROVEN_BUDGET, sorted(
         f"{b}-{la}-{t}-{o}" for b, la, t, o, _p in unproven
     )
-    # Sanity: the matrix is an evidence unit, not an empty shell.
     assert len(_CELLS) == len(BACKENDS) * len(LANES) * len(TRIGGERS) * len(OUTCOMES)
-    assert UNPROVEN_BUDGET < len(_CELLS)
+    assert UNPROVEN_BUDGET <= len(_CELLS)
+
+    # Anti-degeneracy, which is what the old ``UNPROVEN_BUDGET < len(_CELLS)``
+    # was reaching for and got wrong. That assertion said "at least one cell
+    # must be proven", which is a conclusion about master, not a property of
+    # the unit -- and round 3 found it false. The real failure it should catch
+    # is someone flipping the matrix to one boilerplate ``unproven`` and
+    # calling it honest. So: distinct probes, at least one per (lane, outcome),
+    # because a gap that cannot say what would close it is not a gap, it is a
+    # shrug.
+    distinct = {detail for _b, _la, _t, _o, (kind, detail) in _CELLS if kind == "unproven"}
+    assert len(distinct) >= len(LANES) * len(OUTCOMES), len(distinct)
 
 
 def test_every_question_and_finding_names_a_real_consuming_test() -> None:
@@ -156,21 +183,30 @@ def test_every_question_and_finding_names_a_real_consuming_test() -> None:
     for finding_id, finding in PR7R_FINDINGS.items():
         assert finding_id.startswith("PR7R-F"), finding_id
         assert finding["title"].strip() and finding["detail"].strip(), finding_id
-        # The owner must be a real module path, so the contract amendment knows
-        # who has to change.
-        module_path = finding["owner"].split("::")[0]
-        assert Path(module_path).exists(), finding_id
+        # The owner must resolve to a real SYMBOL, not merely to a real file,
+        # so the contract amendment knows exactly who has to change.
+        _assert_symbol_exists(finding["owner"])
         _assert_node_exists(finding["reproducer"])
 
-    # Every finding is reachable from the matrix, and every matrix defect cell
-    # names a finding that exists. A defect recorded in only one of the two
-    # places is how an evidence unit quietly loses a defect.
+    # Every finding is reachable from the matrix, and every finding id named in
+    # the matrix exists. A defect recorded in only one of the two places is how
+    # an evidence unit quietly loses a defect.
+    #
+    # Scanned over EVERY cell rather than only ``defect`` cells, because round 3
+    # demoted both defect cells to ``unproven``: the reproducers characterize
+    # End's behavior and explicitly disclaim the Run half, which is what those
+    # cells are about. The finding is still real and still has to stay tied to
+    # the matrix -- the tie just cannot be the proof KIND.
     referenced = {
-        detail.split(" -- ")[0].strip()
-        for _b, _la, _t, _o, (kind, detail) in _CELLS
-        if kind == "defect"
+        finding_id
+        for _b, _la, _t, _o, (_kind, detail) in _CELLS
+        for finding_id in PR7R_FINDINGS
+        if finding_id in detail
     }
-    assert referenced == set(PR7R_FINDINGS)
+    assert referenced == set(PR7R_FINDINGS), referenced
+    for _b, _la, _t, _o, (kind, detail) in _CELLS:
+        if kind == "defect":
+            assert detail.split(" -- ")[0].strip() in PR7R_FINDINGS, detail
 
 
 def test_a_citation_with_the_wrong_class_component_is_rejected() -> None:
@@ -194,7 +230,7 @@ def test_a_citation_with_the_wrong_class_component_is_rejected() -> None:
 
     with pytest.raises(AssertionError, match="no class named"):
         _assert_node_exists(real.replace("AgentStopSettlementTests", "RenamedTests"))
-    with pytest.raises(AssertionError, match="no test function named"):
+    with pytest.raises(AssertionError, match="no symbol named"):
         # The class is right; the function moved out from under it.
         _assert_node_exists(
             "tests/test_agent_stop_settlement.py::AgentStopSettlementTests::"
@@ -206,6 +242,29 @@ def test_a_citation_with_the_wrong_class_component_is_rejected() -> None:
             "tests/test_run_terminal_truth_matrix.py::NotAClass::"
             "test_the_unproven_count_matches_the_checked_in_budget"
         )
+
+
+def test_a_finding_owner_must_resolve_to_a_real_symbol() -> None:
+    """HFR-186: the owner suffix is validated, not decoration.
+
+    The regression this pins: the guard used to keep only the module path and
+    assert the FILE existed, so every owner suffix -- the part that says which
+    function a contract amendment has to change -- was unchecked. Renaming
+    ``end_running_agent``, or misspelling it here in the first place, left the
+    unit pointing confidently at nothing while the citation half of the same
+    file got full nested-symbol validation.
+    """
+    owners = {finding["owner"] for finding in PR7R_FINDINGS.values()}
+    assert owners, PR7R_FINDINGS
+    for owner in owners:
+        assert "::" in owner, owner
+        _assert_symbol_exists(owner)  # the real spellings
+
+    module_path = next(iter(owners)).split("::")[0]
+    with pytest.raises(AssertionError, match="no symbol named"):
+        _assert_symbol_exists(f"{module_path}::no_such_owner_function")
+    with pytest.raises(AssertionError, match="no module at"):
+        _assert_symbol_exists("core/services/not_a_module.py::end_running_agent")
 
 
 def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:

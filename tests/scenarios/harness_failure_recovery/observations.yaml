@@ -299,36 +299,62 @@ observations:
       receives is NOT established here either -- the reproducer builds only the codex
       session and turn registries, so no Run row exists for it to observe, and an
       earlier draft's "its Run is never settled" was inference from the missing
-      interrupt rather than evidence.
+      interrupt rather than evidence. Round 3 corrected how (1) is DEMONSTRATED
+      without changing the finding: the race window used to be postulated by the
+      fixture (an empty ``claude_active_sessions`` handed in) and the intentional
+      teardown marker used to be stamped by the probe itself, so the reproducer
+      would have kept passing -- still reporting the defect -- the day production
+      closed either half. Both are now read off production: the ordering out of
+      ``handle_message``, and the marker by running the real
+      ``_cleanup_session_locked``, which applies its own
+      ``client is not None or receiver_task is not None`` guard the hand-stamp
+      skipped. Both matrix cells were also demoted from ``defect`` to ``unproven``:
+      the reproducers characterize End's behaviour and explicitly disclaim the Run
+      half those cells are about, and ``defect`` is excluded from
+      ``UNPROVEN_BUDGET``, so the classification was hiding eight cells behind a
+      vocabulary word.
   - id: HFR-OBS-024
     date: 2026-08-06
     source: PR7R current-master evidence matrix (HFR-183, HFR-184)
     result: confirmed
     detail: >-
-      Codex exposes a per-Turn progress signal on both lanes and then discards it;
-      Claude and OpenCode expose none. Codex's ``item/*`` notifications carry a
+      Three of six backend/lane cells expose a per-Turn progress signal and then
+      discard it; the other three expose none. Codex's ``item/*`` notifications carry a
       ``turnId`` and ``_find_request_for_notification`` resolves the participating
       Run's request from that id through a per-turn map, so the event IS attributable
       to an exact Turn -- but ``should_emit_progress`` then gates on the single
       ``_active_turns[base]`` slot and the activity timestamp is stamped per session,
       so the attribution is thrown away one step downstream. Claude stamps
       ``session_turn_started`` / ``session_last_activity`` per composite key and the
-      SDK has no query/result correlation id; opencode holds one asyncio task per
-      base session. The plan's rule requires an exact signal for EVERY backend and
+      SDK has no query/result correlation id. OpenCode's ``_active_requests`` is
+      likewise one asyncio task per base session -- but that projection is not the
+      event stream: ``run_prompt_poll`` is handed the exact ``AgentRequest`` and
+      every progress emit in it passes ``request.context``, whose ``turn_token``
+      ``_process_message`` has already read as ``logical_turn_id``. That token is
+      stamped only by ``core/session_turns.py`` and the streaming turn dispatch,
+      both Workbench owners, so opencode has the signal on the durable lane and not
+      on direct IM. The plan's rule requires an exact signal for EVERY backend and
       lane, so a generic inactivity timeout is still blocked on evidence and no
       implementation PR may be opened for one yet -- but the shape of the remaining
-      work is now known to differ per backend: codex needs its existing attribution
-      carried through to the stamp, the other two need a signal that does not exist.
-      This corrects the first draft of the same observation, which read only each
-      backend's base-session projection and generalised "no backend has one" from a
-      lossy projection. Separately, a Turn's accepted-run
+      work now differs per cell: codex and workbench opencode need an existing
+      attribution carried through to the stamp, claude needs a signal that does not
+      exist, and IM opencode needs a Turn stamped into its context at all.
+      This corrects the same observation TWICE, both times the same way: a lossy
+      base-session projection was read and a conclusion about the event stream was
+      drawn from it -- first for codex, then, after that was named, for opencode.
+      Separately, a Turn's accepted-run
       record cannot discriminate between its participants: it holds a flat
       ``accepted_agent_run_ids`` list and one Turn-level ``source_kind`` stamped by
       the first participant, with no per-Run source or deadline anywhere. Whether a
       scheduler cron Run and a manual CLI Run actually coalesce is a separate,
       still-open question owned by ``_hydrate_delivery_batch_context``, not by the
-      accumulator. Either way cancellation is Turn-level, so per-Run timeout policy
-      stays unspecifiable until that cardinality is made explicit.
+      accumulator. That is a statement about the PROJECTION and must not be read as
+      one about the system: each accepted id is the primary key of an ``agent_runs``
+      row carrying ``source_kind``, ``source_actor`` and ``definition_id``, and
+      ``run_definitions`` carries ``timeout_seconds`` / ``lifetime_timeout_seconds``.
+      The inputs exist and are one join away, so the open question is the narrower
+      one of whether the cancellation site performs that join -- not, as an earlier
+      draft had it, that per-Run timeout policy is unspecifiable.
   - id: HFR-OBS-025
     date: 2026-08-06
     source: PR7R current-master evidence matrix (Q1, Q4, Q5)
@@ -401,3 +427,32 @@ observations:
       notification that feeds it. Rejecting a finding and loosening a blocker are
       both valid outcomes of a review; the lesson is that reading one level up from
       where the loss happens is part of the check.
+  - id: HFR-OBS-028
+    date: 2026-08-06
+    source: third adversarial review of the PR7R matrix (PR #1212)
+    result: confirmed
+    detail: >-
+      Asked of the remaining cells as a class, the substitution question has one
+      answer for all of them: no test on master traces a Run from a trigger's
+      admission through to that Run's terminal settlement. A third review moved the
+      budget 117 -> 168 -- every cell -- and the honest reading of that number is
+      not that PR7R found nothing but that every surviving citation proved a
+      SEGMENT. Storage writers driven in isolation with no admission (12 cells); a
+      projection whose backend never returns (9); an Activity registry holding a
+      bare run-id STRING against a mock store, so no ``agent_runs`` row exists in it
+      at all (16); a terminal chain that is a genuine end-to-end Run trace but
+      admitted by ``enqueue_agent_run``, which is deliberately not one of the four
+      triggers (10); and the two End reproducers, filed as ``defect`` for a Run half
+      they explicitly disclaim (8). An all-unproven matrix is uncomfortable and it
+      is the correct result: the unit's value is the 168 named probes and the
+      demonstration that the coverage was an artefact of reading citations
+      charitably. Two second-order lessons. First, a guard assertion can encode a
+      CONCLUSION instead of a property -- ``UNPROVEN_BUDGET < len(_CELLS)`` was
+      written to mean "this is not an empty shell" and became false the moment the
+      evidence said so; it is now an anti-degeneracy check on the number of DISTINCT
+      probe texts, which is the property actually wanted. Second, the same
+      validation asymmetry appeared twice in one file: test citations got full
+      nested-symbol resolution while finding OWNERS were checked only for file
+      existence, so a renamed owner stayed green. ``tests/test_scheduled_tasks.py``'s
+      ``_assert_node_exists`` (HFR-105) still has the leaf-only weakness this unit
+      fixed, and is untouched.

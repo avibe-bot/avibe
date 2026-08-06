@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…187`, `HFR-188…219` still reserved. 51 of 168 matrix cells proven, 117 `unproven` with named probes. Q5 closes in master's favour; Q2 open and still blocking the inactivity timeout; Q1/Q3/Q4 open; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…187`, `HFR-188…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q5 closes in master's favour; Q2 open and still blocking the inactivity timeout; Q1/Q3/Q4 open; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under two review rounds
+#### PR7R status (2026-08-06) — first increment, revised under three review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`) and fed by
@@ -1235,11 +1235,11 @@ The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
 (lane, trigger, outcome) with a `per_backend` override wherever the backend
 demonstrably changes the answer, because the durable owner chain is chosen by
-the lane, not by the backend. **51 cells carry a consuming test, 117 are
-`unproven`** and name the exact probe that would close them; `UNPROVEN_BUDGET`
-pins that number so a gap cannot widen silently.
+the lane, not by the backend. **All 168 cells are `unproven`** and name the
+exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
+cannot widen silently.
 
-The budget moved 28 → 78 → 117 across two adversarial review rounds, and the
+The budget moved 28 → 78 → 117 → 168 across three adversarial review rounds, and the
 reason is the most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
 cell rather than about the cell. The first round found fifty such cells, in four
@@ -1278,17 +1278,52 @@ That last one generalises: a test can trace a cell's **settlement** half
 perfectly and still say nothing about its **admission** half, and admission is
 exactly what a trigger owns.
 
+The third round asked that question of the remaining cells **as a class** and
+got one answer for all of them: **no test on master traces a Run from a
+trigger's admission through to that Run's terminal settlement.** Every surviving
+citation proved a segment —
+
+- **storage writers driven in isolation**, with no admission and no Run (12);
+- a **projection whose backend never returns**, so nothing settles (9);
+- an **Activity registry holding a bare run-id string** against a mock or stub
+  run store — there is no `agent_runs` row in any of those tests at all (16);
+- a **genuine end-to-end terminal chain** that is nonetheless admitted by
+  `enqueue_agent_run`, deliberately not one of the four triggers (10);
+- the **two End reproducers**, filed as `defect` for a Run half they explicitly
+  disclaim (8) — and because `defect` is excluded from `UNPROVEN_BUDGET`, that
+  misclassification was hiding those eight cells behind a vocabulary word. Both
+  are now `unproven`, and the finding ↔ matrix tie scans every cell's detail
+  text instead of only `defect` cells.
+
+An all-`unproven` matrix is an uncomfortable result and it is the correct one.
+The unit's value is the 168 named probes plus the demonstration that the earlier
+coverage was an artefact of reading citations charitably.
+
 The matrix guard cannot catch any of these: it verifies that a citation
 resolves, not that it is about the right thing. That check is a reader's job,
 and it is now a required one whenever a cell is marked covered — every round,
-not once.
+not once. Two second-order lessons from round 3 about the guard itself:
 
-The second round also overturned a claim in the other direction. Q2's blanket
-"no backend exposes a per-Turn progress signal" was false for codex, and it was
-reached by reading a lossy base-session projection rather than the notification
-that feeds it. Loosening a blocker is as much a review outcome as tightening a
-claim; the transferable part is that the check has to be made one level up from
-where the loss happens.
+- a guard assertion can encode a **conclusion** rather than a property.
+  `UNPROVEN_BUDGET < len(_CELLS)` was written to mean "this unit is not an empty
+  shell" and became false the moment the evidence said so. It is now an
+  anti-degeneracy check on the number of **distinct** probe texts, which is the
+  property that was actually wanted;
+- the same **validation asymmetry** appeared twice in one file: test citations
+  got full nested-symbol resolution while finding *owners* were checked only for
+  file existence, so a renamed owner would stay green. There is now one
+  resolver, `_assert_symbol_exists`, used for both. `HFR-105`'s copy in
+  `tests/test_scheduled_tasks.py` still has the leaf-only weakness and is
+  untouched by this unit.
+
+Rounds 2 and 3 also overturned claims in the other direction, both times the
+same way. Q2's blanket "no backend exposes a per-Turn progress signal" was false
+for codex (round 2) and then false for Workbench-lane opencode (round 3), and
+each time it had been reached by reading a lossy base-session projection rather
+than the event stream that feeds it. Loosening a blocker is as much a review
+outcome as tightening a claim; the transferable part is that the check has to be
+made one level up from where the loss happens — and that naming a mistake once
+is not the same as stopping it.
 
 Question verdicts:
 
@@ -1299,31 +1334,44 @@ Question verdicts:
    premature terminal transition in the IM reservation or backend-acceptance
    path would leave them green. The premature-success claim may be closed once
    an IM-lane acceptance-boundary probe exists — not before.
-2. **Q2 — open, and it still blocks the timeout.** Codex keys a progress event
-   by Turn on both lanes and then throws the key away; claude and opencode have
-   no key at all. Codex's `item/*` notifications carry a `turnId`, and
-   `_find_request_for_notification` resolves the participating Run's request
+2. **Q2 — open, and it still blocks the timeout.** Three of six backend/lane
+   cells key a progress event by Turn and then throw the key away; the other
+   three have no key at all. Codex's `item/*` notifications carry a `turnId`,
+   and `_find_request_for_notification` resolves the participating Run's request
    from it through `get_request_for_turn`, a per-turn map — so the attribution
-   exists. It is discarded one step downstream, by `should_emit_progress`
-   gating on the single `_active_turns[base]` slot and by an activity timestamp
-   stamped per session. `mark_session_turn_started` takes a composite key and no
-   turn, and a second Turn in that key overwrites the first's baseline; opencode
-   holds one asyncio task per base session id. The plan's rule requires an exact
-   signal for every backend and lane, so a generic inactivity timeout still may
-   not be specified or implemented — but the remaining work now differs per
-   backend: codex needs its existing attribution carried through to the stamp,
-   claude and opencode need a signal that does not exist yet. The first draft of
-   this verdict read `get_active_turn(base)` and generalised from a projection.
-3. **Q3 — open, split.** Established: a Turn's accepted-run record cannot
-   discriminate between participants — a flat `accepted_agent_run_ids` list and
-   one Turn-level `source_kind` stamped by whichever Run arrived first, with no
-   per-Run source or deadline anywhere. That alone leaves Turn-level
-   cancellation nothing to consult, so per-Run timeout policy stays
-   unspecifiable. Not established: whether a cron Run and a manual CLI Run
-   actually coalesce. `_attach_accepted_agent_runs` is downstream of that
-   decision; the owner is
-   `SessionTurnManager._hydrate_delivery_batch_context`, which folds a Delivery
-   batch into one context.
+   exists on both codex lanes. It is discarded one step downstream, by
+   `should_emit_progress` gating on the single `_active_turns[base]` slot and by
+   an activity timestamp stamped per session. OpenCode's `_active_requests` is
+   likewise one asyncio task per base session — but that projection is not the
+   event stream: `run_prompt_poll` receives the exact `AgentRequest` and every
+   progress emit in it passes `request.context`, whose `turn_token`
+   `_process_message` has already read as `logical_turn_id`. That token is
+   stamped only by `core/session_turns.py` and the streaming turn dispatch, both
+   Workbench owners, so opencode has the signal on the durable lane and not on
+   direct IM. Claude has neither: `mark_session_turn_started` takes a composite
+   key and no turn, and a second Turn in that key overwrites the first's
+   baseline. The plan's rule requires an exact signal for every backend and lane,
+   so a generic inactivity timeout still may not be specified or implemented —
+   but the remaining work now differs per cell: codex (both lanes) and Workbench
+   opencode need an existing attribution carried through to the stamp, claude
+   needs a signal that does not exist, and IM opencode needs a Turn stamped into
+   its context at all. This verdict has been corrected twice, both times because
+   a base-session projection was read in place of the event stream.
+3. **Q3 — open, split, and narrower than it was.** Established: the *Turn's*
+   accepted-run record cannot discriminate between participants — a flat
+   `accepted_agent_run_ids` list and one Turn-level `source_kind` stamped by
+   whichever Run arrived first, with no per-Run source or deadline anywhere in
+   the projection. That is a statement about the projection and must not be read
+   as one about the system: each accepted id is the primary key of an
+   `agent_runs` row carrying `source_kind`, `source_actor` and `definition_id`,
+   and `run_definitions` carries `timeout_seconds` / `lifetime_timeout_seconds`.
+   The inputs exist; they are one join away and absent from the projection, so
+   the open question is whether the cancellation site performs that join — not,
+   as an earlier draft had it, that per-Run timeout policy is unspecifiable.
+   Also not established: whether a cron Run and a manual CLI Run actually
+   coalesce. `_attach_accepted_agent_runs` is downstream of that decision; the
+   owner is `SessionTurnManager._hydrate_delivery_batch_context`, which folds a
+   Delivery batch into one context.
 4. **Q4 — open, Claude only, and two of the four facts are unproven.** Four
    pre-terminal facts are named and two are established, both for Claude: the
    durable pending-output Activity batch and the `activity_local_settlement_only`
@@ -1336,6 +1384,10 @@ Question verdicts:
    rest on the Activity output batch, so for codex and opencode there is no
    proven pre-terminal evidence at all — the stronger form of Q2's gap, since an
    inactivity decision on those backends would have nothing to outrank it.
+   Q4 calling two facts *established* while every matrix cell is `unproven` is
+   not a contradiction: Q4 asks whether a pre-terminal fact is durably recorded,
+   a cell asks whether a Run admitted through a given trigger reaches a given
+   terminal outcome, and a test may settle one and not the other.
 5. **Q5 — answered, no health cursor needed.** `health`,
    `consecutive_failures` and `recent_failures` are derived per read by
    `SQLiteBackgroundTaskStore._classify_health` over the bounded verdict window
@@ -1359,7 +1411,16 @@ Reproduced defects, both on the direct-IM / agent-run lane and both owned by
   ends with is deliberately not claimed — `SETTLED_BY_BACKEND_REFRESH` is
   emitted by `SessionTurnManager.release_for_backend_refresh` on the Workbench
   lane, and nothing connects it to an IM Run. The earlier draft of this finding
-  did claim it, on the strength of two constant lookups.
+  did claim it, on the strength of two constant lookups. Round 3 changed how the
+  finding is *demonstrated*, not the finding: the race window used to be
+  postulated by the fixture and the intentional-teardown marker stamped by the
+  probe itself, so the reproducer would have kept passing — still reporting the
+  defect — the day production closed either half. The ordering is now read out
+  of `handle_message`, the five-hop chain to the marking code is asserted
+  (including the `getattr`-by-string dispatch in
+  `_cleanup_runtime_session_state`, which no call-graph check would see), and
+  the marker is produced by running the real `_cleanup_session_locked` with its
+  own `client is not None or receiver_task is not None` guard applied.
 - **PR7R-F2** (`HFR-181`) — on the codex active branch a teardown that succeeds
   after a failed `_stop_active_agent` returns `{ok: True, action: "ended"}`.
   Clearing the stale row is deliberate and stays; the payload carrying no signal
@@ -1370,29 +1431,34 @@ Reproduced defects, both on the direct-IM / agent-run lane and both owned by
   evidence.
 
 Both are characterization tests: they assert current behavior, so the
-implementation PR that fixes them must flip them. Neither is fixed here.
+implementation PR that fixes them must flip them. Neither is fixed here. Their
+matrix cells are `unproven`, not `defect`: the reproducers characterize End's
+behaviour and explicitly disclaim the Run half those cells ask about.
 
-Remaining PR7R work, in the order it closes the most cells:
+Remaining PR7R work. Round 3 collapsed the old per-area list into one shape,
+because every cell now needs the same missing thing — a Run **admitted through
+one of the four triggers** and followed **to its own terminal settlement**. The
+ordering is by how many cells one harness closes:
 
-1. The **per-backend terminal-path probe** for codex and opencode — which
-   durable fact, if any, a pending output or a failed local settlement leaves on
-   their Runs (32 cells, and it also settles Q4).
-2. The **direct-IM lane probes**: `failure`, `resultless_termination` and
-   `terminal_persistence_failure` driven from a real backend dispatch with an
-   IM-scoped Harness Run bound to the turn (36 cells, and `failure` plus the
-   acceptance boundary settle Q1).
-3. The **durable-lane Run-bound probes** the second round opened: a real
-   `SessionTurnManager.cancel` with an attached Run (12 cells), a prewrite
-   failure with a Run bound to the Delivery (12 cells), and per-trigger
-   admission for resultless termination (12 cells).
-4. The **watch terminal-half probes** on both lanes — does a firing settle its
-   Run and re-arm the next cycle (6 cells) — and a successful one-shot `at`
-   firing driven to terminal (3 cells).
-5. The **opencode End live-state probe** (4 cells).
-6. The **four remaining Q2 exact-signal probes** in
-   `EXACT_TURN_PROGRESS_SIGNALS` (codex is now covered on both lanes), the Q3
-   admission drive through `_hydrate_delivery_batch_context`, and Q4's
-   terminal-result latch probe.
+1. A **trigger-admission harness**: fire each of `scheduler_cron`,
+   `scheduler_at`, `manual_cli` and `watch` for real and hold on to the
+   `agent_runs` row it creates. Every cell in the matrix is downstream of this,
+   and none of the existing settlement tests have it — they admit through
+   `enqueue_agent_run`, which is not a trigger.
+2. Drive that Run to each of the seven **outcomes** on the **durable Workbench**
+   lane (84 cells), reusing the existing settlement machinery now that the
+   admission is real.
+3. Repeat on the **direct-IM** lane (84 cells), which additionally needs an
+   IM-scoped Harness Run bound to the turn — the thing PR7R-F1/F2 could not
+   observe, and what settles Q1's acceptance boundary.
+4. **Per-backend** overrides for codex and opencode wherever step 2 or 3 shows
+   the answer differs: the pending-output and local-settlement rows are
+   Claude-only in production today, which is also what Q4 turns on.
+5. The **three remaining Q2 exact-signal probes** in
+   `EXACT_TURN_PROGRESS_SIGNALS` — claude on both lanes and opencode on direct
+   IM — plus the Q3 admission drive through
+   `_hydrate_delivery_batch_context`, whether the cancellation site joins
+   `agent_runs`/`run_definitions`, and Q4's terminal-result latch probe.
 
 ### After PR7R — close the claim or review the contract
 

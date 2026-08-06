@@ -2737,12 +2737,12 @@ scenarios:
     backend: shared
     test: tests/test_run_terminal_truth_evidence_probes.py::test_the_accepted_run_batch_records_no_per_run_source_or_deadline
   - id: HFR-183
-    name: only codex attributes a progress event to an exact Turn
+    name: which backends attribute a progress event to an exact Turn
     status: covered
     kind: safety
     layer: contract
     backend: shared
-    test: tests/test_run_terminal_truth_evidence_probes.py::test_only_codex_attributes_a_progress_event_to_an_exact_turn
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_which_backends_attribute_a_progress_event_to_an_exact_turn
   - id: HFR-184
     name: every run terminal truth cell is proven or named as a gap
     status: covered

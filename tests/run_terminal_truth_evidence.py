@@ -83,6 +83,12 @@ def shared_owner(reason_and_node: str) -> tuple[str, str]:
     consuming test, separated by ``" -- "``. The guard splits on that marker
     and resolves the right-hand side as a node id, so a ``shared`` claim
     without a real test is as loud as a missing cell.
+
+    NO CELL USES THIS, and that is itself a result. Both former users argued
+    "the owner is backend-independent, so one test covers all three" while
+    citing a test that never drove a backend at all -- the argument was doing
+    the work the evidence was supposed to do. The vocabulary stays because a
+    genuine shared-owner proof is possible; none exists on master today.
     """
 
     return "shared", reason_and_node
@@ -197,7 +203,7 @@ _F2 = (
 )
 _Q2_SIGNALS = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
-    "test_only_codex_attributes_a_progress_event_to_an_exact_turn"
+    "test_which_backends_attribute_a_progress_event_to_an_exact_turn"
 )
 _Q3_PROBE = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
@@ -214,16 +220,6 @@ _Q3_PROBE = (
 #: Reading order is the durable chain from the plan: a ``covered``/``shared``
 #: cell means that chain is traced end to end by the named test, NOT merely
 #: that the outcome is reachable.
-
-_SHARED_TERMINAL_LATCH = (
-    "the terminal-result latch and Run settlement are owned by "
-    "SessionTurnManager / the run settlement writers, which never branch on "
-    "backend -- " + _NONTERMINAL_UNTIL_SETTLED
-)
-_SHARED_DEFINITION_PROJECTION = (
-    "definition health/last_run_at/last_error is one CAS-guarded write in the "
-    "same terminal transition, identical for every backend -- " + _DEFINITION_CAS
-)
 
 #: The Activity output batch is not a backend-independent mechanism. Every test
 #: that proves a pending-output or post-delivery local-settlement fact starts a
@@ -255,9 +251,71 @@ _NON_CLAUDE_LOCAL_SETTLEMENT: Final = {
     for backend in ("codex", "opencode")
 }
 
+#: Claude's half of the same two outcomes. Round 3 separated two failures that
+#: the old ``covered`` collapsed into one. ``_PENDING_OUTPUT`` really does trace
+#: a Run: a real ``TaskExecutionStore`` row, a real ``defer_run_terminal``, a
+#: real recovery drain, and a terminal ``succeeded`` at the end -- but it is
+#: admitted by ``enqueue_agent_run``, so it says nothing about the trigger the
+#: cell is indexed by. The three local-settlement citations are weaker still:
+#: every one of them passes a bare ``run_id`` string to a MOCK run store, so no
+#: ``agent_runs`` row exists in any of them and the retry they prove belongs to
+#: the Activity registry, not to a Run.
+_CLAUDE_ACTIVITY_PENDING: Final = unproven(
+    "the cited test traces a real Run to a terminal ``succeeded`` through the "
+    "recovery drain, but admits it with ``enqueue_agent_run`` -- not one of "
+    "the four TRIGGERS -- so the trigger this cell is indexed by is untraced. "
+    "Probe: owe an output on a Run admitted through THIS trigger and assert "
+    "the deferred terminal still settles once after restart -- "
+    + _PENDING_OUTPUT
+    + " covers the agent-run admission only."
+)
+_CLAUDE_ACTIVITY_LOCAL_SETTLEMENT: Final = unproven(
+    "the cited retry evidence carries no Harness Run: it hands a bare run-id "
+    "string to a stubbed run store, so what it proves is the Activity "
+    "registry's requeue policy. Probe: bind a real Run admitted through THIS "
+    "trigger to the owed output, fail local settlement once, and assert the "
+    "Run settles exactly once without re-delivering."
+)
+
 _DURABLE_BY_OUTCOME: Final = {
-    "success": {"shared": covered(_TERMINAL_SUCCESS)},
-    "failure": {"shared": covered(_TERMINAL_FAILURE)},
+    # Same defect as ``resultless_termination`` below, in the cell round 2
+    # walked straight past: ``_TERMINAL_SUCCESS`` enqueues with
+    # ``request_store.enqueue_agent_run(...)``. It is a thorough test of the
+    # callback/persistence chain and it settles a real Run -- but through
+    # ``vibe agent run``, which is deliberately NOT one of ``TRIGGERS``. A cron,
+    # ``at``, CLI-task or watch fire that never attached its run id to the Turn
+    # it submits would leave it green.
+    "success": {
+        "shared": unproven(
+            "the cited test admits its Run through ``enqueue_agent_run`` "
+            "(``vibe agent run``), which is not one of the four TRIGGERS. "
+            "Probe: fire THIS trigger, let the backend return a real terminal "
+            "result, and assert the run id reached the Turn context and the "
+            "Run row reached ``succeeded`` -- "
+            + _TERMINAL_SUCCESS
+            + " covers the agent-run admission only."
+        ),
+    },
+    # ``_TERMINAL_FAILURE`` is a STORAGE test and nothing more. It drives all
+    # five terminal writers directly -- ``record_run_output``,
+    # ``settle_run_terminal`` via a claimed completion, ``settle_deferred_run``,
+    # the coalesced completer -- with rows enqueued by ``enqueue_hook_send`` and
+    # ``enqueue_agent_run``. The property it pins is real and valuable ("any
+    # UPDATE that sets a terminal failure status stamps an owed notice, so a
+    # writer added later inherits it"), and it is the wrong property for this
+    # cell: no backend runs, no trigger admits, and nothing shows a failing turn
+    # ever REACHES one of those writers.
+    "failure": {
+        "shared": unproven(
+            "the cited test invokes the five terminal storage writers directly "
+            "with hook-send/agent-run rows; no backend fails and no trigger "
+            "admits. Probe: fail a turn on this backend under a Run admitted "
+            "through THIS trigger and assert the Run reaches a terminal "
+            "failure status with the owed notice attached -- "
+            + _TERMINAL_FAILURE
+            + " covers the writer property only."
+        ),
+    },
     # The settlement half IS traced end to end: the cited test drives a real
     # ``SessionTurnManager``, a real ``TaskExecutionStore``, and asserts the Run
     # reaches ``canceled`` with ``interrupt_reason='stopped'``. What it does not
@@ -313,17 +371,34 @@ _DURABLE_BY_OUTCOME: Final = {
         ),
     },
     "pending_output_delivery": {
-        "shared": covered(_PENDING_OUTPUT),
+        "shared": _CLAUDE_ACTIVITY_PENDING,
         "per_backend": dict(_NON_CLAUDE_ACTIVITY),
     },
     "post_delivery_local_settlement_failure": {
-        "shared": covered(_LOCAL_SETTLEMENT_DURABLE),
+        "shared": _CLAUDE_ACTIVITY_LOCAL_SETTLEMENT,
         "per_backend": dict(_NON_CLAUDE_LOCAL_SETTLEMENT),
     },
 }
 
 _IM_BY_OUTCOME: Final = {
-    "success": {"shared": shared_owner(_SHARED_TERMINAL_LATCH)},
+    # ``_DEFINITION_CAS`` used to carry this as a shared-owner argument
+    # ("definition health is one CAS-guarded write, identical for every
+    # backend"). The argument is sound and the citation does not support it:
+    # the test creates only an ``at`` definition, its scheduled handler blocks
+    # forever so no backend ever returns, and its natural-terminal branch calls
+    # ``store.mark_task_result`` and ``request_store.complete`` by hand. It is
+    # excellent evidence for Q5's projection question and no evidence at all
+    # that a backend terminal success reaches a Run on this lane.
+    "success": {
+        "shared": unproven(
+            "no cited test drives a backend to a terminal success with an "
+            "IM-scoped Harness Run bound to it; the projection evidence hand-"
+            "calls ``mark_task_result``/``complete`` behind a handler that "
+            "never returns. Probe: fire THIS trigger on this backend, let the "
+            "receiver emit a real terminal result, and assert the Run row "
+            "reaches ``succeeded`` and the definition projection follows it."
+        ),
+    },
     "failure": {
         # ``_TERMINAL_FAILURE`` is a STORAGE test: it drives the five terminal
         # writers directly and proves the owed-notice stamp is keyed on the
@@ -348,11 +423,47 @@ _IM_BY_OUTCOME: Final = {
             "the turn and assert the Run row reaches a terminal status."
         ),
     },
+    # These four cells were ``defect`` until round 3, and the classification was
+    # not survivable. ``defect`` means "current master is wrong HERE and a
+    # characterization test pins what it does" -- here being a Run's terminal
+    # truth. But round 2 narrowed both reproducers precisely because neither
+    # builds a Run: F1 stops at the skipped canonical stop, F2 at the
+    # synthesized ``ended`` payload, and both now SAY so in their docstrings.
+    # A cell cannot claim the reproducer characterizes what the reproducer
+    # explicitly disclaims. ``defect`` is also excluded from ``UNPROVEN_BUDGET``,
+    # so the misclassification was hiding eight cells from the gap count -- the
+    # same accounting failure as a wrong ``covered``, one vocabulary word over.
+    # The findings stay; they are service findings against
+    # ``running_agents.py``, and they are named here so the guard still ties
+    # each one to the matrix.
     "user_stop": {
-        "shared": covered(_END_IM),
+        "shared": unproven(
+            "the cited End test asserts which BRANCH End takes, not what any "
+            "Run receives; no IM-scoped Run is bound in it. Probe: End an "
+            "IM-scoped turn that owns a real Harness Run and assert the "
+            "settlement the Run row actually reaches -- "
+            + _END_IM
+            + " covers the canonical-stop dispatch only."
+        ),
         "per_backend": {
-            "claude": defect("PR7R-F1 -- " + _F1),
-            "codex": defect("PR7R-F2 -- " + _F2),
+            "claude": unproven(
+                "PR7R-F1 characterizes the skipped canonical stop and the "
+                "intentional-teardown reclassification, and claims nothing "
+                "about the Run -- the reproducer builds no ``agent_runs`` row. "
+                "Probe: bind an IM-scoped Run to the racing turn and record "
+                "the status it settles to, if any -- "
+                + _F1
+                + " covers End's branch and the misclassification only."
+            ),
+            "codex": unproven(
+                "PR7R-F2 characterizes the ``ok/ended`` payload synthesized "
+                "after a FAILED stop, and claims nothing about the Run -- the "
+                "reproducer builds only the codex session and turn registries. "
+                "Probe: bind an IM-scoped Run to that turn and record whether "
+                "anything settles it after the interrupt fails -- "
+                + _F2
+                + " covers the response payload only."
+            ),
             "opencode": unproven(
                 "``_resolve_live_state`` reads ``agent._active_requests[base]`` "
                 "and calls a missing entry ``idle``. Probe: End an opencode row "
@@ -370,11 +481,28 @@ _IM_BY_OUTCOME: Final = {
         ),
     },
     "pending_output_delivery": {
-        "shared": covered(_LOCAL_SETTLEMENT_EVIDENCE),
+        "shared": unproven(
+            "the cited evidence is a ``SessionActivityRegistry`` unit built on "
+            "a ``mock.Mock`` store with a bare ``run_id`` string; it proves the "
+            "requeue-and-retry policy, not that any Run owes an output. Probe: "
+            "bind a real IM-scoped Run admitted through THIS trigger to an owed "
+            "output and assert the Run stays nonterminal until it lands -- "
+            + _LOCAL_SETTLEMENT_EVIDENCE
+            + " covers the registry policy only."
+        ),
         "per_backend": dict(_NON_CLAUDE_ACTIVITY),
     },
     "post_delivery_local_settlement_failure": {
-        "shared": covered(_LOCAL_SETTLEMENT_IM),
+        "shared": unproven(
+            "the cited test patches ``SQLiteBackgroundTaskStore`` with a stub "
+            "whose ``record_run_output`` always raises, against a bare "
+            "``run_id`` string; no ``agent_runs`` row exists to be settled. "
+            "Probe: bind a real IM-scoped Run admitted through THIS trigger, "
+            "fail local settlement once, and assert the Run settles exactly "
+            "once with no re-delivery -- "
+            + _LOCAL_SETTLEMENT_IM
+            + " covers the in-process retry policy only."
+        ),
         "per_backend": dict(_NON_CLAUDE_LOCAL_SETTLEMENT),
     },
 }
@@ -435,14 +563,29 @@ _TRIGGER_OVERRIDES: Final = {
             ),
         },
     },
+    # The one direct-IM cell whose citation at least has the right trigger:
+    # ``_DEFINITION_CAS`` really does admit through ``enqueue_task_run`` with
+    # ``source_kind='scheduler'`` on an ``at`` definition and really does drive
+    # ``_drain_requests``. Kept separate from the lane default because what is
+    # missing here is narrower -- only the backend terminal result -- and so is
+    # the probe that would close it. The cron and manual-CLI cells that used to
+    # cite the same test have no such excuse and now fall through to the lane
+    # default: an ``at`` definition is not a cron definition, and
+    # ``source_kind='scheduler'`` is not ``vibe task run``.
     ("direct_im", "scheduler_at"): {
-        "success": {"shared": shared_owner(_SHARED_DEFINITION_PROJECTION)},
-    },
-    ("direct_im", "scheduler_cron"): {
-        "success": {"shared": shared_owner(_SHARED_DEFINITION_PROJECTION)},
-    },
-    ("direct_im", "manual_cli"): {
-        "success": {"shared": shared_owner(_SHARED_DEFINITION_PROJECTION)},
+        "success": {
+            "shared": unproven(
+                "the cited test admits a real ``at`` Run through "
+                "``enqueue_task_run`` and drains it, then hand-settles the "
+                "natural-terminal branch with ``mark_task_result`` and "
+                "``complete`` behind a handler that never returns -- the "
+                "admission is this trigger's, the terminal result is nobody's. "
+                "Probe: let the backend emit the terminal result instead of "
+                "hand-calling it -- "
+                + _DEFINITION_CAS
+                + " covers admission and projection only."
+            ),
+        },
     },
 }
 
@@ -484,7 +627,27 @@ RUN_TERMINAL_TRUTH_MATRIX: Final = _build_matrix()
 #: (12). Two rounds of this is the finding: the guard checks that a citation
 #: RESOLVES, and nothing mechanical can check that it is ABOUT the cell. The
 #: number going up twice is the unit working, not the unit failing.
-UNPROVEN_BUDGET: Final = 117
+#:
+#: A third round took it 117 -> 168, i.e. to every cell, and the reason it went
+#: all the way is worth stating plainly rather than softening. Round 2 fixed
+#: four cells one at a time. Round 3 asked the same question of the REMAINING
+#: cells as a class and got one answer for all of them: **no test on master
+#: traces a Run from a trigger's admission through to that Run's terminal
+#: settlement.** Every surviving citation proved a segment -- storage writers in
+#: isolation (12), a projection whose backend never returns (9), an Activity
+#: registry holding a bare run-id string against a mock store (16), a terminal
+#: chain admitted by ``vibe agent run`` (10), and two End reproducers filed as
+#: ``defect`` for a Run half they explicitly disclaim (8, and ``defect`` is
+#: excluded from this budget, so that spelling was hiding them).
+#:
+#: An all-unproven matrix is an uncomfortable result and it is the correct one.
+#: What PR7R was asked to produce is a true statement about current master, and
+#: the true statement is that run-terminal-truth has segment coverage, not
+#: end-to-end coverage, on every backend/lane/trigger/outcome. The unit's value
+#: is not the count: it is 168 named probes, each saying which segment exists
+#: and which is missing, plus two findings and five question verdicts. A matrix
+#: that had reported 34 green cells would have been more comfortable and wrong.
+UNPROVEN_BUDGET: Final = 168
 
 
 # ----- Q2: exact-Turn progress attribution ---------------------------------
@@ -518,12 +681,26 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # than not having it.
     ("codex", "durable_workbench"): covered(_Q2_SIGNALS),
     ("codex", "direct_im"): covered(_Q2_SIGNALS),
-    ("opencode", "durable_workbench"): unproven(
-        "``_active_requests[base]`` is one asyncio task per base session with no "
-        "per-Turn identity. Probe: assert whether the poller reports progress "
-        "bound to a Turn or only to the session."
+    # OpenCode was read the same wrong way as codex, one round later, and for
+    # the same reason: ``_active_requests[base]`` is a LIVENESS map -- one
+    # asyncio task per base session -- and reading a lossy projection told us
+    # nothing about the event stream. ``OpenCodePollLoop.run_prompt_poll``
+    # receives the exact ``AgentRequest`` and emits every tool call and
+    # assistant message with ``request.context``, and ``_process_message``
+    # reads that same context's ``turn_token`` as ``logical_turn_id`` before
+    # polling starts. So each progress emit carries its own Turn's token.
+    ("opencode", "durable_workbench"): covered(_Q2_SIGNALS),
+    # ...but only where a token exists. ``turn_token`` is stamped by
+    # ``SessionTurnManager`` and by ``core/services/dispatch.py``'s streaming
+    # turn dispatch -- both Workbench-lane owners. Nothing stamps one on a
+    # plain IM message, so ``logical_turn_id`` is ``""`` there and the emit
+    # carries no Turn to attribute against.
+    ("opencode", "direct_im"): unproven(
+        "the poll loop's emits carry ``request.context``, but nothing stamps a "
+        "``turn_token`` into an IM context, so ``logical_turn_id`` is empty on "
+        "this lane. Probe: drive an IM-scoped opencode turn and assert whether "
+        "any emitted progress event carries a Turn identifier at all."
     ),
-    ("opencode", "direct_im"): unproven("same task map as above -- same probe."),
 }
 
 
@@ -561,24 +738,31 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "Codex can, on both lanes; Claude and OpenCode cannot, on either. "
-            "This corrects an earlier blanket 'no backend exposes one', which "
-            "was reached by reading only the base-session projection each "
-            "backend stamps. Codex's ``item/*`` notifications carry a "
-            "``turnId`` and ``_find_request_for_notification`` resolves the "
-            "participating Run's request from it, so the event IS attributable "
-            "to an exact Turn -- the attribution is then discarded by "
-            "``should_emit_progress``, which gates on the single "
-            "``_active_turns[base]`` slot, and by an activity timestamp stamped "
-            "per session. Claude's ``mark_session_turn_started`` takes a "
-            "composite key and no Turn, and OpenCode holds one asyncio task per "
-            "base session; neither event stream names a Turn at all. The plan's "
-            "rule still bites: it requires an exact signal for EVERY backend "
-            "and lane before a generic inactivity timeout, and two of three "
-            "backends have none. What changes is the shape of the work -- codex "
-            "needs its existing attribution carried through to the stamp, not a "
-            "new signal invented. See ``EXACT_TURN_PROGRESS_SIGNALS`` for the "
-            "four remaining cells and their probes."
+            "Three of six cells can, and the same reading error produced both "
+            "corrections. The original blanket 'no backend exposes one' was "
+            "reached by reading each backend's base-session PROJECTION -- "
+            "``_active_turns[base]`` for codex, ``_active_requests[base]`` for "
+            "opencode -- and concluding from a lossy liveness map that the "
+            "event stream carried nothing. It does. Codex's ``item/*`` "
+            "notifications carry a ``turnId`` and "
+            "``_find_request_for_notification`` resolves the participating "
+            "Run's request from it, on both lanes. OpenCode's poll loop is "
+            "handed the exact ``AgentRequest`` and emits every tool call and "
+            "assistant message with ``request.context``, whose ``turn_token`` "
+            "``_process_message`` has already read as ``logical_turn_id`` -- "
+            "but only on the Workbench lane, because nothing stamps a "
+            "``turn_token`` onto a plain IM context. Claude has none on either "
+            "lane: ``mark_session_turn_started`` takes a composite key and no "
+            "Turn. So the attribution EXISTS for codex on both lanes and for "
+            "opencode on the Workbench lane, and in every one of those three it "
+            "is discarded downstream -- codex at ``should_emit_progress``, "
+            "which gates on the single ``_active_turns[base]`` slot, and both "
+            "at a per-session activity timestamp. The plan's rule still bites: "
+            "an exact signal is required for EVERY backend and lane before a "
+            "generic inactivity timeout, and three cells still have none. What "
+            "changed is the shape of the work -- for two backends the "
+            "attribution must be carried through to the stamp, not invented. "
+            "See ``EXACT_TURN_PROGRESS_SIGNALS`` for the three remaining cells."
         ),
         "evidence": (_Q2_SIGNALS,),
     },
@@ -589,12 +773,24 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "Partly. What IS established: once several Runs are attributed to "
-            "one Turn, the Turn records only a flat ``accepted_agent_run_ids`` "
-            "list -- no per-Run source, no per-Run deadline -- so a Turn-level "
-            "cancellation has nothing to consult that would let it treat them "
-            "differently. That alone blocks a per-Run timeout policy. What is "
-            "NOT established is the admission half: whether a scheduler Run and "
+            "Partly. What IS established, and NARROWED in round 3 to what the "
+            "probe actually reaches: once several Runs are attributed to one "
+            "Turn, the Turn's own CONTEXT PROJECTION records only a flat "
+            "``accepted_agent_run_ids`` list plus one Turn-level "
+            "``source_kind`` stamped by whichever participant arrived first -- "
+            "no per-Run source, no per-Run deadline. An earlier draft went on "
+            "to conclude that a per-Run timeout policy is therefore "
+            "unspecifiable, and that was an over-claim: each accepted id is the "
+            "primary key of an ``agent_runs`` row carrying ``source_kind``, "
+            "``source_actor`` and ``definition_id``, and the definition it "
+            "points at carries the timeout fields. The inputs exist; they are "
+            "one join away and absent from the projection. What that makes "
+            "unproven is a different and narrower thing -- whether the "
+            "cancellation site can perform that join, and whether the values "
+            "are stable enough to decide on -- and neither is tested. Probe: "
+            "drive a Turn-level cancellation over a mixed batch and record "
+            "whether it reads ``agent_runs`` at all. What is also NOT "
+            "established is the admission half: whether a scheduler Run and "
             "a manual CLI Run actually coalesce. The probe drives the "
             "accumulator, and the accumulator is downstream of the decision -- "
             "it appends ids already attributed to its Turn. The owner that "
@@ -636,7 +832,17 @@ PR7R_QUESTIONS: Final = {
             "nothing to outrank it. Probes: (1) the per-backend one named in the "
             "``pending_output_delivery`` cells; (2) latch a terminal result on a "
             "Turn that owns a Run, then drive an inactivity decision against it "
-            "and assert the latch outranks it."
+            "and assert the latch outranks it. "
+            "One apparent contradiction is deliberate and worth spelling out: "
+            "round 3 marked every ``pending_output_delivery`` and "
+            "``post_delivery_local_settlement_failure`` matrix cell "
+            "``unproven`` while this answer still calls two of those facts "
+            "established. Both are true because they are different questions. "
+            "Q4 asks what pre-terminal evidence a TURN carries, and "
+            "``_PENDING_OUTPUT`` answers it on a real Run. The matrix cell asks "
+            "whether THIS TRIGGER's Run reaches that evidence, and the same "
+            "test cannot answer that, because it admits through "
+            "``enqueue_agent_run``. A test may settle one and not the other."
         ),
         "evidence": (
             _PENDING_OUTPUT,
