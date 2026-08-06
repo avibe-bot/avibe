@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -29,6 +30,9 @@ from storage.models import (
 TURN_OWNER_STATES = ("starting", "active")
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
+_ATTEMPT_ID_LOCK = threading.Lock()
+_ATTEMPT_ID_WALL_MS = -1
+_ATTEMPT_ID_SLOT = -1
 
 
 def utc_now_iso() -> str:
@@ -50,10 +54,21 @@ def new_delivery_id() -> str:
 
 
 def new_attempt_id() -> str:
-    # Keep the leading order key compatible with timestamp-first native IDs.
-    # The zeroed low bits leave room for a native assistant created in the same
-    # millisecond to sort after this user-message attempt.
-    order_key = (int(time.time() * 1_000) * 0x1000) & ((1 << 48) - 1)
+    # Reserve the preceding millisecond for Avibe-authored user messages. This
+    # leaves the current native millisecond free for OpenCode's assistant ID,
+    # while the slot preserves FIFO order between rapid durable attempts.
+    global _ATTEMPT_ID_SLOT, _ATTEMPT_ID_WALL_MS
+
+    wall_ms = int(time.time() * 1_000)
+    with _ATTEMPT_ID_LOCK:
+        if wall_ms != _ATTEMPT_ID_WALL_MS:
+            _ATTEMPT_ID_WALL_MS = wall_ms
+            _ATTEMPT_ID_SLOT = 0
+        else:
+            _ATTEMPT_ID_SLOT += 1
+        if _ATTEMPT_ID_SLOT > 0xFFF:
+            raise RuntimeError("durable attempt ID slots exhausted for one millisecond")
+        order_key = (((wall_ms - 1) * 0x1000) + _ATTEMPT_ID_SLOT) & ((1 << 48) - 1)
     return f"atm_{order_key:012x}{uuid.uuid4().hex[:14]}"
 
 

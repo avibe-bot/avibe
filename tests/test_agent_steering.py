@@ -1496,6 +1496,57 @@ async def test_opencode_accepted_prompt_waits_for_delayed_busy_registration() ->
 
 
 @pytest.mark.anyio
+async def test_opencode_idle_waits_for_delayed_terminal_message_visibility() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+
+    class _DelayedFinalServer(_OpenCodeServer):
+        async def list_messages(self, session_id: str, directory: str) -> list[dict]:
+            if self.list_calls == 2:
+                self.messages.append(
+                    {
+                        "info": {
+                            "id": "follow-up-assistant",
+                            "role": "assistant",
+                            "time": {"completed": 2},
+                            "finish": "stop",
+                        },
+                        "parts": [{"type": "text", "text": "answered"}],
+                    }
+                )
+            return await super().list_messages(session_id, directory)
+
+    server = _DelayedFinalServer(
+        messages=[
+            {
+                "info": {"id": "follow-up-user", "role": "user"},
+                "parts": [{"type": "text", "text": "follow-up"}],
+            }
+        ],
+        status_responses=[{"type": "busy"}, {"type": "idle"}, {"type": "idle"}],
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = set()
+    state.awaiting_user_text = "follow-up"
+    state.awaiting_start_confirmation_deadline = time.monotonic() - 1
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        messages = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        assert messages[-1]["info"]["id"] == "follow-up-assistant"
+        assert state.terminal_status_failure_messages is None
+        assert state.awaiting_after_message_ids is None
+        assert state.closing is True
+        assert server.list_calls == 3
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
 async def test_opencode_accepted_prompt_idle_start_timeout_is_terminal() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()

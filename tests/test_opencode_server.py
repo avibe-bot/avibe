@@ -493,17 +493,29 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_durable_attempt_maps_between_surrounding_native_messages(self):
+        """MESSAGE-DELIVERY-021: durable attempts preserve native message order."""
         timestamp_ms = 1_775_630_400_000
         with patch.object(delivery_store.time, "time", return_value=timestamp_ms / 1000):
-            attempt_id = delivery_store.new_attempt_id()
+            first_attempt_id = delivery_store.new_attempt_id()
+            second_attempt_id = delivery_store.new_attempt_id()
 
-        native_message_id = SERVER_MODULE.native_message_id_for_attempt(attempt_id)
-        previous_order = ((timestamp_ms - 1) * 0x1000) & ((1 << 48) - 1)
-        next_order = (timestamp_ms * 0x1000 + 1) & ((1 << 48) - 1)
+        first_native_message_id = SERVER_MODULE.native_message_id_for_attempt(
+            first_attempt_id
+        )
+        second_native_message_id = SERVER_MODULE.native_message_id_for_attempt(
+            second_attempt_id
+        )
+        previous_order = ((timestamp_ms - 2) * 0x1000 + 0xFFF) & ((1 << 48) - 1)
+        next_order = (timestamp_ms * 0x1000) & ((1 << 48) - 1)
 
-        self.assertRegex(native_message_id, r"^msg_[0-9a-f]{26}$")
-        self.assertLess(f"msg_{previous_order:012x}{'z' * 14}", native_message_id)
-        self.assertLess(native_message_id, f"msg_{next_order:012x}{'0' * 14}")
+        self.assertRegex(first_native_message_id, r"^msg_[0-9a-f]{26}$")
+        self.assertLess(
+            f"msg_{previous_order:012x}{'z' * 14}", first_native_message_id
+        )
+        self.assertLess(first_native_message_id, second_native_message_id)
+        self.assertLess(
+            second_native_message_id, f"msg_{next_order:012x}{'0' * 14}"
+        )
 
     def test_legacy_random_attempt_identity_is_rejected(self):
         with self.assertRaises(ValueError):
