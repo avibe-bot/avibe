@@ -180,15 +180,27 @@ turn ends because you armed a watch and are waiting, say exactly that.
   account for those events in the cursor plan.
 - The one-watch invariant is scoped by owner and concern: one live lane/fix
   watch per PR, plus one independent orchestrator gate watch when the work is
-  delegated. Verify the watch name, target session, command, and `--pr <N>`
-  together with `vibe watch show` and a live `wait_pr.py` process; never count
-  unrelated global monitors as the lane watch.
+  delegated. Give each concern its own cursor path, for example
+  `<tmp>/pr-<N>-lane.json` and `<tmp>/pr-<N>-gate.json`; never share a natural
+  per-PR cursor file across concurrent watches. Verify the watch name, target
+  session, command, cursor path, and `--pr <N>` together with `vibe watch show`
+  and a live `wait_pr.py` process; never count unrelated global monitors as the
+  lane watch.
 - Before each push, snapshot all current activity cursors with
   `wait_pr.py --snapshot-cursors --cursor-file <file>`; after the push, pass
-  that file to the newly armed waiter as both `--cursor-file <file>` and
-  `--cursor-output <file>` so consumed events are persisted before any re-arm.
-  The bundled waiter also defaults cursor progress to `--cursor-file` when no
-  separate output path is supplied.
+  that file to the newly armed waiter as `--cursor-file <file>`; its detected
+  progress is staged in `<file>.pending`, not committed over the baseline.
+  After the follow-up has received and handled the event, re-arm with
+  `--ack-cursor-file <file>` to promote that staged progress. This makes a
+  crash between waiter output and follow-up delivery replay the event instead
+  of losing it. `--cursor-output <file>` is only needed when the staged path
+  should be different from the cursor input path.
+- The same saved-cursor and staged-ack protocol applies to `--new-prs`: read
+  `pr_cursor` from the cursor file and persist it only after explicit delivery
+  acknowledgement.
+- `wait_pr.py` settles a detected PR batch with two short follow-up polls before
+  returning, so a Codex review envelope and its inline comments are delivered
+  together when GitHub writes them in separate API requests.
 - Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
   settled: your own thread resolutions count as "review activity" to a watch
   armed earlier in the round, so it self-consumes on YOUR close-out actions and

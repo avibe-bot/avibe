@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -323,8 +325,7 @@ def _write_cursor_output(
         "reaction_cursor": reaction_cursor,
         "pr_status": pr_status,
     }
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle)
+    _write_staged_json(path, payload)
 
 
 def _read_cursor_input(path: str | None) -> dict[str, Any]:
@@ -338,12 +339,89 @@ def _read_cursor_input(path: str | None) -> dict[str, Any]:
     return payload
 
 
+def _staged_cursor_path(path: str) -> str:
+    return f"{path}.pending"
+
+
+def _write_staged_json(path: str, payload: dict[str, Any]) -> None:
+    """Stage progress so a follow-up can acknowledge delivery before promotion."""
+    _write_json_atomically(_staged_cursor_path(path), payload)
+
+
+def _write_json_atomically(path: str, payload: dict[str, Any]) -> None:
+    directory = os.path.dirname(path) or "."
+    prefix = f".{os.path.basename(path)}."
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=directory, prefix=prefix, delete=False
+    ) as handle:
+        json.dump(payload, handle)
+        temporary_path = handle.name
+    os.replace(temporary_path, path)
+
+
+def _promote_staged_cursor(path: str | None) -> None:
+    if not path:
+        return
+    staged_path = _staged_cursor_path(path)
+    if os.path.exists(staged_path):
+        os.replace(staged_path, path)
+
+
 def _write_new_pr_cursor_output(path: str | None, *, pr_cursor: int) -> None:
     if not path:
         return
 
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump({"pr_cursor": pr_cursor}, handle)
+    _write_staged_json(path, {"pr_cursor": pr_cursor})
+
+
+def _settle_activity(
+    *,
+    repo: str,
+    pr_number: int,
+    token: str | None,
+    initial_output: str,
+    state: dict[str, list[dict[str, Any]]],
+    review_cursor: int,
+    review_comment_cursor: int,
+    issue_comment_cursor: int,
+    reaction_cursor: int,
+    pr_status: str,
+    event_limit: int,
+    viewer_login: str | None,
+    ignore_self_comments: bool,
+) -> tuple[str, int, int, int, int, str]:
+    """Collect a short burst of review envelope and inline-comment writes."""
+    outputs = [initial_output]
+    for _ in range(2):
+        time.sleep(2)
+        try:
+            state, _request_count = _fetch_state(repo, pr_number, token)
+        except urllib.error.HTTPError as err:
+            print(f"GitHub API error during review settling: {err.code} {err.reason}", file=sys.stderr)
+            break
+        except Exception as err:  # noqa: BLE001
+            print(f"Review settling failed: {err}", file=sys.stderr)
+            break
+
+        output, review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status = (
+            _render_activity(
+                repo=repo,
+                pr_number=pr_number,
+                state=state,
+                review_cursor=review_cursor,
+                review_comment_cursor=review_comment_cursor,
+                issue_comment_cursor=issue_comment_cursor,
+                reaction_cursor=reaction_cursor,
+                pr_status=pr_status,
+                event_limit=event_limit,
+                viewer_login=viewer_login,
+                ignore_self_comments=ignore_self_comments,
+            )
+        )
+        if output is not None:
+            outputs.append(output)
+
+    return "\n\n".join(outputs), review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status
 
 
 def main() -> int:
@@ -368,6 +446,10 @@ def main() -> int:
     parser.add_argument(
         "--cursor-output",
         help="Write consumed activity cursors here when the waiter detects an event",
+    )
+    parser.add_argument(
+        "--ack-cursor-file",
+        help="Promote the previous staged cursor after its event was delivered and handled",
     )
     parser.add_argument(
         "--cursor-file",
@@ -398,9 +480,17 @@ def main() -> int:
     if args.snapshot_cursors and args.new_prs:
         parser.error("--snapshot-cursors requires --pr")
 
+    try:
+        _promote_staged_cursor(args.ack_cursor_file)
+    except OSError as err:
+        print(f"Failed to acknowledge staged cursor: {err}", file=sys.stderr)
+        return 1
+
     token = get_token()
-    viewer_login = None if args.include_self_comments else get_authenticated_login(token)
-    if token is not None and not args.include_self_comments and viewer_login is None:
+    viewer_login = (
+        get_authenticated_login(token) if args.pr is not None and not args.include_self_comments else None
+    )
+    if token is not None and args.pr is not None and not args.include_self_comments and viewer_login is None:
         print(
             "Unable to resolve the authenticated GitHub viewer identity; "
             "use a token that can read /user or pass --include-self-comments explicitly.",
@@ -482,8 +572,7 @@ def main() -> int:
                 "reaction_cursor": max_id(state["reactions"]),
                 "pr_status": _current_pr_status(state.get("pull_request")),
             }
-            with open(cursor_path, "w", encoding="utf-8") as handle:
-                json.dump(snapshot, handle)
+            _write_json_atomically(cursor_path, snapshot)
             print(json.dumps(snapshot))
             return 0
 
@@ -566,6 +655,28 @@ def main() -> int:
             ignore_self_comments=not args.include_self_comments,
         )
         if initial_output is not None:
+            (
+                initial_output,
+                review_cursor,
+                review_comment_cursor,
+                issue_comment_cursor,
+                reaction_cursor,
+                pr_status,
+            ) = _settle_activity(
+                repo=args.repo,
+                pr_number=args.pr,
+                token=token,
+                initial_output=initial_output,
+                state=state,
+                review_cursor=review_cursor,
+                review_comment_cursor=review_comment_cursor,
+                issue_comment_cursor=issue_comment_cursor,
+                reaction_cursor=reaction_cursor,
+                pr_status=pr_status,
+                event_limit=args.event_limit,
+                viewer_login=viewer_login,
+                ignore_self_comments=not args.include_self_comments,
+            )
             _write_cursor_output(
                 args.cursor_output or args.cursor_file,
                 review_cursor=review_cursor,
@@ -577,7 +688,20 @@ def main() -> int:
             print(initial_output)
             return 0
     else:
-        pr_cursor = args.since_pr_id if args.since_pr_id is not None else (0 if args.catch_up else max_id(state["pull_requests"]))
+        try:
+            cursor_input = _read_cursor_input(args.cursor_file)
+        except (OSError, ValueError, json.JSONDecodeError) as err:
+            print(f"Failed to read cursor file: {err}", file=sys.stderr)
+            return 1
+        pr_cursor = (
+            args.since_pr_id
+            if args.since_pr_id is not None
+            else (
+                int(cursor_input["pr_cursor"])
+                if "pr_cursor" in cursor_input
+                else (0 if args.catch_up else max_id(state["pull_requests"]))
+            )
+        )
         print(
             f"Watching GitHub new PRs in {args.repo} from cursor: pr={pr_cursor} catch_up={args.catch_up}",
             file=sys.stderr,
@@ -589,7 +713,7 @@ def main() -> int:
             event_limit=args.event_limit,
         )
         if initial_output is not None:
-            _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
+            _write_new_pr_cursor_output(args.cursor_output or args.cursor_file, pr_cursor=pr_cursor)
             print(initial_output)
             return 0
 
@@ -673,6 +797,29 @@ def main() -> int:
             if output is None:
                 continue
 
+            (
+                output,
+                review_cursor,
+                review_comment_cursor,
+                issue_comment_cursor,
+                reaction_cursor,
+                pr_status,
+            ) = _settle_activity(
+                repo=args.repo,
+                pr_number=args.pr,
+                token=token,
+                initial_output=output,
+                state=state,
+                review_cursor=review_cursor,
+                review_comment_cursor=review_comment_cursor,
+                issue_comment_cursor=issue_comment_cursor,
+                reaction_cursor=reaction_cursor,
+                pr_status=pr_status,
+                event_limit=args.event_limit,
+                viewer_login=viewer_login,
+                ignore_self_comments=not args.include_self_comments,
+            )
+
             _write_cursor_output(
                 args.cursor_output or args.cursor_file,
                 review_cursor=review_cursor,
@@ -690,7 +837,7 @@ def main() -> int:
             )
             if output is None:
                 continue
-            _write_new_pr_cursor_output(args.cursor_output, pr_cursor=pr_cursor)
+            _write_new_pr_cursor_output(args.cursor_output or args.cursor_file, pr_cursor=pr_cursor)
 
         print(output)
         return 0
