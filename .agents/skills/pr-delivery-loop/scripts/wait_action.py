@@ -20,6 +20,7 @@ from _github_wait_common import (  # noqa: E402
     RETRY_EXIT_CODE,
     get_token,
     github_get,
+    is_rate_limit_http_error,
     is_retryable_http_error,
     min_interval_for_unauthenticated,
 )
@@ -251,7 +252,7 @@ def main() -> int:
             if not is_retryable_http_error(err):
                 print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
                 return 1
-            if token is None and err.code == 429:
+            if token is None and is_rate_limit_http_error(err):
                 print(
                     (
                         "GitHub unauthenticated polling hit a rate limit. "

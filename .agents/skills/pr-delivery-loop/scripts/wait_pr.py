@@ -261,7 +261,8 @@ def _render_activity(
     non_reaction_events = rendered_events[: len(rendered_events) - len(reaction_events)]
     non_reaction_limit = max(visible_limit - len(reaction_events), 0)
     displayed_events = non_reaction_events[:non_reaction_limit] + reaction_events
-    omitted_events = len(non_reaction_events) - len(displayed_events[:non_reaction_limit])
+    displayed_non_reaction_count = min(len(non_reaction_events), non_reaction_limit)
+    omitted_events = len(non_reaction_events) - displayed_non_reaction_count
 
     lines = [f"GitHub PR activity detected for {repo}#{pr_number}"]
     for entry in displayed_events:
@@ -487,10 +488,11 @@ def main() -> int:
         return 1
 
     token = get_token()
+    should_filter_pr_activity = args.pr is not None and not args.snapshot_cursors
     viewer_login = (
-        get_authenticated_login(token) if args.pr is not None and not args.include_self_comments else None
+        get_authenticated_login(token) if should_filter_pr_activity and not args.include_self_comments else None
     )
-    if args.pr is not None and not args.include_self_comments and viewer_login is None:
+    if should_filter_pr_activity and not args.include_self_comments and viewer_login is None:
         print(
             "Unable to resolve the authenticated GitHub viewer identity; "
             "use a token that can read /user or pass --include-self-comments explicitly.",
@@ -513,14 +515,25 @@ def main() -> int:
 
     start = time.monotonic()
 
+    new_pr_cursor_input: dict[str, Any] = {}
+    if args.new_prs:
+        try:
+            new_pr_cursor_input = _read_cursor_input(args.cursor_file)
+        except (OSError, ValueError, json.JSONDecodeError) as err:
+            print(f"Failed to read cursor file: {err}", file=sys.stderr)
+            return 1
+
     try:
         if args.pr is not None:
             state, requests_per_poll_count = _fetch_state(args.repo, args.pr, token)
         else:
             initial_pr_stop_after_id = None
             initial_pr_max_pages = None
-            if args.since_pr_id is not None and not args.catch_up:
-                initial_pr_stop_after_id = args.since_pr_id
+            initial_pr_cursor = args.since_pr_id
+            if initial_pr_cursor is None and not args.catch_up and "pr_cursor" in new_pr_cursor_input:
+                initial_pr_cursor = int(new_pr_cursor_input["pr_cursor"])
+            if initial_pr_cursor is not None and not args.catch_up:
+                initial_pr_stop_after_id = initial_pr_cursor
             elif not args.catch_up:
                 initial_pr_max_pages = 1
             state, requests_per_poll_count = _fetch_new_pr_state(
@@ -576,11 +589,7 @@ def main() -> int:
             print(json.dumps(snapshot))
             return 0
 
-        try:
-            cursor_input = _read_cursor_input(args.cursor_file)
-        except (OSError, ValueError, json.JSONDecodeError) as err:
-            print(f"Failed to read cursor file: {err}", file=sys.stderr)
-            return 1
+        cursor_input = new_pr_cursor_input
 
         review_cursor = (
             args.since_review_id
