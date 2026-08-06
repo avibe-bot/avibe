@@ -414,6 +414,121 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         agent.controller.emit_agent_message.assert_not_awaited()
 
+    async def test_silent_followup_preserves_visible_result_candidate(self):
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        await handler._on_item_completed(
+            {
+                "turnId": "turn-1",
+                "item": {"type": "agentMessage", "text": "Regression report"},
+            },
+            request,
+        )
+        await handler._on_item_completed(
+            {
+                "turnId": "turn-1",
+                "item": {"type": "agentMessage", "text": "<silent>Watch acknowledged</silent>"},
+            },
+            request,
+        )
+        await handler._on_turn_completed(
+            {"turn": {"id": "turn-1", "status": "completed"}},
+            request,
+        )
+
+        agent.controller.emit_agent_message.assert_not_awaited()
+        agent.emit_result_message.assert_awaited_once()
+        assert agent.emit_result_message.await_args.args[1] == "Regression report"
+
+    async def test_visible_followup_replaces_silent_candidate_without_activity(self):
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        await handler._on_item_completed(
+            {
+                "turnId": "turn-1",
+                "item": {"type": "agentMessage", "text": "<silent>Waiting</silent>"},
+            },
+            request,
+        )
+        await handler._on_item_completed(
+            {
+                "turnId": "turn-1",
+                "item": {"type": "agentMessage", "text": "Final answer"},
+            },
+            request,
+        )
+        await handler._on_turn_completed(
+            {"turn": {"id": "turn-1", "status": "completed"}},
+            request,
+        )
+
+        agent.controller.emit_agent_message.assert_not_awaited()
+        agent.emit_result_message.assert_awaited_once()
+        assert agent.emit_result_message.await_args.args[1] == "Final answer"
+
+    async def test_silent_only_turn_still_emits_terminal_result(self):
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        silent_result = "<silent>No user-facing response needed</silent>"
+        await handler._on_item_completed(
+            {
+                "turnId": "turn-1",
+                "item": {"type": "agentMessage", "text": silent_result},
+            },
+            request,
+        )
+        await handler._on_turn_completed(
+            {"turn": {"id": "turn-1", "status": "completed"}},
+            request,
+        )
+
+        agent.controller.emit_agent_message.assert_not_awaited()
+        agent.emit_result_message.assert_awaited_once()
+        assert agent.emit_result_message.await_args.args[1] == silent_result
+
+    async def test_visible_followup_keeps_prior_visible_message_as_activity(self):
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        await handler._on_item_completed(
+            {
+                "turnId": "turn-1",
+                "item": {"type": "agentMessage", "text": "Progress update"},
+            },
+            request,
+        )
+        await handler._on_item_completed(
+            {
+                "turnId": "turn-1",
+                "item": {"type": "agentMessage", "text": "Final answer"},
+            },
+            request,
+        )
+        await handler._on_turn_completed(
+            {"turn": {"id": "turn-1", "status": "completed"}},
+            request,
+        )
+
+        agent.controller.emit_agent_message.assert_awaited_once_with(
+            request.context,
+            "assistant",
+            "Progress update",
+            parse_mode="markdown",
+        )
+        agent.emit_result_message.assert_awaited_once()
+        assert agent.emit_result_message.await_args.args[1] == "Final answer"
+
     async def test_empty_success_result_falls_back_to_new_thread_generated_images(self):
         agent = _StubAgent()
         handler = CodexEventHandler(agent)
