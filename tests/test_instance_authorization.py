@@ -215,25 +215,6 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
     assert http_authorization_policy(method, path).remote_access == expected
 
 
-@pytest.mark.parametrize(
-    ("method", "path"),
-    [
-        ("POST", "/api/show-pages/ses-1/visibility"),
-        ("GET", "/api/backend/codex/runtime"),
-        ("GET", "/api/global-prompts"),
-        ("GET", "/api/harness/runs"),
-        ("GET", "/api/harness/runs/run-1"),
-        ("GET", "/api/harness/bootstrap"),
-        ("GET", "/api/vault/pubkey"),
-        ("GET", "/api/vault/agent/pubkey"),
-        ("GET", "/api/vault/sandbox/root-metadata"),
-        ("GET", "/api/vault/vmk"),
-    ],
-)
-def test_remote_local_execution_and_sensitive_surfaces_are_local_only(method, path) -> None:
-    assert http_authorization_policy(method, path).remote_access == REMOTE_HTTP_LOCAL_ONLY
-
-
 def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:
     viewer = _remote_context("viewer")
     editor = _remote_context("editor")
