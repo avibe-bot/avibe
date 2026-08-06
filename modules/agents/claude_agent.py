@@ -354,13 +354,18 @@ class ClaudeAgent(BaseAgent):
         anything reading the reason, but no longer indistinguishable from a backend
         that actually broke.
 
-        What does NOT change is ``is_error``. It carries no dot or sidebar state on
-        this path; inside the dispatcher's silent branch it feeds exactly three
-        things -- the collapsed status bubble's footer word, the durable Turn
-        outcome, and the IM silent-terminal trace -- and for all three "no terminal
-        result was produced" remains true no matter who killed the process. Clearing
-        it would collapse the bubble to a green ``done`` for a turn that answered
-        nothing.
+        What does NOT change is ``is_error``. Inside the dispatcher's silent branch
+        it feeds four things -- the collapsed status bubble's footer word, the
+        durable Turn outcome, the IM silent-terminal trace, and (when no durable
+        Turn owns the session) the sidebar status projection -- and for all four
+        "no terminal result was produced" remains true no matter who killed the
+        process. Clearing it would collapse the bubble to a green ``done`` for a
+        turn that answered nothing.
+
+        The three that must NOT read that as a backend fault are told so by the
+        settlement, which outranks the flag: ``NON_COMPLETING_TURN_SETTLEMENTS``
+        for the two Turn-outcome surfaces, and the same map's membership for the
+        sidebar, which has no dot between ``idle`` and ``failed`` to spend on it.
 
         The one thing suppressed is ``terminal_error``: with the flag set and no
         diagnostic, the bubble reads ``stopped`` (an intentional silent end) rather

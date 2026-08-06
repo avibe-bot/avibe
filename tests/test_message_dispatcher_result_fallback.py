@@ -269,6 +269,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         controller.session_turns.on_terminal_result.assert_called_once_with(
             context,
             is_error=False,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
             terminal_evidence={
                 "result_text": "final output",
                 "terminal_error": None,
@@ -338,6 +339,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         controller.session_turns.on_terminal_result.assert_called_once_with(
             context,
             is_error=False,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
             terminal_evidence={
                 "result_text": "already delivered",
                 "terminal_error": None,
@@ -1180,6 +1182,52 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
         context = _avibe_ctx()
         with mock.patch("core.message_dispatcher.persist_agent_message"):
             await dispatcher.emit_agent_message(context, "result", "", is_error=True)
+        controller.session_turns.on_terminal_delivery_complete(context)
+        self.assertEqual(controller.status_calls, [("ses-1", "failed")])
+
+    async def test_contained_teardown_does_not_project_a_failed_session(self):
+        """The settlement outranks ``is_error`` for the sidebar too.
+
+        No durable Turn owns this session, so this projection IS its terminal
+        state. ``is_error`` is honestly ``True`` -- nothing answered -- but the
+        service retired the runtime itself, and there is no dot between ``idle``
+        and ``failed`` to say so. Without the settlement this read ``failed``,
+        contradicting every other surface the same release writes.
+        """
+
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        context = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                level="silent",
+                output=contained_teardown_output_for(None),
+                terminal_error=None,
+            )
+        controller.session_turns.on_terminal_delivery_complete(context)
+        self.assertEqual(controller.status_calls, [("ses-1", "idle")])
+
+    async def test_unnamed_silent_failure_still_projects_a_failed_session(self):
+        """Negative control: only a NAMED non-completing settlement is exempt."""
+
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        context = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                level="silent",
+                terminal_error="provider unavailable",
+            )
         controller.session_turns.on_terminal_delivery_complete(context)
         self.assertEqual(controller.status_calls, [("ses-1", "failed")])
 

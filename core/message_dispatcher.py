@@ -1931,6 +1931,7 @@ class ConsolidatedMessageDispatcher:
                 manager.on_terminal_result(
                     context,
                     is_error=is_error,
+                    settled_by=self._turn_release_settlement(output_semantics),
                     terminal_evidence={
                         "result_text": self._fold_footer(terminal_body, result_footer),
                         "terminal_error": terminal_error,

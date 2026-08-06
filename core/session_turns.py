@@ -6974,9 +6974,16 @@ class SessionTurnManager:
         context: "MessageContext",
         *,
         is_error: bool,
+        settled_by: str | None = None,
         terminal_evidence: dict[str, Any] | None = None,
     ) -> None:
-        """OUTBOUND turn chokepoint for the active terminal ``result``."""
+        """OUTBOUND turn chokepoint for the active terminal ``result``.
+
+        ``settled_by`` is the release's named settlement, latched alongside
+        ``is_error`` so the post-delivery boundary can tell a Turn that ended
+        WITHOUT a result on purpose from a backend that broke. Optional because a
+        release may not name one; absent, the flag decides as before.
+        """
         if self.controller is None:
             return
         if not self.is_active_emit(context):
@@ -7007,6 +7014,7 @@ class SessionTurnManager:
             "session_id": session_id,
             "logical_turn_id": logical_turn_id,
             "is_error": is_error,
+            "settled_by": settled_by or None,
             "terminal_evidence": dict(terminal_evidence or {}),
         }
         context.platform_specific = payload
@@ -7025,6 +7033,7 @@ class SessionTurnManager:
         session_id = str(latch.get("session_id") or "")
         logical_turn_id = str(latch.get("logical_turn_id") or "")
         is_error = bool(latch.get("is_error"))
+        latched_settlement = str(latch.get("settled_by") or "")
         if not session_id:
             return
         durable_turn_exists = False
@@ -7040,9 +7049,23 @@ class SessionTurnManager:
                     exc_info=True,
                 )
         if not durable_turn_exists:
+            # No durable Turn row owns this session's outcome (IM, CLI, legacy),
+            # so this projection IS the session's terminal state. ``is_error``
+            # alone would call every result-less release a failure -- including a
+            # release whose settlement says the Turn was ended on purpose. A
+            # service-initiated backend teardown is the case that matters: the
+            # flag is honestly ``True`` (nothing answered) while the settlement
+            # says infrastructure, not fault, and the sidebar has no third dot to
+            # say so. ``idle`` is what the stop path already projects for the
+            # other member of that map, so one deliberate non-completion no
+            # longer reads two different ways depending on which one it was.
             self.controller.set_agent_status(
                 session_id,
-                "failed" if is_error else "idle",
+                (
+                    "failed"
+                    if is_error and latched_settlement not in NON_COMPLETING_TURN_SETTLEMENTS
+                    else "idle"
+                ),
             )
             return
         current = self.in_flight.get(session_id)
