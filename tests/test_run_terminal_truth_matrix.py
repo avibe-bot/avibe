@@ -1,4 +1,4 @@
-"""HFR-184..HFR-187, HFR-189..HFR-190, HFR-192: the PR7R matrix is closed and self-consistent.
+"""HFR-184..HFR-187, HFR-189..HFR-190, HFR-192..HFR-194: the PR7R matrix is closed.
 
 Same contract as HFR-105 for ``TEARDOWN_SETTLEMENT_MATRIX``: growing a
 dimension fails here until every new cell names a consuming test or a precise
@@ -9,6 +9,7 @@ silently.
 """
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -310,7 +311,15 @@ def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None
     so a wrong one is worse than none.
 
     Scope is the two PR7R modules on purpose: this asserts a convention the rest
-    of the suite does not yet follow, and widening it is a separate change.
+    of the suite does not yet follow, and widening it is a separate change. What
+    is NOT narrowed is which nodes count: the first draft walked ``tree.body``
+    for ``ast.FunctionDef`` only, so an ``async def test_*`` -- the natural shape
+    for the next probe in a unit whose subject is an async admission path -- or a
+    test method inside a class would have been skipped in silence while the
+    guard's own name promised every test. A guard that exempts the tests most
+    likely to be written next is the fourth degenerate-assertion instance in this
+    unit, so the walk recurses into classes and accepts both function kinds; the
+    node id it builds carries the class components, exactly as pytest would.
     """
     yaml = pytest.importorskip("yaml")
     catalog_path = (
@@ -327,22 +336,107 @@ def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None
         "tests/test_run_terminal_truth_matrix.py",
         "tests/test_run_terminal_truth_evidence_probes.py",
     )
+    def _tests(body: list[ast.stmt], prefix: tuple[str, ...]) -> list[tuple[str, ast.stmt]]:
+        """Every test callable in ``body``, named the way pytest would name it."""
+        found: list[tuple[str, ast.stmt]] = []
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                found.extend(_tests(node.body, prefix + (node.name,)))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith("test_"):
+                    found.append(("::".join(prefix + (node.name,)), node))
+        return found
+
     repo_root = Path(__file__).resolve().parents[1]
     seen = 0
     for rel in modules:
         tree = ast.parse((repo_root / rel).read_text(encoding="utf-8"))
-        for node in tree.body:
-            if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
-                continue
+        for suffix, node in _tests(tree.body, ()):
+            node_id = f"{rel}::{suffix}"
             doc = ast.get_docstring(node) or ""
             head = doc.split(":", 1)[0].split("/", 1)[0].strip()
             assert head.startswith("HFR-"), (
-                f"{rel}::{node.name} does not open its docstring with a scenario id"
+                f"{node_id} does not open its docstring with a scenario id"
             )
-            assert head in by_id, f"{rel}::{node.name} claims {head}, which no catalog row owns"
-            assert by_id[head] == f"{rel}::{node.name}", (
-                f"{head} is filed against {by_id[head]} but claimed by {rel}::{node.name}"
+            assert head in by_id, f"{node_id} claims {head}, which no catalog row owns"
+            assert by_id[head] == node_id, (
+                f"{head} is filed against {by_id[head]} but claimed by {node_id}"
             )
             seen += 1
     # A floor, so deleting every docstring id cannot turn this into a vacuous pass.
     assert seen >= 10, seen
+
+
+_PLAN = Path(__file__).resolve().parents[1] / "docs" / "plans" / "harness-run-reliability.md"
+
+
+def test_the_plan_states_the_same_question_verdicts_as_the_matrix() -> None:
+    """HFR-193: the plan's verdict list and ``PR7R_QUESTIONS`` cannot disagree.
+
+    The regression this pins: round 6 moved Q2 to ``answered`` and Q5 to
+    ``open`` in the matrix and in §7's narration, and left §7's own numbered
+    "Question verdicts" block still saying Q2 blocks the inactivity timeout and
+    Q5 is answered. The plan is the contract the next implementation unit reads,
+    so a stale verdict there is worse than a stale comment -- it hands that unit
+    the opposite instruction, in the document that is supposed to be
+    authoritative, while every test stays green.
+
+    Only the verdict WORD is tied. The prose either side of it is where the
+    reasoning lives and is deliberately not machine-checked; what must not drift
+    is the one token an implementer greps for.
+    """
+    text = _PLAN.read_text(encoding="utf-8")
+    stated = dict(
+        re.findall(r"^\d+\. \*\*(Q\d) [—-] (answered|open|blocked)\b", text, re.MULTILINE)
+    )
+    assert set(stated) == set(PR7R_QUESTIONS), stated
+    for key, verdict in stated.items():
+        assert verdict == PR7R_QUESTIONS[key]["verdict"], (
+            f"{key}: plan says {verdict!r}, matrix says {PR7R_QUESTIONS[key]['verdict']!r}"
+        )
+
+
+def test_the_plans_reserved_scenario_range_is_actually_free() -> None:
+    """HFR-194: a reserved id block may not contain ids the catalog already owns.
+
+    The regression this pins: the round-6 commit added catalog rows HFR-188 to
+    HFR-192 and left the plan's allocation summary advertising HFR-188…219 as
+    reserved. That is the one line a follow-up unit reads to pick its ids, so the
+    next probe would have been filed under an id this unit already owns -- and
+    scenario ids are stable references, so a collision is not a rename away from
+    being fixed.
+
+    Both halves are checked, because either alone is satisfiable by cheating:
+    every PR7R id must fall inside the occupied range, and no catalog id
+    anywhere may fall inside the reserved one.
+    """
+    yaml = pytest.importorskip("yaml")
+    catalog_path = (
+        Path(__file__).resolve().parent / "scenarios" / "harness_failure_recovery" / "catalog.yaml"
+    )
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+
+    line = re.search(
+        r"^- PR7: `HFR-(\d+)…(\d+)`.*?`HFR-(\d+)…(\d+)` still\s+reserved",
+        _PLAN.read_text(encoding="utf-8"),
+        re.MULTILINE | re.DOTALL,
+    )
+    assert line is not None, "the PR7 allocation line is not in the shape this guard reads"
+    occupied = range(int(line.group(1)), int(line.group(2)) + 1)
+    reserved = range(int(line.group(3)), int(line.group(4)) + 1)
+    assert occupied.stop == reserved.start, (occupied, reserved)
+
+    pr7r_modules = {
+        "tests/test_run_terminal_truth_matrix.py",
+        "tests/test_run_terminal_truth_evidence_probes.py",
+    }
+    ours = {
+        int(row["id"].removeprefix("HFR-"))
+        for row in scenarios
+        if row["test"].split("::")[0] in pr7r_modules
+    }
+    assert ours, "no catalog row points at a PR7R module"
+    assert ours <= set(occupied), sorted(ours - set(occupied))
+    taken = {int(row["id"].removeprefix("HFR-")) for row in scenarios}
+    assert not (taken & set(reserved)), sorted(taken & set(reserved))

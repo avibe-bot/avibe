@@ -630,3 +630,37 @@ observations:
       resolves to a test; none checked the reverse, that a test announcing an id
       is the test that id names. HFR-192 now ties the two directions together for
       both PR7R modules.
+  - id: HFR-OBS-032
+    date: 2026-08-06
+    source: seventh adversarial review of the PR7R matrix (PR #1212)
+    result: confirmed
+    detail: >-
+      A guard's EXEMPTIONS are invisible, so they need counter-checking as
+      deliberately as its assertions -- fourth instance in this unit, and both of
+      round 6's new guards were an instance. HFR-191 blocked the second turn
+      while the first was still inside the backend, which is what any mutex does;
+      the Q2 conclusion turns on the gate outliving the call, because a backend
+      returning from turn submission is not a turn ending. Codex and claude both
+      return while the native turn keeps executing, and that window is where a
+      second live turn would have to be excluded. Adding a release right after
+      ``await agent.handle_message(request)`` -- the precise regression the probe
+      exists to catch -- left it green. It now lets the first call RETURN, asserts
+      the queued turn is still outside the backend, and only then releases; the
+      mutation fails it. HFR-192 walked ``tree.body`` for ``ast.FunctionDef``
+      only, so an ``async def test_*`` or a class-nested test method was skipped
+      in silence by a guard whose name promised every test -- and an async test is
+      the natural next shape in a unit whose subject is an async admission path.
+      It recurses into classes and accepts both function kinds now.
+      Separately, and more consequentially, the PLAN had been left contradicting
+      itself: §7's numbered question-verdict block still said Q2 blocks the
+      inactivity timeout and Q5 is answered, three paragraphs below the round-6
+      narration that says the opposite, and the scenario-range summary still
+      advertised HFR-188…219 as reserved after the same commit filed rows through
+      HFR-192. A stale verdict in the contract document is worse than a stale
+      comment: it hands the next implementation unit the opposite instruction in
+      the artefact that is supposed to be authoritative, while every test stays
+      green. Both are now tied to code -- HFR-193 compares the plan's verdict word
+      against ``PR7R_QUESTIONS``, HFR-194 asserts no catalog id falls inside the
+      range the plan calls reserved. The general rule: when a document states a
+      fact the code also states, the document's copy is a cache, and an unchecked
+      cache goes stale.

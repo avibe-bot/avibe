@@ -2806,6 +2806,20 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_run_terminal_truth_matrix.py::test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id
+  - id: HFR-193
+    name: the plan states the same PR7R question verdicts as the matrix
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_the_plan_states_the_same_question_verdicts_as_the_matrix
+  - id: HFR-194
+    name: the plan's reserved scenario range holds no already-owned id
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_the_plans_reserved_scenario_range_is_actually_free
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…187`, `HFR-188…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q5 closes in master's favour; Q2 open and still blocking the inactivity timeout; Q1/Q3/Q4 open; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…194`, `HFR-195…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn, so the inactivity timeout is no longer blocked on attribution; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,11 +1227,11 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under six review rounds
+#### PR7R status (2026-08-06) — first increment, revised under seven review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
-`HFR-192`) and fed by
+`HFR-192…194`) and fed by
 `tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
 `HFR-191`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
@@ -1242,8 +1242,8 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through six changed how the
-findings are demonstrated, two question verdicts, and two degenerate guards. Why it moved is the
+rounds and has held at 168 since; rounds four through seven changed how the
+findings are demonstrated, two question verdicts, and four degenerate guards. Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
 cell rather than about the cell. The first round found fifty such cells, in four
@@ -1416,6 +1416,34 @@ no catalog row at all. Every guard here checks that a **citation** resolves to a
 test; none checked the reverse. `HFR-192` ties both directions for the two PR7R
 modules.
 
+Round 7 found that round 6's own two guards were each degenerate in the way this
+unit keeps rediscovering, and that the plan had been left contradicting itself.
+`HFR-191` blocked the second turn *inside* the first backend call, which is what
+any mutex does; the Q2 conclusion turns on the gate outliving the call, because a
+backend returning from turn submission is not a turn ending. Adding a release
+when the backend returns — the exact regression that matters — kept the probe
+green. It now lets the first call **return**, asserts the queued turn is still
+outside the backend, and only then releases; the mutation fails it. `HFR-192`
+walked `tree.body` for `ast.FunctionDef` only, so an `async def test_*` — the
+natural shape for the next probe in a unit whose subject is an async admission
+path — or a test method in a class was skipped in silence by a guard whose name
+promised every test. It recurses into classes and accepts both function kinds
+now. The pattern across four instances: **a guard's exemptions are invisible, so
+they have to be counter-checked as deliberately as its assertions.**
+
+The plan itself was the third finding, and the most consequential, because it is
+the artefact the next unit reads. §7's numbered "Question verdicts" block still
+said Q2 blocks the inactivity timeout and Q5 is answered, directly contradicting
+the round-6 narration three paragraphs above it and `PR7R_QUESTIONS` — including
+the false claim that `last_run_at`/`last_error` share the Run's terminal CAS. The
+allocation summary likewise still advertised `HFR-188…219` as reserved after the
+same commit filed rows through `HFR-192`, which would have handed a follow-up an
+id this unit already owns. Both are now tied to code rather than to diligence:
+`HFR-193` compares the verdict word in this document against
+`PR7R_QUESTIONS[q]["verdict"]`, and `HFR-194` asserts that no catalog id falls in
+the range this document calls reserved. Prose in a plan drifts; the one token an
+implementer greps for should not be prose.
+
 Question verdicts:
 
 1. **Q1 — open, do not close the claim yet.** A Delivery reservation and an
@@ -1425,39 +1453,33 @@ Question verdicts:
    premature terminal transition in the IM reservation or backend-acceptance
    path would leave them green. The premature-success claim may be closed once
    an IM-lane acceptance-boundary probe exists — not before.
-2. **Q2 — open, and it still blocks the timeout, but the split is by LANE, not
-   by backend.** Four of six backend/lane cells key a progress event by Turn:
-   all three backends on the durable Workbench lane, plus codex on direct IM
-   because its id rides the notification rather than the context. Codex's
-   `item/*` notifications carry a `turnId`,
-   and `_find_request_for_notification` resolves the participating Run's request
-   from it through `get_request_for_turn`, a per-turn map — so the attribution
-   exists on both codex lanes. It is discarded one step downstream, by
-   `should_emit_progress` gating on the single `_active_turns[base]` slot and by
-   an activity timestamp stamped per session. OpenCode's `_active_requests` is
-   likewise one asyncio task per base session — but that projection is not the
-   event stream: `run_prompt_poll` receives the exact `AgentRequest` and every
-   progress emit in it passes `request.context`, whose `turn_token`
-   `_process_message` has already read as `logical_turn_id`. That token is
-   stamped only by `core/session_turns.py` and the streaming turn dispatch, both
-   Workbench owners, so opencode has the signal on the durable lane and not on
-   direct IM. Claude is the same shape once you look past
-   `mark_session_turn_started`, which does take a composite key and no turn:
-   `_adopt_pending_turn_token` copies the FIFO-head pending request's
-   `turn_token` and attribution keys onto the long-lived receiver context before
-   every assistant and tool emit, so a Workbench claude event names its Turn
-   too. The mechanism is weaker than codex's and the difference matters for
-   remediation — codex resolves by an id the event **carries**, claude by **FIFO
-   position** among pending requests, exact only while that ordering holds. The
-   plan's rule requires an exact signal for every backend and lane, so a generic
-   inactivity timeout still may not be specified or implemented — but the
-   remaining work is now small and uniform: the four attributed cells need an
-   existing attribution carried through to the stamp, and the two open ones,
-   **claude and opencode on direct IM, are one fix**, because both fail for the
-   same reason — `turn_token` is stamped only by `core/session_turns.py` and
-   `core/services/dispatch.py`, which are Workbench owners. This verdict has been
-   corrected three times, every time because a base-session projection was read
-   in place of the event stream.
+2. **Q2 — answered. All six backend/lane cells key a progress event by Turn,
+   and it no longer blocks the timeout.** Codex's `item/*` notifications carry a
+   `turnId` and `_find_request_for_notification` resolves the participating
+   Run's request from it through `get_request_for_turn`, a per-turn map.
+   OpenCode's `run_prompt_poll` receives the exact `AgentRequest` and every
+   progress emit passes `request.context`, whose `turn_token` `_process_message`
+   has already read as `logical_turn_id`. Claude's `_adopt_pending_turn_token`
+   copies the FIFO-head pending request's `turn_token` and attribution keys onto
+   the long-lived receiver context before every assistant and tool emit. And the
+   direct-IM lane is not the exception four earlier drafts made it: `turn_token`
+   is stamped for **every** request on **both** lanes by
+   `AgentService._stamp_runtime_turn`, which `handle_message` calls before the
+   backend is invoked. The four rounds that said otherwise had grepped the
+   literal string and missed the constant-keyed write — see §7's round-6
+   paragraph; the durable form is that a "nothing writes X" claim is only as good
+   as the search behind it. Two things remain, and both are remediation rather
+   than evidence. First, the activity timestamp is stamped per **session** on
+   every backend, so an exact attribution is aggregated away at the last step;
+   that is what an inactivity timeout has to change. Second, claude resolves by
+   **FIFO position** among pending requests rather than by an id the event
+   carries — exact only while per-key serialization holds, which
+   `HFR-191` drives — so the remediation must build on a weaker mechanism there
+   than on codex. The earlier reading that codex *discards* its signal at
+   `should_emit_progress` does not survive that same serialization: the gate is
+   held past the backend's return and released at terminal delivery, so the
+   single `_active_turns[base]` slot names the only live turn there is and the
+   filter is correct.
 3. **Q3 — open, split, and narrower than it was.** Established: the *Turn's*
    accepted-run record cannot discriminate between participants — a flat
    `accepted_agent_run_ids` list and one Turn-level `source_kind` stamped by
@@ -1489,14 +1511,21 @@ Question verdicts:
    not a contradiction: Q4 asks whether a pre-terminal fact is durably recorded,
    a cell asks whether a Run admitted through a given trigger reaches a given
    terminal outcome, and a test may settle one and not the other.
-5. **Q5 — answered, no health cursor needed.** `health`,
-   `consecutive_failures` and `recent_failures` are derived per read by
+5. **Q5 — open, and it splits.** `health`, `consecutive_failures` and
+   `recent_failures` are answered: derived per read by
    `SQLiteBackgroundTaskStore._classify_health` over the bounded verdict window
-   `_health_rows` collects, rather than stored counters: a failure ages out of
-   the window on its own, and a success downgrades `failing` to `degraded`
-   instead of erasing history. `last_run_at` and `last_error` are written in the
-   same CAS-guarded terminal transition that settles the Run.
-
+   `_health_rows` collects, rather than stored counters, so a failure ages out of
+   the window on its own and a success downgrades `failing` to `degraded`
+   instead of erasing history. No health cursor is needed for those three.
+   `last_run_at` and `last_error` are **not** written in the Run's terminal CAS,
+   as this block said through round 5. They are a definition-level stamp that
+   `store.mark_task_result` commits inside `_execute_task`; the Run's terminal
+   CAS is `request_store.complete` in `_execute_claimed_request`'s `finally`, a
+   second write afterwards. HFR-261 reconciles a refused transition and nothing
+   reconciles process loss in the gap, so a definition can advertise a
+   `last_run_at` for a Run that never settled. Those two fields are stored, not
+   derived, so unlike the trio they can drift: they project an *attempt*, not
+   settled Run history.
 Reproduced defects, both on the direct-IM / agent-run lane and both owned by
 `core/services/running_agents.py`:
 
@@ -1681,8 +1710,9 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…187` — occupied by PR7R's first increment; `HFR-188…219` still
-  reserved for the remaining probes listed in §7
+- PR7: `HFR-180…194` — occupied by PR7R's first increment (`HFR-188…194` were
+  taken by its round-6 and round-7 reviews); `HFR-195…219` still reserved for
+  the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is
 now `HFR-435`, allocated by unrelated capabilities above this plan's reserved

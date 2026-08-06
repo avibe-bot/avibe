@@ -1024,6 +1024,18 @@ def test_one_runtime_key_admits_one_live_turn_at_a_time():
     outbound dispatcher releases it at terminal delivery -- so a second turn on
     the same key cannot enter the backend while the first is live. Driven here
     rather than read off the production comment that says so.
+
+    The second half is the half that carries the claim, and the first draft of
+    this probe was missing it. Holding a lock ACROSS a call is what any mutex
+    does; what Q2 turns on is the gate outliving the call, because a backend
+    returning from turn submission is not a turn ending -- codex and claude both
+    return while the turn is still executing, and it is that window in which a
+    second live turn would have to be excluded. A probe that only blocks inside
+    the backend stays green under the exact regression it should catch: add a
+    release when the backend returns and native turns can overlap while the
+    assertions still pass. So the release is driven in two steps -- let the first
+    backend call RETURN, then assert the second is still shut out, and only then
+    release explicitly.
     """
     from modules.agents.base import AGENT_TURN_TOKEN
 
@@ -1047,6 +1059,14 @@ def test_one_runtime_key_admits_one_live_turn_at_a_time():
 
         release.set()
         await asyncio.wait_for(first, timeout=5)
+        # The first backend call has RETURNED and its turn is unreleased. This
+        # is the state a backend is in while its native turn keeps running, and
+        # it is the one the Q2 conclusion depends on: the gate must still be
+        # held, so the queued turn must still be outside the backend.
+        await asyncio.sleep(0.05)
+        assert len(agent.seen) == 1, agent.seen
+        assert not second.done()
+
         service.release_runtime_turn(first_request.context)
         await asyncio.wait_for(second, timeout=5)
         return agent
