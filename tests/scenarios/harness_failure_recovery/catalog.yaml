@@ -2721,6 +2721,16 @@ scenarios:
     kind: failure
     layer: contract
     backend: claude
+    # RULE, and it is about who holds a lock in a reachability argument. This row's
+    # window exists only if an accepted turn can be inside get_or_create_claude_session
+    # while End tears the runtime down. Round 4 argued it from source text; round 20
+    # drove it but took the generation lock BY HAND, which shows the resolver can be
+    # blocked and not that production ever blocks it; round 21 makes the holder
+    # cleanup_session -- a real owner of that lock, and the exact method End's chain
+    # terminates on, hop for hop, as the probe asserts. If cleanup_session stops taking
+    # the lock the probe fails, and that is correct: the reachability argument would
+    # have gone with it. Do not simulate a contender for a window you are trying to
+    # prove is reachable; borrow one from production or leave the finding unproven.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional
   - id: HFR-181
     name: codex End reports ok/ended when the canonical stop never interrupted
@@ -2827,6 +2837,13 @@ scenarios:
     kind: safety
     layer: contract
     backend: shared
+    # Round 21 turned the occupied half from membership into EQUALITY. A subset check
+    # let an interior id disappear in silence: delete a guard and its row together and
+    # ours is still a subset, the highest id is unchanged, the reserved tail is
+    # unchanged, and HFR-192's bidirectional docstring/catalog tie is satisfied because
+    # both sides went at once. The plan would still claim the whole span occupied with
+    # nothing under one of its ids. Equality pins every allocated id individually.
+    # RULE: a range is a claim about each of its members, not about its endpoints.
     test: tests/test_run_terminal_truth_matrix.py::test_the_plans_reserved_scenario_range_is_actually_free
   - id: HFR-195
     name: a working-path change splits the gate key but not the codex turn slot
@@ -2873,6 +2890,14 @@ scenarios:
     # The shared resolver accepts a class leaf because a finding OWNER may be a
     # type; a node id reusing that rule accepted a private helper or a bare class,
     # i.e. a citation no test run executes. Both strictnesses are pinned here.
+    # RULE: pytest decides collection by ATTRIBUTE LOOKUP, so every attribute this
+    # predicate reads must be resolved through the bases and not off one class body.
+    # Learned twice: round 20 for __test__, round 21 for __init__/__new__ -- the second
+    # was left standing by the commit that fixed the first, in the same function, four
+    # lines down. A class inheriting either is refused by pytest while its name says
+    # otherwise, so a row citing it advertises coverage that never runs. Every case is
+    # checked against this repo's real pytest, with a control class that has a local
+    # base and no constructor, so the rule cannot degenerate into "any subclass".
     test: tests/test_run_terminal_truth_matrix.py::test_a_node_id_citation_must_name_something_pytest_collects
   - id: HFR-199
     name: no step of the durable reservation path settles the Run

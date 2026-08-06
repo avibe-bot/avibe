@@ -1409,3 +1409,53 @@ observations:
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
       and is still deliberately untouched (HFR-OBS-028).
+  - id: HFR-OBS-046
+    area: run-terminal-truth
+    summary: >-
+      Round 21, three findings, all three accepted, nothing rejected. No new
+      scenario id, no verdict move, no budget move -- UNPROVEN_BUDGET stays 168
+      and no cell's proof kind changes. All three findings are round 20's own
+      work one step short, which is the entry.
+      FINDING ONE, a hand-held lock is not a reachability proof. Round 20
+      replaced a source-text claim about suspension with a real drive and then
+      supplied the contention itself: the test took the generation lock and
+      watched the resolver block. That shows the resolver CAN be blocked, not
+      that production ever blocks it, so HFR-180 could still be advertising an
+      unreachable defect. Production has three owners of that key's lock --
+      session resolution, ``cleanup_session``, and the idle-reclamation sweep
+      -- and the middle one is where End's chain terminates, hop for hop, which
+      this probe already asserted on its own. The holder is now End's own
+      teardown and the parked caller is the real resolver; both sides acquire
+      and release through production and only the two innermost bodies are
+      stubbed. Counter-checked against PRODUCTION rather than the test: remove
+      the lock from ``cleanup_session`` and the probe fails, which is the right
+      failure, because the reachability argument goes with it.
+      FINDING TWO, the constructor rule was still reading one class body.
+      Round 20 made ``__test__`` resolve through the MRO and left the
+      ``__init__``/``__new__`` refusal reading ``node.body``, in the same
+      function, four lines below the line it was editing. pytest refuses a
+      Test-named class that merely INHERITS a constructor, several hops up, and
+      says so in the warning. Resolved through the same local ancestry the
+      other two predicates use, with three inherited cases and one control
+      class that has a local base and no constructor so the rule cannot
+      degenerate into "any subclass". All four checked against this
+      repository's real pytest.
+      FINDING THREE, the subset check let an interior id vanish in silence.
+      Delete a guard and its catalog row together and ``ours`` is still a
+      subset, the highest id is unchanged, the reserved tail is unchanged, and
+      HFR-192's bidirectional tie is satisfied because both sides went at once
+      -- while the plan keeps claiming the whole span occupied with nothing
+      under one of its ids. Now an equality, pinning every allocated id
+      individually.
+      THE DURABLE RULE, a fix inherits the blind spot of the thing it fixes.
+      Round 20 replaced an argument with a drive and then wrote the drive's
+      precondition by hand. Round 20 resolved one attribute through the MRO and
+      left its neighbour reading the body. Rounds 18 and 20 made the id range
+      derived at its endpoints and left its interior unchecked. The question
+      that catches this is not "did I fix it" but "what did I have to assume to
+      make the fix pass, and who is supplying that assumption".
+      Rejected: nothing. None of the three asked for a fix to PR7R-F1 or
+      PR7R-F2, which would have been out of scope by the plan's own boundary.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
+      and is still deliberately untouched (HFR-OBS-028).

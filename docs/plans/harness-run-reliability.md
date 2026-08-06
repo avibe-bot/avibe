@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under twenty review rounds
+#### PR7R status (2026-08-06) — first increment, revised under twenty-one review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
@@ -1242,7 +1242,7 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through twenty changed how the
+rounds and has held at 168 since; rounds four through twenty-one changed how the
 findings are demonstrated, three question verdicts, and twenty degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
@@ -2069,6 +2069,51 @@ a fact restated in a second artefact, corrected in the first. Two of them became
 mechanical rules here rather than edits, which is the only move that has ever
 converged on this in twenty rounds.
 
+Round 21 — three findings, **all three accepted, none rejected**; no new
+scenario, no verdict move, and **no budget move**.
+
+1. **A hand-held lock is not a reachability proof.** Round 20 replaced a
+   source-text claim with a real drive, and then supplied the contention
+   itself: the test acquired the generation lock and watched the resolver
+   block. That shows the resolver *can* be blocked, not that anything in
+   production blocks it — so `HFR-180` could still be advertising an
+   unreachable defect. Production has three owners of that key's lock: session
+   resolution, `cleanup_session`, and the idle-reclamation sweep. The middle
+   one is where End's chain terminates, hop for hop, which this probe already
+   asserted independently. So the holder is now **End's own teardown** and the
+   parked caller is the real resolver — both sides acquire and release through
+   production, and only the two innermost bodies are stubbed. Counter-checked
+   against production rather than against the test: remove the lock from
+   `cleanup_session` and the probe fails, which is the correct failure, because
+   the reachability argument would have gone with it.
+
+2. **The constructor rule was still reading one class body.** Round 20 fixed
+   `__test__` to resolve through the MRO and left the `__init__`/`__new__`
+   refusal reading `node.body` — in the same function, four lines below the
+   line it was editing. pytest refuses a `Test*` class that merely *inherits* a
+   constructor, several hops up, and names it in the warning. Resolved through
+   the same local ancestry the other two predicates use, with three inherited
+   cases and one control class that has a local base and no constructor, so the
+   rule cannot degenerate into "any subclass". All four checked against this
+   repository's real pytest.
+
+3. **`ours <= occupied` let an interior id vanish in silence.** Delete a guard
+   and its catalog row together and the subset holds, the highest id is
+   unchanged, the reserved tail is unchanged, and `HFR-192`'s bidirectional tie
+   is satisfied because both sides went at once — while the plan keeps claiming
+   the whole span occupied with nothing under one of its ids. Now an equality,
+   which pins every allocated id individually. A range is a claim about each of
+   its members, not about its endpoints.
+
+**The durable lesson is that a fix inherits the blind spot of the thing it
+fixes.** All three findings are the previous round's own work, one step short:
+round 20 replaced an argument with a drive and then wrote the drive's
+precondition by hand; round 20 resolved one attribute through the MRO and left
+its neighbour reading the body; rounds 18 and 20 made the id range derived at
+its endpoints and left its interior unchecked. The question that catches this
+is not *did I fix it* but *what did I have to assume to make the fix pass, and
+who is supplying that assumption.*
+
 Question verdicts:
 
 1. **Q1 — open, do not close the claim yet.** On the durable Workbench lane,
@@ -2411,7 +2456,7 @@ Scenario range status, verified against
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
 - PR7: `HFR-180…210` — occupied by PR7R's first increment (`HFR-188…210` were
-  taken by its round-6 through round-20 reviews); `HFR-211…219` still reserved for
+  taken by its round-6 through round-21 reviews); `HFR-211…219` still reserved for
   the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is

@@ -319,6 +319,42 @@ def _resolved_test_flag(
     return None
 
 
+def _defines_constructor(
+    node: ast.ClassDef, module_body: list[ast.stmt], seen: frozenset[str] = frozenset()
+) -> bool:
+    """``__init__``/``__new__`` as pytest would FIND them -- through the bases.
+
+    Round 21, and it is round 20's finding one attribute over, in the function
+    round 20 was editing. ``_resolved_test_flag`` was added because pytest
+    reads ``__test__`` as an attribute, and the constructor refusal is the same
+    lookup: pytest warns ``cannot collect test class 'TestChild' because it has
+    a __init__ constructor`` for a class that merely INHERITS one, several hops
+    up, and ``__new__`` behaves identically. Reading the child's own body
+    called it collectible, so a catalog row could advertise executable
+    coverage for methods pytest silently refuses to run.
+
+    Same ancestry boundary as ``_resolved_test_flag`` and ``_unittest_ancestry``
+    -- locally defined bases only, in declaration order. An imported base
+    cannot be resolved from this AST, and this predicate errs the way the other
+    two do: a false rejection is loud, a false acceptance is silent.
+    """
+
+    if any(
+        isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and child.name in ("__init__", "__new__")
+        for child in node.body
+    ):
+        return True
+    local = {n.name: n for n in module_body if isinstance(n, ast.ClassDef)}
+    return any(
+        isinstance(base, ast.Name)
+        and base.id not in seen
+        and base.id in local
+        and _defines_constructor(local[base.id], module_body, seen | {base.id})
+        for base in node.bases
+    )
+
+
 def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
     """pytest's own default rule, read off the AST: ``Test*`` or a TestCase base.
 
@@ -339,6 +375,10 @@ def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
 
     Round 20 reads the flag through ``_resolved_test_flag`` rather than off the
     class body, because pytest reads an attribute and attributes are inherited.
+    Round 21 does the same for the constructor rule, which round 20 left
+    reading one class body while fixing the line above it -- the whole point
+    being that pytest resolves BOTH through the MRO, so a fix that travels for
+    one attribute and not the other is half a rule twice over.
     """
     flag = _resolved_test_flag(node, module_body)
     if flag is False:
@@ -355,12 +395,9 @@ def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
     # has a __init__ constructor``, and its tests never run. Believing the name
     # alone would let a catalog row cite a green-looking scenario that pytest
     # skips in silence -- the exact rot this resolver exists to stop, one
-    # attribute deeper than round 11 looked.
-    return not any(
-        isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and child.name in ("__init__", "__new__")
-        for child in node.body
-    )
+    # attribute deeper than round 11 looked. Round 21 resolves it through the
+    # bases for the same reason round 20 resolved the flag through them.
+    return not _defines_constructor(node, module_body)
 
 
 def _collected_tests(
@@ -955,6 +992,18 @@ def test_the_plans_reserved_scenario_range_is_actually_free() -> None:
     Both halves are checked, because either alone is satisfiable by cheating:
     every PR7R id must fall inside the occupied range, and no catalog id
     anywhere may fall inside the reserved one.
+
+    Round 21 makes the first half an EQUALITY. Membership let an interior id
+    vanish in silence: delete both a guard and its catalog row -- say HFR-202 --
+    and ``ours`` is still a subset, the highest id is unchanged, the reserved
+    tail is unchanged, and ``HFR-192``'s bidirectional docstring/catalog tie is
+    satisfied because both sides went together. The plan would keep claiming
+    the whole span occupied while the evidence under one of its ids had ceased
+    to exist. Equality pins every allocated id individually, which is the only
+    reading under which "occupied" means what the allocation line says it
+    means, and it is the same discipline as ``UNPROVEN_BUDGET``: a fact that
+    may change, in writing, so that changing it is an edit somebody has to
+    make on purpose.
     """
     yaml = pytest.importorskip("yaml")
     catalog_path = (
@@ -975,7 +1024,13 @@ def test_the_plans_reserved_scenario_range_is_actually_free() -> None:
 
     ours = _pr7r_owned_ids(scenarios)
     assert ours, "no catalog row points at a PR7R module"
-    assert ours <= set(occupied), sorted(ours - set(occupied))
+    assert ours == set(occupied), (
+        f"the plan claims HFR-{occupied.start}…{occupied.stop - 1} is occupied "
+        f"by this unit. Outside that span: {sorted(ours - set(occupied))}. "
+        f"Claimed but owned by no catalog row: {sorted(set(occupied) - ours)} "
+        f"-- an id whose guard and row were deleted together leaves no other "
+        f"trace, so narrow the claimed range or restore the evidence."
+    )
     taken = {int(row["id"].removeprefix("HFR-")) for row in scenarios}
     assert not (taken & set(reserved)), sorted(taken & set(reserved))
 
@@ -1315,6 +1370,22 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "class TestOverridesBase(MutedBase):\n"
         "    __test__ = True\n"
         "    def test_case(self): ...\n"
+        "class CtorBase:\n"
+        "    def __init__(self): ...\n"
+        "class TestInheritedCtor(CtorBase):\n"
+        "    def test_case(self): ...\n"
+        "class CtorMid(CtorBase):\n"
+        "    pass\n"
+        "class TestInheritedCtorTwoDeep(CtorMid):\n"
+        "    def test_case(self): ...\n"
+        "class NewBase:\n"
+        "    def __new__(cls): return super().__new__(cls)\n"
+        "class TestInheritedNew(NewBase):\n"
+        "    def test_case(self): ...\n"
+        "class PlainBase:\n"
+        "    def helper(self): ...\n"
+        "class TestPlainBase(PlainBase):\n"
+        "    def test_case(self): ...\n"
         "class Owner:\n"
         "    def method(self): ...\n"
         "    def test_case(self): ...\n"
@@ -1441,6 +1512,24 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         ):
             _assert_node_exists(f"{rel}::{inherited_out}::test_case")
 
+    # Round 21: the CONSTRUCTOR reached through a base, which is round 20's
+    # finding one attribute over and was left standing by the commit that fixed
+    # the flag. pytest refuses a ``Test*`` class that merely inherits
+    # ``__init__`` or ``__new__`` -- the warning even names the constructor --
+    # so these three are collected by nobody while their names say otherwise.
+    # ``TestPlainBase`` is the control that keeps the rule from degenerating
+    # into "any class with a local base is refused".
+    _assert_node_exists(f"{rel}::TestPlainBase::test_case")
+    for inherited_ctor in (
+        "TestInheritedCtor",
+        "TestInheritedCtorTwoDeep",
+        "TestInheritedNew",
+    ):
+        with pytest.raises(
+            AssertionError, match=f"pytest does not collect class '{inherited_ctor}'"
+        ):
+            _assert_node_exists(f"{rel}::{inherited_ctor}::test_case")
+
     # The same flag on a FUNCTION, which is written one scope out from the
     # function it applies to -- pytest reads an attribute and does not care
     # which statement set it, so the resolver reads the enclosing body.
@@ -1463,6 +1552,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "FlaggedIn::test_case",
         "InheritedFlagIn::test_case",
         "TestOverridesBase::test_case",
+        "TestPlainBase::test_case",
     }, discovered
     for absent in (
         "Owner::test_case",
@@ -1472,6 +1562,9 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "TestInheritedOptOut::test_case",
         "TestInheritedTwoDeep::test_case",
         "TestFlaggedCtor::test_case",
+        "TestInheritedCtor::test_case",
+        "TestInheritedCtorTwoDeep::test_case",
+        "TestInheritedNew::test_case",
         "test_muted",
     ):
         assert absent not in discovered, absent

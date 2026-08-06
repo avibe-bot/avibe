@@ -263,6 +263,16 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     and once with it held, and the two outcomes are asserted. The uncontended
     case is asserted as FINISHING, not as a wart to be tolerated: it is the
     half that shows why reading the source could not carry the claim.
+
+    Round 21 changes who HOLDS the lock, which is the difference between "the
+    resolver can be blocked" and "production blocks it". Round 20 took it by
+    hand, and a lock held by the test says nothing about whether an accepted
+    turn ever meets contention. Production has three owners of this key's
+    generation lock -- session resolution itself, ``cleanup_session``, and the
+    idle-reclamation sweep -- and the middle one is where End's chain
+    terminates, hop for hop, as asserted below. So the holder is now End's own
+    teardown and the parked caller is the real resolver: both sides acquire and
+    release through production, and only the two innermost bodies are stubbed.
     """
     # The race, read off production instead of assumed. ``mark_session_active``
     # is what fills ``claude_active_sessions``; it is called only after
@@ -301,6 +311,18 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     assert "async with self._claude_runtime_generation_lock(composite_key):" in resolve_source
     assert "await self._wait_for_claude_receiver_cleanup(retry.composite_key)" in resolve_source
 
+    # Round 21 replaces the lock owner. The previous draft took the lock by
+    # hand, and review was right that an artificially held lock proves only
+    # that the resolver can be blocked -- not that anything in production ever
+    # blocks it, which is the reachability question this probe exists to
+    # settle. The holder below is ``SessionHandler.cleanup_session``, real
+    # production code, and it is not an arbitrary choice: it is the exact
+    # method End's chain lands on, hop by hop, as asserted further down. So
+    # this is End itself holding the generation lock while a warm-idle second
+    # turn arrives -- the interleave the finding describes, driven rather than
+    # argued. Only ``_cleanup_session_locked`` and
+    # ``_get_or_create_claude_session_locked`` are stubbed; every lock
+    # acquisition and release on both sides is production's.
     async def _drive_generation_lock() -> tuple[bool, bool]:
         handler = object.__new__(SessionHandler)
         handler.claude_runtime_generation_locks = {}
@@ -320,16 +342,27 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
         uncontended_finished_in_one_step = free.done()
         assert await free is resolved
 
-        # Contended: the first generation holds the lock, the second turn is
-        # admitted and parks INSIDE session resolution. Eight scheduler steps,
-        # so "not done" is a park and not a slow start.
-        lock = handler._claude_runtime_generation_lock("slack_a:/w")
-        await lock.acquire()
+        # Contended by End's own teardown. ``cleanup_session`` takes the
+        # generation lock for this key and holds it across its locked body; the
+        # warm second turn is admitted and parks INSIDE session resolution,
+        # before anything stamps it active. Eight scheduler steps, so "not
+        # done" is a park and not a slow start.
+        inside_cleanup = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+
+        async def _cleanup_locked(*args, **kwargs):
+            inside_cleanup.set()
+            await finish_cleanup.wait()
+
+        handler._cleanup_session_locked = _cleanup_locked
+        teardown = asyncio.create_task(handler.cleanup_session("slack_a:/w"))
+        await inside_cleanup.wait()
         second = asyncio.create_task(handler.get_or_create_claude_session(None))
         for _ in range(8):
             await asyncio.sleep(0)
         parked = not second.done()
-        lock.release()
+        finish_cleanup.set()
+        await teardown
         assert await second is resolved
         return uncontended_finished_in_one_step, parked
 
@@ -339,9 +372,11 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
         "retraction above is what needs rereading, not this assertion"
     )
     assert parked, (
-        "a second turn did not park inside session resolution while the "
-        "generation lock was held, so the window PR7R-F1 depends on is not a "
-        "window and the finding needs rereading"
+        "a second turn did not park inside session resolution while End's own "
+        "teardown held the generation lock, so the window PR7R-F1 depends on "
+        "is not a window and the finding needs rereading. This fails if "
+        "``cleanup_session`` stops taking the lock, which is the right way for "
+        "it to fail -- the reachability argument would be gone with it."
     )
 
     # REACHABILITY, which the previous draft left to the reader and review was
