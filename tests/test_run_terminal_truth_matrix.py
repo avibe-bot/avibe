@@ -50,16 +50,40 @@ _CELLS = _expand()
 
 
 def _assert_node_exists(node_id: str) -> None:
+    """Resolve the COMPLETE pytest node id, one nesting level at a time.
+
+    Matching only the trailing function name and walking the whole module --
+    which is what HFR-105 does, and what this guard did first -- accepts a node
+    id whose class component is misspelled, renamed, or absent, as long as some
+    same-named function exists anywhere in the file. For a matrix whose entire
+    value is that its citations are real, that is the wrong failure mode: the
+    citation would stay green while pointing at a test that no longer runs.
+    """
     test_path, *node_parts = node_id.split("::")
     assert test_path.startswith("tests/"), node_id
     assert node_parts, node_id
-    test_name = node_parts[-1]
-    tree = ast.parse(Path(test_path).read_text(encoding="utf-8"))
-    assert any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == test_name
-        for node in ast.walk(tree)
-    ), node_id
+
+    scope: list[ast.stmt] = ast.parse(
+        Path(test_path).read_text(encoding="utf-8")
+    ).body
+    for depth, name in enumerate(node_parts):
+        is_leaf = depth == len(node_parts) - 1
+        wanted = (
+            (ast.FunctionDef, ast.AsyncFunctionDef) if is_leaf else (ast.ClassDef,)
+        )
+        match = next(
+            (
+                node
+                for node in scope
+                if isinstance(node, wanted) and node.name == name
+            ),
+            None,
+        )
+        assert match is not None, (
+            f"{node_id}: no {'test function' if is_leaf else 'class'} "
+            f"named {name!r} at this level"
+        )
+        scope = match.body
 
 
 def _detail_node(detail: str) -> str:
@@ -147,6 +171,41 @@ def test_every_question_and_finding_names_a_real_consuming_test() -> None:
         if kind == "defect"
     }
     assert referenced == set(PR7R_FINDINGS)
+
+
+def test_a_citation_with_the_wrong_class_component_is_rejected() -> None:
+    """HFR-186: the node resolver reads the whole id, not just its last word.
+
+    The regression this pins: a class-qualified citation used to pass on the
+    strength of the function name alone, so renaming the class -- or citing a
+    class that never existed -- left the matrix pointing at a test pytest would
+    not collect, with a green guard. Both real spellings are checked too, so
+    the resolver cannot be "fixed" by rejecting everything.
+    """
+    real = (
+        "tests/test_agent_stop_settlement.py::AgentStopSettlementTests::"
+        "test_no_backend_stop_uses_the_terminal_turn_default"
+    )
+    _assert_node_exists(real)  # class-qualified, correct
+    _assert_node_exists(  # module-level, correct
+        "tests/test_run_terminal_truth_matrix.py::"
+        "test_the_unproven_count_matches_the_checked_in_budget"
+    )
+
+    with pytest.raises(AssertionError, match="no class named"):
+        _assert_node_exists(real.replace("AgentStopSettlementTests", "RenamedTests"))
+    with pytest.raises(AssertionError, match="no test function named"):
+        # The class is right; the function moved out from under it.
+        _assert_node_exists(
+            "tests/test_agent_stop_settlement.py::AgentStopSettlementTests::"
+            "test_no_such_test_lives_in_this_class"
+        )
+    with pytest.raises(AssertionError, match="no class named"):
+        # A real module-level function cited as if it were nested.
+        _assert_node_exists(
+            "tests/test_run_terminal_truth_matrix.py::NotAClass::"
+            "test_the_unproven_count_matches_the_checked_in_budget"
+        )
 
 
 def test_the_q2_blocker_is_spelled_for_every_backend_and_lane() -> None:

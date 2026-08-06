@@ -158,6 +158,14 @@ _NONTERMINAL_UNTIL_SETTLED = (
     "tests/test_scheduled_tasks.py::"
     "test_claimed_watch_stays_nonterminal_after_delivery_ownership_transfer"
 )
+_HEALTH_WINDOW_AGES_OUT = (
+    "tests/test_harness_failure_visibility.py::"
+    "test_health_window_ages_out_after_the_time_bound"
+)
+_HEALTH_DERIVED_NOT_STORED = (
+    "tests/test_harness_failure_visibility.py::"
+    "test_one_success_does_not_erase_recent_failure_history"
+)
 _DEFINITION_CAS = (
     "tests/test_scheduled_tasks.py::"
     "test_task_definition_projection_follows_the_exact_terminal_cas_winner"
@@ -181,7 +189,7 @@ _NOT_A_SUCCESS = (
 # PR7R's own reproducers.
 _F1 = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
-    "test_end_live_state_race_settles_an_unmarked_claude_turn_as_a_refresh"
+    "test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional"
 )
 _F2 = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
@@ -189,11 +197,11 @@ _F2 = (
 )
 _Q2_BLOCKER = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
-    "test_no_backend_exposes_a_per_turn_progress_signal_on_either_lane"
+    "test_no_backend_keys_a_progress_signal_by_turn_on_either_lane"
 )
 _Q3_PROBE = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
-    "test_the_turn_merge_key_admits_runs_with_different_source_semantics"
+    "test_the_accepted_run_batch_records_no_per_run_source_or_deadline"
 )
 
 
@@ -217,6 +225,36 @@ _SHARED_DEFINITION_PROJECTION = (
     "same terminal transition, identical for every backend -- " + _DEFINITION_CAS
 )
 
+#: The Activity output batch is not a backend-independent mechanism. Every test
+#: that proves a pending-output or post-delivery local-settlement fact starts a
+#: ``SessionActivity`` with ``backend="claude"``, and ``claude_agent.py`` is the
+#: only production module that PRODUCES one -- ``modules/agents/service.py``
+#: merely owns the registry. So those cells are evidence for Claude and nothing
+#: else. They are ``unproven`` rather than ``N/A`` for the other two backends
+#: because a pending-output fact is still reachable for them by another route:
+#: ``defer_run_terminal`` is called from ``core/message_dispatcher.py`` and
+#: ``core/scheduled_tasks.py``, neither of which branches on backend. Whether
+#: that route actually fires on a codex/opencode terminal path is the open
+#: question, and calling it ``N/A`` would answer it by assertion.
+def _activity_is_claude_only(outcome: str) -> tuple[str, str]:
+    return unproven(
+        f"the cited {outcome} evidence starts a SessionActivity with "
+        "backend='claude', and claude_agent.py is the only production producer "
+        "of one. Probe: drive this backend's terminal path with a pending "
+        "output owed and record which durable fact (an Activity batch, a "
+        "``defer_run_terminal`` deferral, or none) the Run actually carries."
+    )
+
+
+_NON_CLAUDE_ACTIVITY: Final = {
+    backend: _activity_is_claude_only("pending-output")
+    for backend in ("codex", "opencode")
+}
+_NON_CLAUDE_LOCAL_SETTLEMENT: Final = {
+    backend: _activity_is_claude_only("local-settlement-retry")
+    for backend in ("codex", "opencode")
+}
+
 _DURABLE_BY_OUTCOME: Final = {
     "success": {"shared": covered(_TERMINAL_SUCCESS)},
     "failure": {"shared": covered(_TERMINAL_FAILURE)},
@@ -233,15 +271,34 @@ _DURABLE_BY_OUTCOME: Final = {
         },
     },
     "terminal_persistence_failure": {"shared": covered(_PREWRITE)},
-    "pending_output_delivery": {"shared": covered(_PENDING_OUTPUT)},
+    "pending_output_delivery": {
+        "shared": covered(_PENDING_OUTPUT),
+        "per_backend": dict(_NON_CLAUDE_ACTIVITY),
+    },
     "post_delivery_local_settlement_failure": {
-        "shared": covered(_LOCAL_SETTLEMENT_DURABLE)
+        "shared": covered(_LOCAL_SETTLEMENT_DURABLE),
+        "per_backend": dict(_NON_CLAUDE_LOCAL_SETTLEMENT),
     },
 }
 
 _IM_BY_OUTCOME: Final = {
     "success": {"shared": shared_owner(_SHARED_TERMINAL_LATCH)},
-    "failure": {"shared": covered(_TERMINAL_FAILURE)},
+    "failure": {
+        # ``_TERMINAL_FAILURE`` is a STORAGE test: it drives the five terminal
+        # writers directly and proves the owed-notice stamp is keyed on the
+        # property "this UPDATE sets a terminal failure status", so no future
+        # writer can escape it. That is a real backend-independent guarantee,
+        # and on the durable lane the Run genuinely reaches it as a claimed
+        # request completion. On the IM lane nothing connects a backend failure
+        # to any of those writers, so citing it here would be borrowing a
+        # storage proof to cover a dispatch path.
+        "shared": unproven(
+            "the owed-notice guarantee is proven at the storage writers, not "
+            "from an IM dispatch. Probe: fail a turn on each backend with an "
+            "IM-scoped Harness Run bound to it and assert the Run reaches a "
+            "terminal failure status with an owed notice attached."
+        ),
+    },
     "resultless_termination": {
         "shared": unproven(
             "the IM lane has no durable Turn row to settle from, so the Run "
@@ -271,9 +328,13 @@ _IM_BY_OUTCOME: Final = {
             "whether the Run is retried, swept, or left nonterminal."
         ),
     },
-    "pending_output_delivery": {"shared": covered(_LOCAL_SETTLEMENT_EVIDENCE)},
+    "pending_output_delivery": {
+        "shared": covered(_LOCAL_SETTLEMENT_EVIDENCE),
+        "per_backend": dict(_NON_CLAUDE_ACTIVITY),
+    },
     "post_delivery_local_settlement_failure": {
-        "shared": covered(_LOCAL_SETTLEMENT_IM)
+        "shared": covered(_LOCAL_SETTLEMENT_IM),
+        "per_backend": dict(_NON_CLAUDE_LOCAL_SETTLEMENT),
     },
 }
 
@@ -289,11 +350,35 @@ _TRIGGER_OVERRIDES: Final = {
     ("durable_workbench", "scheduler_at"): {
         "success": {"shared": covered(_ONE_SHOT_RETIREMENT)},
     },
+    # Both watch tests deliberately stop at the ownership boundary, which is
+    # what makes them good tests of the boundary and useless as success
+    # evidence: the durable one ASSERTS the Run is still ``running`` after the
+    # transfer, and the IM one has no Run row at all -- it asserts the steer
+    # reached the Delivery owner. A watch's terminal half is a different fact
+    # (does the cycle settle its Run and re-arm?) and nothing proves it yet.
     ("durable_workbench", "watch"): {
-        "success": {"shared": covered(_NONTERMINAL_UNTIL_SETTLED)},
+        "success": {
+            "shared": unproven(
+                "the cited transfer test asserts the Run is still ``running``; "
+                "the terminal half of the watch cycle is unproven. Probe: run "
+                "one watch firing through to its terminal result and assert "
+                "both the Run's terminal status and the next cycle's re-arm -- "
+                + _NONTERMINAL_UNTIL_SETTLED
+                + " covers only the pre-terminal half."
+            ),
+        },
     },
     ("direct_im", "watch"): {
-        "success": {"shared": covered(_IM_WATCH_DELIVERY)},
+        "success": {
+            "shared": unproven(
+                "the cited test proves admission only -- the steer reaches the "
+                "Delivery owner and no Run row is involved. Probe: bind an "
+                "IM-scoped Harness Run to a watch firing and assert it reaches "
+                "a terminal success -- "
+                + _IM_WATCH_DELIVERY
+                + " covers only the steer."
+            ),
+        },
     },
     ("direct_im", "scheduler_at"): {
         "success": {"shared": shared_owner(_SHARED_DEFINITION_PROJECTION)},
@@ -323,7 +408,17 @@ RUN_TERMINAL_TRUTH_MATRIX: Final = _build_matrix()
 #: How many of the 168 expanded cells currently have no evidence. This is the
 #: honest gap in PR7R, not a tolerance: it may only be lowered by a commit that
 #: adds the probe named in the cell.
-UNPROVEN_BUDGET: Final = 28
+#:
+#: It went 28 -> 78 under review. Every one of those 50 cells was previously
+#: marked ``covered`` by a test that proves a NEARBY fact: a storage-writer
+#: property standing in for an IM dispatch, a Claude-only Activity fixture
+#: standing in for three backends, an ownership-transfer test that asserts
+#: ``running`` standing in for a terminal success. That is the exact failure
+#: mode this budget exists to expose, and it took an adversarial read to find
+#: it -- which is worth recording, because it means a cell citing a real,
+#: passing, relevant-looking test is still not evidence until someone checks
+#: that the test's subject is this cell's subject.
+UNPROVEN_BUDGET: Final = 78
 
 
 # ----- Q2: exact-Turn progress attribution ---------------------------------
@@ -371,14 +466,19 @@ PR7R_QUESTIONS: Final = {
             "Does the Run remain nonterminal until its actual terminal "
             "Turn/result or Activity output batch settles it?"
         ),
-        "verdict": "answered",
+        "verdict": "open",
         "answer": (
-            "Yes on both lanes. Delivery reservation, ownership transfer and "
-            "backend dispatch acceptance all leave the Run nonterminal; only a "
-            "terminal Turn/result, an Activity output batch, or an explicit "
-            "settlement writes a terminal status. The old premature-success "
-            "claim should be CLOSED with this regression evidence rather than "
-            "answered with another terminal writer."
+            "Yes on the durable Workbench lane: a Delivery reservation and an "
+            "ownership transfer both leave the Run ``running``, and a "
+            "result-less failure is not laundered into an interruption. The "
+            "direct-IM lane is NOT established. Both cited tests are durable: "
+            "neither touches the IM reservation or the backend-acceptance "
+            "boundary, so a premature terminal transition there would leave "
+            "them green. Probe: bind an IM-scoped Harness Run to an accepted "
+            "backend dispatch and assert the Run is still nonterminal at the "
+            "acceptance boundary. The old premature-success claim may only be "
+            "closed once that probe exists -- on the durable lane alone this "
+            "answer does not carry it."
         ),
         "evidence": (_NONTERMINAL_UNTIL_SETTLED, _NOT_A_SUCCESS),
     },
@@ -405,11 +505,21 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "The merge key is the session anchor, not the Run source, so Runs "
-            "with different ``source_kind`` can coalesce into one Turn. "
-            "Cancellation is Turn-level, so no per-Run timeout policy may be "
-            "specified until this cardinality is made explicit -- see the probe "
-            "for the exact key and the recorded batch."
+            "Partly. What IS established: once several Runs are attributed to "
+            "one Turn, the Turn records only a flat ``accepted_agent_run_ids`` "
+            "list -- no per-Run source, no per-Run deadline -- so a Turn-level "
+            "cancellation has nothing to consult that would let it treat them "
+            "differently. That alone blocks a per-Run timeout policy. What is "
+            "NOT established is the admission half: whether a scheduler Run and "
+            "a manual CLI Run actually coalesce. The probe drives the "
+            "accumulator, and the accumulator is downstream of the decision -- "
+            "it appends ids already attributed to its Turn. The owner that "
+            "decides is ``SessionTurnManager._hydrate_delivery_batch_context``, "
+            "which folds a Delivery batch into ONE context and calls "
+            "``_append_accepted_agent_run_ids`` once. Probe: enqueue a cron "
+            "Delivery and a ``vibe task run`` Delivery on one Session and drive "
+            "that batch hydration, asserting whether both run ids land in a "
+            "single Turn context."
         ),
         "evidence": (_Q3_PROBE, _ONE_SHOT_RETIREMENT),
     },
@@ -418,13 +528,21 @@ PR7R_QUESTIONS: Final = {
             "Which evidence exists before the Turn becomes terminal, proving "
             "natural completion has started?"
         ),
-        "verdict": "answered",
+        "verdict": "open",
         "answer": (
             "Four durable facts, all of which must outrank a later inactivity "
             "decision: the terminal-result latch, a durable pending-output fact, "
             "an accepted Message receipt, and the "
             "``activity_local_settlement_only`` marker that survives a failed "
-            "local settlement without re-delivering."
+            "local settlement without re-delivering. FOR CLAUDE ONLY. Three of "
+            "the four rest on the Activity output batch, and "
+            "``modules/agents/claude_agent.py`` is its only production producer "
+            "-- every cited test starts its activity with ``backend='claude'``. "
+            "A codex or opencode Turn has no proven pre-terminal evidence at "
+            "all, which is the stronger form of the same blocker as Q2: an "
+            "inactivity decision on those backends would have nothing to "
+            "outrank it. Probe: the per-backend one named in the "
+            "``pending_output_delivery`` cells."
         ),
         "evidence": (
             _PENDING_OUTPUT,
@@ -441,14 +559,23 @@ PR7R_QUESTIONS: Final = {
         "verdict": "answered",
         "answer": (
             "Yes. ``health``/``consecutive_failures``/``recent_failures`` are "
-            "derived per read by ``_health_from_verdicts`` over a bounded window "
-            "of terminal Run verdicts -- they are not stored counters, so they "
-            "cannot drift. ``last_run_at``/``last_error`` are written in the same "
-            "CAS-guarded terminal transition that settles the Run. No health "
-            "cursor is needed, and dispatch or Delivery acceptance never touches "
-            "any of them."
+            "derived per read by "
+            "``SQLiteBackgroundTaskStore._classify_health`` over the bounded "
+            "verdict window ``_health_rows`` collects -- they are not stored "
+            "counters, so they cannot drift, a failure that ages out of the "
+            "window stops counting on its own, and a success downgrades "
+            "``failing`` to ``degraded`` instead of erasing the history. "
+            "``last_run_at``/``last_error`` are written in the same CAS-guarded "
+            "terminal transition that settles the Run. No health cursor is "
+            "needed, and dispatch or Delivery acceptance never touches any of "
+            "them."
         ),
-        "evidence": (_HEALTH_PROJECTION, _DEFINITION_CAS),
+        "evidence": (
+            _HEALTH_WINDOW_AGES_OUT,
+            _HEALTH_DERIVED_NOT_STORED,
+            _HEALTH_PROJECTION,
+            _DEFINITION_CAS,
+        ),
     },
 }
 
@@ -460,8 +587,8 @@ PR7R_QUESTIONS: Final = {
 PR7R_FINDINGS: Final = {
     "PR7R-F1": {
         "title": (
-            "End settles a Claude turn as a backend refresh when the live-state "
-            "probe cannot see it yet"
+            "End tears down a live Claude turn without the canonical stop when "
+            "the live-state probe cannot see it yet"
         ),
         "owner": "core/services/running_agents.py::_resolve_live_state",
         "detail": (
@@ -469,10 +596,21 @@ PR7R_FINDINGS: Final = {
             "``get_or_create_claude_session`` returns, so a turn that is "
             "accepted while the CLI is still starting is absent from "
             "``claude_active_sessions``. ``_resolve_live_state`` reports "
-            "``idle`` for it, End takes the idle branch into ``_end_claude``, "
-            "and the intentional-teardown path settles the Run as "
-            "``backend_refresh`` -> ``failed`` instead of ``stopped`` -> "
-            "``canceled``. Invariant 2 says a user Stop is ``canceled``."
+            "``idle`` for it, and End takes the idle branch into "
+            "``_end_claude``. Two things follow, and only the second was "
+            "originally stated correctly. (1) ``handle_stop`` -- the ONLY path "
+            "that emits ``stopped`` -> ``canceled`` -- never runs, so a user "
+            "Stop cannot produce the status Invariant 2 requires for one. "
+            "(2) ``cleanup_session`` marks the key an INTENTIONAL teardown, so "
+            "when the still-live turn dies of the resulting SIGTERM/SIGKILL, "
+            "``claude_teardown_is_intentional`` classifies it as service "
+            "cleanup rather than a fault -- the user's Stop is erased from the "
+            "record twice over. WHICH terminal status the IM Run then receives "
+            "is deliberately NOT claimed here: ``SETTLED_BY_BACKEND_REFRESH`` "
+            "is emitted by ``SessionTurnManager.release_for_backend_refresh``, "
+            "a Workbench-lane path, and no evidence connects it to an IM Run. "
+            "The IM lane's ``user_stop`` and ``resultless_termination`` cells "
+            "carry the probe that would settle it."
         ),
         "reproducer": _F1,
     },

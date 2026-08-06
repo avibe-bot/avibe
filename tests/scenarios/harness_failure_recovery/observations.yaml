@@ -281,10 +281,16 @@ observations:
       Workbench turn projection to fall back on. (1) ``_resolve_live_state`` reads
       ``claude_active_sessions``, which ``handle_message`` stamps only AFTER
       ``get_or_create_claude_session`` returns; a Run accepted while that call is in
-      flight reads ``idle``, End takes the idle branch into ``_end_claude``, the
-      canonical stop never runs, and the intentional-teardown path settles the Run as
-      ``backend_refresh`` -> ``failed`` where invariant 2 requires ``stopped`` ->
-      ``canceled``. (2) On the codex active branch a teardown that succeeds after a
+      flight reads ``idle``, End takes the idle branch into ``_end_claude``, and the
+      canonical stop -- the only path that emits ``stopped`` -> ``canceled``, which
+      invariant 2 requires for a user Stop -- never runs. ``cleanup_session`` then
+      marks the key an intentional teardown, so when the still-live turn dies of the
+      resulting kill signal ``claude_teardown_is_intentional`` classifies it as
+      service cleanup rather than a fault: the Stop is erased from the record twice.
+      Which terminal status the IM Run ends with is NOT established and is carried as
+      an open probe -- ``SETTLED_BY_BACKEND_REFRESH`` is emitted by
+      ``SessionTurnManager.release_for_backend_refresh`` on the Workbench lane, and
+      nothing connects it to an IM Run. (2) On the codex active branch a teardown that succeeds after a
       FAILED ``_stop_active_agent`` synthesizes ``{ok: True, action: "ended"}``.
       Clearing the stale row is deliberate and should stay, but the payload is
       byte-identical to a stop that really settled the turn: the un-interrupted
@@ -301,26 +307,52 @@ observations:
       session; opencode holds one asyncio task per base session. All three are
       session-wide, which the plan explicitly rules out as a substitute -- so a
       generic inactivity timeout is blocked on evidence, not on design taste, and no
-      implementation PR may be opened for one yet. Separately, the Turn merge key is
-      the Session anchor alone: ``_attach_accepted_agent_runs`` matches on
-      ``session_id`` plus the logical turn id and records no per-participant source
-      or deadline, so a scheduler cron Run and a manual CLI Run coalesce into one
-      Turn. Cancellation is Turn-level, so per-Run timeout policy stays unspecifiable
-      until that cardinality is made explicit.
+      implementation PR may be opened for one yet. Separately, a Turn's accepted-run
+      record cannot discriminate between its participants: it holds a flat
+      ``accepted_agent_run_ids`` list and one Turn-level ``source_kind`` stamped by
+      the first participant, with no per-Run source or deadline anywhere. Whether a
+      scheduler cron Run and a manual CLI Run actually coalesce is a separate,
+      still-open question owned by ``_hydrate_delivery_batch_context``, not by the
+      accumulator. Either way cancellation is Turn-level, so per-Run timeout policy
+      stays unspecifiable until that cardinality is made explicit.
   - id: HFR-OBS-025
     date: 2026-08-06
     source: PR7R current-master evidence matrix (Q1, Q4, Q5)
-    result: refuted
+    result: confirmed
     detail: >-
-      Three of the plan's five questions close in master's favour and should not
-      receive code. Q1: Delivery reservation, ownership transfer and backend dispatch
-      acceptance all leave the Run nonterminal on both lanes -- the old
-      premature-success claim is closed by regression evidence, not by another
-      terminal writer. Q4: four durable facts already prove natural completion has
-      started (terminal-result latch, durable pending-output fact, accepted Message
-      receipt, ``activity_local_settlement_only`` marker) and must outrank any later
-      inactivity decision. Q5: ``health`` / ``consecutive_failures`` /
-      ``recent_failures`` are derived per read by ``_health_from_verdicts`` over a
-      bounded window of terminal verdicts rather than stored counters, and
-      ``last_run_at`` / ``last_error`` are written in the same CAS-guarded terminal
-      transition that settles the Run -- so no health cursor is needed.
+      Of the plan's five questions only Q5 closes outright in master's favour.
+      ``health`` / ``consecutive_failures`` / ``recent_failures`` are derived per
+      read by ``SQLiteBackgroundTaskStore._classify_health`` over the bounded verdict
+      window ``_health_rows`` collects, rather than stored counters: a failure ages
+      out of the window on its own and a success downgrades ``failing`` to
+      ``degraded`` instead of erasing history. ``last_run_at`` / ``last_error`` are
+      written in the same CAS-guarded terminal transition that settles the Run. No
+      health cursor is needed. Q1 holds on the durable Workbench lane only -- a
+      Delivery reservation and an ownership transfer both leave the Run ``running``
+      -- but nothing exercises the direct-IM reservation or backend-acceptance
+      boundary, so the premature-success claim may not be closed yet. Q4's four
+      durable pre-terminal facts are real for Claude and unproven for the other two
+      backends: three of the four rest on the Activity output batch, whose only
+      production producer is ``modules/agents/claude_agent.py``.
+  - id: HFR-OBS-026
+    date: 2026-08-06
+    source: adversarial review of the PR7R matrix (PR #1212)
+    result: confirmed
+    detail: >-
+      An evidence cell citing a real, passing, topically adjacent test is still not
+      evidence. Review of PR7R's first increment found 50 of 168 cells marked
+      ``covered`` by a test whose SUBJECT was not the cell's subject, and the budget
+      moved 28 -> 78 as a result. Four distinct substitutions, all of which read as
+      coverage: a storage-writer property (the owed-notice stamp, proven by driving
+      the five terminal writers directly) standing in for an IM dispatch path; a
+      Claude-only fixture (every Activity test starts with ``backend="claude"``)
+      standing in for three backends; an ownership-transfer test that ASSERTS the Run
+      is still ``running`` standing in for a terminal success; and a constant lookup
+      (``SETTLEMENT_TERMINAL_STATUS[...]``) standing in for a settlement that was
+      never driven. The last one also carried a wrong claim -- PR7R-F1 originally
+      said the Run settles as ``backend_refresh``, but that settlement is emitted by
+      ``SessionTurnManager.release_for_backend_refresh`` on the Workbench lane and
+      nothing connects it to an IM Run. The matrix guard cannot catch any of this:
+      it verifies a citation RESOLVES, not that it is about the right thing. Only a
+      reader comparing each cited test's body against its cell can, which makes that
+      comparison a required step whenever a cell is marked covered.

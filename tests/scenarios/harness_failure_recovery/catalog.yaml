@@ -2716,12 +2716,12 @@ scenarios:
     backend: shared
     test: tests/test_watches.py::test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop
   - id: HFR-180
-    name: End settles an unmarked Claude turn as a backend refresh instead of a stop
+    name: End tears down a live Claude turn and reclassifies it as intentional
     status: covered
     kind: failure
     layer: contract
     backend: claude
-    test: tests/test_run_terminal_truth_evidence_probes.py::test_end_live_state_race_settles_an_unmarked_claude_turn_as_a_refresh
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional
   - id: HFR-181
     name: codex End reports ok/ended when the canonical stop never interrupted
     status: covered
@@ -2730,19 +2730,19 @@ scenarios:
     backend: codex
     test: tests/test_run_terminal_truth_evidence_probes.py::test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted
   - id: HFR-182
-    name: the Turn merge key admits Runs with different source semantics
+    name: a Turn's accepted-run batch records no per-Run source or deadline
     status: covered
     kind: concurrency
     layer: contract
     backend: shared
-    test: tests/test_run_terminal_truth_evidence_probes.py::test_the_turn_merge_key_admits_runs_with_different_source_semantics
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_the_accepted_run_batch_records_no_per_run_source_or_deadline
   - id: HFR-183
-    name: no backend exposes a per-Turn progress signal on either lane
+    name: no backend keys a progress signal by Turn on either lane
     status: covered
     kind: safety
     layer: contract
     backend: shared
-    test: tests/test_run_terminal_truth_evidence_probes.py::test_no_backend_exposes_a_per_turn_progress_signal_on_either_lane
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_no_backend_keys_a_progress_signal_by_turn_on_either_lane
   - id: HFR-184
     name: every run terminal truth cell is proven or named as a gap
     status: covered
@@ -2764,6 +2764,13 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_run_terminal_truth_matrix.py::test_every_question_and_finding_names_a_real_consuming_test
+  - id: HFR-187
+    name: a matrix citation with the wrong class component is rejected
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_a_citation_with_the_wrong_class_component_is_rejected
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
