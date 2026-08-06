@@ -696,6 +696,19 @@ configuration and remains protected from a silent Source deletion; its
 `SupplyGap.agents` list may correctly be empty. `api.md` → DELETE carries the full set
 and the confirm copy names affected Agents when any exist.
 
+Exact-hop referential integrity is a separate guard from the supply-gap calculation.
+A non-forced Source DELETE refuses whenever any Custom chain names that Source, even
+when a later hop still supplies the menu model, and returns `source_in_custom_chain`
+plus ordered `would_remove_hops` entries naming each `(backend, menu_model,
+source_id, model_id)` reference. `force=true` is an explicit cascade confirmation:
+the same transaction deletes the Source and every exact hop that names it, while the
+identity and relative order of all surviving hops remain unchanged. The route stays
+`custom` even if no hop survives, so deletion never silently changes it to Follow.
+Any resulting protected-model gap is reported through the existing
+`would_interrupt` projection alongside `would_remove_hops`. This explicit cascade is
+not the silent side effect prohibited by §2; without the confirmation, neither the
+Source nor any chain changes.
+
 **Turn provenance.** Each turn whose attribution is **exact** records the model@source
 that served it — the write rule below is what 「exact」 means, and it is the promise's
 scope, not a caveat on it — and that record is readable through a contracted route.
@@ -833,22 +846,44 @@ Custom chain can instead name `src_chatgptplus + gpt-5.6` ahead of
 choice and the deliberate native-first override explicit.
 
 **Mapping evolution proposal — owner-vetoable (2026-08-07).** Contract v5 removes
-`mappings` and `PUT /api/models/agents/<backend>/mappings`. During one atomic pre-GA
-upgrade, legacy rows are first grouped by `builtin_id`. The current resolver uses the
-first enabled row in stored order, so that resolver-effective row alone defines the
-group's target; later enabled duplicates are ignored as shadowed and do not overwrite
-it. A group with no enabled row becomes `follow`. This normalization preserves current
-behavior even for duplicate rows that the old write path accepted.
+`mappings` and `PUT /api/models/agents/<backend>/mappings`. Before changing any
+eligibility rule, `allowed_origins` interpretation, or backend Source order, the
+upgrade snapshots each backend's v4 resolver-effective Source order, eligibility
+decisions, and advertised models. Legacy rows are then grouped by `builtin_id`. The
+v4 resolver uses the first enabled row in stored order, so that resolver-effective row
+alone defines the group's target; later enabled duplicates are ignored as shadowed and
+do not overwrite it. A group with no enabled row becomes `follow`. This normalization
+preserves current behavior even for duplicate rows that the old write path accepted.
 
 Each resolver-effective mapping is then materialized into one Custom chain by walking
-the backend Source order and emitting `(source_id, target_model_id)` for **every**
-enrolled eligible Source that advertises the target. All hops therefore share one
-target model while retaining the old fallback supplier set: the legacy behavior is a
-single-target, potentially multi-hop chain, and it is one-hop only when exactly one
-Source can supply the target. If an effective mapping cannot produce any valid hop,
-the upgrade fails closed and asks for configuration review; it never falls through to
-a shadowed duplicate or keeps a live mapping beside an empty chain. Only after every
-group is normalized and converted are legacy rows deleted and the v5 config committed.
+that **v4 snapshot** and emitting `(source_id, target_model_id)` for every Source the
+v4 resolver would have considered for that target. All hops therefore share one target
+model while retaining exactly the old fallback supplier set: a Hub-held subscription
+made newly eligible by v5 does not enter a migrated Custom chain until the user edits
+that route. The legacy behavior is a single-target, potentially multi-hop chain, and it
+is one-hop only when exactly one Source can supply the target. If an effective mapping
+cannot produce any valid hop, the upgrade fails closed and asks for configuration
+review; it never falls through to a shadowed duplicate or keeps a live mapping beside
+an empty chain.
+
+The upgrade also converts the two persisted diagnostic stores before publishing v5.
+Every attempt slot in `model_hub_turn_provenance.json` replaces `via_mapping` with the
+non-lossy pair `route_policy: "legacy"` plus `requested_model_changed` equal to the old
+boolean. A historical record cannot be relabeled Follow or Custom from today's config,
+because the route may have changed since that turn; `legacy` states that evidence gap
+instead of inventing attribution. Migrated provenance records and converted resolution
+events carry `migrated_from_contract_version: 4`; v5 schemas permit `legacy` only with
+that discriminator and forbid the discriminator on newly written rows. New v5
+provenance records permit only `follow` or `custom`. Every
+`mapping_applied` / `mapping` row in `model_hub_resolution_events.json` becomes the v5
+`route_model_rewritten` / `configured_route` equivalent, preserving its id, timestamp,
+backend, model, billing/severity fields, and recorded human strings. K3 must stage and
+validate the converted config and both bounded stores, then publish them through one
+recoverable upgrade transaction. A crash at any commit point resumes to all-v5 or
+restores all-v4; readers never observe a mixed version, and historical feed and billing
+attribution are never deleted. Only after this transaction commits are legacy mapping
+rows removed. These retained diagnostics are historical evidence, not a second routing
+authority.
 
 This replacement is smaller and more honest than coexistence: one route owner answers
 both “which Source?” and “which upstream model?”, one projection powers runtime and UI,
@@ -1066,9 +1101,9 @@ directions into questions that later lanes must answer before writing mechanical
       native CLI's sanctioned-backend binding.
 - [ ] §4.6 is the document's only chain derivation, and its custom hops are exact
       `(source_id, model_id)` pairs.
-- [ ] The owner-vetoable mapping evolution is acceptable: atomic materialization into
-      a single-target Custom chain that preserves every supplier and duplicate-row
-      resolver semantics, then removal; no dual routing authority.
+- [ ] The owner-vetoable mapping evolution is acceptable: materialization from the v4
+      resolver snapshot preserves every existing supplier and duplicate-row semantics;
+      config plus both diagnostic stores upgrade recoverably; no dual routing authority.
 - [ ] §4.5 keeps state source-global, status live-derived, successful fallback silent,
       and proactive delivery cut.
 - [ ] §5 has exactly Sources + Gateway modules; the connector is state-only and

@@ -344,9 +344,13 @@ addendum differs.
 
 The recommended and default subscription path is native: Claude stays in Claude Code's
 local login and ChatGPT stays in Codex's local login. Native supply leads that backend's
-resolution. When native quota is exhausted or cooling down, the same turn automatically
-continues through the first runnable Gateway provider configured for that backend; after
-native supply recovers, subsequent turns return to it automatically.
+recommended Follow resolution. A Custom chain remains authoritative and may put a Hub
+hop first with no hidden native pre-pass. When the leading native hop reports quota
+exhaustion or cooldown before any output starts, the same turn automatically continues
+through the first runnable Gateway provider in that chain. If native output has already
+streamed, the interrupted turn ends without retry and the next turn uses Gateway while
+native remains cooling. After native supply recovers, subsequent Follow turns return to
+it automatically.
 
 Users may explicitly add either a Claude or ChatGPT subscription as a Hub-held Source.
 Once added, that Source may supply any configured backend and may appear in a

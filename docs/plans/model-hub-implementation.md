@@ -106,7 +106,7 @@ the three whitelisted planning documents while K2 extends the engine survey. K3 
 | --- | --- | --- | --- |
 | **K1 spec v3 sync** | codex | This docs-only PR: `model-hub.md`, binding §3/§8 updates here, and one dated addendum in `model-hub-tos-review.md`; no frozen-contract edit | — |
 | **K2 conversion fidelity** | codex | Extend `model-hub-engine-survey.md` with the owner-requested agentic fidelity matrix and per-pair go/no-go; no product-contract or UI edit | — |
-| **K3 v5 freeze + routing core** | codex | First implementation lane. Author the complete v5 revision set below in one coordinated freeze; replace mappings with per-model route policy/hops; implement the one §4.6 projection, atomic legacy conversion, serializer completeness, route/API guards, retired flag/consent config cleanup, and source-order recommendation changes | K1 |
+| **K3 v5 freeze + routing core** | codex | First implementation lane. Author the complete v5 revision set below in one coordinated freeze; replace mappings with per-model route policy/hops; implement the one §4.6 projection, the recoverable v4→v5 conversion across config and both diagnostic stores, serializer completeness, exact-hop deletion guards, retired flag/consent config cleanup, and source-order recommendation changes | K1 |
 | **K4 channel runtime** | codex | Implement Follow-default native-first dispatch, pre-stream same-turn Gateway takeover, post-stream interruption, and recovery; honor Custom order without a hidden native pre-pass; implement hub-held subscription cross-backend eligibility, `allowed_origins` channel semantics, probe/provenance/event consumers of the v5 chain, and focused backend/scenario evidence; edits no frozen contract | K3 |
 | **K5 Sources + Gateway UI** | claude | Obtain approved v3 frames, then implement exactly two modules, backend order + per-model chain editing, state-only connectors, native/Gateway distinction, and the Claude hub-add warning matrix; remove consent/experimental UI; Configure Agents remains absent | K3; runtime wiring may land after K4 |
 | **K6 integration and GA evidence definition** | either | Check AC-1 through AC-24, scenario catalog, Incus behavior, EN/ZH user docs, and turn the K2 fidelity plus asset-mirror/platform research into proposed gates for owner approval. Does not declare GA or expand its scope | K2, K4, K5 |
@@ -742,8 +742,8 @@ together. K4–K6 consume v5 and do not edit frozen contracts. The revision set 
 | `oauth-flow.schema.json` | Default subscription creation to the native channel when `channel` is omitted; allow an explicit Hub channel without experimental consent | Claude and ChatGPT subscriptions are native-first but may be added to the Gateway |
 | `agent-supply.schema.json` | Replace `mappings` with a per-menu-model route policy: `follow` or an ordered `custom` hop list of exact `(source_id, model_id)` pairs; retain the independent backend Source-order policy; replace the old consent/API-key-only eligibility reasons with the channel-aware vocabulary | A legacy mapping is the single-target, potentially multi-hop form of the same route chain, not a parallel structure, and Hub-held subscriptions are eligible for OpenCode too |
 | `agent-chain.schema.json` | Project exactly the §4.6 chain for both `follow` and `custom`; expose each exact hop and its route origin; remove `via_mapping` semantics | §4.6 is the sole derivation and UI/runtime/probe must consume the same projection |
-| `probe-result.schema.json`, `turn-provenance.schema.json`, `resolution-event.schema.json` | Replace mapping-specific annotations such as `via_mapping` or `mapping_applied` with route-policy/chain equivalents while preserving exact Source/model attribution | Diagnostics must describe the same routing model as execution |
-| `api.md` | Remove the mapping write surface; keep `GET /api/models/agents/<backend>/chain?model=...` and add the matching atomic `PUT` with either `{"policy":"follow"}` or `{"policy":"custom","hops":[...]}`; keep `PUT /api/models/agents/<backend>/sources` as the independent Follow-order surface; update protected-set terms from mapping rows to custom-chain menu models; replace mapping-only errors/events with chain equivalents; update OAuth defaults and eligibility prose | There must be one model-route write shape and one read projection, while backend default order remains separately owned and cannot override a custom chain |
+| `probe-result.schema.json`, `turn-provenance.schema.json`, `resolution-event.schema.json` | Replace mapping-specific annotations with route-policy/chain equivalents: attempt slots carry `route_policy` plus `requested_model_changed`, and `mapping_applied` / `mapping` becomes `route_model_rewritten` / `configured_route`; add `migrated_from_contract_version: 4` as the discriminator for converted rows and permit historical `route_policy: "legacy"` only there; preserve exact Source/model attribution and define the persisted-store conversion below | Diagnostics must describe the same routing model as execution, and retained v4 rows must remain readable under v5 without letting new writers emit legacy ambiguity |
+| `api.md` | Remove the mapping write surface; keep `GET /api/models/agents/<backend>/chain?model=...` and add the matching atomic `PUT` with either `{"policy":"follow"}` or `{"policy":"custom","hops":[...]}`; keep `PUT /api/models/agents/<backend>/sources` as the independent Follow-order surface; update protected-set terms from mapping rows to custom-chain menu models; add `source_in_custom_chain` + ordered `would_remove_hops` and the explicit `force=true` cascade for Source deletion; replace mapping-only errors/events with chain equivalents; update OAuth defaults and eligibility prose | There must be one model-route write shape and one read projection, while backend default order remains separately owned and cannot override a custom chain; exact hops cannot silently dangle or disappear |
 | `adapter-interface.py`, `opencode-overlay.md` | Keep native subscription origins bound to their own backend client, while allowing Hub-held subscriptions to supply every configured backend through the Gateway | `allowed_origins` is channel-aware; it is not a vendor-wide subscription ban |
 | `migration-scan.schema.json` | Remove experimental-flag and consent language; preserve native subscription import as the default path and leave controlled credential import deferred | Imported subscriptions must remain in native custody |
 
@@ -751,17 +751,35 @@ together. K4–K6 consume v5 and do not edit frozen contracts. The revision set 
 set unless K3 proves a direct contract dependency. K3 must not use that possibility to
 expand the GA scope.
 
-The route replacement is atomic. Legacy mappings are grouped by menu-side
-`builtin_id`; the first enabled row in stored order is the resolver-effective row and
-later enabled duplicates are ignored as shadowed. A group with no enabled row becomes
-`follow`. Each effective row becomes a `custom` chain whose hops keep that one target
-model and enumerate **all** eligible suppliers in the existing backend Source order.
-If an effective row cannot be materialized without inventing a Source or model,
-migration fails closed and reports the group; it never falls through to a shadowed
-duplicate. The old mapping key and route disappear in the same v5 revision, so no
-runtime may choose between two routing structures. This proposal and the accompanying
-vocabulary choices are owner-vetoable, as recorded in the v3 spec; K3 escalates a veto
-instead of preserving both models.
+The route replacement is atomic. Before applying v5 eligibility or order changes, K3
+captures the v4 resolver-effective Source order, eligibility result, and advertised
+models for every backend. Legacy mappings are grouped by menu-side `builtin_id`; the
+first enabled row in stored order is the resolver-effective row and later enabled
+duplicates are ignored as shadowed. A group with no enabled row becomes `follow`. Each
+effective row becomes a `custom` chain whose hops keep that one target model and
+enumerate every supplier the **v4 resolver snapshot** would have considered, in its old
+order. A Source made newly cross-backend-eligible by v5 is never inserted into that
+Custom chain implicitly. If an effective row cannot be materialized without inventing
+a Source or model, migration fails closed and reports the group; it never falls through
+to a shadowed duplicate.
+
+The same recoverable upgrade transaction covers the config,
+`model_hub_resolution_events.json`, and `model_hub_turn_provenance.json`. K3 stages and
+validates all three v5 payloads before publishing a commit marker. Provenance attempt
+slots replace `via_mapping` with `route_policy: "legacy"` plus
+`requested_model_changed` equal to the old boolean; new v5 provenance rows use only
+`follow` or `custom`. Converted records carry `migrated_from_contract_version: 4`;
+the v5 schemas require that discriminator for `legacy` and reject it on new writes.
+Resolution rows
+replace `mapping_applied` / `mapping` with
+`route_model_rewritten` / `configured_route`, retaining identifiers, timestamps,
+attribution, billing/severity metadata, and recorded human strings. Fault injection
+after each file replacement must prove restart convergence to all-v4 or all-v5, never a
+mixed version. The old mapping key and route disappear only when that transaction
+commits, so no runtime may choose between two routing structures and no historical feed
+or billing attribution is lost. This proposal and the accompanying vocabulary choices
+are owner-vetoable, as recorded in the v3 spec; K3 escalates a veto instead of preserving
+both models.
 
 ### v3 handoff notes — delivery language the push cut stranded in frozen files
 
@@ -1186,19 +1204,33 @@ apart from explicitly non-semantic status annotations; no other paragraph, schem
 service derives a second order. A `custom` projection preserves the submitted hop
 order and exact pair identity, changes no other menu model, and is the shared input to
 runtime resolution, probe, Gateway UI, deletion guards, and diagnostics. A legacy
-mapping becomes a single-target chain with one hop per capable Source; one hop is only
-the special case where the target has one supplier. v5 contains no mapping key,
-mapping write route, mapping-only status flag, or resolver branch. A fixed-menu Follow
-fixture also proves that a foreign-vendor Source advertising the same literal model id
-is excluded; cross-vendor supply enters only through an exact Custom hop.
+mapping becomes a single-target chain with one hop per supplier in the v4
+resolver-effective snapshot; one hop is only the special case where the target had one
+supplier. v5 live config and newly written diagnostics contain no mapping key, mapping
+write route, mapping-only status flag, or resolver branch. A fixed-menu Follow fixture
+also proves that a foreign-vendor Source advertising the same literal model id is
+excluded; cross-vendor supply enters only through an exact Custom hop.
 
-Migration is tested as one transaction: for each `builtin_id`, the first enabled row
-in stored order becomes a Custom chain containing every capable supplier; later
-enabled duplicates are ignored as shadowed; a group with no enabled row becomes
-`follow`; and an unresolvable effective row aborts without partial state or fallback to
-a shadowed row. AC-5 and AC-8 remain the migration-time guard evidence; after v5,
-their mapping-specific vocabulary is structurally discharged by the chain model rather
-than kept as compatibility behavior. The replacement algorithm is owner-vetoable; a
+Deleting `src_a` from a Custom chain `[src_a/model_x, src_b/model_x]` without force is
+refused with the exact `would_remove_hops` entry even though `src_b` still supplies the
+model. The confirmed force path deletes `src_a` and that hop atomically, preserves
+`src_b/model_x` byte-for-byte at its relative position, and never resets the route to
+Follow; deleting the sole hop leaves an empty Custom route with the derived interrupted
+state. The existing `would_interrupt` list remains independently asserted.
+
+Migration is tested as one recoverable transaction: for each `builtin_id`, the first
+enabled row in stored order becomes a Custom chain containing every supplier admitted
+by the captured v4 order and eligibility; later enabled duplicates are ignored as
+shadowed; a group with no enabled row becomes `follow`; a newly v5-eligible Hub-held
+subscription is not inserted into the migrated Custom chain; and an unresolvable
+effective row aborts without partial state or fallback to a shadowed row. Seed both
+bounded stores with v4 `mapping_applied` and `via_mapping` rows, then assert the exact v5
+equivalents retain `migrated_from_contract_version: 4`, remain readable and schema-valid
+after restart, and cannot be produced through the new-write path. Fault injection at
+each publish point must expose neither mixed config/diagnostic versions nor deleted history.
+AC-5 and AC-8 remain the migration-time guard evidence; after v5, their
+mapping-specific vocabulary is structurally discharged by the chain model rather than
+kept as live compatibility behavior. The replacement algorithm is owner-vetoable; a
 veto blocks K3's freeze and does not authorize dual structures.
 
 ### AC-23 — Make native subscriptions primary with automatic Gateway takeover
