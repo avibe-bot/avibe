@@ -232,7 +232,15 @@ class ClaudeAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
             diagnostic = self._claude_error_diagnostic(runtime_session_key, e)
-            await self.record_model_hub_native_failure(context, diagnostic)
+            # Classify BEFORE recording: ``record_model_hub_native_failure``
+            # turns the pending native/hub attempt into a failed one, so a
+            # process the service killed on purpose would settle that source's
+            # provenance as exhausted with no backend fault behind it.
+            intentional_teardown = self._teardown_is_intentional(
+                runtime_session_key, e, client=client
+            )
+            if not intentional_teardown:
+                await self.record_model_hub_native_failure(context, diagnostic)
             # Clean up the specific reaction for this request (not FIFO)
             await self._remove_specific_pending_reaction(runtime_session_key, context, request)
             self._remove_pending_request(runtime_session_key, request)
@@ -258,28 +266,38 @@ class ClaudeAgent(BaseAgent):
                         preserve_pending_request_state=True,
                     )
                 if not handled:
-                    await self.session_handler.handle_session_error(runtime_session_key, context, e)
+                    contained = await self.session_handler.handle_session_error(
+                        runtime_session_key, context, e, client=client
+                    )
                     # ``handle_session_error`` sends through the IM client, which doesn't
                     # write to ``messages``, and the web Chat renders only durable
                     # ``message.new`` rows. The auth branch persists its recovery text.
-                    try:
-                        from core.message_mirror import persist_agent_message
+                    # A contained failure (a teardown the service performed itself)
+                    # must stay silent on every surface, so skip the durable row too.
+                    # Only an explicit ``True`` suppresses: the session handler is
+                    # duck-typed here, and a handler that returns anything else must
+                    # keep the failure visible.
+                    if contained is not True:
+                        try:
+                            from core.message_mirror import persist_agent_message
 
-                        notification = backend_failure_notification_output(
-                            context,
-                            "claude",
-                            request=request,
-                            output=terminal_output_for(request),
-                        )
-                        persist_agent_message(
-                            context,
-                            "notify",
-                            error_notify,
-                            metadata=notification.metadata,
-                            native_message_id=notification.idempotency_key,
-                        )
-                    except Exception:
-                        logger.debug("claude: failed to persist terminal error row", exc_info=True)
+                            notification = backend_failure_notification_output(
+                                context,
+                                "claude",
+                                request=request,
+                                output=terminal_output_for(request),
+                            )
+                            persist_agent_message(
+                                context,
+                                "notify",
+                                error_notify,
+                                metadata=notification.metadata,
+                                native_message_id=notification.idempotency_key,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "claude: failed to persist terminal error row", exc_info=True
+                            )
                     # No async receiver result is coming. Auth recovery settles its
                     # own failure; otherwise do that here without another bubble.
                     await self.controller.emit_agent_message(
@@ -295,6 +313,23 @@ class ClaudeAgent(BaseAgent):
                 self._release_service_runtime_turn(context)
         finally:
             await self._delete_ack(context, request)
+
+    def _teardown_is_intentional(self, composite_key: str, error: Exception, *, client=None) -> bool:
+        """Did the service kill this Claude process itself?
+
+        The session handler owns the classification; this only reaches it.
+        Duck-typed like the other handler calls here, and failure-closed: an
+        unknown answer must record the failure rather than silently drop
+        backend-health evidence.
+        """
+        probe = getattr(self.session_handler, "claude_teardown_is_intentional", None)
+        if not callable(probe):
+            return False
+        try:
+            return probe(composite_key, error, client=client) is True
+        except Exception:
+            logger.debug("claude: teardown classification failed", exc_info=True)
+            return False
 
     def _release_service_runtime_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "agent_service", None)
@@ -1901,7 +1936,11 @@ class ClaudeAgent(BaseAgent):
             error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
             diagnostic = self._claude_error_diagnostic(composite_key, eof_error)
             failure_context = getattr(pending_request, "context", context)
-            await self.record_model_hub_native_failure(failure_context, diagnostic)
+            intentional_teardown = self._teardown_is_intentional(
+                composite_key, eof_error, client=client
+            )
+            if not intentional_teardown:
+                await self.record_model_hub_native_failure(failure_context, diagnostic)
             auth_handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                 context,
                 "claude",
@@ -1929,28 +1968,34 @@ class ClaudeAgent(BaseAgent):
                 self._requeue_request_activity(pending_request)
                 handle_session_error = getattr(self.session_handler, "handle_session_error", None)
                 if callable(handle_session_error):
-                    await handle_session_error(composite_key, context, eof_error)
-                    try:
-                        from core.message_mirror import persist_agent_message
+                    contained = await handle_session_error(
+                        composite_key, context, eof_error, client=client
+                    )
+                    # A teardown the service performed itself is already
+                    # explained in the log; do not leave a durable failure row
+                    # for the web Chat to render.
+                    if contained is not True:
+                        try:
+                            from core.message_mirror import persist_agent_message
 
-                        notification = backend_failure_notification_output(
-                            context,
-                            "claude",
-                            request=pending_request,
-                            output=terminal_output_for(pending_request),
-                        )
-                        persist_agent_message(
-                            context,
-                            "notify",
-                            error_notify,
-                            metadata=notification.metadata,
-                            native_message_id=notification.idempotency_key,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "claude: failed to persist terminated EOF notification",
-                            exc_info=True,
-                        )
+                            notification = backend_failure_notification_output(
+                                context,
+                                "claude",
+                                request=pending_request,
+                                output=terminal_output_for(pending_request),
+                            )
+                            persist_agent_message(
+                                context,
+                                "notify",
+                                error_notify,
+                                metadata=notification.metadata,
+                                native_message_id=notification.idempotency_key,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "claude: failed to persist terminated EOF notification",
+                                exc_info=True,
+                            )
                 else:
                     diagnostic = terminal_error
         else:
@@ -2005,7 +2050,15 @@ class ClaudeAgent(BaseAgent):
             diagnostic = self._claude_error_diagnostic(composite_key, error)
             error_notify = self._format_error_notify(error, composite_key=composite_key)
             failure_context = getattr(pending_request, "context", context)
-            await self.record_model_hub_native_failure(failure_context, diagnostic)
+            # Read the client once and reuse it for both the health gate and the
+            # handler, so a replacement registering in between cannot make the
+            # two disagree about which generation actually failed.
+            errored_client = self.claude_sessions.get(composite_key)
+            intentional_teardown = self._teardown_is_intentional(
+                composite_key, error, client=errored_client
+            )
+            if not intentional_teardown:
+                await self.record_model_hub_native_failure(failure_context, diagnostic)
             handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                 context,
                 "claude",
@@ -2026,32 +2079,36 @@ class ClaudeAgent(BaseAgent):
                 await self._clear_pending_reactions(composite_key, context)
                 self._mark_session_idle_if_no_pending_requests(composite_key)
             else:
-                await self.session_handler.handle_session_error(
+                contained = await self.session_handler.handle_session_error(
                     composite_key,
                     context,
                     error,
+                    client=errored_client,
                 )
-                try:
-                    from core.message_mirror import persist_agent_message
+                # A teardown the service performed itself is contained: no IM
+                # message and no durable failure row on any surface.
+                if contained is not True:
+                    try:
+                        from core.message_mirror import persist_agent_message
 
-                    notification = backend_failure_notification_output(
-                        context,
-                        "claude",
-                        request=pending_request,
-                        output=terminal_output_for(pending_request),
-                    )
-                    persist_agent_message(
-                        context,
-                        "notify",
-                        error_notify,
-                        metadata=notification.metadata,
-                        native_message_id=notification.idempotency_key,
-                    )
-                except Exception:
-                    logger.debug(
-                        "claude: failed to persist terminal receiver-error row",
-                        exc_info=True,
-                    )
+                        notification = backend_failure_notification_output(
+                            context,
+                            "claude",
+                            request=pending_request,
+                            output=terminal_output_for(pending_request),
+                        )
+                        persist_agent_message(
+                            context,
+                            "notify",
+                            error_notify,
+                            metadata=notification.metadata,
+                            native_message_id=notification.idempotency_key,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "claude: failed to persist terminal receiver-error row",
+                            exc_info=True,
+                        )
                 await self.controller.emit_agent_message(
                     context,
                     "result",

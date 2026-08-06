@@ -2592,8 +2592,17 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    async def fake_reap(native_session_id, *, keep_pid=None, cli_path=None, logger, terminate_timeout=2.0):
+    async def fake_reap(
+        native_session_id,
+        *,
+        keep_pid=None,
+        exclude_pids=None,
+        cli_path=None,
+        logger,
+        terminate_timeout=2.0,
+    ):
         captured["reap_calls"].append((native_session_id, keep_pid, cli_path))
+        captured["exclude_pids"] = exclude_pids
         return 2
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
@@ -2616,3 +2625,274 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
     assert client.disconnects == 1
     assert getattr(client, "_vibe_native_session_id") == "native-session-1"
     assert captured["reap_calls"] == [("native-session-1", None, "/usr/local/bin/claude-proxy")]
+    # The evicted client is gone from the registry, so its own pid stays reapable.
+    assert captured["exclude_pids"] == set()
+
+
+def test_cleanup_defers_duplicate_reap_while_a_client_create_is_in_flight(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An in-flight create owns a subprocess that is not yet registered.
+
+    Generation locks are per composite key, so another key can be inside
+    ``connect()`` for the same native resume id. Its pid cannot appear in
+    ``claude_sessions`` yet, so the reap must be deferred instead of running
+    against a knowingly incomplete owner set.
+    """
+    captured: dict[str, Any] = {"reap_calls": 0}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(*args, **kwargs):
+        captured["reap_calls"] += 1
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(client, "_vibe_native_session_id", "native-session-1")
+    handler.claude_session_creates["slack_C999:other"] = object()
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert captured["reap_calls"] == 0
+    assert client.disconnects == 1
+
+
+def test_evict_idle_sessions_protects_pids_of_other_live_sessions(monkeypatch, tmp_path: Path) -> None:
+    """The duplicate reap must never target a still-registered client's pid.
+
+    ``force_cleanup_stuck_active_session`` reaches cleanup without a receiver
+    task, so ``keep_pid`` is dropped and the reaper falls back to "kill every
+    process matching this native session id". Ownership of live pids is the
+    guard that survives that path.
+    """
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(
+        native_session_id,
+        *,
+        keep_pid=None,
+        exclude_pids=None,
+        cli_path=None,
+        logger,
+        terminate_timeout=2.0,
+    ):
+        captured["exclude_pids"] = exclude_pids
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(client, "_vibe_native_session_id", "native-session-1")
+
+    # A second live client resuming the same native session id, as created by
+    # the turn that follows a force eviction.
+    replacement = _StubClaudeSDKClient(None)
+    replacement._transport._process.pid = 9876
+    setattr(replacement, "_vibe_native_session_id", "native-session-1")
+    controller.claude_sessions["slack_C999:other"] = replacement
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert captured["exclude_pids"] == {9876}
+
+
+def test_cleanup_defers_duplicate_reap_when_a_live_client_pid_is_unresolved(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An owner whose pid cannot be read still owns its process.
+
+    ``_live_claude_client_pids`` can only name the pids it can resolve. If a
+    registered client is not among them the exclusion set is knowingly partial,
+    and running the process-table scan against it can select that live client's
+    process. ``reap_orphaned_claude_sessions`` already defers on the same
+    signal; duplicate cleanup must not treat a partial set as authoritative.
+    """
+    captured: dict[str, Any] = {"reap_calls": 0}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(*args, **kwargs):
+        captured["reap_calls"] += 1
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(client, "_vibe_native_session_id", "native-session-1")
+
+    # Registered, live, and resuming the same native id — but its pid cannot be
+    # resolved, so it cannot be named in ``exclude_pids``.
+    replacement = _StubClaudeSDKClient(None)
+    replacement._transport._process.pid = None
+    setattr(replacement, "_vibe_native_session_id", "native-session-1")
+    controller.claude_sessions["slack_C999:other"] = replacement
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert captured["reap_calls"] == 0
+    assert client.disconnects == 1
+
+
+def test_cleanup_skips_a_generation_a_replacement_already_took_over(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Containing a stale teardown must not become a second teardown.
+
+    ``cleanup_session`` resolves the composite key again under the generation
+    lock. A caller acting on a client that has since been replaced would
+    otherwise disconnect the healthy replacement that now owns the key.
+    """
+    captured: dict[str, Any] = {"reap_calls": 0}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(*args, **kwargs):
+        captured["reap_calls"] += 1
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    superseded = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(superseded, "_vibe_native_session_id", "native-session-1")
+
+    # A newer turn registered its own client under the same key.
+    replacement = _StubClaudeSDKClient(None)
+    setattr(replacement, "_vibe_native_session_id", "native-session-1")
+    controller.claude_sessions[composite_key] = replacement
+
+    asyncio.run(handler.cleanup_session(composite_key, expected_client=superseded))
+
+    assert replacement.disconnects == 0
+    assert superseded.disconnects == 0
+    assert captured["reap_calls"] == 0
+    assert controller.claude_sessions[composite_key] is replacement
+
+
+def test_cleanup_records_no_teardown_intent_for_an_empty_key(monkeypatch, tmp_path: Path) -> None:
+    """No generation retired means nothing to explain later.
+
+    A marker left on an already-empty key opens a 120s window in which the NEXT
+    client's genuine ``-9`` — dying inside ``connect()``, before registration
+    can clear the record — is suppressed as a service teardown.
+    """
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    composite_key = f"slack_C123:{tmp_path}"
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert composite_key not in handler.claude_intentional_teardowns
+
+
+def test_tracking_a_create_retires_the_previous_teardown_record(monkeypatch, tmp_path: Path) -> None:
+    """The marker must not outlive the start of the replacement's creation.
+
+    A new generation that exits ``-9`` inside ``connect()`` never registers, so
+    its failure is reported with ``client=None``. Clearing only at registration
+    would leave the previous teardown's key-level marker standing to classify
+    that genuine crash as our own cleanup and swallow the user-facing error.
+    """
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.claude_intentional_teardowns[composite_key] = 1000.0
+
+    async def scenario() -> bool:
+        handler._track_claude_session_create(composite_key)
+        # No client was ever handed back, so the caller has none to pass.
+        return handler.claude_teardown_is_intentional(
+            composite_key, RuntimeError("Claude Code process exited with exit code: -9")
+        )
+
+    assert asyncio.run(scenario()) is False
+    assert composite_key not in handler.claude_intentional_teardowns
