@@ -1407,7 +1407,92 @@ def test_test_web_auth_happy_path_returns_excerpt(
     assert result["ok"] is True
     assert result["excerpt"] == "Hello from the model"
     assert isinstance(result["duration_ms"], int)
-    probe.assert_awaited_once_with(os.getcwd(), model="gpt-5.4-mini")
+    probe.assert_awaited_once_with(
+        os.getcwd(),
+        model="gpt-5.4-mini",
+        on_diagnostic=ANY,
+    )
+
+
+def test_test_web_auth_codex_uses_owned_runtime_when_backend_is_disabled(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = AsyncMock(return_value="Hello from temporary Codex")
+    shutdown = AsyncMock()
+    temp_agent = SimpleNamespace(
+        probe_connection=probe,
+        shutdown_runtime=shutdown,
+    )
+    captured = []
+    service.controller.agent_service = SimpleNamespace(agents={})
+    monkeypatch.setattr(service, "_get_cli_binary", lambda _backend: "codex-custom")
+    monkeypatch.setattr(
+        service,
+        "_create_codex_probe_agent",
+        lambda runtime_config: captured.append(runtime_config) or temp_agent,
+    )
+
+    result = _run(service.test_web_auth("codex"))
+
+    assert result["ok"] is True
+    assert captured[0].binary == "codex-custom"
+    probe.assert_awaited_once_with(
+        os.getcwd(),
+        model=None,
+        on_diagnostic=ANY,
+    )
+    shutdown.assert_awaited_once_with()
+
+
+def test_disabled_backend_probe_uses_persisted_codex_binary(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from config.v2_config import V2Config
+
+    persisted = SimpleNamespace(
+        agents=SimpleNamespace(codex=SimpleNamespace(cli_path="/opt/codex/bin/codex"))
+    )
+    monkeypatch.setattr(service, "_resolve_backend_config", lambda _backend: None)
+    monkeypatch.setattr(V2Config, "load", classmethod(lambda _cls: persisted))
+
+    assert service._get_cli_binary("codex") == "/opt/codex/bin/codex"
+
+
+def test_test_web_auth_codex_does_not_probe_model_hub_transport(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_probe = AsyncMock(
+        side_effect=AssertionError("Model Hub transport must not test direct credentials")
+    )
+    live_agent = SimpleNamespace(
+        probe_connection=live_probe,
+        can_reuse_direct_connection_probe=lambda _cwd: False,
+    )
+    temp_probe = AsyncMock(return_value="Hello from direct Codex")
+    temp_agent = SimpleNamespace(
+        probe_connection=temp_probe,
+        shutdown_runtime=AsyncMock(),
+    )
+    service.controller.agent_service = SimpleNamespace(agents={"codex": live_agent})
+    monkeypatch.setattr(
+        service,
+        "_create_codex_probe_agent",
+        lambda _runtime_config: temp_agent,
+    )
+
+    result = _run(service.test_web_auth("codex"))
+
+    assert result["ok"] is True
+    live_probe.assert_not_awaited()
+    temp_probe.assert_awaited_once_with(
+        os.getcwd(),
+        model=None,
+        on_diagnostic=ANY,
+    )
+    temp_agent.shutdown_runtime.assert_awaited_once_with()
 
 
 def test_verify_web_login_claude_forces_oauth_env(
@@ -1557,6 +1642,7 @@ def test_test_web_auth_claude_runs_in_runtime_cwd(
         binary="/usr/bin/echo",
         cwd=str(runtime_cwd),
         model=None,
+        on_diagnostic=ANY,
     )
     assert runtime_cwd.is_dir()
 
@@ -1596,6 +1682,25 @@ def test_test_web_auth_failure_surfaces_stderr(
     # actionable "Replace your API key or re-authenticate" sentence.
     assert result["error"] == "invalid_credentials"
     assert "Authentication failed" in (result.get("detail") or "")
+
+
+def test_test_web_auth_timeout_preserves_retry_diagnostic(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def retrying_probe(*, on_diagnostic, **_kwargs):
+        on_diagnostic("401 Unauthorized while retrying")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(service, "_run_claude_agent_probe", retrying_probe)
+    monkeypatch.setattr(_Backend, "auth_mode", "api_key", raising=False)
+    monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
+
+    result = _run(service.test_web_auth("claude", timeout=0.01))
+
+    assert result["ok"] is False
+    assert result["error"] == "invalid_credentials"
+    assert result["detail"] == "401 Unauthorized while retrying"
 
 
 def test_test_web_auth_not_logged_in_has_specific_error_code(

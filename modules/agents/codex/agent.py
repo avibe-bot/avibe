@@ -66,12 +66,26 @@ CODEX_CONNECTION_PROBE_DIR = "codex-connection-probe"
 
 
 class _CodexConnectionProbeState:
-    def __init__(self) -> None:
+    def __init__(self, on_diagnostic: Callable[[str], None] | None = None) -> None:
         self.terminal: asyncio.Future[tuple[str, str]] = (
             asyncio.get_running_loop().create_future()
         )
         self.response_text = ""
         self.turn_id = ""
+        self.on_diagnostic = on_diagnostic
+
+    def record_diagnostic(self, detail: str) -> None:
+        text = str(detail or "").strip()
+        if not text or self.on_diagnostic is None:
+            return
+        try:
+            self.on_diagnostic(text)
+        except Exception:
+            logger.debug("Codex probe diagnostic callback failed", exc_info=True)
+
+
+class CodexConnectionProbeRuntimeMismatchError(RuntimeError):
+    """The cached transport does not represent direct Codex credentials."""
 
 
 class CodexResumeUnavailableError(RuntimeError):
@@ -100,9 +114,16 @@ class CodexAgent(BaseAgent):
 
     name = "codex"
 
-    def __init__(self, controller: Any, codex_config: Any) -> None:
+    def __init__(
+        self,
+        controller: Any,
+        codex_config: Any,
+        *,
+        registered_runtime: bool = True,
+    ) -> None:
         super().__init__(controller)
         self.codex_config = codex_config
+        self._registered_runtime = registered_runtime
 
         # cwd → CodexTransport (one persistent process per working dir)
         self._transports: Dict[str, CodexTransport] = {}
@@ -132,6 +153,7 @@ class CodexAgent(BaseAgent):
         self._fork_correction_pending_base_sessions: set[str] = set()
         self._connection_probes: Dict[str, _CodexConnectionProbeState] = {}
         self._connection_probe_turns: Dict[str, str] = {}
+        self._connection_probe_cwds: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # BaseAgent interface
@@ -179,42 +201,70 @@ class CodexAgent(BaseAgent):
             return lambda: None
         return lambda: self._transport_alive(transport)
 
-    async def probe_connection(self, cwd: str, *, model: str | None = None) -> str:
+    def can_reuse_direct_connection_probe(self, cwd: str) -> bool:
+        """Return whether a live transport is suitable for direct-auth testing."""
+
+        transport = self._transports.get(cwd)
+        return not (
+            transport is not None
+            and getattr(transport, "runtime_fingerprint", "direct") != "direct"
+        )
+
+    async def probe_connection(
+        self,
+        cwd: str,
+        *,
+        model: str | None = None,
+        on_diagnostic: Callable[[str], None] | None = None,
+    ) -> str:
         """Run a read-only ephemeral turn on the normal persistent app-server."""
 
         probe_cwd = paths.get_runtime_dir() / CODEX_CONNECTION_PROBE_DIR
         probe_cwd.mkdir(parents=True, exist_ok=True)
-
-        transport = self._transports.get(cwd)
-        if transport is None or not transport.is_initialized:
-            transport = await self._get_or_create_transport(cwd)
-        else:
-            self._touch_transport_activity(cwd)
-
-        thread_response = await transport.send_request(
-            "thread/start",
-            {
-                "cwd": str(probe_cwd),
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
-                "ephemeral": True,
-                "developerInstructions": (
-                    "This is a connection probe. Do not use tools. "
-                    "Reply with a short greeting."
-                ),
-            },
-        )
-        thread = thread_response.get("thread")
-        thread_id = thread_response.get("id") or (
-            thread.get("id") if isinstance(thread, dict) else None
-        )
-        if not thread_id:
-            raise RuntimeError("Codex thread/start returned no thread id")
-
-        state = _CodexConnectionProbeState()
-        self._connection_probes[thread_id] = state
+        transport: CodexTransport | None = None
+        state: _CodexConnectionProbeState | None = None
+        thread_id = ""
         closed_task: asyncio.Task[None] | None = None
+        probe_cwds = self._connection_probe_cwds
+        probe_cwds[cwd] = probe_cwds.get(cwd, 0) + 1
         try:
+            transport = self._transports.get(cwd)
+            if (
+                transport is not None
+                and getattr(transport, "runtime_fingerprint", "direct") != "direct"
+            ):
+                raise CodexConnectionProbeRuntimeMismatchError(
+                    "The cached Codex transport does not use direct credentials"
+                )
+            if transport is None or not transport.is_initialized:
+                transport = await self._get_or_create_transport(cwd)
+            else:
+                self._touch_transport_activity(cwd)
+
+            thread_response = await transport.send_request(
+                "thread/start",
+                {
+                    "cwd": str(probe_cwd),
+                    "approvalPolicy": "never",
+                    "sandbox": "read-only",
+                    "ephemeral": True,
+                    "developerInstructions": (
+                        "This is a connection probe. Do not use tools. "
+                        "Reply with a short greeting."
+                    ),
+                },
+            )
+            thread = thread_response.get("thread")
+            thread_id = str(
+                thread_response.get("id")
+                or (thread.get("id") if isinstance(thread, dict) else "")
+                or ""
+            )
+            if not thread_id:
+                raise RuntimeError("Codex thread/start returned no thread id")
+
+            state = _CodexConnectionProbeState(on_diagnostic)
+            self._connection_probes[thread_id] = state
             turn_params: Dict[str, Any] = {
                 "threadId": thread_id,
                 "input": [{"type": "text", "text": "Hi"}],
@@ -249,14 +299,42 @@ class CodexAgent(BaseAgent):
             self._touch_transport_activity(cwd)
             return result
         finally:
-            self._connection_probes.pop(thread_id, None)
-            if state.turn_id:
-                self._connection_probe_turns.pop(state.turn_id, None)
-            if not state.terminal.done():
-                state.terminal.cancel()
-            if closed_task is not None:
-                closed_task.cancel()
-                await asyncio.gather(closed_task, return_exceptions=True)
+            try:
+                if (
+                    transport is not None
+                    and state is not None
+                    and state.turn_id
+                    and not state.terminal.done()
+                    and transport.is_initialized
+                ):
+                    try:
+                        await asyncio.wait_for(
+                            transport.send_request(
+                                "turn/interrupt",
+                                {"threadId": thread_id, "turnId": state.turn_id},
+                            ),
+                            timeout=2.0,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to interrupt cancelled Codex connection probe",
+                            exc_info=True,
+                        )
+            finally:
+                if thread_id:
+                    self._connection_probes.pop(thread_id, None)
+                if state is not None and state.turn_id:
+                    self._connection_probe_turns.pop(state.turn_id, None)
+                if state is not None and not state.terminal.done():
+                    state.terminal.cancel()
+                if closed_task is not None:
+                    closed_task.cancel()
+                    await asyncio.gather(closed_task, return_exceptions=True)
+                remaining = probe_cwds.get(cwd, 0) - 1
+                if remaining > 0:
+                    probe_cwds[cwd] = remaining
+                else:
+                    probe_cwds.pop(cwd, None)
 
     async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
         router = getattr(self.controller, "model_hub_runtime", None)
@@ -895,6 +973,8 @@ class CodexAgent(BaseAgent):
         cwd: str,
         transport: CodexTransport,
     ) -> RuntimeActivationIdentity | None:
+        if not getattr(self, "_registered_runtime", True):
+            return None
         registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
         if registry is None:
             return None
@@ -912,6 +992,8 @@ class CodexAgent(BaseAgent):
     ) -> tuple[Any, Any] | None:
         if self._transports.get(cwd) is not transport:
             return None
+        if not getattr(self, "_registered_runtime", True):
+            return (None, None)
         registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
         if registry is None:
             return (None, None)
@@ -1214,6 +1296,8 @@ class CodexAgent(BaseAgent):
         return evicted
 
     def _retire_model_hub_process_scope(self, cwd: str) -> None:
+        if not getattr(self, "_registered_runtime", True):
+            return
         controller = getattr(self, "controller", None)
         router = getattr(controller, "model_hub_runtime", None)
         retire = getattr(router, "retire_process_scope", None)
@@ -2422,14 +2506,15 @@ class CodexAgent(BaseAgent):
                     state.response_text = text
             return True
         if method == "error":
-            if params.get("willRetry") is True:
-                return True
             error = params.get("error") if isinstance(params, dict) else params
             detail = (
                 error.get("message")
                 if isinstance(error, dict)
                 else str(error or "Codex error")
             )
+            state.record_diagnostic(str(detail or "Codex error"))
+            if params.get("willRetry") is True:
+                return True
             if not state.terminal.done():
                 state.terminal.set_result(("error", str(detail or "Codex error")))
             return True
@@ -2449,6 +2534,7 @@ class CodexAgent(BaseAgent):
                 if isinstance(error, dict)
                 else str(error or "Codex turn failed")
             )
+            state.record_diagnostic(str(detail or "Codex turn failed"))
             outcome = ("error", str(detail or "Codex turn failed"))
         else:
             outcome = ("error", f"Codex turn ended with status: {status or 'unknown'}")
@@ -2581,6 +2667,8 @@ class CodexAgent(BaseAgent):
         }
 
     def _has_active_turns_for_cwd(self, cwd: str) -> bool:
+        if cwd in getattr(self, "_connection_probe_cwds", set()):
+            return True
         for base_session_id in self._session_mgr.sessions_for_cwd(cwd):
             if self._turn_registry.get_active_turn(base_session_id):
                 return True

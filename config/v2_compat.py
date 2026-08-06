@@ -70,6 +70,7 @@ class AppCompatConfig:
     log_level: str
     ack_mode: str
     language: str
+    default_cwd: str
     platforms: dict = field(default_factory=lambda: {"enabled": ["slack"], "primary": "slack"})
     discord: Optional[DiscordConfig] = None
     telegram: Optional[TelegramConfig] = None
@@ -158,6 +159,7 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         log_level=v2.runtime.log_level,
         ack_mode=v2.ack_mode,
         language=v2.language,
+        default_cwd=v2.runtime.default_cwd,
         show_duration=v2.show_duration,
         include_time_info=v2.include_time_info,
         include_user_info=v2.include_user_info,

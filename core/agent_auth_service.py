@@ -491,6 +491,17 @@ class AgentAuthService:
         # flows ignore a non-default cli_path and fall through to
         # ``$PATH``, breaking installs that pin a specific binary.
         backend_cfg = self._resolve_backend_config(backend)
+        if backend_cfg is None:
+            try:
+                from config.v2_config import V2Config
+
+                backend_cfg = getattr(V2Config.load().agents, backend, None)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Failed to load persisted %s config for Settings probe",
+                    backend,
+                    exc_info=True,
+                )
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
         return cli_path or backend
 
@@ -500,6 +511,7 @@ class AgentAuthService:
         candidates = (
             getattr(self._resolve_backend_config(backend), "cwd", None),
             getattr(getattr(config, "runtime", None), "default_cwd", None),
+            getattr(config, "default_cwd", None),
         )
         for raw in candidates:
             if isinstance(raw, str) and raw.strip():
@@ -2249,22 +2261,41 @@ class AgentAuthService:
                     return {"ok": False, "error": "settings_cleanup_failed", "detail": str(err)}
 
         started = time.monotonic()
+        diagnostics: list[str] = []
+
+        def record_diagnostic(detail: str) -> None:
+            text = str(detail or "").strip()
+            if text:
+                diagnostics.append(text)
+                del diagnostics[:-40]
+
         try:
             if backend == "claude":
                 probe = self._run_claude_agent_probe(
                     binary=binary,
                     cwd=probe_cwd,
                     model=model,
+                    on_diagnostic=record_diagnostic,
                 )
             else:
-                probe = self._run_codex_agent_probe(cwd=probe_cwd, model=model)
+                probe = self._run_codex_agent_probe(
+                    binary=binary,
+                    cwd=probe_cwd,
+                    model=model,
+                    on_diagnostic=record_diagnostic,
+                )
             response_text = await asyncio.wait_for(probe, timeout=timeout)
         except asyncio.TimeoutError:
-            return {
+            detail = "\n".join(diagnostics).strip()
+            classified = _classify_test_failure("", detail, auth_mode=auth_mode)
+            result: dict[str, Any] = {
                 "ok": False,
-                "error": "timed_out",
+                "error": classified if classified != "cli_failed" else "timed_out",
                 "duration_ms": int((time.monotonic() - started) * 1000),
             }
+            if detail:
+                result["detail"] = detail[:600]
+            return result
         except FileNotFoundError:
             return {"ok": False, "error": "cli_not_found", "detail": binary}
         except Exception as err:  # noqa: BLE001
@@ -2292,6 +2323,7 @@ class AgentAuthService:
         binary: str,
         cwd: str,
         model: str | None,
+        on_diagnostic: Callable[[str], None] | None = None,
     ) -> str:
         """Run an isolated turn through the same Claude Agent SDK transport."""
         from modules.agents.model_hub import claude_setting_sources_for_launch
@@ -2304,6 +2336,8 @@ class AgentAuthService:
             if text:
                 stderr_lines.append(text)
                 del stderr_lines[:-40]
+                if on_diagnostic is not None:
+                    on_diagnostic(text)
 
         claude_env = build_claude_subprocess_env(self._resolve_backend_config("claude"))
         claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_AUTH_OWNER
@@ -2348,6 +2382,8 @@ class AgentAuthService:
                 message_error = getattr(message, "error", None)
                 if message_error:
                     assistant_error = str(message_error)
+                    if on_diagnostic is not None:
+                        on_diagnostic(assistant_error)
                 if hasattr(message, "is_error"):
                     result_text = str(getattr(message, "result", "") or "").strip()
                     if bool(getattr(message, "is_error", False)):
@@ -2410,17 +2446,79 @@ class AgentAuthService:
     async def _run_codex_agent_probe(
         self,
         *,
+        binary: str,
         cwd: str,
         model: str | None,
+        on_diagnostic: Callable[[str], None] | None = None,
     ) -> str:
-        """Run through the controller-owned CodexAgent transport pool."""
+        """Reuse a matching direct runtime, or own a temporary direct runtime."""
+        from config.v2_compat import CodexCompatConfig
+        from config.v2_config import DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+        from modules.agents.codex import CodexConnectionProbeRuntimeMismatchError
+
+        backend_cfg = self._resolve_backend_config("codex")
+        runtime_config = CodexCompatConfig(
+            enabled=bool(getattr(backend_cfg, "enabled", True)),
+            binary=binary,
+            extra_args=list(getattr(backend_cfg, "extra_args", None) or []),
+            idle_timeout_seconds=int(
+                getattr(
+                    backend_cfg,
+                    "idle_timeout_seconds",
+                    DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+                )
+            ),
+            auth_mode=str(getattr(backend_cfg, "auth_mode", "oauth") or "oauth"),
+        )
         agent_service = getattr(self.controller, "agent_service", None)
         agents = getattr(agent_service, "agents", None)
         agent = agents.get("codex") if isinstance(agents, dict) else None
         probe = getattr(agent, "probe_connection", None)
-        if not callable(probe):
-            raise RuntimeError("Codex Agent runtime is unavailable")
-        return await probe(cwd, model=model)
+        can_reuse = getattr(agent, "can_reuse_direct_connection_probe", None)
+        live_config = getattr(agent, "codex_config", None)
+        live_matches = live_config is None or (
+            str(getattr(live_config, "binary", "")) == runtime_config.binary
+            and list(getattr(live_config, "extra_args", None) or [])
+            == runtime_config.extra_args
+            and str(getattr(live_config, "auth_mode", "oauth") or "oauth")
+            == runtime_config.auth_mode
+        )
+        direct_runtime = not callable(can_reuse) or bool(can_reuse(cwd))
+        if callable(probe) and live_matches and direct_runtime:
+            try:
+                return await probe(
+                    cwd,
+                    model=model,
+                    on_diagnostic=on_diagnostic,
+                )
+            except CodexConnectionProbeRuntimeMismatchError:
+                pass
+
+        probe_agent = self._create_codex_probe_agent(runtime_config)
+        try:
+            return await probe_agent.probe_connection(
+                cwd,
+                model=model,
+                on_diagnostic=on_diagnostic,
+            )
+        finally:
+            try:
+                await probe_agent.shutdown_runtime()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to stop controller-owned Codex probe runtime",
+                    exc_info=True,
+                )
+
+    def _create_codex_probe_agent(self, runtime_config: Any) -> Any:
+        """Create an unregistered CodexAgent whose runtime this service owns."""
+        from modules.agents.codex import CodexAgent
+
+        return CodexAgent(
+            self.controller,
+            runtime_config,
+            registered_runtime=False,
+        )
 
     async def test_opencode_provider(
         self,

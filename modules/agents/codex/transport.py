@@ -255,6 +255,11 @@ class CodexTransport:
 
         try:
             return await asyncio.wait_for(fut, timeout=120.0)
+        except asyncio.CancelledError:
+            self._pending.pop(req_id, None)
+            if not fut.done():
+                fut.cancel()
+            raise
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             self._initialized = False

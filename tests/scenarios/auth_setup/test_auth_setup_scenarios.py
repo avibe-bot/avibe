@@ -399,6 +399,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         agent._transport_last_activity = {}
         agent._connection_probes = {}
         agent._connection_probe_turns = {}
+        agent._connection_probe_cwds = {}
         controller.agent_service = SimpleNamespace(agents={"codex": agent})
         service = AgentAuthService(controller)
 
