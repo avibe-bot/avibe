@@ -4,6 +4,7 @@ from typing import Optional
 from config.v2_config import (
     DEFAULT_AGENT_BACKEND,
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
     DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
     V2Config,
     SlackConfig,
@@ -55,6 +56,7 @@ class OpenCodeCompatConfig:
     request_timeout_seconds: int
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
+    active_turn_timeout_seconds: int = DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
     # User's saved default provider from Settings → Backends → OpenCode.
     # Used as the ``providerID`` when a routed model string has no ``provider/``
     # prefix (most agents.opencode model entries are bare model IDs).
@@ -69,6 +71,7 @@ class AppCompatConfig:
     log_level: str
     ack_mode: str
     language: str
+    default_cwd: str
     platforms: dict = field(default_factory=lambda: {"enabled": ["slack"], "primary": "slack"})
     discord: Optional[DiscordConfig] = None
     telegram: Optional[TelegramConfig] = None
@@ -135,6 +138,7 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
             request_timeout_seconds=60,
             default_reasoning_effort=v2.agents.opencode.default_reasoning_effort,
             error_retry_limit=v2.agents.opencode.error_retry_limit,
+            active_turn_timeout_seconds=v2.agents.opencode.active_turn_timeout_seconds,
             # Surface the user's saved provider choice so the OpenCode agent
             # adapter can prepend it as ``providerID`` for bare-model strings.
             default_provider=v2.agents.opencode.default_provider,
@@ -157,6 +161,7 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         log_level=v2.runtime.log_level,
         ack_mode=v2.ack_mode,
         language=v2.language,
+        default_cwd=v2.runtime.default_cwd,
         show_duration=v2.show_duration,
         include_time_info=v2.include_time_info,
         include_user_info=v2.include_user_info,

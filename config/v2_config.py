@@ -90,6 +90,11 @@ DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
+# A provider runtime can keep an accepted OpenCode prompt in retry forever without
+# surfacing a terminal message. Bound that lifecycle independently of per-request
+# HTTP timeouts; 90 minutes matches the watchdog threshold reported in #1190 and
+# remains adjustable for workloads that legitimately need longer turns.
+DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 90 * 60
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
@@ -459,6 +464,7 @@ class OpenCodeConfig:
     default_agent: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
+    active_turn_timeout_seconds: int = DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
     # Provider the user picked in Settings → Backends → OpenCode. The provider
     # catalog itself lives in ~/.config/opencode/opencode.json (OpenCode's own
     # state file). Stays ``None`` until the user explicitly chooses so legacy

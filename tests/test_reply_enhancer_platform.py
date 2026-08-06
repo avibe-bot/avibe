@@ -1461,7 +1461,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "| Dispatch an existing queued Workbench Session head now | `vibe session send-now <session-id>` |",
+            "| Promote an existing queued Session head now | `vibe session send-now <session-id>` |",
             prompt,
         )
         self.assertIn("| Branch from current Session context | `vibe agent run --fork-self ...` |", prompt)
@@ -1493,7 +1493,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "Both forms require a Web/Workbench Session",
+            "Both forms work for Workbench and IM Sessions",
             prompt,
         )
         self.assertIn(
@@ -1517,32 +1517,32 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "`--send-now --message` is a content-P0 admission",
+            "persist the new Run at P3 and then promote the exact FIFO head through P1",
             prompt,
         )
         self.assertIn(
-            "starts that new instruction immediately even if older backlog is held",
+            "the new message never leapfrogs it",
             prompt,
         )
         self.assertIn(
-            "adds no Message; it releases the hold and promotes the exact oldest queued P3 head",
+            "the same exact-head P1 promotion without adding a Message",
             prompt,
         )
         self.assertIn(
-            "steers that exact head into the active logical/native Turn",
+            "the promoted head steers that same logical/native Turn",
             prompt,
         )
         self.assertIn(
-            "if the Session is idle, it starts that head as a new Turn",
+            "if the Session is idle, it starts as a new Turn",
             prompt,
         )
         self.assertNotIn(
             "Both forms require a Web/Workbench Session, interrupt through the shared Stop path",
             prompt,
         )
-        self.assertNotIn("the new message does not leapfrog it", prompt)
+        self.assertNotIn("content-P0 admission", prompt)
         self.assertIn(
-            "if that interruption is refused, the active Turn and durable queue remain intact",
+            "never falls back to Stop",
             prompt,
         )
         self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)

@@ -616,6 +616,34 @@ def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str,
     return headers
 
 
+async def test_backend_auth(
+    backend: str,
+    *,
+    model: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """Run a Settings connection probe on the controller-owned Agent runtime."""
+
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    payload: dict[str, Any] = {"backend": backend}
+    if model:
+        payload["model"] = model
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            resp = await client.post("/internal/backend-auth/test", json=payload)
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
 async def notify_vault_request_created(
     request_payload: dict[str, Any],
     *,

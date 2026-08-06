@@ -127,10 +127,11 @@ live Session/Run bindings and cannot mutate an unaccepted Delivery snapshot.
 - existing-Session Agent Run and Watch input is P1 by default; it steers the
   active Turn, starts itself when idle, and falls back to P3 only after a
   definitive refusal or not-active receipt;
-- explicit send-now/content replacement is P0;
-- empty send-now promotes the exact current P3 head segment;
-- only empty P0/Stop establishes the durable backlog hold;
-- content P0 preserves the existing hold and its replacement Turn bypasses it.
+- Agent Run send-now persists its new input at P3, then promotes the exact
+  current P3 head segment through empty P1, so older work cannot be bypassed;
+- Session send-now performs the same exact-head P1 promotion without adding
+  content;
+- P0 is reserved for explicit content-free Stop.
 
 On startup, OpenCode first restores the exact logical/runtime/native identity
 map. Restored polling then waits until durable Delivery/Turn reconciliation has

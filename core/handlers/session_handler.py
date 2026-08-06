@@ -23,6 +23,10 @@ from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_PROCESS_OWNER_ENV,
     AVIBE_CLAUDE_SESSION_OWNER,
     get_claude_client_pid,
+    get_claude_client_returncode,
+    get_claude_client_stderr_tail,
+    claude_process_exit_reason,
+    claude_process_exit_reason_i18n,
     register_claude_owned_process,
     reap_duplicate_claude_resume_processes,
     reap_orphaned_claude_processes,
@@ -75,6 +79,14 @@ class ClaudeSessionNotFoundError(RuntimeError):
         super().__init__(
             f"Claude Code session not found in current working directory: {session_id} ({working_path})"
         )
+
+
+class _ClaudeReceiverCleanupRequired(RuntimeError):
+    """Signal that a dead generation must be retried after receiver cleanup."""
+
+    def __init__(self, composite_key: str):
+        self.composite_key = composite_key
+        super().__init__(f"Claude receiver cleanup is still pending for {composite_key}")
 
 
 class SessionHandler(BaseHandler):
@@ -156,6 +168,26 @@ class SessionHandler(BaseHandler):
     async def _wait_for_claude_session_idle(self, composite_key: str) -> None:
         while composite_key in self.active_sessions:
             await asyncio.sleep(0.05)
+
+    async def _wait_for_claude_receiver_cleanup(self, composite_key: str) -> None:
+        """Wait for the receiver task to finish its post-error cleanup."""
+        receiver_task = self.receiver_tasks.get(composite_key)
+        if receiver_task is None or receiver_task is asyncio.current_task():
+            return
+        try:
+            await asyncio.shield(receiver_task)
+        except asyncio.CancelledError:
+            if receiver_task.cancelled():
+                return
+            raise
+        except Exception:
+            # The receiver already reported its failure; cleanup must still retire
+            # the cached client and drain the task without masking that failure.
+            logger.debug(
+                "Claude receiver task ended with an error while waiting for cleanup: %s",
+                composite_key,
+                exc_info=True,
+            )
 
     def bind_claude_runtime_session(
         self,
@@ -254,6 +286,45 @@ class SessionHandler(BaseHandler):
         )
         return env["PATH"] if "PATH" in env else os.environ.get("PATH", "")
 
+    async def _evict_terminated_cached_claude_session(
+        self,
+        composite_key: str,
+        client: ClaudeSDKClient,
+    ) -> bool:
+        returncode = get_claude_client_returncode(client)
+        if returncode is None:
+            return False
+
+        reason = claude_process_exit_reason(returncode)
+        stderr_tail = get_claude_client_stderr_tail(client)
+        diagnostic = f"\nClaude stderr tail:\n{stderr_tail}" if stderr_tail else ""
+        logger.warning(
+            "Recreating cached Claude SDK client for %s because its process terminated (%s)%s",
+            composite_key,
+            reason,
+            diagnostic,
+        )
+        receiver_task = self.receiver_tasks.get(composite_key)
+        if (
+            receiver_task is not None
+            and receiver_task is not asyncio.current_task()
+            and not receiver_task.done()
+        ):
+            # This method runs under the generation lock. Let the receiver
+            # release that lock through its normal error cleanup before waiting
+            # for the task, otherwise both sides wait on one another.
+            raise _ClaudeReceiverCleanupRequired(composite_key)
+        await self._wait_for_claude_receiver_cleanup(composite_key)
+        await self._wait_for_claude_session_idle(composite_key)
+        await self._cleanup_session_locked(
+            composite_key,
+            # A dead cached client may have been launched through Model Hub even
+            # when the current turn resolves to a different channel. Retire the
+            # cached generation's process credential before recreating it.
+            retire_model_hub_scope=True,
+        )
+        return True
+
     async def _reuse_cached_claude_session_if_available(
         self,
         *,
@@ -269,6 +340,11 @@ class SessionHandler(BaseHandler):
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
+            return None
+        if await self._evict_terminated_cached_claude_session(
+            composite_key,
+            client,
+        ):
             return None
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude SDK client because Model Hub channel changed")
@@ -361,6 +437,11 @@ class SessionHandler(BaseHandler):
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
+            return None
+        if await self._evict_terminated_cached_claude_session(
+            composite_key,
+            client,
+        ):
             return None
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude subagent SDK client because Model Hub channel changed")
@@ -941,14 +1022,20 @@ class SessionHandler(BaseHandler):
         """Resolve or create one Claude runtime generation under its exact lock."""
 
         composite_key = self._claude_runtime_generation_key(context, subagent_name)
-        async with self._claude_runtime_generation_lock(composite_key):
-            return await self._get_or_create_claude_session_locked(
-                context,
-                subagent_name=subagent_name,
-                subagent_model=subagent_model,
-                subagent_reasoning_effort=subagent_reasoning_effort,
-                agent_system_prompt=agent_system_prompt,
-            )
+        while True:
+            try:
+                async with self._claude_runtime_generation_lock(composite_key):
+                    return await self._get_or_create_claude_session_locked(
+                        context,
+                        subagent_name=subagent_name,
+                        subagent_model=subagent_model,
+                        subagent_reasoning_effort=subagent_reasoning_effort,
+                        agent_system_prompt=agent_system_prompt,
+                    )
+            except _ClaudeReceiverCleanupRequired as retry:
+                # Receiver error handling may need the same generation lock. Wait
+                # only after the lock has been released, then retry resolution.
+                await self._wait_for_claude_receiver_cleanup(retry.composite_key)
 
     async def _get_or_create_claude_session_locked(
         self,
@@ -1237,6 +1324,7 @@ class SessionHandler(BaseHandler):
             claude_stderr_lines.append(text)
             if len(claude_stderr_lines) > 40:
                 del claude_stderr_lines[:-40]
+            logger.warning("Claude CLI stderr for %s: %s", composite_key, text)
 
         # V2Config-driven Anthropic env composition, centralised so the
         # control-channel client (``agent_auth_service``) cannot drift
@@ -1314,6 +1402,7 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
+        setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
         setattr(client, "_vibe_git_path_state", git_path_state)
         setattr(
@@ -2249,7 +2338,29 @@ class SessionHandler(BaseHandler):
                     )
                 ),
             )
-        elif "read() called while another coroutine" in error_msg:
+            return
+
+        client = self.claude_sessions.get(composite_key)
+        returncode = get_claude_client_returncode(client)
+        if returncode is not None:
+            reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
+            reason = self._t(reason_key, **reason_values)
+            diagnostic = self.claude_error_diagnostic(composite_key, error)
+            logger.error(
+                "Claude process for session %s terminated (%s): %s",
+                composite_key,
+                reason,
+                diagnostic,
+            )
+            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            await self._get_im_client(context).send_message(
+                context,
+                self._get_formatter(context).format_error(
+                    self._t("error.claudeProcessTerminated", reason=reason)
+                ),
+            )
+            return
+        if "read() called while another coroutine" in error_msg:
             logger.error(f"Session {composite_key} has concurrent read error - cleaning up")
             await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
 
@@ -2281,6 +2392,18 @@ class SessionHandler(BaseHandler):
                 context,
                 self._get_formatter(context).format_error(self._t("error.sessionGeneric", error=error_msg)),
             )
+
+    def claude_error_diagnostic(self, composite_key: str, error: Exception) -> str:
+        """Add process state and captured stderr to a Claude failure diagnostic."""
+        diagnostic = str(error)
+        client = self.claude_sessions.get(composite_key)
+        returncode = get_claude_client_returncode(client)
+        if returncode is not None:
+            diagnostic = f"{diagnostic}\nClaude process terminated: {claude_process_exit_reason(returncode)}"
+        stderr_tail = get_claude_client_stderr_tail(client)
+        if stderr_tail:
+            diagnostic = f"{diagnostic}\nClaude stderr tail:\n{stderr_tail}"
+        return diagnostic
 
     def capture_session_id(
         self,

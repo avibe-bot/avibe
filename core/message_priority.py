@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import Literal, cast
 
 
-DeliveryIntent = Literal["send_now", "steer", "queue"]
+DeliveryIntent = Literal["replace", "steer", "queue"]
 DeliveryPriority = Literal["p0", "p1", "p3"]
 
 _PRIORITY_BY_INTENT: dict[DeliveryIntent, DeliveryPriority] = {
-    "send_now": "p0",
+    "replace": "p0",
     "steer": "p1",
     "queue": "p3",
 }

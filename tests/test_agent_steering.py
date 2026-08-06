@@ -622,6 +622,37 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
 
 
 @pytest.mark.anyio
+async def test_opencode_keeps_reconciliation_armed_after_post_write_idle() -> None:
+    """HFR-434: a transient post-write idle stays reconcilable, not refused."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        status_responses=[{"type": "busy"}, {"type": "idle"}],
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    state = agent._steering_states[primary.base_session_id]
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+
+        receipt = await steer_active_turn(
+            controller,
+            "opencode",
+            _steer_request(identity[1]),
+        )
+
+        assert receipt.outcome is SteerOutcome.UNKNOWN
+        assert receipt.reason == "native_turn_start_pending"
+        assert state.awaiting_user_text == STEER_TEXT
+        assert state.awaiting_after_message_ids == {"primary-user"}
+        assert state.awaiting_start_confirmation_deadline is not None
+        assert server.abort_calls == []
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
 async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()

@@ -7,6 +7,7 @@ import sys
 import threading
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -595,6 +596,133 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
     assert "`slack/<user_id>`" in first_client.options.system_prompt["append"]
     assert "slack/U123" not in first_client.options.system_prompt["append"]
     assert "slack/U456" not in first_client.options.system_prompt["append"]
+
+
+def test_session_handler_recreates_terminated_cached_client_before_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    idle_wait = AsyncMock()
+    handler._wait_for_claude_session_idle = idle_wait
+    context = MessageContext(user_id="U123", channel_id="C123")
+    composite_key = f"slack_C123:{tmp_path}"
+
+    first_client = _run_session(handler, context)
+    first_client.options.stderr("sandbox warning")
+    first_client._transport._process.returncode = -6
+    first_client._vibe_stderr_lines.extend(["fatal: Claude CLI aborted", "transport closed"])
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert controller.claude_sessions[composite_key] is second_client
+    assert len(captured["clients"]) == 2
+    idle_wait.assert_awaited_once_with(composite_key)
+    assert "SIGABRT (signal 6)" in caplog.text
+    assert "Claude CLI stderr for slack_C123:" in caplog.text
+    assert "Claude stderr tail:\nsandbox warning\nfatal: Claude CLI aborted\ntransport closed" in caplog.text
+
+
+def test_session_handler_waits_for_receiver_cleanup_outside_generation_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    async def exercise() -> None:
+        controller = _Controller(tmp_path)
+        handler = SessionHandler(controller)
+        composite_key = f"slack_C123:{tmp_path}"
+        release_cleanup = asyncio.Event()
+
+        class _StubClaudeSDKClient:
+            def __init__(self, options):
+                self.options = options
+                self.disconnects = 0
+                self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+                captured["clients"].append(self)
+
+            async def connect(self) -> None:
+                return None
+
+            async def disconnect(self) -> None:
+                self.disconnects += 1
+
+        monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+        monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+        context = MessageContext(user_id="U123", channel_id="C123")
+        first_client = await handler.get_or_create_claude_session(context)
+        first_client._transport._process.returncode = -6
+
+        async def receiver() -> None:
+            await release_cleanup.wait()
+            await handler.cleanup_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+            )
+
+        receiver_task = asyncio.create_task(receiver())
+        handler.receiver_tasks[composite_key] = receiver_task
+
+        eviction = asyncio.create_task(
+            handler.get_or_create_claude_session(context)
+        )
+        await asyncio.sleep(0)
+        assert not eviction.done()
+        release_cleanup.set()
+        second_client = await asyncio.wait_for(eviction, timeout=1)
+        assert second_client is not first_client
+        assert first_client.disconnects == 1
+        assert len(captured["clients"]) == 2
+        await receiver_task
+
+    asyncio.run(exercise())
+
+
+def test_session_handler_retires_model_hub_scope_for_dead_cached_client(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        controller = _Controller(tmp_path)
+        handler = SessionHandler(controller)
+        composite_key = f"slack_C123:{tmp_path}"
+        client = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=1)),
+            _vibe_model_hub_fingerprint="hub:http://127.0.0.1:18443:token",
+        )
+        handler.claude_sessions[composite_key] = client
+        handler._wait_for_claude_receiver_cleanup = AsyncMock()
+        handler._wait_for_claude_session_idle = AsyncMock()
+        handler._cleanup_session_locked = AsyncMock()
+
+        assert await handler._evict_terminated_cached_claude_session(composite_key, client)
+        handler._cleanup_session_locked.assert_awaited_once_with(
+            composite_key,
+            retire_model_hub_scope=True,
+        )
+
+    asyncio.run(exercise())
 
 
 def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp_path: Path) -> None:
@@ -1310,6 +1438,63 @@ def test_cached_claude_subagent_revalidates_memory_principal_and_guidance(
     assert local_client.disconnects == 1
     assert principals == {}
     assert "## Personal Memory" not in str(denied_client.options.system_prompt)
+def test_session_handler_recreates_terminated_cached_subagent_before_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _RoutingSessions(_Sessions):
+        @staticmethod
+        def get_agent_session_id(settings_key, base_session_id, agent_name):
+            return None
+
+        @staticmethod
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
+            return "ses-subagent"
+
+    class _RoutingSettingsManager(_SettingsManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sessions = _RoutingSessions()
+
+        @staticmethod
+        def get_channel_routing(settings_key):
+            return type("Routing", (), {"claude_agent": "reviewer", "model": None, "reasoning_effort": None})()
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.settings_manager = _RoutingSettingsManager()
+    controller.platform_settings_managers = {"slack": controller.settings_manager}
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"routing_subagent": "reviewer", "task_trigger_kind": "agent_run"},
+    )
+
+    first_client = _run_session(handler, context)
+    first_client._transport._process.returncode = -6
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
 
 
 def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypatch, tmp_path: Path) -> None:

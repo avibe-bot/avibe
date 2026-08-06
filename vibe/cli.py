@@ -1403,7 +1403,7 @@ def _agent_run_examples_text() -> str:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
           Add --queue to persist this Run as P3 behind the active Turn.
-          Add --send-now to admit this new Run as content P0 and replace the active Turn.
+          Add --send-now to persist the new Run and steer the exact FIFO head into the active Turn.
           To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
@@ -1431,7 +1431,7 @@ def _agent_run_examples_text() -> str:
         Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
-          vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
+          vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correction in the current turn.'
           vibe session queue list sesk8m4q2p7x
           vibe session queue remove sesk8m4q2p7x msg_queued123
           vibe session send-now sesk8m4q2p7x
@@ -5895,23 +5895,6 @@ def cmd_agent_run(args):
         session_metadata = _session_creation_metadata_from_caller(caller_context)
         if session_policy in {"existing", "fork"} and session_id:
             target = resolve_session_id_target(session_id)
-            if (
-                delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW
-                and target.session_key.platform != "avibe"
-            ):
-                raise TaskCliError(
-                    "--send-now requires a Web/Workbench Agent Session",
-                    code="send_now_unsupported_target",
-                    hint=(
-                        "Omit --send-now to steer the active IM Turn or start a new "
-                        "Turn when idle."
-                    ),
-                    help_command="vibe agent run --help",
-                    details={
-                        "session_id": session_id,
-                        "platform": target.session_key.platform,
-                    },
-                )
             session_key = target.session_key.to_key()
             agent = _resolve_agent_for_target(
                 agent_name=agent_name or None,
@@ -6510,7 +6493,7 @@ def cmd_session_get(args):
 
 
 def cmd_session_send_now(args):
-    """Apply Workbench's Session-level Send now transition without adding work."""
+    """Promote a Session's exact FIFO head without adding work."""
 
     from core.services import sessions as sessions_service
     from vibe import internal_client
@@ -6520,17 +6503,6 @@ def cmd_session_send_now(args):
         engine = _open_session_engine()
         with engine.connect() as conn:
             sessions_service.get_active_session(conn, session_id)
-        target = resolve_session_id_target(session_id)
-        if target.session_key.platform != "avibe":
-            raise TaskCliError(
-                "send-now requires a Web/Workbench Agent Session",
-                code="send_now_unsupported_target",
-                hint="This Session uses an IM scope, whose active turn is not owned by Workbench.",
-                details={
-                    "session_id": session_id,
-                    "platform": target.session_key.platform,
-                },
-            )
         controller_result = asyncio.run(internal_client.send_now(session_id))
     except LookupError:
         _print_task_error(
@@ -14226,7 +14198,7 @@ def build_parser():
     agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
-        help="Replace the active Turn with this new Run; start it immediately when idle",
+        help="Persist this Run, then steer the exact FIFO head without stopping the active Turn",
     )
     agent_run_delivery_group.add_argument(
         "--queue",

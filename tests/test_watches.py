@@ -1332,8 +1332,13 @@ def test_managed_watch_service_forever_no_event_exit_rearms_without_follow_up(tm
     )
 
     async def _run() -> None:
-        service.start()
-        await asyncio.sleep(0.08)
+        await _start_watch_service(service)
+        deadline = asyncio.get_running_loop().time() + 2
+        while asyncio.get_running_loop().time() < deadline:
+            saved = store.get_watch(watch.id)
+            if saved is not None and saved.last_exit_code == NO_EVENT_EXIT_CODE:
+                break
+            await asyncio.sleep(0.01)
         await service.stop()
 
     asyncio.run(_run())

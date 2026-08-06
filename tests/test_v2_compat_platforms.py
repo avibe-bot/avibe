@@ -12,6 +12,7 @@ from config.v2_config import (
     CodexConfig,
     DEFAULT_AGENT_BACKEND,
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
     DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
     DiscordConfig,
     OpenCodeConfig,
@@ -49,6 +50,7 @@ def test_to_app_config_preserves_enabled_platforms():
     assert compat.platform == "discord"
     assert compat.platforms == {"enabled": ["slack", "discord"], "primary": "discord"}
     assert compat.enabled_platforms() == ["slack", "discord"]
+    assert compat.default_cwd == config.runtime.default_cwd
 
 
 def test_to_app_config_preserves_telegram_config():
@@ -120,6 +122,10 @@ def test_to_app_config_uses_shared_agent_defaults() -> None:
     assert compat.claude.idle_timeout_seconds == DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     assert compat.opencode is not None
     assert compat.opencode.error_retry_limit == DEFAULT_OPENCODE_ERROR_RETRY_LIMIT
+    assert (
+        compat.opencode.active_turn_timeout_seconds
+        == DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
+    )
 
 
 def test_to_app_config_exposes_opencode_provider_and_reasoning_fields() -> None:

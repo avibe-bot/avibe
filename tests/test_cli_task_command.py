@@ -3459,8 +3459,10 @@ def test_default_agent_pointer_is_created(tmp_path: Path) -> None:
     assert agent_store.get_default_agent().backend == "codex"
 
 
+@pytest.mark.no_sqlite_template
 def test_resolve_agent_for_target_bootstraps_sqlite_before_scope_lookup(tmp_path: Path) -> None:
     db_path = tmp_path / "fresh-state" / "vibe.sqlite"
+    assert not db_path.exists()
     default_agent = SimpleNamespace(name="default", backend="codex")
     fake_store = SimpleNamespace(
         require=lambda name: (_ for _ in ()).throw(ValueError(f"agent '{name}' not found")),

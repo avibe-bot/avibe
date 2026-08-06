@@ -141,6 +141,9 @@ assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 CodexAgent = _MODULE.CodexAgent
+CodexConnectionProbeRuntimeMismatchError = (
+    _MODULE.CodexConnectionProbeRuntimeMismatchError
+)
 CodexResumeUnavailableError = _MODULE.CodexResumeUnavailableError
 
 for name, module in _saved_modules.items():
@@ -262,6 +265,322 @@ class CodexAgentNotificationRoutingTests(unittest.TestCase):
         resolved = agent._find_request_for_notification("item/completed", {"threadId": "thread-1", "turnId": "turn-1"})
 
         self.assertIsNone(resolved)
+
+
+class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
+    def _agent(self, cwd: str, transport):
+        agent = object.__new__(CodexAgent)
+        agent._transports = {cwd: transport}
+        agent._transport_last_activity = {}
+        agent._connection_probes = {}
+        agent._connection_probe_turns = {}
+        agent._connection_probe_cwds = {}
+        agent.can_reuse_direct_connection_probe = Mock(
+            return_value=getattr(transport, "runtime_fingerprint", "direct") == "direct"
+        )
+        agent._get_or_create_transport = AsyncMock(return_value=transport)
+        return agent
+
+    def test_live_probe_requires_a_cached_direct_transport_and_existing_cwd(self):
+        agent = object.__new__(CodexAgent)
+        agent._transports = {}
+        with tempfile.TemporaryDirectory() as cwd:
+            self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
+
+            direct = SimpleNamespace(runtime_fingerprint="direct")
+            agent._transports[cwd] = direct
+            self.assertTrue(agent.can_reuse_direct_connection_probe(cwd))
+
+            direct.runtime_fingerprint = "hub:openai/gpt-5.4-mini"
+            self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
+
+            direct.runtime_fingerprint = "direct"
+        self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
+
+    async def test_reuses_existing_transport_with_isolated_ephemeral_thread(self):
+        requests = []
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, params):
+                requests.append((method, params))
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                await agent._on_notification(
+                    "item/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turnId": "turn-probe",
+                        "item": {"type": "agentMessage", "text": "hello"},
+                    },
+                )
+                await agent._on_notification(
+                    "turn/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turn": {"id": "turn-probe", "status": "completed"},
+                    },
+                )
+                return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(inner_self):
+                await asyncio.Event().wait()
+
+        transport = _Transport()
+        agent = self._agent(cwd, transport)
+        diagnostics = []
+
+        async def acquire_transport(_cwd, *, allow_runtime_replacement):
+            self.assertEqual(agent._connection_probe_cwds, {})
+            self.assertFalse(allow_runtime_replacement)
+            return transport
+
+        agent._get_or_create_transport = AsyncMock(side_effect=acquire_transport)
+
+        with patch.object(
+            _MODULE.paths,
+            "get_runtime_dir",
+            return_value=Path(runtime_dir.name),
+        ):
+            result = await agent.probe_connection(
+                cwd,
+                model="gpt-5.4-mini",
+                on_diagnostic=diagnostics.append,
+            )
+
+        self.assertEqual(result, "hello")
+        agent._get_or_create_transport.assert_awaited_once_with(
+            cwd,
+            allow_runtime_replacement=False,
+        )
+        self.assertEqual(requests[0][0], "thread/start")
+        self.assertEqual(
+            requests[0][1],
+            {
+                "cwd": str(Path(runtime_dir.name) / "codex-connection-probe"),
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "ephemeral": True,
+                "developerInstructions": (
+                    "This is a connection probe. Do not use tools. "
+                    "Reply with a short greeting."
+                ),
+            },
+        )
+        self.assertEqual(
+            requests[1],
+            (
+                "turn/start",
+                {
+                    "threadId": "thread-probe",
+                    "input": [{"type": "text", "text": "Hi"}],
+                    "approvalPolicy": "never",
+                    "sandboxPolicy": {
+                        "type": "readOnly",
+                        "networkAccess": False,
+                    },
+                    "effort": "low",
+                    "model": "gpt-5.4-mini",
+                },
+            ),
+        )
+        self.assertEqual(agent._connection_probes, {})
+        self.assertEqual(agent._connection_probe_turns, {})
+        self.assertEqual(agent._connection_probe_cwds, {})
+        self.assertEqual(diagnostics, [])
+
+    async def test_transport_exit_settles_probe_without_outer_timeout(self):
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, _params):
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(inner_self):
+                return None
+
+        agent = self._agent(cwd, _Transport())
+
+        with (
+            patch.object(
+                _MODULE.paths,
+                "get_runtime_dir",
+                return_value=Path(runtime_dir.name),
+            ),
+            self.assertRaisesRegex(
+                ConnectionError,
+                "app-server exited during the connection probe",
+            ),
+        ):
+            await agent.probe_connection(cwd)
+
+        self.assertEqual(agent._connection_probes, {})
+        self.assertEqual(agent._connection_probe_turns, {})
+        self.assertEqual(agent._connection_probe_cwds, {})
+
+    async def test_cancellation_interrupts_started_probe_and_clears_ownership(self):
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+        turn_started = asyncio.Event()
+        requests = []
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, params):
+                requests.append((method, params))
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                if method == "turn/start":
+                    turn_started.set()
+                    return {"turn": {"id": "turn-probe"}}
+                if method == "turn/interrupt":
+                    return {}
+                raise AssertionError(method)
+
+            async def wait_closed(inner_self):
+                await asyncio.Event().wait()
+
+        agent = self._agent(cwd, _Transport())
+        with patch.object(
+            _MODULE.paths,
+            "get_runtime_dir",
+            return_value=Path(runtime_dir.name),
+        ):
+            task = asyncio.create_task(agent.probe_connection(cwd))
+            await turn_started.wait()
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertIn(
+            (
+                "turn/interrupt",
+                {"threadId": "thread-probe", "turnId": "turn-probe"},
+            ),
+            requests,
+        )
+        self.assertEqual(agent._connection_probes, {})
+        self.assertEqual(agent._connection_probe_turns, {})
+        self.assertEqual(agent._connection_probe_cwds, {})
+
+    async def test_retriable_errors_are_preserved_as_diagnostics(self):
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+        diagnostics = []
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, _params):
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                await agent._on_notification(
+                    "error",
+                    {
+                        "threadId": "thread-probe",
+                        "turnId": "turn-probe",
+                        "willRetry": True,
+                        "error": {"message": "401 Unauthorized"},
+                    },
+                )
+                await agent._on_notification(
+                    "turn/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turn": {"id": "turn-probe", "status": "completed"},
+                    },
+                )
+                return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(inner_self):
+                await asyncio.Event().wait()
+
+        agent = self._agent(cwd, _Transport())
+        with patch.object(
+            _MODULE.paths,
+            "get_runtime_dir",
+            return_value=Path(runtime_dir.name),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "returned no response"):
+                await agent.probe_connection(
+                    cwd,
+                    on_diagnostic=diagnostics.append,
+                )
+
+        self.assertEqual(diagnostics, ["401 Unauthorized"])
+
+    async def test_rejects_initialized_model_hub_transport(self):
+        cwd = "/tmp/user-project"
+        transport = SimpleNamespace(
+            is_initialized=True,
+            runtime_fingerprint="hub:openai/gpt-5.4-mini",
+        )
+        agent = self._agent(cwd, transport)
+
+        with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
+            await agent.probe_connection(cwd)
+
+        self.assertEqual(agent._connection_probe_cwds, {})
+
+    async def test_runtime_fingerprint_race_does_not_replace_model_hub_transport(self):
+        cwd = "/tmp/user-project"
+        transport = SimpleNamespace(is_initialized=True, runtime_fingerprint="direct")
+        agent = self._agent(cwd, transport)
+        agent._get_or_create_transport = AsyncMock(
+            side_effect=CodexConnectionProbeRuntimeMismatchError("runtime changed")
+        )
+
+        with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
+            await agent.probe_connection(cwd)
+
+        agent._get_or_create_transport.assert_awaited_once_with(
+            cwd,
+            allow_runtime_replacement=False,
+        )
+        self.assertEqual(agent._connection_probe_cwds, {})
+
+    async def test_unregistered_probe_runtime_preserves_live_activation(self):
+        cwd = "/tmp/user-project"
+        activation = RuntimeActivationRegistry()
+        live_identity = activation.attach("codex", cwd)
+        retire_scope = Mock()
+        transport = SimpleNamespace(stop=AsyncMock())
+        agent = object.__new__(CodexAgent)
+        agent._registered_runtime = False
+        agent._transports = {cwd: transport}
+        agent._transport_last_activity = {cwd: 1.0}
+        agent._transport_locks = {cwd: asyncio.Lock()}
+        agent._transport_cwd_inodes = {cwd: 1}
+        agent._session_last_activity = {}
+        agent._session_locks = {}
+        agent._session_mgr = SimpleNamespace(all_base_sessions=lambda: [])
+        agent._turn_registry = SimpleNamespace()
+        agent.sessions = SimpleNamespace()
+        agent.controller = SimpleNamespace(
+            runtime_activation=activation,
+            model_hub_runtime=SimpleNamespace(retire_process_scope=retire_scope),
+        )
+
+        self.assertIsNone(agent._attach_transport_activation(cwd, transport))
+        await agent.shutdown_runtime()
+
+        transport.stop.assert_awaited_once_with()
+        self.assertIs(activation.current("codex", cwd), live_identity)
+        retire_scope.assert_not_called()
 
 
 class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
@@ -3603,6 +3922,28 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(result, cached)
             cached.stop.assert_not_awaited()
             ctor.assert_not_called()
+
+    async def test_probe_validation_does_not_replace_incompatible_runtime(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            cached = SimpleNamespace(
+                is_initialized=True,
+                runtime_fingerprint="hub:openai/gpt-5.4-mini",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = cached
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+
+            with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
+                await agent._get_or_create_transport(
+                    cwd,
+                    allow_runtime_replacement=False,
+                )
+
+            cached.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], cached)
 
     async def test_untracked_legacy_entry_reuses_without_inode(self):
         import tempfile

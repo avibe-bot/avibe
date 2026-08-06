@@ -488,6 +488,10 @@ class DeliveryRequest:
     admission_context: dict[str, Any] | None = None
     native_message_id: str | None = None
     parent_native_message_id: str | None = None
+    # A caller that will immediately promote the durable FIFO head can request
+    # P3 admission without the usual idle-session auto-start. This keeps the
+    # admission and promotion decision on one post-admission queue snapshot.
+    admission_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -2380,7 +2384,7 @@ class SessionTurnManager:
                     raise RuntimeError("P3 queue claim lost after writer reservation")
                 delivery = queued
             active = delivery_store.active_turn(conn, request.session_id)
-            while active is None and not backend_draining:
+            while active is None and not backend_draining and not request.admission_only:
                 queued_payloads = delivery_store.claimable_fifo_prefix(
                     conn, request.session_id
                 )
@@ -6014,7 +6018,7 @@ class SessionTurnManager:
         text: str,
         *,
         source: str = SOURCE_HUMAN,
-        delivery_intent: Literal["queue", "send_now", "steer"] = "queue",
+        delivery_intent: Literal["queue", "replace", "steer"] = "queue",
     ) -> TurnSubmissionResult:
         """Admit one caller through the durable Delivery owner."""
         from core.message_priority import priority_for_delivery_intent
@@ -6025,7 +6029,7 @@ class SessionTurnManager:
             await self._run(None, context, text, source=source)
             return TurnSubmissionResult(
                 route="ran",
-                delivery_status="ran" if delivery_intent == "send_now" else None,
+                delivery_status="ran" if delivery_intent == "replace" else None,
             )
 
         spec = dict(getattr(context, "platform_specific", None) or {})
@@ -6086,7 +6090,7 @@ class SessionTurnManager:
             route="enqueued" if enqueued else "ran",
             queue_persisted=True,
             target_was_busy=busy,
-            delivery_status=result.state if delivery_intent == "send_now" else None,
+            delivery_status=result.state if delivery_intent == "replace" else None,
         )
 
     async def _run(

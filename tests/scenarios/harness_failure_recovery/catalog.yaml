@@ -3835,20 +3835,16 @@ scenarios:
     # work into one tail-boundary rewind while the durable store retains the inventory.
     test: tests/test_runtime_work_supervisor.py::test_hfr_288_expired_backoff_preserves_forward_scan_before_retry
   - id: HFR-430
-    name: an Agent Run can apply the Workbench send-now transition to a busy Session
+    name: an Agent Run send-now steers the exact FIFO head without stopping
     status: covered
     kind: recovery
     layer: contract
     backend: shared
-    # Agent-to-Agent delivery previously had only the queue path even though
-    # Workbench already owned the cross-backend interrupt-and-flush transition.
-    # The delivery intent is durable on the Agent Run. The shared turn owner first
-    # persists the harness-attributed queue row, then marks the active turn for
-    # flush-on-cancel and interrupts it through the ordinary Stop handler. The old
-    # turn settles exactly once and the FIFO head starts as a new scheduled turn.
-    # A refused Stop leaves both owners intact, and an idle backlog starts directly
-    # without a post-submit call racing and interrupting the newly started head.
-    test: tests/test_internal_server.py::test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head
+    # The delivery intent is durable on the Agent Run. The shared owner first
+    # persists the harness-attributed row at P3, then promotes the exact FIFO head
+    # through empty P1. An active native Turn is steered without Stop, older queued
+    # work cannot be bypassed, and a refused or stale steer stays durably queued.
+    test: tests/test_internal_server.py::test_agent_run_send_now_steers_the_fifo_head_without_stopping
   - id: HFR-431
     name: a terminal Turn racing a successful Stop receipt remains a successful cancel
     status: covered
@@ -3861,6 +3857,39 @@ scenarios:
     # than the late receipt and must clear stale UI working state, not surface a
     # false transport failure banner. A genuinely unresolved Stop remains 409.
     test: tests/test_internal_server.py::test_cancel_accepts_terminal_settlement_that_races_the_stop_receipt
+  - id: HFR-432
+    name: a timed-out OpenCode Turn releases its Session FIFO and the shared provider lane
+    status: covered
+    kind: recovery
+    layer: scenario
+    backend: opencode
+    # OpenCode may accept a prompt while its provider runtime retries forever. The
+    # accepted Turn has a bounded wall-clock owner: expiry aborts the exact native
+    # session, emits one failed terminal result, admits the same-Session successor,
+    # and lets a different OpenCode Agent waiting on that shared provider continue.
+    # The timeout never enters the empty successful-result fallback.
+    test: tests/test_agent_service.py::test_hfr_432_opencode_timeout_releases_fifo_and_shared_runtime
+  - id: HFR-434
+    name: an OpenCode steer at the native terminal boundary stays reconcilable
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: opencode
+    # prompt_async returns 204 after persisting the user message, while its worker
+    # may still be registering the continuation as busy. A transient idle sample
+    # keeps the exact attempt in reconciliation so it cannot be replayed; later
+    # native evidence either accepts the attempt or closes it terminally.
+    test: tests/test_agent_steering.py::test_opencode_keeps_reconciliation_armed_after_post_write_idle
+  - id: HFR-435
+    name: a Claude steered Assistant response owns the following terminal result
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: claude
+    # The accepted steering barrier suppresses only a buffered pre-steer result.
+    # Once the receiver has emitted Assistant text in the current generation,
+    # its ResultMessage is the real continuation and must settle the pending Turn.
+    test: tests/test_claude_agent_sessions.py::test_steered_assistant_and_result_settle_the_pending_turn
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

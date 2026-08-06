@@ -140,6 +140,8 @@ AGENT_RUN_DELIVERY_INTENTS = frozenset(
 )
 AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
 AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
+FAILURE_CODE_SEND_NOW_GATE_UNAVAILABLE = "send_now_requires_turn_gate"
+SEND_NOW_GATE_UNAVAILABLE_I18N_KEY = "harness.run.sendNowGateUnavailable"
 
 
 def _publish_task_definitions_updated() -> None:
@@ -559,6 +561,7 @@ class TaskDispatchResult:
 class AgentRunExecutionResult:
     error: Optional[str]
     complete_on_return: bool
+    failure_code: Optional[str] = None
     requeue_on_return: bool = False
     recover_queue_on_return: bool = False
     # The run's terminal row was already written by the executor itself (through a
@@ -7779,6 +7782,7 @@ class ScheduledTaskService:
                 )
                 error = result.error
                 should_complete = result.complete_on_return
+                failure_code = result.failure_code
                 settled_out_of_band = result.settled_out_of_band
                 recover_queue_on_return = result.recover_queue_on_return
                 if result.requeue_on_return:
@@ -8557,33 +8561,11 @@ class ScheduledTaskService:
         delivery_intent = normalize_agent_run_delivery_intent(
             (metadata or {}).get(AGENT_RUN_DELIVERY_INTENT_METADATA_KEY)
         )
-        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and (
-            target.platform != "avibe" or not session_id or gate is None
-        ):
-            target_label = target.platform or "unknown"
-            delivery_outcome = {
-                "intent": delivery_intent,
-                "status": "unsupported_target",
-                "target_was_busy": False,
-            }
-            from storage.background import (
-                record_agent_run_delivery_outcome_in_connection,
-                run_update_event_transaction,
-            )
-
-            with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
-                record_agent_run_delivery_outcome_in_connection(
-                    conn,
-                    execution_id,
-                    delivery_outcome,
-                )
+        if session_id and delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and gate is None:
             return AgentRunExecutionResult(
-                error=(
-                    "send-now requires a live Web/Workbench Agent Session; "
-                    f"target platform is '{target_label}'"
-                ),
+                error=self._t(SEND_NOW_GATE_UNAVAILABLE_I18N_KEY),
                 complete_on_return=True,
-                delivery_outcome=delivery_outcome,
+                failure_code=FAILURE_CODE_SEND_NOW_GATE_UNAVAILABLE,
             )
         if session_id and gate is not None:
             if delivery_intent != AGENT_RUN_DELIVERY_STEER:
