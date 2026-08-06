@@ -5,8 +5,7 @@ This is the C4 piece of Plan 2 from
 exposes a minimal FastAPI app on
 ``~/.vibe_remote/state/dispatch.sock`` so cross-process callers (the
 separate UI server subprocess, future ``vibe agent run --sync`` flows)
-can invoke ``core.services.dispatch.dispatch_turn`` and stream the
-agent's output back over SSE chunked response.
+can submit turns to the controller-owned session turn manager.
 
 Three properties matter:
 
@@ -21,8 +20,8 @@ Three properties matter:
    restrictive umask and chmod'd to ``0o600`` when the filesystem supports
    it — defense in depth against shared hosts.
 
-The endpoint set is intentionally tiny for v1 (``dispatch`` + a stub
-``cancel``); follow-ups can grow it without changing the bind contract.
+The endpoint set is intentionally tiny; follow-ups can grow it without
+changing the bind contract.
 """
 
 from __future__ import annotations
@@ -38,6 +37,7 @@ import socket
 import stat
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
@@ -47,9 +47,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
-from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
+from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
+from vibe.message_identity import HARNESS_TYPE, is_input_turn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
@@ -112,7 +113,7 @@ def create_app(
     Factored out so tests can mount the same routes against a fake
     controller without spinning up uvicorn.
     """
-    from core.inbox_events import bus, mark_controller_process
+    from core.inbox_events import mark_controller_process
 
     mark_controller_process()
     if memory_ui_secret is None:
@@ -134,14 +135,14 @@ def create_app(
     # waiting for the agent to settle, and reuses the stored context so it
     # interrupts the backend the turn actually started on — even if the Chat
     # header changed the session's agent / model while the reply was streaming.
-    # Tasks are registered when the SSE response starts and removed in its
-    # ``finally`` so cancelled / completed sessions don't leak slots.
+    # Tasks are registered by ``SessionTurnManager`` before they run and removed
+    # in its ``finally`` so cancelled / completed sessions don't leak slots.
     # The turn owner (FSM) is created in Controller.__init__ so it exists for boot
     # stale-reset + OpenCode restore; reuse it here and bind the routing-context
     # builder now that the gate (which owns _build_session_context) is built. A fake
     # controller in tests may lack one — create it then. The registry bound below
     # is the SAME object the closures + ``controller.session_turn_gate`` use.
-    from core.session_turns import SessionTurnManager, Turn
+    from core.session_turns import SessionTurnManager
 
     manager = getattr(controller, "session_turns", None)
     if not isinstance(manager, SessionTurnManager):
@@ -151,77 +152,428 @@ def create_app(
         controller.session_turns = manager
     manager.bind_context(_build_session_context)
 
-    # The turn registry (``session_id -> Turn``) is owned by the manager; the legacy
-    # streaming ``/internal/dispatch`` (Show-page) endpoint below shares it directly,
-    # and tests inspect it via ``app.state``. The flush intents live ON each ``Turn``
-    # (set by ``manager.cancel`` / ``manager.send_now``), not in side sets here.
+    # The turn registry (``session_id -> Turn``) is owned by the manager and tests
+    # inspect it via ``app.state``. Flush intents live on each ``Turn`` (set by
+    # ``manager.cancel`` / ``manager.send_now``), not in side sets here.
     in_flight = manager.in_flight
     app.state.in_flight_dispatches = in_flight
 
-    async def _flush_queue(session_id: str) -> bool:
-        """Thin delegation to ``SessionTurnManager.flush_queue`` (FSM, Phase 1b):
-        pop + merge the send-while-busy queue and run it as the next turn. Returns
-        True if a turn was started, False on an empty queue / failure."""
-        return await manager.flush_queue(session_id)
+    def _publish_scheduled_queue_growth(session_id: str, state: str) -> None:
+        if state != "queued":
+            return
+        try:
+            from core.inbox_events import bus
 
-    async def _submit_scheduled_turn(session_id: str, context: MessageContext, text: str) -> str:
-        """Run a scheduled / watch turn through the SAME unified ``manager.submit``
-        the interactive Chat path uses, so a scheduled run can never preempt an
-        active Chat turn and gets the full turn lifecycle (in_flight + turn.start /
-        turn.end + Stop) the Chat page renders (Codex P2). Unlike Chat there is no
-        pre-persisted ``pending`` row to promote, so the enqueue callback ``append``s
-        a fresh ``queued`` row attributed to the harness.
+            bus.publish("queue.updated", {"session_id": session_id})
+        except Exception:
+            logger.exception(
+                "scheduled Delivery queue projection failed for Session=%s",
+                session_id,
+            )
+
+    async def _submit_scheduled_turn(
+        session_id: str,
+        context: MessageContext,
+        text: str,
+        *,
+        delivery_intent: str = "steer",
+    ) -> Any:
+        """Run a Harness input through the same durable owner as interactive Chat.
+
+        The explicit source intent decides whether it queues or steers. Send-now
+        persists the new input at P3, then promotes the exact FIFO head through
+        empty P1; it never stops the active Turn or jumps older queued work.
+        The submission remains a Delivery until exact native acceptance materializes
+        the harness Message.
         """
         if not session_id:
-            return await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
+            submission = await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
+            return submission.route
 
+        from core.message_mirror import _scope_id_for_session
+        from core.session_turns import (
+            DeliveryRequest,
+            SCHEDULED_PROVENANCE_KEY,
+            TurnSubmissionResult,
+            capture_scheduled_provenance,
+        )
+        from storage import message_deliveries, messages_service
+        from storage.background import (
+            agent_run_cancellation_won_in_connection,
+            attach_agent_run_delivery_in_connection,
+            cancel_queued_agent_run_delivery_in_connection,
+            normalize_run_status,
+            record_agent_run_delivery_outcome_in_connection,
+            run_update_event_transaction,
+        )
+
+        submission_platform = str(getattr(context, "platform", None) or "avibe").strip()
         native_message_id = str(getattr(context, "message_id", None) or "").strip()
-        if native_message_id:
-            active = manager.in_flight.get(session_id)
-            active_message_id = str(getattr(getattr(active, "context", None), "message_id", None) or "").strip()
-            if active_message_id == native_message_id:
-                return "duplicate"
-            from storage import messages_service
+        submission_spec = dict(getattr(context, "platform_specific", None) or {})
+        author_id = str(submission_spec.get("task_definition_id") or "").strip() or None
+        author_name = str(submission_spec.get("task_trigger_kind") or "").strip() or None
+        dedupe_key: str | None = None
+        delivery_id: str | None = None
+        delivery_request: DeliveryRequest | None = None
+        scope_id: str | None = None
+        delivery_owner_transferred = False
+        target_was_busy = False
+        effective_delivery_intent = delivery_intent
+        execution_id = str(
+            (context.platform_specific or {}).get("task_execution_id") or ""
+        ).strip()
+        with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+            from sqlalchemy import select
+            from storage.agent_session_rows import reserve_write_lock
+            from storage.models import agent_runs, agent_sessions
 
-            engine = get_cached_sqlite_engine()
-            with engine.connect() as conn:
-                if messages_service.native_message_exists(
+            reserve_write_lock(conn)
+            scope_id = _scope_id_for_session(conn, session_id)
+            dedupe_key = message_deliveries.native_dedupe_key(
+                submission_platform,
+                native_message_id,
+                scope_id=scope_id,
+            )
+            existing = message_deliveries.get_delivery_by_native_identity(
+                conn,
+                platform=submission_platform,
+                native_message_id=native_message_id,
+                scope_id=scope_id,
+                session_id=session_id,
+                normalize_legacy=True,
+            )
+            legacy_accepted = bool(
+                native_message_id
+                and messages_service.native_message_exists(
                     conn,
-                    platform="avibe",
+                    platform=submission_platform,
+                    scope_id=scope_id,
                     native_message_id=native_message_id,
-                ):
+                )
+            )
+            target_was_busy = message_deliveries.active_turn(conn, session_id) is not None
+            if existing is not None and existing["session_id"] != session_id:
+                return "duplicate"
+            if existing is not None and existing["state"] != "reserved":
+                if execution_id:
+                    run_owner = conn.execute(
+                        select(
+                            agent_runs.c.status,
+                            agent_runs.c.session_id,
+                            agent_runs.c.delivery_id,
+                        )
+                        .where(agent_runs.c.id == execution_id)
+                        .limit(1)
+                    ).mappings().first()
+                    if (
+                        run_owner is not None
+                        and normalize_run_status(run_owner["status"])
+                        in {"queued", "running"}
+                        and run_owner["session_id"] == session_id
+                        and run_owner["delivery_id"] == existing["id"]
+                    ):
+                        existing_state = str(existing["state"])
+                        if existing_state == "retired":
+                            cancel_queued_agent_run_delivery_in_connection(
+                                conn,
+                                execution_id,
+                                session_id=session_id,
+                                delivery_id=str(existing["id"]),
+                            )
+                            return TurnSubmissionResult(
+                                route="enqueued",
+                                queue_persisted=False,
+                                target_was_busy=target_was_busy,
+                                delivery_status="canceled",
+                            )
+                        if not (
+                            delivery_intent == "send_now"
+                            and existing_state == "queued"
+                        ):
+                            return TurnSubmissionResult(
+                                route=(
+                                    "enqueued"
+                                    if existing_state
+                                    in {
+                                        "queued",
+                                        "interrupt_waiting",
+                                        "waiting_terminal",
+                                        "reconciling_steer",
+                                    }
+                                    else "ran"
+                                ),
+                                queue_persisted=True,
+                                target_was_busy=target_was_busy,
+                                delivery_status=existing_state,
+                                delivery_owner_transferred=True,
+                            )
+                        delivery_owner_transferred = True
+                if not delivery_owner_transferred:
                     return "duplicate"
+            if legacy_accepted:
+                return "duplicate"
+            status = conn.execute(
+                select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+            if status != "active":
+                raise ValueError("Session is archived")
+            if existing is not None:
+                delivery_id = str(existing["id"])
+                delivery_request = manager._request_from_delivery(existing)
+                scope_id = delivery_request.scope_id
+                from core.message_priority import delivery_intent_for_priority
 
-        def _enqueue() -> None:
-            from core.message_mirror import _scope_id_for_session
-            from core.session_turns import SCHEDULED_PROVENANCE_KEY, capture_scheduled_provenance
-            from storage import messages_service
+                persisted_intent = delivery_intent_for_priority(
+                    delivery_request.priority
+                )
+                effective_delivery_intent = (
+                    "send_now"
+                    if delivery_intent == "send_now"
+                    and delivery_request.priority == "p3"
+                    else persisted_intent
+                )
+                delivery_request = replace(
+                    delivery_request,
+                    admission_only=effective_delivery_intent == "send_now",
+                )
+                provenance = (delivery_request.metadata or {}).get(
+                    SCHEDULED_PROVENANCE_KEY
+                )
+                persisted_spec = (
+                    provenance.get("platform_specific")
+                    if isinstance(provenance, dict)
+                    else None
+                )
+                if isinstance(persisted_spec, dict):
+                    execution_id = str(
+                        persisted_spec.get("task_execution_id") or execution_id
+                    ).strip()
+            else:
+                from core.message_priority import priority_for_delivery_intent
 
-            # Persist the scheduled run's delivery / attribution provenance on the
-            # queued row's metadata so flush_queue re-runs it as SOURCE_SCHEDULED with
-            # that restored — keeping suppress_delivery / the delivery target / the task
-            # attribution instead of degrading to a plain user turn (#84). The key's
-            # PRESENCE also marks this row as a scheduled segment for the flush.
-            engine = get_cached_sqlite_engine()
-            with engine.begin() as conn:
-                scope_id = _scope_id_for_session(conn, session_id)
-                try:
-                    messages_service.append(
-                        conn,
+                delivery_id = message_deliveries.new_delivery_id()
+                admitted_state = "reserved"
+                priority = (
+                    "p3"
+                    if delivery_intent == "send_now"
+                    else priority_for_delivery_intent(delivery_intent)
+                )
+                message_deliveries.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=session_id,
+                    priority=priority,
+                    state=admitted_state,
+                    snapshot=message_deliveries.message_snapshot(
                         scope_id=scope_id,
                         session_id=session_id,
-                        platform="avibe",
+                        platform=submission_platform,
                         author="harness",
+                        author_id=author_id,
+                        author_name=author_name,
                         source="harness",
-                        message_type=messages_service.QUEUED_TYPE,
+                        message_type="harness",
                         text=text,
-                        metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
+                        metadata={
+                            SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
+                                context
+                            )
+                        },
                         native_message_id=native_message_id or None,
-                    )
-                except IntegrityError:
-                    logger.info("scheduled turn duplicate native id already queued: %s", native_message_id)
+                    ),
+                    dispatch_text=text,
+                    dedupe_key=dedupe_key,
+                    history_event={
+                        "kind": "admission",
+                        "priority": priority,
+                        "state": admitted_state,
+                    },
+                )
+            if execution_id and not delivery_owner_transferred:
+                if not attach_agent_run_delivery_in_connection(
+                    conn,
+                    execution_id,
+                    session_id=session_id,
+                    delivery_id=delivery_id,
+                    delivery_outcome={
+                        "intent": effective_delivery_intent,
+                        "status": "admitted",
+                        "target_was_busy": target_was_busy,
+                    },
+                ):
+                    if agent_run_cancellation_won_in_connection(conn, execution_id):
+                        message_deliveries.retire_not_written(
+                            conn,
+                            session_id,
+                            delivery_id,
+                            reason="agent_run_canceled",
+                        )
+                        return TurnSubmissionResult(
+                            route="enqueued",
+                            queue_persisted=False,
+                            delivery_status="canceled",
+                        )
+                    raise RuntimeError("Agent Run Delivery binding was refused")
+                delivery_owner_transferred = True
 
-        return await manager.submit(session_id, context, text, source=SOURCE_SCHEDULED, enqueue=_enqueue)
+        if delivery_request is None:
+            from core.message_priority import priority_for_delivery_intent
+
+            delivery_request = DeliveryRequest(
+                session_id=session_id,
+                priority=(
+                    "p3"
+                    if delivery_intent == "send_now"
+                    else priority_for_delivery_intent(delivery_intent)
+                ),
+                content=text,
+                delivery_id=delivery_id,
+                scope_id=scope_id,
+                platform=submission_platform,
+                source="harness",
+                author="harness",
+                author_id=author_id,
+                author_name=author_name,
+                message_type="harness",
+                display_text=text,
+                metadata={
+                    SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
+                },
+                native_message_id=native_message_id or None,
+                admission_only=delivery_intent == "send_now",
+            )
+
+        if context.platform_specific is None:
+            context.platform_specific = {}
+        context.platform_specific.update(
+            {
+                "delivery_id": delivery_id,
+                "native_message_id": delivery_request.native_message_id,
+                "scope_id": scope_id,
+                "display_text": delivery_request.display_text,
+                "message_metadata": dict(delivery_request.metadata or {}),
+                "author_id": delivery_request.author_id,
+                "author_name": delivery_request.author_name,
+            }
+        )
+        try:
+            result = await manager.deliver(
+                delivery_request,
+                context=context,
+            )
+        except Exception:
+            if not delivery_owner_transferred:
+                raise
+            logger.exception(
+                "Delivery admission deferred to recovery after Agent Run ownership "
+                "transfer: run=%s delivery=%s",
+                execution_id,
+                delivery_id,
+            )
+            delivery_status = "reserved"
+            try:
+                with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                    persisted = message_deliveries.get_delivery(conn, delivery_id)
+                    delivery_status = str(
+                        (persisted or {}).get("state") or delivery_status
+                    )
+                    recorded = record_agent_run_delivery_outcome_in_connection(
+                        conn,
+                        execution_id,
+                        {
+                            "intent": effective_delivery_intent,
+                            "status": delivery_status,
+                            "target_was_busy": target_was_busy,
+                        },
+                    )
+                if not recorded:
+                    logger.warning(
+                        "Agent Run deferred Delivery outcome lost its exact CAS: "
+                        "run=%s delivery=%s",
+                        execution_id,
+                        delivery_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "Agent Run deferred outcome projection failed; Delivery "
+                    "ownership remains authoritative: run=%s delivery=%s",
+                    execution_id,
+                    delivery_id,
+                )
+            _publish_scheduled_queue_growth(session_id, delivery_status)
+            return TurnSubmissionResult(
+                route="enqueued",
+                queue_persisted=True,
+                target_was_busy=target_was_busy,
+                delivery_status=delivery_status,
+                delivery_owner_transferred=True,
+            )
+        delivery_state = str(result.state)
+        if effective_delivery_intent == "send_now":
+            with get_cached_sqlite_engine().connect() as conn:
+                admitted = message_deliveries.get_delivery(conn, delivery_id)
+                observed_head = message_deliveries.ordering_head(conn, session_id)
+            if (
+                admitted is not None
+                and admitted["state"] == "queued"
+                and observed_head is not None
+                and observed_head["state"] == "queued"
+            ):
+                await manager.send_now(
+                    session_id,
+                    expected_delivery_id=str(observed_head["id"]),
+                )
+                with get_cached_sqlite_engine().connect() as conn:
+                    latest = message_deliveries.get_delivery(conn, delivery_id)
+                if latest is not None:
+                    delivery_state = str(latest["state"])
+
+        route = "enqueued" if delivery_state in {
+            "queued",
+            "pending_steer",
+            "steering",
+            "interrupt_waiting",
+            "waiting_terminal",
+            "reconciling_steer",
+        } else "ran"
+        submission = TurnSubmissionResult(
+            route=route,
+            queue_persisted=True,
+            target_was_busy=target_was_busy,
+            delivery_status=(
+                delivery_state if effective_delivery_intent == "send_now" else None
+            ),
+            delivery_owner_transferred=delivery_owner_transferred,
+        )
+        _publish_scheduled_queue_growth(session_id, delivery_state)
+        if effective_delivery_intent == "send_now":
+            try:
+                with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                    recorded = record_agent_run_delivery_outcome_in_connection(
+                        conn,
+                        execution_id,
+                        {
+                            "intent": "send_now",
+                            "status": delivery_state,
+                            "target_was_busy": submission.target_was_busy,
+                        },
+                    )
+                if not recorded:
+                    logger.warning(
+                        "send-now Agent Run outcome lost its exact CAS after Delivery "
+                        "ownership transfer: run=%s delivery=%s",
+                        execution_id,
+                        delivery_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "send-now Agent Run outcome persistence deferred after Delivery "
+                    "ownership transfer: run=%s delivery=%s",
+                    execution_id,
+                    delivery_id,
+                )
+            return submission
+        return submission if delivery_owner_transferred else route
 
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
@@ -277,165 +629,167 @@ def create_app(
             return JSONResponse(status_code=409, content=result)
         return result
 
-    @app.post("/internal/dispatch")
-    async def _dispatch(request: Request) -> Any:
-        """Streaming turn dispatch: runs a turn and proxies its notify/result
-        chunks back over an SSE response. The web **Chat** page no longer uses
-        this (it's fire-and-forget via ``/internal/dispatch_async`` +
-        ``message.new``); this backs the **Show-page** dispatch flow, where
-        ``ui_server._run_show_event_dispatch`` re-publishes each event as
-        ``show.dispatch`` for the open Show page."""
-        payload = await _safe_json(request)
-        try:
-            text, context = await _build_dispatch_payload(payload)
-        except ValueError as err:
-            return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
-
-        session_id = payload.get("session_id")
-
-        # One streaming turn per session. If a turn is already in flight for
-        # this session (a second browser tab, or a resend before the first
-        # finishes), refuse the new one HERE — before creating a task or
-        # touching ``in_flight`` — so we never overwrite the real turn's task
-        # handle. Overwriting it would orphan the running turn: its sink keeps
-        # streaming but ``/internal/cancel`` could no longer find the task to
-        # interrupt, so the Stop button would silently no-op.
-        if isinstance(session_id, str) and session_id:
-            existing = in_flight.get(session_id)
-            if existing is not None and not existing.task.done():
-                async def _busy_stream():
-                    yield _sse_event("turn.start", {"session_id": session_id})
-                    yield _sse_event(
-                        "turn.chunk",
-                        {
-                            "kind": "error",
-                            "text": controller._t("error.streamTurnInProgress"),
-                            "message_id": None,
-                        },
-                    )
-                    yield _sse_event("turn.end", {"session_id": session_id})
-
-                return StreamingResponse(
-                    _busy_stream(),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-                )
-
-        # SSE chunked stream — the response body is fed by ``on_chunk``
-        # callbacks that the dispatcher fires for every successful
-        # ``emit_agent_message`` notify / result during the turn. The
-        # turn coroutine and the producer-consumer queue live on the
-        # same loop, so ordering is preserved.
-        chunk_queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
-
-        async def on_chunk(envelope: dict) -> None:
-            await chunk_queue.put(envelope)
-
-        async def _runner() -> None:
-            try:
-                await dispatch_turn(controller, context, text, on_chunk=on_chunk)
-            except asyncio.CancelledError:
-                # Surface a cancel envelope so the SSE consumer can
-                # distinguish "user stopped me" from "agent finished".
-                await chunk_queue.put({"kind": "cancelled", "text": ""})
-                raise
-            except Exception as err:
-                logger.exception("internal dispatch failed for session=%s", session_id)
-                await chunk_queue.put({"kind": "error", "text": str(err)})
-            finally:
-                # This legacy streaming route invokes dispatch_turn directly, so it
-                # bypasses SessionTurnManager._run_turn, which owns lifecycle bus
-                # events for Chat/scheduled turns. The two paths are exclusive:
-                # streaming lifecycle is owned here; manager lifecycle stays in
-                # core/session_turns.py. Publishing before the sentinel also makes
-                # post-turn subscribers finish before queued work can be flushed.
-                if isinstance(session_id, str) and session_id:
-                    bus.publish("turn.end", {"session_id": session_id})
-                # Sentinel signals end-of-stream to the consumer below.
-                await chunk_queue.put(None)
-
-        task = asyncio.create_task(_runner(), name="internal-dispatch")
-        if isinstance(session_id, str) and session_id:
-            in_flight[session_id] = Turn(task=task, context=context)
-            # create_task cannot run until this coroutine yields, so synchronous
-            # pre-turn subscribers complete before the backend can touch files.
-            bus.publish("turn.start", {"session_id": session_id})
-
-        async def _stream():
-            saw_cancel = False
-            reached_end = False
-            try:
-                yield _sse_event("turn.start", {"session_id": session_id})
-                while True:
-                    envelope = await chunk_queue.get()
-                    if envelope is None:
-                        reached_end = True
-                        break
-                    if envelope.get("kind") == "cancelled":
-                        saw_cancel = True
-                    yield _sse_event("turn.chunk", envelope)
-                yield _sse_event("turn.end", {"session_id": session_id})
-            finally:
-                if not task.done():
-                    task.cancel()
-                # Release the slot whether the task completed normally,
-                # was cancelled by the UI, or the SSE consumer
-                # disconnected mid-stream. ``pop`` is idempotent.
-                if isinstance(session_id, str):
-                    in_flight.pop(session_id, None)
-                    # This endpoint shares ``in_flight`` with the session, so a Chat
-                    # send during a Show-page dispatch enqueues behind it. Drain that
-                    # queue on NATURAL completion (not a Stop / consumer disconnect,
-                    # mirroring _run_turn's no-flush-on-cancel rule) so the queued
-                    # Chat message isn't stranded until manual intervention (Codex P2).
-                    if reached_end and not saw_cancel:
-                        await _flush_queue(session_id)
-
-        return StreamingResponse(
-            _stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-        )
-
     @app.post("/internal/dispatch_async")
     async def _dispatch_async(request: Request) -> Any:
-        """Fire-and-forget turn dispatch for the session/page-scoped stream.
+        """Admit one already-persisted Delivery on the controller loop."""
 
-        Starts the turn and returns ``202`` immediately. The reply — plus any
-        notify/result — reaches the browser over the persistent ``message.new``
-        session stream, so the HTTP response isn't held open for the turn's
-        duration and a closed browser tab can't cancel an in-flight turn.
-        ``_run_turn`` holds the turn open (keeping ``in_flight`` populated so
-        Stop works), publishes the turn lifecycle, and flushes the
-        send-while-busy queue when it settles.
-        """
+        from storage import message_deliveries
+        from storage import workbench_sessions_service
+
         payload = await _safe_json(request)
-        try:
-            text, context = await _build_dispatch_payload(payload)
-        except ValueError as err:
-            return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
+        session_id = str(payload.get("session_id") or "").strip()
+        delivery_id = str(payload.get("user_message_id") or "").strip()
+        if not delivery_id:
+            from core.workbench_media import file_attachments_from_specs
 
-        session_id = payload.get("session_id")
-        sid = session_id if isinstance(session_id, str) and session_id else None
-        user_message_id = payload.get("user_message_id")
+            raw_text = payload.get("text")
+            if not (
+                isinstance(raw_text, str) and raw_text.strip()
+            ) and not file_attachments_from_specs(payload.get("files")):
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": "text or files is required"},
+                )
+        if not session_id or not delivery_id:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "session_id and user_message_id are required"},
+            )
+        with get_cached_sqlite_engine().begin() as conn:
+            from storage.agent_session_rows import reserve_write_lock
 
-        def _enqueue() -> None:
-            # Chat already persisted the user's message as a ``pending`` row; promote
-            # it to ``queued`` so it drains via the queue after the active turn.
-            if isinstance(user_message_id, str) and user_message_id:
-                from storage import messages_service
+            reserve_write_lock(conn)
+            delivery = message_deliveries.get_delivery(conn, delivery_id)
+            archived = workbench_sessions_service.is_session_archived(conn, session_id)
+            if (
+                archived
+                and delivery is not None
+                and delivery["session_id"] == session_id
+                and delivery["state"] == "reserved"
+            ):
+                message_deliveries.retire_not_written(
+                    conn,
+                    session_id,
+                    delivery_id,
+                    reason="session_archived",
+                )
+                delivery = message_deliveries.get_delivery(conn, delivery_id)
+            delivery_payload = (
+                message_deliveries.delivery_payload(delivery)
+                if delivery is not None and delivery["session_id"] == session_id
+                else None
+            )
+            if (
+                delivery is not None
+                and delivery_payload is not None
+                and message_deliveries.delivery_has_remote_resource_context(delivery)
+            ):
+                message_deliveries.retire_not_written(
+                    conn,
+                    session_id,
+                    delivery_id,
+                    reason="remote_execution_disabled",
+                )
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "ok": False,
+                        "code": "remote_execution_disabled",
+                        "session_id": session_id,
+                        "delivery_id": delivery_id,
+                    },
+                )
+            attachment_specs: list[dict[str, Any]] = []
+            if delivery_payload is not None:
+                from core.workbench_media import resolve_attachment_specs
 
-                engine = get_cached_sqlite_engine()
-                with engine.begin() as conn:
-                    messages_service.promote_pending(conn, user_message_id, messages_service.QUEUED_TYPE)
-
-        outcome = await manager.submit(sid, context, text, enqueue=_enqueue)
-        if outcome == "enqueued":
+                attachment_specs = resolve_attachment_specs(
+                    conn,
+                    session_id=session_id,
+                    attachments=(delivery_payload.get("content") or {}).get(
+                        "attachments"
+                    )
+                    or [],
+                )
+        if archived or delivery is None or delivery["session_id"] != session_id:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "code": "session_archived" if archived else "delivery_reservation_lost",
+                    "session_id": session_id,
+                    "delivery_id": delivery_id,
+                },
+            )
+        if delivery["state"] != "reserved":
             return JSONResponse(
                 status_code=202,
-                content={"ok": True, "queued": True, "session_id": session_id, "message_id": user_message_id},
+                content={
+                    "ok": True,
+                    "duplicate": True,
+                    "session_id": session_id,
+                    "delivery_id": delivery_id,
+                    "message_id": delivery.get("message_id"),
+                    "delivery_state": delivery["state"],
+                    "queued": delivery["state"] == "queued",
+                },
             )
-        return JSONResponse(status_code=202, content={"ok": True, "session_id": session_id})
+        # The HTTP request only wakes the durable owner. Prompt, provenance, and
+        # attachments always come from the reservation, never from a stale caller.
+        dispatch_payload = {
+            **payload,
+            "text": str(delivery.get("dispatch_text") or ""),
+            "files": attachment_specs,
+            "platform": delivery_payload.get("platform"),
+            "user_id": delivery_payload.get("author_id"),
+            "message_id": delivery_payload.get("native_message_id") or delivery_id,
+            "thread_id": delivery_payload.get("parent_native_message_id"),
+            "scope_id": delivery_payload.get("scope_id"),
+            "display_text": delivery_payload.get("text"),
+            "content": dict(delivery_payload.get("content") or {}),
+            "metadata": dict(delivery_payload.get("metadata") or {}),
+            "author_id": delivery_payload.get("author_id"),
+            "author_name": delivery_payload.get("author_name"),
+        }
+        try:
+            text, context = await _build_dispatch_payload(dispatch_payload)
+        except ValueError as err:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
+        if context.platform_specific is None:
+            context.platform_specific = {}
+        context.platform_specific.update(
+            {
+                "delivery_id": delivery_id,
+                "scope_id": dispatch_payload.get("scope_id"),
+                "display_text": dispatch_payload.get("display_text"),
+                "message_content": dispatch_payload.get("content"),
+                "message_metadata": dispatch_payload.get("metadata") or {},
+                "author_id": dispatch_payload.get("author_id"),
+                "author_name": dispatch_payload.get("author_name"),
+            }
+        )
+        from core.message_priority import delivery_intent_for_priority
+
+        delivery_intent = delivery_intent_for_priority(str(delivery["priority"]))
+        submission = await manager.submit(
+            session_id,
+            context,
+            text,
+            delivery_intent=delivery_intent,
+        )
+        with get_cached_sqlite_engine().connect() as conn:
+            settled = message_deliveries.get_delivery(conn, delivery_id)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "session_id": session_id,
+                "delivery_id": delivery_id,
+                "message_id": (settled or {}).get("message_id"),
+                "delivery_state": (settled or {}).get("state"),
+                "queued": submission.route == "enqueued",
+            },
+        )
 
     @app.post("/internal/reconcile-platforms")
     async def _reconcile_platforms() -> Any:
@@ -692,14 +1046,52 @@ def create_app(
         except Exception:
             logger.warning("internal memory clear failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+    @app.post("/internal/backend-auth/test")
+    async def _test_backend_auth(request: Request) -> Any:
+        """Probe credentials through the controller-owned Agent runtime."""
+        payload = await _safe_json(request)
+        backend = payload.get("backend")
+        model = payload.get("model")
+        if not isinstance(backend, str) or not backend.strip():
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "backend must be a non-empty string"},
+            )
+        if model is not None and not isinstance(model, str):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "model must be a string"},
+            )
+        service = getattr(controller, "agent_auth_service", None)
+        test = getattr(service, "test_web_auth", None)
+        if not callable(test):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "backend_runtime_unavailable"},
+            )
+        try:
+            result = await test(
+                backend.strip().lower(),
+                model=model.strip() if isinstance(model, str) and model.strip() else None,
+            )
+            return JSONResponse(status_code=200, content=result)
+        except Exception as exc:
+            logger.exception("internal backend auth test failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""
 
+        from config.v2_config import is_model_hub_enabled
         from core.handlers.model_hub import ModelHubError
         from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
+        if not is_model_hub_enabled():
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "contract_version": 1, "error": "feature_disabled"},
+            )
         body = await _safe_json(request)
         operation = body.get("operation") if isinstance(body, dict) else None
         payload = body.get("payload") if isinstance(body, dict) else None
@@ -714,6 +1106,7 @@ def create_app(
             response = {"ok": False, "error": exc.code}
             if exc.detail:
                 response["detail"] = exc.detail
+            response.update(exc.data)
             return JSONResponse(status_code=exc.status, content=response)
         return {"ok": True, "result": result}
 
@@ -761,14 +1154,25 @@ def create_app(
         but they can reach this permission-restricted Unix socket and reuse the
         same Controller -> UI-server -> browser SSE path.
         """
-        from core.inbox_events import RUNS_UPDATED_EVENT, VAULTS_UPDATED_EVENT, bus
+        from core.inbox_events import (
+            DEFINITIONS_UPDATED_EVENT,
+            QUEUE_UPDATED_EVENT,
+            RUNS_UPDATED_EVENT,
+            VAULTS_UPDATED_EVENT,
+            bus,
+        )
 
         payload = await _safe_json(request)
         if not isinstance(payload, dict):
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_payload"})
         event_type = str(payload.get("type") or "").strip()
         data = payload.get("data")
-        if event_type not in {RUNS_UPDATED_EVENT, VAULTS_UPDATED_EVENT}:
+        if event_type not in {
+            DEFINITIONS_UPDATED_EVENT,
+            QUEUE_UPDATED_EVENT,
+            RUNS_UPDATED_EVENT,
+            VAULTS_UPDATED_EVENT,
+        }:
             return JSONResponse(status_code=400, content={"ok": False, "error": "unsupported_event_type"})
         if not isinstance(data, dict):
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_event_data"})
@@ -803,23 +1207,32 @@ def create_app(
         code = result.get("code")
         if code == "not_in_flight":
             return JSONResponse(status_code=404, content=result)
-        if code == "stop_failed":
+        if code in {"stop_failed", "stop_unknown"}:
             return JSONResponse(status_code=409, content=result)
         return result
 
     @app.post("/internal/send-now/{session_id}")
-    async def _send_now(session_id: str) -> Any:
+    async def _send_now(
+        session_id: str,
+        expected_delivery_id: str | None = None,
+    ) -> Any:
         """HTTP adapter: delegate "立即发送" (run the send-while-busy queue now) to
-        the turn owner (FSM, Phase 1b); ``stop_failed`` -> 409."""
-        result = await manager.send_now(session_id)
-        if result.get("code") == "stop_failed":
+        the turn owner (FSM, Phase 1b); typed failures remain HTTP failures."""
+        result = await manager.send_now(
+            session_id,
+            expected_delivery_id=expected_delivery_id,
+        )
+        code = result.get("code")
+        if code in {"stop_failed", "stale_head", "ordering_fence"}:
             return JSONResponse(status_code=409, content=result)
+        if code == "flush_failed":
+            return JSONResponse(status_code=503, content=result)
         return result
 
     # Expose the per-session turn gate to in-process callers (the scheduler)
     # WITHOUT going through the HTTP surface: ``ScheduledTaskService`` runs on the
-    # same loop and routes avibe scheduled / watch turns through
-    # ``submit_scheduled`` so they share the Chat path's queueing + lifecycle.
+    # same loop and routes persisted Session inputs through ``submit_scheduled``
+    # so they share the Chat path's durable priority and lifecycle authority.
     # ``in_flight`` is the SAME dict object as ``app.state.in_flight_dispatches``
     # (the cancel endpoint, turn-state, and the tests all read it), so a scheduled
     # run registered by ``_run_turn`` is Stoppable through ``/internal/cancel``.
@@ -851,18 +1264,9 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
     import uvicorn
 
     app = create_app(controller)
-    manager = getattr(controller, "session_turns", None)
-    recover_queue = getattr(manager, "recover_persisted_agent_run_queue", None)
-    if callable(recover_queue):
-        try:
-            recovered = await recover_queue()
-            if recovered:
-                logger.info(
-                    "Recovered persisted Workbench Agent Run queues for %s",
-                    ",".join(recovered),
-                )
-        except Exception:
-            logger.exception("Failed to recover persisted Workbench Agent Run queues")
+    recovery_complete = getattr(controller, "_delivery_recovery_complete", None)
+    if recovery_complete is not None:
+        await recovery_complete.wait()
     config = uvicorn.Config(
         app,
         log_config=None,
@@ -1104,10 +1508,23 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
         channel_id=payload.get("channel_id"),
         platform=payload.get("platform"),
         thread_id=payload.get("thread_id"),
-        message_id=payload.get("message_id"),
+        message_id=payload.get("message_id") or payload.get("user_message_id"),
         files=files,
         memory_cli_admitted=payload.get("memory_cli_admitted") is True,
         is_ordinary_text=payload.get("is_ordinary_text") is True,
+    )
+    if context.platform_specific is None:
+        context.platform_specific = {}
+    context.platform_specific.update(
+        {
+            "delivery_id": payload.get("user_message_id"),
+            "scope_id": payload.get("scope_id"),
+            "display_text": payload.get("display_text"),
+            "message_content": payload.get("content"),
+            "message_metadata": payload.get("metadata") or {},
+            "author_id": payload.get("author_id"),
+            "author_name": payload.get("author_name"),
+        }
     )
     return text, context
 
@@ -1124,22 +1541,37 @@ def _build_session_context(
     memory_cli_admitted: bool = False,
     is_ordinary_text: bool = False,
 ) -> MessageContext:
-    """Build the avibe ``MessageContext`` for a workbench session.
+    """Rebuild a Session's routing context from its durable scope and target.
 
     Shared by the dispatch endpoint and the cancel endpoint so a stop reuses
     the exact same session-routing context (chosen agent / model / effort,
     native session id, workdir) the turn ran under — that's what lets cancel
     reuse the IM ``/stop`` path to interrupt the right backend session.
-    Defaults to ``platform="avibe"``.
+    Workbench and IM Sessions use the same builder; Delivery hydration adds the
+    exact sender and native Message identity afterward.
     """
 
-    # ``agent_session_id`` is the agent_sessions PK; persist_agent_message reads
-    # it to attribute avibe agent replies to the right session (IM stamps it at
-    # session-resolve time). For avibe the dispatch session_id IS that PK.
+    from core.scheduled_tasks import resolve_session_id_target
+
+    target_info = resolve_session_id_target(session_id)
+    session_row = _lookup_session(session_id)
+    resolved_platform = platform or target_info.session_key.platform or "avibe"
+    is_dm = target_info.session_key.scope_type == "user"
+    resolved_channel_id = channel_id or (
+        session_id
+        if resolved_platform == "avibe"
+        else target_info.session_key.scope_id
+    )
+    resolved_user_id = user_id or (
+        target_info.session_key.scope_id if is_dm else "workbench"
+    )
     platform_specific: dict[str, Any] = {
-        "workbench_session_id": session_id,
         "agent_session_id": session_id,
+        "platform": resolved_platform,
+        "is_dm": is_dm,
     }
+    if resolved_platform == "avibe":
+        platform_specific["workbench_session_id"] = session_id
     if memory_cli_admitted:
         platform_specific["memory_cli_admitted"] = True
     session_row = _lookup_session(session_id)
@@ -1167,10 +1599,10 @@ def _build_session_context(
             platform_specific["vibe_agent_name"] = session_row["agent_name"]
 
     return MessageContext(
-        user_id=str(user_id or "workbench"),
-        channel_id=str(channel_id or session_id),
-        platform=platform or "avibe",
-        thread_id=thread_id,
+        user_id=str(resolved_user_id),
+        channel_id=str(resolved_channel_id),
+        platform=resolved_platform,
+        thread_id=thread_id or target_info.session_key.thread_id,
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,

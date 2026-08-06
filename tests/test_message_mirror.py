@@ -27,10 +27,11 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_mirror import (
+    agent_message_exists,
     mirror_harness_inbound,
     mirror_inbound,
     persist_agent_message,
-    persist_silent_completion_marker,
+    persist_silent_terminal,
 )
 from modules.im import MessageContext
 from storage import messages_service
@@ -121,6 +122,50 @@ def test_persist_agent_writes_typed_agent_row_on_same_scope(isolated_state):
     # No session resolved on this synthetic context -> falls back to the
     # channel scope auto-created on first inbound; both rows share it.
     assert agent_row["scope_id"] == user_row["scope_id"]
+
+
+def test_persist_agent_keeps_result_footer_as_structured_content(isolated_state):
+    ctx = _slack_ctx()
+    mirror_inbound(ctx, "ping")
+    persist_agent_message(
+        ctx,
+        "result",
+        "pong\n\n✅ ⏱️ 5s · 🪙 1.2k tok",
+        result_footer="✅ ⏱️ 5s · 🪙 1.2k tok",
+    )
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(messages).where(messages.c.author == "agent")
+        ).mappings().one()
+
+    content = json.loads(row["content_json"])
+    assert content["kind"] == "result"
+    assert content["result_footer"] == "✅ ⏱️ 5s · 🪙 1.2k tok"
+
+
+def test_agent_message_receipt_lookup_returns_text_footer_and_batch(isolated_state):
+    ctx = _slack_ctx()
+    mirror_inbound(ctx, "ping")
+    persist_agent_message(
+        ctx,
+        "result",
+        "Exact accepted assistant result",
+        result_footer="3.4s | 812 tok",
+        metadata={
+            "activity_ids": ["task-a", "task-b"],
+            "run_ids": ["run-a", "run-b"],
+        },
+        native_message_id="activity-batch-receipt",
+    )
+
+    accepted = agent_message_exists(ctx, "activity-batch-receipt")
+
+    assert accepted is not None
+    assert accepted["text"] == "Exact accepted assistant result"
+    assert accepted["content"]["result_footer"] == "3.4s | 812 tok"
+    assert accepted["metadata"]["activity_ids"] == ["task-a", "task-b"]
 
 
 def test_agent_output_provenance_is_hidden_metadata_and_deduplicated(isolated_state):
@@ -266,6 +311,62 @@ def test_persist_agent_im_uses_delivery_scope_not_session(isolated_state):
     # scope = C_delivery, session = ses_im (anchored under C_source).
     assert row["session_id"] == "ses_im"
     assert row["content_text"] == "routed answer"
+
+
+def test_silent_im_terminal_is_trace_evidence_not_transcript(isolated_state):
+    engine = create_sqlite_engine()
+    now = "2026-06-01T10:00:00Z"
+    with engine.begin() as conn:
+        source_scope = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C_source_terminal",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_im_terminal",
+                scope_id=source_scope,
+                agent_name="codex",
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_ses_im_terminal",
+                native_session_id="",
+                status="active",
+                visibility="foreground",
+                pinned=0,
+                agent_status="running",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    context = MessageContext(
+        user_id="U_terminal",
+        channel_id="C_delivery_terminal",
+        platform="slack",
+        platform_specific={
+            "agent_session_id": "ses_im_terminal",
+            "turn_token": "turn-im-terminal",
+        },
+    )
+
+    persist_silent_terminal(context, is_error=True)
+
+    with engine.connect() as conn:
+        event = conn.execute(
+            select(agent_events).where(
+                agent_events.c.session_id == "ses_im_terminal"
+            )
+        ).mappings().one()
+        transcript_row = conn.execute(
+            select(messages).where(messages.c.session_id == "ses_im_terminal")
+        ).first()
+    assert event["event_type"] == "silent_terminal"
+    assert json.loads(event["metadata_json"])["terminal_outcome"] == "failed"
+    assert transcript_row is None
 
 
 def test_duplicate_native_message_id_is_swallowed(isolated_state):
@@ -966,89 +1067,3 @@ def test_avibe_inbound_is_noop(isolated_state):
     with engine.connect() as conn:
         rows = conn.execute(select(messages).where(messages.c.author == "user")).mappings().all()
     assert rows == []
-
-
-def test_silent_completion_marker_persisted_but_invisible(isolated_state):
-    """``persist_silent_completion_marker`` writes an agent-authored ``silent`` row
-    (empty text, content.kind='silent') that is EXCLUDED from the transcript allowlist
-    and from the inbox conversation clock, so the last visible message is unchanged."""
-    engine = create_sqlite_engine()
-    now = "2026-05-30T12:00:00Z"
-    with engine.begin() as conn:
-        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_sil", now=now)
-        conn.execute(
-            agent_sessions.insert().values(
-                id="ses_sil", scope_id=scope_id, agent_backend="claude", agent_variant="default",
-                session_anchor="anchor_ses_sil", native_session_id="", status="active", metadata_json="{}",
-                created_at=now, updated_at=now, last_active_at=now,
-            )
-        )
-        # A real, visible reply for an earlier turn — must stay the "last visible" one.
-        conn.execute(
-            messages.insert().values(
-                id="m_vis", scope_id=scope_id, session_id="ses_sil", platform="avibe", author="agent",
-                type="result", source="agent", content_text="the visible answer", content_json="{}",
-                metadata_json="{}", created_at=now, updated_at=now,
-            )
-        )
-
-    ctx = MessageContext(
-        user_id="workbench", channel_id="ses_sil", platform="avibe",
-        platform_specific={"agent_session_id": "ses_sil"},
-    )
-    persist_silent_completion_marker(ctx)
-
-    with engine.connect() as conn:
-        rows = conn.execute(select(messages).where(messages.c.session_id == "ses_sil")).mappings().all()
-        transcript = messages_service.list_session_messages(
-            conn, session_id="ses_sil", limit=50, tail=True, types=messages_service.TRANSCRIPT_TYPES
-        )["messages"]
-
-    silent_rows = [r for r in rows if r["type"] == "silent"]
-    assert len(silent_rows) == 1  # persisted
-    assert silent_rows[0]["author"] == "agent"
-    assert (silent_rows[0]["content_text"] or "") == ""
-    assert json.loads(silent_rows[0]["content_json"]).get("kind") == "silent"
-
-    # Invisible: excluded from the transcript allowlist; last visible row unchanged.
-    assert "silent" not in [m["type"] for m in transcript]
-    assert transcript[-1]["type"] == "result" and transcript[-1]["text"] == "the visible answer"
-    # And kept out of the inbox conversation clock (never bumps last-activity/author).
-    assert messages_service.SILENT_TYPE in messages_service.NON_CONVERSATION_TYPES
-    assert messages_service.SILENT_TYPE not in messages_service.TRANSCRIPT_TYPES
-
-
-def test_silent_completion_marker_publishes_inbox_update_not_message(isolated_state):
-    """The marker clears the inbox awaiting flag, so it publishes ``inbox.session.updated``
-    (live sidebar refresh) — but NOT ``message.new`` (no transcript bubble)."""
-    from unittest import mock
-
-    engine = create_sqlite_engine()
-    now = "2026-05-30T12:00:00Z"
-    with engine.begin() as conn:
-        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_pub", now=now)
-        conn.execute(
-            agent_sessions.insert().values(
-                id="ses_pub", scope_id=scope_id, agent_backend="claude", agent_variant="default",
-                session_anchor="anchor_ses_pub", native_session_id="", status="active", metadata_json="{}",
-                created_at=now, updated_at=now, last_active_at=now,
-            )
-        )
-        conn.execute(
-            messages.insert().values(
-                id="m_vis", scope_id=scope_id, session_id="ses_pub", platform="avibe", author="agent",
-                type="result", source="agent", content_text="visible", content_json="{}",
-                metadata_json="{}", created_at=now, updated_at=now,
-            )
-        )
-
-    ctx = MessageContext(
-        user_id="workbench", channel_id="ses_pub", platform="avibe",
-        platform_specific={"agent_session_id": "ses_pub"},
-    )
-    with mock.patch("core.inbox_events.bus.publish") as publish:
-        persist_silent_completion_marker(ctx)
-
-    published = [call.args[0] for call in publish.call_args_list]
-    assert "inbox.session.updated" in published  # sidebar awaiting clears live
-    assert "message.new" not in published  # invisible: no transcript bubble

@@ -10,19 +10,14 @@ import {
   ChevronRight,
   CodeXml,
   Ellipsis,
-  EyeOff,
   FileText,
   Folder,
   FolderOpen,
   FolderPlus,
-  GitFork,
-  Hash,
   Inbox,
   KeyRound,
   Loader2,
   Pencil,
-  Pin,
-  PinOff,
   Plus,
   Search,
   Settings2,
@@ -35,16 +30,14 @@ import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
-import { useApi } from '../../context/ApiContext';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
-import { useToast } from '../../context/ToastContext';
 import { SessionPinAction } from './SessionPinAction';
-import { sessionPinRowPaddingClass } from './sessionPinLayout';
+import { SESSION_ROW_MENU_POSITION_CLASS, sessionRowActionPaddingClass } from './sessionRowLayout';
+import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
+import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { ArchiveSessionDialog } from './ArchiveSessionDialog';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
@@ -119,21 +112,19 @@ const InboxHoverPopover: React.FC<{
             {t('workbench.inbox.headerCount', { unread: unreadSessions, total: sessions.length })}
           </div>
         </div>
-        {canMarkRead && (
-          <button
-            type="button"
-            onClick={onMarkAllRead}
-            disabled={totalUnread === 0}
-            className={clsx(
-              'rounded-md border px-2 py-1 text-[10px] font-medium transition',
-              totalUnread === 0
-                ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
-                : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
-            )}
-          >
-            {t('workbench.inbox.markAllRead')}
-          </button>
-        )}
+        {canMarkRead && <button
+          type="button"
+          onClick={onMarkAllRead}
+          disabled={totalUnread === 0}
+          className={clsx(
+            'rounded-md border px-2 py-1 text-[10px] font-medium transition',
+            totalUnread === 0
+              ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
+              : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
+          )}
+        >
+          {t('workbench.inbox.markAllRead')}
+        </button>}
       </div>
 
       {shown.length === 0 ? (
@@ -209,35 +200,23 @@ const STATUS_DOT_CLASS: Record<string, string> = {
   idle: 'bg-muted',
 };
 
-// One session row under a project. Left-click opens the chat; right-click opens
-// the session action menu. Rename calls api.updateSession({ title }); the live
-// session.activity 'updated' event then patches the title in this list (see the
-// onSessionActivity handler in WorkbenchSidebar), so no manual local patch here.
+// One session row under a project. Left-click opens the chat; the hover-revealed
+// ⋯ (and right-click anywhere on the row) opens the shared session action menu —
+// see sessionActions.tsx, which owns the items and the writes for every surface.
+// Rename is inline here: the commit calls the provider, whose session.activity
+// 'updated' event patches the title in this list, so no manual local patch.
 const SessionRow: React.FC<{
+  projectId: string;
   session: WorkbenchSession;
   unread: number;
   canChat: boolean;
-  onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
-  onSetPinned: (sessionId: string, pinned: boolean) => Promise<void>;
-  onRenameSession: (sessionId: string, title: string) => Promise<void>;
-  onArchiveSession: (sessionId: string) => Promise<void>;
-}> = ({ session, unread, canChat, onForkSession, onSetPinned, onRenameSession, onArchiveSession }) => {
+}> = ({ projectId, session, unread, canChat }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const api = useApi();
-  const { showToast } = useToast();
-  const authorizeRouteAction = useUnsavedChangesActionGuard();
+  const { renameSession } = useWorkbenchProjectsTree();
   const location = useLocation();
   const active = location.pathname === `/chat/${session.id}`;
-  // "Reference this session" shows only when a chat composer is mounted (a chat
-  // is open) AND this row isn't that open session — you can't reference yourself.
-  const insertTarget = useComposerInsertTarget();
-  const canReference = canChat && insertTarget != null && insertTarget.sessionId !== session.id;
   const [menuOpen, setMenuOpen] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState(false);
-  const [forking, setForking] = useState(false);
-  const [pinning, setPinning] = useState(false);
-  const pinningRef = useRef(false);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -245,6 +224,26 @@ const SessionRow: React.FC<{
   // unmounts and its onBlur would fire commitRename again; Escape cancels and
   // must NOT let that trailing blur commit the stale draft (Codex P2).
   const handledRef = useRef(false);
+
+  const { actions, archiveDialog } = useSessionActions({
+    session,
+    writable: canChat,
+    projectId,
+    onRenameStart: () => {
+      setDraft(session.title ?? '');
+      handledRef.current = false;
+      setRenaming(true);
+    },
+    // Forking navigates, and useSessionActions runs the unsaved-changes guard
+    // itself — before the fork request, so a cancelled prompt writes nothing.
+    onOpenSession: (sessionId) => navigate(`/chat/${encodeURIComponent(sessionId)}`),
+    // Archiving the chat we are currently viewing leaves it directly — don't rely
+    // solely on the replay-less SSE 'archived' event to navigate away.
+    onArchived: () => {
+      if (active) navigate('/inbox');
+    },
+  });
+  const pinAction = actions.find((action) => action.id === 'pin');
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -258,7 +257,7 @@ const SessionRow: React.FC<{
     // No-op when unchanged; an empty name clears to "untitled" like the header.
     if (trimmed === (session.title ?? '').trim()) return;
     try {
-      await onRenameSession(session.id, trimmed);
+      await renameSession(projectId, session.id, trimmed);
     } catch {
       // The shared apiFetch layer already surfaced the error toast.
     }
@@ -295,20 +294,6 @@ const SessionRow: React.FC<{
   }
 
   const displayName = session.title?.trim() || t('workbench.untitledSession');
-  const canFork = !!session.native_session_id && !forking;
-  const togglePinned = async () => {
-    if (pinningRef.current) return;
-    pinningRef.current = true;
-    setPinning(true);
-    try {
-      await onSetPinned(session.id, !session.pinned);
-    } catch {
-      // apiFetch already surfaced the error toast.
-    } finally {
-      pinningRef.current = false;
-      setPinning(false);
-    }
-  };
   return (
     <>
     <Popover open={canChat && menuOpen} onOpenChange={(open) => canChat && setMenuOpen(open)}>
@@ -321,7 +306,7 @@ const SessionRow: React.FC<{
           }}
           className={clsx(
             'group/sess relative flex items-center gap-2 rounded-md py-1.5 pl-[26px] text-left transition-[background-color,padding-right] duration-150 ease-out motion-reduce:transition-none',
-            sessionPinRowPaddingClass(session.pinned),
+            sessionRowActionPaddingClass(menuOpen, session.pinned),
             active
               ? 'border-l-2 border-mint bg-mint-soft pl-[24px] font-semibold text-foreground'
               : 'hover:bg-foreground/[0.04]',
@@ -354,138 +339,38 @@ const SessionRow: React.FC<{
             )}
           </button>
           {canChat && (
-            <SessionPinAction
-              pinned={session.pinned}
-              pending={pinning}
-              pinLabel={t('workbench.sessionPin')}
-              unpinLabel={t('workbench.sessionUnpin')}
-              onToggle={() => void togglePinned()}
-            />
+            <>
+              {pinAction && (
+                <SessionPinAction
+                  pinned={session.pinned}
+                  pending={Boolean(pinAction.pending)}
+                  pinLabel={t('workbench.sessionPin')}
+                  unpinLabel={t('workbench.sessionUnpin')}
+                  onToggle={pinAction.onSelect}
+                />
+              )}
+              <span className="absolute inset-y-0 right-2 flex items-center">
+                <PopoverTrigger asChild>
+                  <SessionActionsTrigger label={t('workbench.sessionActions')} open={menuOpen} />
+                </PopoverTrigger>
+              </span>
+            </>
           )}
+          <span className={clsx('absolute inset-y-0 flex items-center', SESSION_ROW_MENU_POSITION_CLASS)}>
+            <PopoverTrigger asChild>
+              <SessionActionsTrigger label={t('workbench.sessionActions')} open={menuOpen} />
+            </PopoverTrigger>
+          </span>
         </div>
       </PopoverAnchor>
-      <PopoverContent align="start" className="w-[176px] p-1">
-        <button
-          type="button"
-          disabled={pinning}
-          onClick={() => {
-            setMenuOpen(false);
-            void togglePinned();
-          }}
-          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:cursor-not-allowed disabled:text-muted"
-        >
-          {pinning ? (
-            <Loader2 className="size-3 animate-spin text-muted" />
-          ) : session.pinned ? (
-            <PinOff className="size-3 text-muted" />
-          ) : (
-            <Pin className="size-3 text-muted" />
-          )}
-          {t(session.pinned ? 'workbench.sessionUnpin' : 'workbench.sessionPin')}
-        </button>
-        {canReference && (
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              insertTarget?.insertSessionReference(session.id, session.title);
-            }}
-            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
-          >
-            <Hash className="size-3 text-muted" />
-            {t('workbench.sessionReference')}
-          </button>
-        )}
-        <button
-          type="button"
-          disabled={!canFork}
-          title={!session.native_session_id ? t('workbench.sessionForkUnavailable') : undefined}
-          onClick={async () => {
-            if (!canFork) return;
-            const authorization = authorizeRouteAction();
-            if (!authorization) return;
-            setMenuOpen(false);
-            setForking(true);
-            try {
-              const forked = await onForkSession(session.id);
-              if (forked) {
-                authorization.runNavigation(() => navigate(`/chat/${encodeURIComponent(forked.id)}`));
-              }
-            } finally {
-              setForking(false);
-            }
-          }}
-          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:cursor-not-allowed disabled:text-muted disabled:hover:bg-transparent"
-        >
-          {forking ? <Loader2 className="size-3 animate-spin text-muted" /> : <GitFork className="size-3 text-muted" />}
-          {t('workbench.sessionFork')}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setMenuOpen(false);
-            setDraft(session.title ?? '');
-            handledRef.current = false;
-            setRenaming(true);
-          }}
-          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
-        >
-          <Pencil className="size-3 text-muted" />
-          {t('workbench.sessionRename')}
-        </button>
-        <button
-          type="button"
-          onClick={async () => {
-            setMenuOpen(false);
-            try {
-              // Move to background (M1 PATCH). The row leaves the list on its own
-              // via the A6 session.activity pipeline — no client-side removal. Not
-              // a delete: offer an immediate Undo and say where it went. Hiding the
-              // currently-open chat is fine — we don't navigate; it just leaves the
-              // list while the chat stays usable.
-              await api.setSessionVisibility(session.id, 'background');
-              showToast(t('workbench.sessionHiddenToast'), 'success', {
-                label: t('common.undo'),
-                onClick: () => {
-                  void api.setSessionVisibility(session.id, 'foreground');
-                },
-              });
-            } catch (err) {
-              showToast(err instanceof Error ? err.message : String(err), 'error');
-            }
-          }}
-          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
-        >
-          <EyeOff className="size-3 text-muted" />
-          {t('workbench.sessionHideToBackground')}
-        </button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() => {
-            setMenuOpen(false);
-            setArchiveOpen(true);
-          }}
-          className="h-auto w-full justify-start gap-2 rounded px-2 py-1.5 text-left text-[12px] font-normal text-pink hover:bg-pink/[0.08] hover:text-pink"
-        >
-          <Archive className="size-3" />
-          {t('workbench.sessionArchive')}
-        </Button>
-      </PopoverContent>
+      <SessionActionMenuContent
+        actions={actions}
+        label={t('workbench.sessionActions')}
+        align="start"
+        onClose={() => setMenuOpen(false)}
+      />
     </Popover>
-    <ArchiveSessionDialog
-      sessionId={archiveOpen ? session.id : null}
-      sessionTitle={session.title}
-      open={archiveOpen}
-      onOpenChange={setArchiveOpen}
-      onConfirm={async () => {
-        await onArchiveSession(session.id);
-        // If we're viewing the chat we just archived, leave it directly — don't
-        // rely solely on the replay-less SSE 'archived' event to navigate away.
-        if (active) navigate('/inbox');
-      }}
-    />
+    {archiveDialog}
     </>
   );
 };
@@ -508,10 +393,6 @@ const ProjectRow: React.FC<{
   unreadBySession: Record<string, number>;
   onRename: (next: string) => Promise<void>;
   onArchive: () => Promise<void>;
-  onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
-  onSetPinned: (sessionId: string, pinned: boolean) => Promise<void>;
-  onRenameSession: (sessionId: string, title: string) => Promise<void>;
-  onArchiveSession: (sessionId: string) => Promise<void>;
 }> = ({
   project,
   expanded,
@@ -528,10 +409,6 @@ const ProjectRow: React.FC<{
   unreadBySession,
   onRename,
   onArchive,
-  onForkSession,
-  onSetPinned,
-  onRenameSession,
-  onArchiveSession,
 }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
@@ -723,13 +600,10 @@ const ProjectRow: React.FC<{
             sessions.map((session) => (
               <SessionRow
                 key={session.id}
+                projectId={project.id}
                 session={session}
                 unread={unreadBySession[session.id] || 0}
                 canChat={canChat}
-                onForkSession={onForkSession}
-                onSetPinned={onSetPinned}
-                onRenameSession={onRenameSession}
-                onArchiveSession={onArchiveSession}
               />
             ))}
           {hasMore && (
@@ -788,12 +662,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     loadMore,
     creatingSession,
     createSessionForProject,
-    forkSession,
     renameProject,
     archiveProject,
-    renameSession,
-    setSessionPinned,
-    archiveSession,
     upsertProjectToTop,
   } = useWorkbenchProjectsTree();
   const [popoverOpen, setPopoverOpen] = useState(false);
@@ -965,7 +835,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               row above to reclaim that space for the Projects list; ⌘K still
               works. Both are roomy 28px tap targets. */}
           <div className="flex items-center gap-0.5">
-            <Button
+            {capabilities.can_manage_projects && <Button
               type="button"
               variant="ghost"
               size="icon"
@@ -974,19 +844,17 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               onClick={onOpenSearch}
             >
               <Search className="size-4" />
+            </Button>}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-7 shrink-0 text-muted hover:text-foreground"
+              aria-label={t('workbench.addProject')}
+              onClick={() => setShowNewProject(true)}
+            >
+              <FolderPlus className="size-4" />
             </Button>
-            {capabilities.can_manage_projects && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="size-7 shrink-0 text-muted hover:text-foreground"
-                aria-label={t('workbench.addProject')}
-                onClick={() => setShowNewProject(true)}
-              >
-                <FolderPlus className="size-4" />
-              </Button>
-            )}
           </div>
         </div>
 
@@ -1038,10 +906,6 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}
-                  onForkSession={(sessionId) => forkSession(project.id, sessionId)}
-                  onSetPinned={(sessionId, pinned) => setSessionPinned(project.id, sessionId, pinned)}
-                  onRenameSession={(sessionId, title) => renameSession(project.id, sessionId, title)}
-                  onArchiveSession={(sessionId) => archiveSession(project.id, sessionId)}
                 />
               );
             })}

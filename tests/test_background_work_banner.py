@@ -310,12 +310,12 @@ def test_turn_state_survives_harness_derivation_failure(tmp_path: Path):
 
     import core.session_turns as session_turns
 
-    original = session_turns.messages_service.list_queued
-    session_turns.messages_service.list_queued = lambda conn, sid: []
+    original = session_turns.delivery_store.list_queued
+    session_turns.delivery_store.list_queued = lambda conn, sid: []
     try:
         state = manager.turn_state("ses-1")
     finally:
-        session_turns.messages_service.list_queued = original
+        session_turns.delivery_store.list_queued = original
 
     assert [item["id"] for item in state["background_activities"]] == ["bg-1"]
     assert state["background_activities"][0]["item_kind"] == "backend_activity"
@@ -354,8 +354,8 @@ def test_definition_session_filter_scopes_watches_and_tasks(tmp_path: Path):
         assert [w["id"] for w in watches_a.items] == ["w-a"]
         tasks_a = store.list_scheduled_tasks_page(session_id="ses-A", page_request=None)
         assert [t["id"] for t in tasks_a.items] == ["t-a"]
-        assert store.count_watches(session_id="ses-A")["all"] == 1
-        assert store.count_scheduled_tasks(session_id="ses-B")["all"] == 1
+        assert store.count_watches(session_id="ses-A")["total"] == 1
+        assert store.count_scheduled_tasks(session_id="ses-B")["total"] == 1
         # No filter → both sessions' definitions are returned.
         assert len(store.list_watches_page(page_request=None).items) == 2
     finally:

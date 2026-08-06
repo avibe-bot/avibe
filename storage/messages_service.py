@@ -1,11 +1,10 @@
-"""CRUD over the platform-agnostic ``messages`` table.
+"""Accepted communication records in the platform-agnostic ``messages`` table.
 
 The workbench Inbox + per-session history both read through this
 module so they get a consistent shape regardless of which platform
-originated the row. ``append`` is the canonical write path —
-adapters and REST routes call it instead of touching the table
-directly so future invariants (e.g. SSE fan-out hooks, audit logging)
-land in one place.
+originated the row. Inbound content materializes here only after a Delivery is
+accepted; ``append`` is for communication that is already accepted when written,
+such as agent output and mirrored IM records.
 """
 
 from __future__ import annotations
@@ -17,34 +16,77 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
 
+from storage.agent_session_rows import INBOX_SESSION_VISIBILITIES
 from storage.db import escape_sql_like
-from storage.models import agent_runs, agent_sessions, messages, scope_settings, scopes
+from storage.models import (
+    agent_runs,
+    agent_sessions,
+    agents,
+    message_deliveries,
+    messages,
+    scope_settings,
+    scopes,
+    session_turns,
+)
+from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.sessions_service import session_agent_display_label
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
+from vibe.message_types import types_with
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def canonical_message_timestamp(value: Any) -> str | None:
+    """Return one lexically sortable UTC representation for Message timestamps."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parseable = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        instant = datetime.fromisoformat(parseable)
+    except ValueError:
+        return text
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _timestamp_key(value: Any, row_id: Any) -> tuple[datetime, str]:
+    text = str(value or "").strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        instant = datetime.fromisoformat(text)
+    except ValueError:
+        instant = datetime.min.replace(tzinfo=timezone.utc)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(timezone.utc), str(row_id or "")
 
 
 def _new_message_id() -> str:
     """Time-sortable message id.
 
-    The transcript and inbox order rows by ``(created_at, id)`` and
-    ``created_at`` is second-resolution, so two rows written in the same second
-    — e.g. a fast avibe turn where the user prompt and the agent result land
-    together — tie on ``created_at``. A microsecond-clock prefix makes the id
-    monotonic so that tie-break preserves insertion order; otherwise a random
-    uuid could render the result before the prompt, or make the inbox pick the
-    wrong "last" row for its activity / replied state. The random suffix keeps
-    ids unique within the same microsecond.
+    The durable transcript key uses Message acceptance-or-creation time plus id.
+    Legacy and imported rows may still have second-resolution timestamps, so a
+    microsecond-clock prefix makes the id tie-break preserve insertion order.
+    The random suffix keeps ids unique within the same microsecond.
     """
     return f"msg_{int(time.time() * 1_000_000):015x}{uuid.uuid4().hex[:8]}"
 
 
 _PRIVATE_WEB_PUSH_METADATA_PREFIX = "_web_push_"
+_PRIVATE_RESOURCE_USER_CONTEXT_KEY = "resource_user_context"
 
 
 def _row_to_payload(
@@ -66,7 +108,8 @@ def _row_to_payload(
         metadata = {
             key: value
             for key, value in metadata.items()
-            if not str(key).startswith(_PRIVATE_WEB_PUSH_METADATA_PREFIX)
+            if key != _PRIVATE_RESOURCE_USER_CONTEXT_KEY
+            and not str(key).startswith(_PRIVATE_WEB_PUSH_METADATA_PREFIX)
         }
     return {
         "id": row["id"],
@@ -93,11 +136,30 @@ def _row_to_payload(
 _AGENT_RUN_NATIVE_PREFIX = "agent_run:"
 
 
-def _attach_agent_run_provenance(
+def _native_harness_provenance(native_message_id: Any) -> tuple[str | None, str | None]:
+    """Recover trigger kind/definition from the stable native Message identity.
+
+    Delivery snapshots written before provenance was carried through the durable
+    queue can have null ``author_name``/``author_id`` even though the native id
+    still records the exact trigger. This is read compatibility for those rows;
+    current writers persist the same values directly.
+    """
+
+    parts = str(native_message_id or "").split(":")
+    kind = parts[0] if parts else ""
+    if kind in {"watch", "webhook", "scheduled"}:
+        return kind, parts[1] if len(parts) >= 3 and parts[1] else None
+    if kind in {"hook", "agent_run"}:
+        return kind, None
+    return None, None
+
+
+def _attach_harness_provenance(
     conn: Connection, payloads: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Read-side provenance for agent-callback ("自动触发") chat messages (A9a).
+    """Read-side provenance for every durable Harness chat message.
 
+    Stable native ids repair legacy queued rows whose trigger fields were lost.
     A harness ``agent_run`` prompt is stored as ``native_message_id =
     "agent_run:<execution_id>"`` with no source-session pointer (the write path
     records none). Resolve it read-side: message → its ``agent_runs`` row
@@ -110,6 +172,12 @@ def _attach_agent_run_provenance(
     exec_by_msg: dict[str, str] = {}
     for payload in payloads:
         native_id = payload.get("native_message_id")
+        if payload.get("source") == "harness":
+            kind, definition_id = _native_harness_provenance(native_id)
+            if not payload.get("author_name") and kind:
+                payload["author_name"] = kind
+            if not payload.get("author_id") and definition_id:
+                payload["author_id"] = definition_id
         if (
             payload.get("source") == "harness"
             and isinstance(native_id, str)
@@ -163,11 +231,35 @@ def _attach_agent_run_provenance(
 
     meta_by_session: dict[str, dict[str, Optional[str]]] = {}
     for row in conn.execute(
-        select(agent_sessions.c.id, agent_sessions.c.title, agent_sessions.c.agent_name).where(
+        select(
+            agent_sessions.c.id,
+            agent_sessions.c.title,
+            agent_sessions.c.agent_name,
+            agent_sessions.c.agent_backend,
+            agents.c.name.label("catalog_agent_name"),
+            agents.c.archived_at.label("catalog_agent_archived_at"),
+            agents.c.metadata_json.label("catalog_agent_metadata_json"),
+        )
+        .select_from(
+            agent_sessions.outerjoin(
+                agents,
+                or_(
+                    agents.c.id == agent_sessions.c.agent_id,
+                    and_(
+                        agent_sessions.c.agent_id.is_(None),
+                        agents.c.name == agent_sessions.c.agent_name,
+                    ),
+                ),
+            )
+        )
+        .where(
             agent_sessions.c.id.in_(set(source_by_exec.values()))
         )
     ).mappings():
-        meta_by_session[row["id"]] = {"title": row["title"], "agent_name": row["agent_name"]}
+        meta_by_session[row["id"]] = {
+            "title": row["title"],
+            "agent_name": session_agent_display_label(row),
+        }
 
     for payload in payloads:
         source_id = source_by_exec.get(exec_by_msg.get(payload["id"], ""))
@@ -180,6 +272,18 @@ def _attach_agent_run_provenance(
             payload["source_session_title"] = meta.get("title")
             payload["source_session_agent_name"] = meta.get("agent_name")
     return payloads
+
+
+def transcript_order_value(table: Any = messages) -> Any:
+    """SQLite ordering key for when a Message entered the transcript.
+
+    A queued Delivery may be submitted while another Turn is active. Its Message
+    is authored then but enters the transcript only when native start accepts it,
+    recorded in ``delivered_at``. Directly accepted rows have no ``delivered_at``
+    and keep their microsecond ``created_at`` plus id tie-break.
+    """
+
+    return func.coalesce(table.c.delivered_at, table.c.created_at)
 
 
 _WS_RE = re.compile(r"\s+")
@@ -239,6 +343,7 @@ def search_messages(
     platform: str = "avibe",
     types: Optional[Iterable[str]] = None,
     limit: int = 50,
+    include_archived: bool = False,
     scope_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
@@ -246,13 +351,20 @@ def search_messages(
     Substring (case-insensitive) ``LIKE`` over ``messages.content_text``, scoped
     to one ``platform`` (Workbench = ``avibe``) and a set of transcript-visible
     ``types`` (human prompts + harness prompts + the agent's rendered ``result``
-    replies — all land on a message the chat actually renders, so a clicked result
-    is always jumpable). Archived sessions are excluded, as are messages under an
-    archived PROJECT — ``projects_service.archive_project`` disables a project by setting
-    ``scope_settings.enabled = 0`` (its sessions stay ``active``), so the scope's
-    disabled state is the authoritative "archived project" signal here. A scope
-    with no ``scope_settings`` row is treated as enabled (legacy / folder-less
-    projects never got one). ``limit`` caps the number of
+    replies + Show annotations — all land on a message the chat
+    actually renders, so a clicked result is always jumpable). Archived SESSIONS
+    are excluded unless ``include_archived=True`` opts them in (archive is
+    terminal, so those transcripts are read-only — the flag only makes them
+    findable). Messages under an archived PROJECT are excluded
+    UNCONDITIONALLY, independent of ``include_archived``:
+    ``projects_service.archive_project``
+    disables a project by setting ``scope_settings.enabled = 0`` (its sessions
+    stay ``active``), so the scope's disabled state is the authoritative
+    "archived project" signal here, and project archive is reversible through its
+    own restore flow rather than through search. A scope with no
+    ``scope_settings`` row is
+    treated as enabled (legacy / folder-less projects never got one). ``limit``
+    caps the number of
     MATCHED messages scanned (newest first), so it bounds total work; the matches
     are then grouped into sessions. The snippet is built in Python (see
     :func:`build_snippet`) so the client renders ``match`` with a highlight and
@@ -260,7 +372,9 @@ def search_messages(
 
     Returns ``{"sessions": [...], "total": <#matches>, "session_count": <#sessions>}``
     where each session is ``{session_id, title, project_id, project_name,
-    matches: [{id, author, source, type, created_at, snippet}]}``. Sessions are
+    archived, matches: [{id, author, source, type, created_at, snippet}]}``.
+    ``archived`` is always present and is ``False`` for every group in the
+    default (opt-out) mode. Sessions are
     ordered by their most-recent match; matches are newest-first within a session.
     An empty / whitespace query short-circuits to an empty result.
     """
@@ -272,8 +386,11 @@ def search_messages(
         return {"sessions": [], "total": 0, "session_count": 0}
 
     like = escape_sql_like(cleaned)
-    type_list = list(types if types is not None else ("user", HARNESS_TYPE, "result"))
+    type_list = list(types if types is not None else types_with("searchable"))
     effective_limit = min(max(int(limit), 1), 200)
+    # Applied in place below so the default (opt-out) statement keeps exactly the
+    # predicates — and the predicate order — it had before the flag existed.
+    archived_session_filters = () if include_archived else (agent_sessions.c.status != "archived",)
 
     stmt = (
         select(
@@ -285,6 +402,7 @@ def search_messages(
             messages.c.content_text,
             messages.c.created_at,
             agent_sessions.c.title,
+            agent_sessions.c.status,
             scopes.c.native_id.label("project_id"),
             scopes.c.display_name.label("project_name"),
         )
@@ -297,14 +415,24 @@ def search_messages(
         .where(messages.c.type.in_(type_list))
         .where(messages.c.content_text.is_not(None))
         .where(messages.c.content_text.ilike(f"%{like}%", escape="\\"))
-        # Archived sessions are soft-deleted — never surface their messages.
-        .where(agent_sessions.c.status != "archived")
+        # Archived sessions are soft-deleted — never surface their messages
+        # unless the caller explicitly opted in via ``include_archived``.
+        .where(*archived_session_filters)
+        # DELIBERATELY ``foreground`` ALONE, i.e. narrower than the inbox
+        # (``INBOX_SESSION_VISIBILITIES``, which also admits ``system``). Search
+        # returns RESULTS a user goes on to open and read in context, and the only
+        # system session is the runtime's workspace-notifications row: machine-authored
+        # failure notices, already surfaced as inbox cards, with no conversation around
+        # a hit to read. Admitting it would put runtime bookkeeping into every user text
+        # search for no reachable next action. (Today's notices are additionally not
+        # ``searchable`` by TYPE — this predicate is the one that stays true if that
+        # ever changes.)
         .where(agent_sessions.c.visibility == "foreground")
         # Archived PROJECTS are modelled as scope_settings.enabled = 0 (the
         # sessions stay active), so exclude a disabled scope's messages too. A
         # missing scope_settings row (legacy / folder-less project) is enabled.
         .where(or_(scope_settings.c.enabled.is_(None), scope_settings.c.enabled != 0))
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
         .limit(effective_limit)
     )
     if allowed_scope_ids is not None:
@@ -326,6 +454,7 @@ def search_messages(
                 "title": row["title"],
                 "project_id": row["project_id"],
                 "project_name": row["project_name"],
+                "archived": row["status"] == "archived",
                 "matches": [],
             }
             grouped[session_id] = bucket
@@ -387,7 +516,8 @@ def append(
         author = HARNESS_TYPE
         resolved_type = HARNESS_TYPE
 
-    now = _utc_now_iso()
+    now = canonical_message_timestamp(_utc_now_iso())
+    assert now is not None
     payload = {
         "id": _new_message_id(),
         "scope_id": scope_id,
@@ -405,26 +535,73 @@ def append(
         "metadata_json": json.dumps(metadata or {}),
         "created_at": now,
         "updated_at": now,
-        "delivered_at": delivered_at,
+        "delivered_at": canonical_message_timestamp(delivered_at),
         "read_at": read_at,
     }
     conn.execute(messages.insert().values(**payload))
     return _row_to_payload(payload)
 
 
-def native_message_exists(conn: Connection, *, platform: str, native_message_id: str) -> bool:
-    """True when a platform/native message id has already been recorded."""
+def get_message(
+    conn: Connection,
+    message_id: str,
+    *,
+    session_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Load one message by id, optionally requiring its owning session."""
+
+    query = select(messages).where(messages.c.id == message_id)
+    if session_id is not None:
+        query = query.where(messages.c.session_id == session_id)
+    row = conn.execute(query).mappings().first()
+    return _row_to_payload(dict(row)) if row else None
+
+
+def native_message_exists(
+    conn: Connection,
+    *,
+    platform: str,
+    scope_id: str | None,
+    native_message_id: str,
+) -> bool:
+    """True when a conversation-scoped native message has been recorded."""
+    return (
+        get_native_message(
+            conn,
+            platform=platform,
+            scope_id=scope_id,
+            native_message_id=native_message_id,
+        )
+        is not None
+    )
+
+
+def get_native_message(
+    conn: Connection,
+    *,
+    platform: str,
+    scope_id: str | None,
+    native_message_id: str,
+) -> Optional[dict[str, Any]]:
+    """Load one accepted Message by its conversation-scoped native identity."""
+
     platform = str(platform or "").strip()
     native_message_id = str(native_message_id or "").strip()
     if not platform or not native_message_id:
-        return False
-    row_id = conn.execute(
-        select(messages.c.id)
+        return None
+    scope_predicate = (
+        messages.c.scope_id == scope_id
+        if scope_id is not None
+        else messages.c.scope_id.is_(None)
+    )
+    row = conn.execute(
+        select(messages)
         .where(messages.c.platform == platform)
+        .where(scope_predicate)
         .where(messages.c.native_message_id == native_message_id)
         .limit(1)
-    ).scalar_one_or_none()
-    return row_id is not None
+    ).mappings().first()
+    return _row_to_payload(dict(row)) if row else None
 
 
 def get_quick_reply_chosen(conn: Connection, session_id: str, message_id: str) -> Optional[str]:
@@ -493,20 +670,14 @@ def list_session_messages(
     around_id: Optional[str] = None,
     limit: int = 50,
     types: Optional[Iterable[str]] = None,
-    include_metadata_sources: Iterable[str] = (),
+    include_private_metadata: bool = False,
     tail: bool = False,
 ) -> dict[str, Any]:
     """Return messages for one session in chronological order with cursor pagination.
 
     ``types`` optionally restricts the rows to a set of message types. The chat
-    transcript passes ``('user', 'result')`` so the intermediate ``assistant`` /
-    ``tool_call`` / ``notify`` rows — now persisted for avibe sessions too — stay
-    out of the conversation view (they're the process log, not the dialogue).
-
-    ``include_metadata_sources`` keeps rows whose ``metadata.source`` matches even
-    when their type is filtered out — the chat transcript passes ``('show_page',)``
-    so Show-Page transcript marks (written with ``author='agent'`` → ``type
-    ='assistant'``) stay visible alongside the user/result dialogue.
+    transcript passes :data:`TRANSCRIPT_TYPES` so intermediate process-log rows
+    stay out of the conversation view.
 
     ``before_id`` returns the page immediately older than that row, still in
     chronological order. This powers upward history loading from the chat page.
@@ -527,15 +698,8 @@ def list_session_messages(
     """
 
     query = select(messages).where(messages.c.session_id == session_id)
-    metadata_sources = list(include_metadata_sources)
     if types is not None:
-        type_filter = messages.c.type.in_(list(types))
-        if metadata_sources:
-            query = query.where(
-                or_(type_filter, func.json_extract(messages.c.metadata_json, "$.source").in_(metadata_sources))
-            )
-        else:
-            query = query.where(type_filter)
+        query = query.where(messages.c.type.in_(list(types)))
     effective_limit = min(max(int(limit), 1), 500)
     if around_id:
         # Window centered on a specific message (deep-link / search jump). Resolve
@@ -543,8 +707,9 @@ def list_session_messages(
         # yields an empty window. ``query`` already carries the type/metadata
         # filter, so the older/anchor/newer sub-queries inherit it — the anchor
         # only appears if it is itself transcript-visible.
+        order_value = transcript_order_value()
         anchor = conn.execute(
-            select(messages.c.created_at).where(
+            select(order_value).where(
                 messages.c.id == around_id, messages.c.session_id == session_id
             )
         ).scalar_one_or_none()
@@ -554,38 +719,50 @@ def list_session_messages(
         older_q = (
             query.where(
                 or_(
-                    messages.c.created_at < anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id < around_id),
+                    order_value < anchor,
+                    and_(order_value == anchor, messages.c.id < around_id),
                 )
             )
-            .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+            .order_by(order_value.desc(), messages.c.id.desc())
             .limit(effective_limit + 1)
         )
-        older = [_row_to_payload(dict(row)) for row in conn.execute(older_q).mappings().all()]
+        older = [
+            _row_to_payload(
+                dict(row), include_private_metadata=include_private_metadata
+            )
+            for row in conn.execute(older_q).mappings().all()
+        ]
         has_older = len(older) > effective_limit
         older = older[:effective_limit]
         older.reverse()
 
         anchor_rows = [
-            _row_to_payload(dict(row))
+            _row_to_payload(
+                dict(row), include_private_metadata=include_private_metadata
+            )
             for row in conn.execute(query.where(messages.c.id == around_id)).mappings().all()
         ]
 
         newer_q = (
             query.where(
                 or_(
-                    messages.c.created_at > anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id > around_id),
+                    order_value > anchor,
+                    and_(order_value == anchor, messages.c.id > around_id),
                 )
             )
-            .order_by(messages.c.created_at.asc(), messages.c.id.asc())
+            .order_by(order_value.asc(), messages.c.id.asc())
             .limit(effective_limit + 1)
         )
-        newer = [_row_to_payload(dict(row)) for row in conn.execute(newer_q).mappings().all()]
+        newer = [
+            _row_to_payload(
+                dict(row), include_private_metadata=include_private_metadata
+            )
+            for row in conn.execute(newer_q).mappings().all()
+        ]
         has_newer = len(newer) > effective_limit
         newer = newer[:effective_limit]
 
-        merged = _attach_agent_run_provenance(conn, older + anchor_rows + newer)
+        merged = _attach_harness_provenance(conn, older + anchor_rows + newer)
         return {
             "messages": merged,
             "next_after_id": newer[-1]["id"] if has_newer and newer else None,
@@ -593,9 +770,18 @@ def list_session_messages(
         }
     if tail:
         # Newest ``limit`` rows, then flip back to chronological for the caller.
-        query = query.order_by(messages.c.created_at.desc(), messages.c.id.desc()).limit(effective_limit + 1)
-        rows = _attach_agent_run_provenance(
-            conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+        order_value = transcript_order_value()
+        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(
+            effective_limit + 1
+        )
+        rows = _attach_harness_provenance(
+            conn,
+            [
+                _row_to_payload(
+                    dict(row), include_private_metadata=include_private_metadata
+                )
+                for row in conn.execute(query).mappings().all()
+            ],
         )
         has_older = len(rows) > effective_limit
         rows = rows[:effective_limit]
@@ -606,19 +792,28 @@ def list_session_messages(
             "next_before_id": rows[0]["id"] if has_older and rows else None,
         }
     if before_id:
+        order_value = transcript_order_value()
         anchor = conn.execute(
-            select(messages.c.created_at).where(messages.c.id == before_id)
+            select(order_value).where(messages.c.id == before_id)
         ).scalar_one_or_none()
         if anchor is not None:
             query = query.where(
                 or_(
-                    messages.c.created_at < anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id < before_id),
+                    order_value < anchor,
+                    and_(order_value == anchor, messages.c.id < before_id),
                 )
             )
-        query = query.order_by(messages.c.created_at.desc(), messages.c.id.desc()).limit(effective_limit + 1)
-        rows = _attach_agent_run_provenance(
-            conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(
+            effective_limit + 1
+        )
+        rows = _attach_harness_provenance(
+            conn,
+            [
+                _row_to_payload(
+                    dict(row), include_private_metadata=include_private_metadata
+                )
+                for row in conn.execute(query).mappings().all()
+            ],
         )
         has_older = len(rows) > effective_limit
         rows = rows[:effective_limit]
@@ -629,19 +824,29 @@ def list_session_messages(
             "next_before_id": rows[0]["id"] if has_older and rows else None,
         }
     if after_id:
+        order_value = transcript_order_value()
         anchor = conn.execute(
-            select(messages.c.created_at).where(messages.c.id == after_id)
+            select(order_value).where(messages.c.id == after_id)
         ).scalar_one_or_none()
         if anchor is not None:
             query = query.where(
                 or_(
-                    messages.c.created_at > anchor,
-                    and_(messages.c.created_at == anchor, messages.c.id > after_id),
+                    order_value > anchor,
+                    and_(order_value == anchor, messages.c.id > after_id),
                 )
             )
-    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc()).limit(effective_limit + 1)
-    rows = _attach_agent_run_provenance(
-        conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+    order_value = transcript_order_value()
+    query = query.order_by(order_value.asc(), messages.c.id.asc()).limit(
+        effective_limit + 1
+    )
+    rows = _attach_harness_provenance(
+        conn,
+        [
+            _row_to_payload(
+                dict(row), include_private_metadata=include_private_metadata
+            )
+            for row in conn.execute(query).mappings().all()
+        ],
     )
     # Probe one extra row against the clamped page size: a full page alone does
     # not prove there is another page, but the extra row does.
@@ -673,259 +878,23 @@ def first_user_text(conn: Connection, session_id: str) -> str:
     return str(content.get("text") or "").strip() if isinstance(content, dict) else ""
 
 
-# --- Send-while-busy queue + per-session draft -----------------------------
-# Both reuse the ``messages`` table via dedicated ``type`` values so no extra
-# table is needed (the queue is ephemeral operational state, not conversation):
-#   type='queued' — a message the user sent while a turn was in flight; flushed
-#                   (merged, in order) into one dispatch when the turn ends.
-#   type='draft'  — the user's unsent compose text for a session; one row per
-#                   session, persisted so switching sessions/devices keeps it.
-# Both carry author='user'; the transcript (user/result/notify), inbox and
-# unread queries are all type-filtered, so neither leaks into the conversation.
-
-QUEUED_TYPE = "queued"
-DRAFT_TYPE = "draft"
-# A reserved-but-not-yet-accepted user row: persisted BEFORE dispatch (so it
-# reserves its (created_at, id) for correct ordering) but hidden from the
-# transcript, the queue AND the inbox until the controller decides whether the
-# turn started (→ promote to 'user') or must be queued (→ promote to 'queued').
-# This stops another tab from briefly seeing the row as a sent prompt during the
-# dispatch window (Codex P2).
-PENDING_TYPE = "pending"
-# Hidden row used only to keep native-message-id dedupe coverage after multiple
-# queued harness callbacks are coalesced into one dispatched turn.
-HARNESS_DEDUPE_TYPE = "harness_dedupe"
-# An INVISIBLE, agent-authored terminal marker persisted when a turn completes
-# NORMALLY but produces no user-visible message — a ``<silent>``-stripped or empty
-# final reply, or a reply-less bookkeeping turn (common for watch/scheduled
-# orchestration). It exists ONLY so the activity grouping can close such a turn as
-# DONE instead of misreading "activity rows + no terminal" as ``interrupted``. It is
-# kept out of every user-facing surface by the allowlist reads (TRANSCRIPT_TYPES,
-# inbox preview, unread, web-push, live publish) and, being author='agent', is listed
-# in NON_CONVERSATION_TYPES below so it never bumps the inbox activity clock / last
-# author. Never delivered to IM (avibe-persistence only).
-SILENT_TYPE = "silent"
-# Types that must never count as inbox conversation activity: the ephemeral user rows
-# above plus the invisible agent silent-completion marker.
-NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE, HARNESS_DEDUPE_TYPE, SILENT_TYPE)
+ANNOTATION_TYPE = "annotation"
+INBOX_ACTIVITY_TYPES = types_with("inboxActivity")
 
 # The transcript-visible types — the SINGLE source of truth shared by the
 # history fetch (``list_session_messages``) AND the live ``message.new`` publish
 # gate, so what a page loads and what it receives over the stream are identical.
-# Excludes the agent's process log (``assistant`` / ``tool_call``) and ``system``
-# (which isn't persisted at all). Harness-triggered prompts have their own type
-# so they cannot be mistaken for human input. ``show_page`` transcript marks are
-# kept via a metadata-source
-# override in the fetch even though their row type is ``assistant``. ``error`` is a
-# terminal FAILED result (turned the dot red): shown in the conversation like any
-# terminal message, but the unread queries below stay ``result``-only so a failure
-# is not counted as an unread agent reply.
-TRANSCRIPT_TYPES = ("user", HARNESS_TYPE, "result", "notify", "error")
-
-
-def enqueue_queued(
-    conn: Connection,
-    *,
-    scope_id: str,
-    session_id: str,
-    text: str,
-    author_id: Optional[str] = None,
-    author_name: Optional[str] = None,
-) -> dict[str, Any]:
-    """Append a queued ('send while busy') message for a session."""
-    return append(
-        conn,
-        scope_id=scope_id,
-        session_id=session_id,
-        platform="avibe",
-        author="user",
-        source="user",
-        message_type=QUEUED_TYPE,
-        text=text,
-        author_id=author_id,
-        author_name=author_name,
-    )
-
-
-def list_queued(
-    conn: Connection,
-    session_id: str,
-    *,
-    include_private_metadata: bool = False,
-) -> list[dict[str, Any]]:
-    """Pending queued messages for a session, oldest first."""
-    query = (
-        select(messages)
-        .where(messages.c.session_id == session_id)
-        .where(messages.c.type == QUEUED_TYPE)
-        .order_by(messages.c.created_at.asc(), messages.c.id.asc())
-    )
-    return [
-        _row_to_payload(
-            dict(row),
-            include_private_metadata=include_private_metadata,
-        )
-        for row in conn.execute(query).mappings().all()
-    ]
-
-
-def list_queued_session_ids(conn: Connection) -> list[str]:
-    """Session ids with persisted queue rows, ordered by their oldest row."""
-
-    query = (
-        select(messages.c.session_id)
-        .where(messages.c.session_id.is_not(None))
-        .where(messages.c.type == QUEUED_TYPE)
-        .group_by(messages.c.session_id)
-        .order_by(func.min(messages.c.created_at), func.min(messages.c.id))
-    )
-    return [str(session_id) for session_id in conn.execute(query).scalars() if session_id]
-
-
-def pop_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
-    """Claim the session's queued messages: read them (oldest first), then delete
-    them in the SAME transaction, so the rows are returned exactly once. Empty
-    list when the queue is empty.
-
-    Select-then-delete rather than ``DELETE ... RETURNING``: RETURNING needs
-    SQLite >= 3.35, which the project does not pin, so on an older libsqlite the
-    flush would raise — ``_flush_queue`` returns False and the send-while-busy
-    queue never dispatches, stranding the user's queued follow-up (Codex P2).
-
-    The DELETE is scoped to the CLAIMED row ids (not a broad session+type
-    predicate): the UI server is a SEPARATE writer that can promote a just-sent
-    prompt to ``queued`` between the SELECT and the DELETE, and a broad delete
-    would drop that newer row without returning it — losing the user's message.
-    Deleting only the ids we actually read leaves any concurrently-enqueued row
-    for the next flush (Codex P2).
-    """
-    rows_q = (
-        select(messages)
-        .where(messages.c.session_id == session_id)
-        .where(messages.c.type == QUEUED_TYPE)
-        .order_by(messages.c.created_at.asc(), messages.c.id.asc())
-    )
-    rows = [
-        _row_to_payload(dict(row), include_private_metadata=True)
-        for row in conn.execute(rows_q).mappings().all()
-    ]
-    if not rows:
-        return []
-    claimed_ids = [r["id"] for r in rows]
-    conn.execute(delete(messages).where(messages.c.id.in_(claimed_ids)))
-    return rows
-
-
-def delete_queued(conn: Connection, ids: list[str]) -> None:
-    """Delete a CLAIMED subset of queued rows by id. The caller read them via
-    ``list_queued`` and is claiming exactly this segment (e.g. the leading run of
-    user rows, or one scheduled row). Scoped to the read ids — not a broad
-    session+type predicate — so a row another writer enqueued after the read
-    survives for the next flush (same safety rationale as ``pop_queued``)."""
-    if not ids:
-        return
-    conn.execute(delete(messages).where(messages.c.id.in_(ids)))
-
-
-def clear_queued(conn: Connection, session_id: str) -> int:
-    """Drop ALL send-while-busy queued rows for a session. Used by archive so no
-    queued prompt can later be flushed into a now-terminal session (on natural
-    turn completion or via send-now) — unlike ``delete_queued``, which claims a
-    specific id segment during a flush. Returns the number removed."""
-    result = conn.execute(
-        delete(messages)
-        .where(messages.c.session_id == session_id)
-        .where(messages.c.type == QUEUED_TYPE)
-    )
-    return result.rowcount or 0
-
-
-def clear_pending(conn: Connection, session_id: str) -> int:
-    """Drop ALL ``pending`` send reservations for a session. Used by archive: a
-    send that reserved its row just before the archive committed must not later
-    be promoted into a visible message / accepted turn for a now-terminal session
-    — once the row is gone, ``promote_pending`` no-ops on the in-flight send.
-    Returns the number removed."""
-    result = conn.execute(
-        delete(messages)
-        .where(messages.c.session_id == session_id)
-        .where(messages.c.type == PENDING_TYPE)
-    )
-    return result.rowcount or 0
-
-
-def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
-    """Promote a reserved ``pending`` row to its decided type — ``user`` once the
-    turn is accepted, or ``queued`` when a turn is already running. The row is
-    persisted as ``pending`` BEFORE dispatch (reserving its (created_at, id) for
-    correct ordering) and stays hidden until this promotes it, so no other tab
-    can briefly see it as a sent prompt during the dispatch window. Returns True
-    if a pending row was promoted.
-    """
-    result = conn.execute(
-        update(messages)
-        .where(messages.c.id == message_id)
-        .where(messages.c.type == PENDING_TYPE)
-        .values(type=to_type)
-    )
-    return bool(result.rowcount)
-
-
-def remove_queued(conn: Connection, session_id: str, message_id: str) -> bool:
-    """Delete one queued message, scoped to its session so a stale / cross-session
-    id can't drop another chat's queued row. Returns True if a row was removed."""
-    result = conn.execute(
-        delete(messages)
-        .where(messages.c.id == message_id)
-        .where(messages.c.session_id == session_id)
-        .where(messages.c.type == QUEUED_TYPE)
-    )
-    return bool(result.rowcount)
-
-
-def get_draft(conn: Connection, session_id: str) -> Optional[dict[str, Any]]:
-    """The session's current unsent draft, or None."""
-    query = (
-        select(messages)
-        .where(messages.c.session_id == session_id)
-        .where(messages.c.type == DRAFT_TYPE)
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
-        .limit(1)
-    )
-    row = conn.execute(query).mappings().first()
-    return _row_to_payload(dict(row)) if row else None
-
-
-def set_draft(
-    conn: Connection,
-    *,
-    scope_id: Optional[str],
-    session_id: str,
-    text: Optional[str],
-) -> Optional[dict[str, Any]]:
-    """Upsert the session's draft (one row per session). Blank text clears it."""
-    conn.execute(
-        delete(messages).where(messages.c.session_id == session_id).where(messages.c.type == DRAFT_TYPE)
-    )
-    if not text or not text.strip():
-        return None
-    return append(
-        conn,
-        scope_id=scope_id,
-        session_id=session_id,
-        platform="avibe",
-        author="user",
-        source="user",
-        message_type=DRAFT_TYPE,
-        text=text,
-    )
-
-
-def clear_draft(conn: Connection, session_id: str) -> None:
-    """Drop the session's draft (e.g. after a successful send)."""
-    conn.execute(
-        delete(messages).where(messages.c.session_id == session_id).where(messages.c.type == DRAFT_TYPE)
-    )
+# Excludes hidden ``assistant`` communication; tool calls live in ``agent_events``
+# and ``system`` is not persisted. Harness-triggered prompts have their own type
+# so they cannot be mistaken for human input. Show Page annotations in either
+# direction share one explicit transcript type. ``error`` is a terminal FAILED
+# result (turned the dot red): shown in the conversation like any terminal
+# message, but the unread queries below stay ``result``-only so a failure is not
+# counted as an unread agent reply.
+TRANSCRIPT_TYPES = types_with("transcript")
+_INBOX_PREVIEW_TYPES = types_with("inboxPreview")
+_INBOX_SETTLES_REPLY_TYPES = types_with("inboxSettlesReply")
+_UNREAD_TYPES = types_with("unread")
 
 
 def unread_counts(
@@ -940,8 +909,8 @@ def unread_counts(
     plus the global count without dragging every row through Python.
     Filtered to ``type='result'`` so it agrees with the inbox feed's UNREAD
     count, which is also result-only — otherwise intermediate ``assistant`` /
-    ``tool_call`` rows (now persisted for avibe too) would inflate the badge
-    past what the feed shows. (Inbox *eligibility* and *preview* also accept a
+    process-event rows in ``agent_events`` would inflate the badge past what the
+    feed shows. (Inbox *eligibility* and *preview* also accept a
     terminal ``notify`` so failed turns stay visible, but a failure notify is
     not an unread reply — it never bumps this badge.)
     """
@@ -953,7 +922,7 @@ def unread_counts(
     query = (
         select(messages.c.scope_id, func.count(messages.c.id))
         .where(messages.c.author == "agent")
-        .where(messages.c.type == "result")
+        .where(messages.c.type.in_(_UNREAD_TYPES))
         .where(messages.c.read_at.is_(None))
         # Don't let an archived session's unread results inflate its scope badge
         # (keep null-session rows, which aren't attributable to any session).
@@ -964,7 +933,12 @@ def unread_counts(
                     select(agent_sessions.c.id).where(
                         or_(
                             agent_sessions.c.status == "archived",
-                            agent_sessions.c.visibility != "foreground",
+                            # NEGATIVE form, so it has to name every visibility the
+                            # inbox admits or the badge would disagree with the feed
+                            # it is supposed to count. Spelling it as "not one of the
+                            # admitted values" also keeps a future fourth visibility
+                            # hidden by default rather than silently badged.
+                            agent_sessions.c.visibility.notin_(INBOX_SESSION_VISIBILITIES),
                         )
                     )
                 ),
@@ -1002,7 +976,7 @@ def unread_counts_by_session(
     query = (
         select(messages.c.session_id, func.count(messages.c.id))
         .where(messages.c.author == "agent")
-        .where(messages.c.type == "result")
+        .where(messages.c.type.in_(_UNREAD_TYPES))
         .where(messages.c.read_at.is_(None))
         .where(messages.c.session_id.is_not(None))
         # Archived sessions are inert — their unread results must not light the
@@ -1012,7 +986,9 @@ def unread_counts_by_session(
                 select(agent_sessions.c.id).where(
                     or_(
                         agent_sessions.c.status == "archived",
-                        agent_sessions.c.visibility != "foreground",
+                        # See ``unread_counts``: negative form, so it names the
+                        # admitted set rather than one value.
+                        agent_sessions.c.visibility.notin_(INBOX_SESSION_VISIBILITIES),
                     )
                 )
             )
@@ -1038,7 +1014,7 @@ def total_unread(
     platform: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
 ) -> int:
-    """Unread agent-``result`` count across the caller's visible sessions.
+    """Global unread agent-``result`` count across all non-archived sessions.
 
     This is the sum of :func:`unread_counts_by_session`, i.e. the exact number
     the Inbox nav badge shows (``ui_server`` returns it as ``unread_total``). It
@@ -1085,7 +1061,7 @@ def list_inbox_sessions(
         return {"sessions": [], "next_cursor": None}
 
     def _latest_message_value(
-        column_name: str,
+        column_name: Optional[str],
         *,
         author: Optional[str] = None,
         types: Optional[tuple[str, ...]] = None,
@@ -1093,11 +1069,13 @@ def list_inbox_sessions(
         input_turn_only: bool = False,
     ) -> Any:
         msg = messages.alias()
+        order_value = transcript_order_value(msg)
+        selected_value = order_value if column_name is None else getattr(msg.c, column_name)
         query = (
-            select(getattr(msg.c, column_name))
+            select(selected_value)
             .where(msg.c.session_id == agent_sessions.c.id)
             .where(msg.c.session_id.is_not(None))
-            .order_by(msg.c.created_at.desc(), msg.c.id.desc())
+            .order_by(order_value.desc(), msg.c.id.desc())
             .limit(1)
         )
         if platform is not None:
@@ -1116,27 +1094,62 @@ def list_inbox_sessions(
                 )
             )
         if conversation_only:
-            query = query.where(msg.c.type.notin_(NON_CONVERSATION_TYPES))
+            query = query.where(msg.c.type.in_(INBOX_ACTIVITY_TYPES))
         return query.scalar_subquery()
 
     # Drive from the small session set and do top-1 index probes per session.
     # This preserves the inbox contract while avoiding full message-window
     # materialization as history grows.
-    last_activity_at = _latest_message_value("created_at", conversation_only=True)
+    last_activity_at = _latest_message_value(None, conversation_only=True)
     last_author = _latest_message_value("author", conversation_only=True)
-    preview_id = _latest_message_value("id", types=("result", "notify", "error"))
-    preview_at = _latest_message_value("created_at", types=("result", "notify", "error"))
-    # The awaiting/replied calc must count the INVISIBLE ``silent`` completion marker
-    # as a reply too (a reply-less turn is still answered) — otherwise a silently
-    # completed turn keeps the sidebar showing "awaiting the agent". The PREVIEW text
-    # stays the last VISIBLE reply, so ``silent`` is included here but NOT in preview_*.
-    _terminal_types = ("result", "notify", "error", SILENT_TYPE)
-    last_terminal_id = _latest_message_value("id", types=_terminal_types)
-    last_terminal_at = _latest_message_value("created_at", types=_terminal_types)
+    preview_id = _latest_message_value("id", types=_INBOX_PREVIEW_TYPES)
+    preview_at = _latest_message_value(None, types=_INBOX_PREVIEW_TYPES)
+    last_terminal_id = _latest_message_value("id", types=_INBOX_SETTLES_REPLY_TYPES)
+    last_terminal_at = _latest_message_value(None, types=_INBOX_SETTLES_REPLY_TYPES)
+    last_turn_terminal_id = (
+        select(session_turns.c.id)
+        .where(
+            session_turns.c.session_id == agent_sessions.c.id,
+            session_turns.c.state == "terminal",
+            session_turns.c.terminal_outcome != "not_written",
+        )
+        .order_by(
+            func.julianday(session_turns.c.terminal_at).desc(),
+            session_turns.c.id.desc(),
+        )
+        .limit(1)
+        .scalar_subquery()
+    )
+    last_turn_terminal_at = (
+        select(session_turns.c.terminal_at)
+        .where(
+            session_turns.c.session_id == agent_sessions.c.id,
+            session_turns.c.state == "terminal",
+            session_turns.c.terminal_outcome != "not_written",
+        )
+        .order_by(
+            func.julianday(session_turns.c.terminal_at).desc(),
+            session_turns.c.id.desc(),
+        )
+        .limit(1)
+        .scalar_subquery()
+    )
     last_input_at = _latest_message_value(
-        "created_at", conversation_only=True, input_turn_only=True
+        None, conversation_only=True, input_turn_only=True
     )
     last_input_id = _latest_message_value("id", conversation_only=True, input_turn_only=True)
+    last_input_turn_state = (
+        select(session_turns.c.state)
+        .select_from(
+            message_deliveries.join(
+                session_turns,
+                session_turns.c.id == message_deliveries.c.turn_id,
+            )
+        )
+        .where(message_deliveries.c.message_id == last_input_id)
+        .limit(1)
+        .scalar_subquery()
+    )
 
     # Unread agent messages per session.
     m = messages
@@ -1144,7 +1157,7 @@ def list_inbox_sessions(
         select(m.c.session_id.label("session_id"), func.count().label("unread_count"))
         .where(m.c.session_id.is_not(None))
         .where(m.c.author == "agent")
-        .where(m.c.type == "result")
+        .where(m.c.type.in_(_UNREAD_TYPES))
         .where(m.c.read_at.is_(None))
         .group_by(m.c.session_id)
     )
@@ -1167,8 +1180,11 @@ def list_inbox_sessions(
             preview_at.label("preview_at"),
             last_terminal_id.label("last_terminal_id"),
             last_terminal_at.label("last_terminal_at"),
+            last_turn_terminal_id.label("last_turn_terminal_id"),
+            last_turn_terminal_at.label("last_turn_terminal_at"),
             last_input_at.label("last_input_at"),
             last_input_id.label("last_input_id"),
+            last_input_turn_state.label("last_input_turn_state"),
         )
         .select_from(
             agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True).join(
@@ -1177,9 +1193,15 @@ def list_inbox_sessions(
         )
     )
     # Archived sessions are hidden everywhere — keep them out of the inbox feed too.
+    # Visibility is the ADMISSION list, not "foreground": the runtime's
+    # workspace-notifications row is ``system`` — deliberately absent from every
+    # ordinary session list — and the inbox is the surface it is delivered on, so
+    # excluding it here would hide the notice this session exists to show while the
+    # notice was still recorded as sent. ``background`` remains excluded (it also
+    # sets ``suppress_delivery``).
     session_rows = session_rows.where(
         agent_sessions.c.status != "archived",
-        agent_sessions.c.visibility == "foreground",
+        agent_sessions.c.visibility.in_(INBOX_SESSION_VISIBILITIES),
     )
     if only_session:
         session_rows = session_rows.where(agent_sessions.c.id == only_session)
@@ -1231,26 +1253,33 @@ def list_inbox_sessions(
         unread = int(row["unread_count"] or 0)
         # Awaiting the agent: the latest human or harness input is newer than the
         # agent's latest reply. Persistent across a reload and stays set for the whole
-        # agent turn, unlike a literal "last author" check. ``created_at`` is
-        # second-resolution, so compare ``(created_at, id)`` tuples — the message
-        # id carries a microsecond-clock prefix (see ``_new_message_id``), giving
-        # the right order for a follow-up sent in the same second as the prior
-        # reply.
+        # agent turn, unlike a literal "last author" check. The timestamp values
+        # here are the same acceptance-or-creation positions used by the transcript;
+        # id remains the stable tie-break for legacy second-resolution rows.
         last_input_at = row["last_input_at"]
         last_input_id = row["last_input_id"]
-        # Compare against the last TERMINAL (incl. the invisible ``silent`` marker),
-        # not the preview: a silently-completed turn HAS replied even though its text
-        # is not the visible preview.
-        terminal_at = row["last_terminal_at"]
-        terminal_id = row["last_terminal_id"]
-        awaiting_reply = bool(
-            last_input_at is not None
-            and terminal_at is not None
-            and (
-                last_input_at > terminal_at
-                or (last_input_at == terminal_at and (last_input_id or "") > (terminal_id or ""))
-            )
+        # Execution settlement belongs to SessionTurn. A visible result Message
+        # can be later (for example after delivery retries), so use the newest
+        # semantic terminal evidence without creating an invisible Message marker.
+        terminal_candidates = [
+            (row["last_terminal_at"], row["last_terminal_id"]),
+            (row["last_turn_terminal_at"], row["last_turn_terminal_id"]),
+        ]
+        terminal_at, terminal_id = max(
+            (candidate for candidate in terminal_candidates if candidate[0] is not None),
+            key=lambda candidate: _timestamp_key(candidate[0], candidate[1]),
+            default=(None, None),
         )
+        accepted_turn_state = str(row["last_input_turn_state"] or "")
+        if accepted_turn_state:
+            awaiting_reply = accepted_turn_state in {"starting", "active"}
+        else:
+            awaiting_reply = bool(
+                last_input_at is not None
+                and terminal_at is not None
+                and _timestamp_key(last_input_at, last_input_id)
+                > _timestamp_key(terminal_at, terminal_id)
+            )
         sessions.append(
             {
                 "session_id": row["session_id"],
@@ -1309,18 +1338,15 @@ def mark_session_read(
     )
     if until_message_id:
         anchor = conn.execute(
-            select(messages.c.created_at).where(messages.c.id == until_message_id)
+            select(transcript_order_value()).where(messages.c.id == until_message_id)
         ).scalar_one_or_none()
         if anchor is not None:
-            # ``created_at`` is stored at second precision, so a bare
-            # ``<= anchor`` would also mark newer messages created in the
-            # same second as read. Tie-break on ``id`` so only rows at-or-
-            # before the anchor message itself are affected.
+            order_value = transcript_order_value()
             base = base.where(
                 or_(
-                    messages.c.created_at < anchor,
+                    order_value < anchor,
                     and_(
-                        messages.c.created_at == anchor,
+                        order_value == anchor,
                         messages.c.id <= until_message_id,
                     ),
                 )
@@ -1340,7 +1366,7 @@ def list_messages_for_inbox_scope(
     query = (
         select(messages)
         .where(messages.c.scope_id == scope_id)
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
         .limit(min(max(int(limit), 1), 50))
     )
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]

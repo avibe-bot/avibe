@@ -22,7 +22,8 @@ import clsx from 'clsx';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 
-import { OrganizationProvider, useOrganization } from './context';
+import { useOrganization } from './context';
+import { OrganizationProvider } from './OrganizationProvider';
 import { EmptyState, InitialsAvatar } from './components';
 import { organizationSwitchDestination } from './policy';
 

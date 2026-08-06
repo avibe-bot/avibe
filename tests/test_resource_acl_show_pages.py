@@ -648,7 +648,7 @@ def test_remote_member_cannot_archive_session_with_another_owners_page(monkeypat
         )
 
         assert response.status_code == 403
-        assert response.get_json()["code"] == "resource_access_forbidden"
+        assert response.get_json()["code"] == "remote_execution_disabled"
         with engine.connect() as connection:
             assert connection.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)

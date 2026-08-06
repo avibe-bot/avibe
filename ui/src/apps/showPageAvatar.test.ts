@@ -6,6 +6,7 @@ import {
   firstGrapheme,
   sessionChatPath,
   showPageAvatar,
+  showPageEmbeddedPath,
   showPageIconUrl,
   showPagePrivatePath,
 } from './showPageAvatar';
@@ -78,6 +79,18 @@ describe('showPagePrivatePath', () => {
   it('always points at the private /show/ surface, url-encoded', () => {
     expect(showPagePrivatePath('ses_1')).toBe('/show/ses_1/');
     expect(showPagePrivatePath('a/b')).toBe('/show/a%2Fb/');
+  });
+});
+
+describe('showPageEmbeddedPath', () => {
+  it('marks a Show Page iframe as parent-controlled', () => {
+    expect(showPageEmbeddedPath('/show/ses_1/')).toBe('/show/ses_1/?vibe-embed=1');
+  });
+
+  it('preserves existing query parameters and hashes', () => {
+    expect(showPageEmbeddedPath('/p/share_1/report?tab=weekly#revenue')).toBe(
+      '/p/share_1/report?tab=weekly&vibe-embed=1#revenue',
+    );
   });
 });
 

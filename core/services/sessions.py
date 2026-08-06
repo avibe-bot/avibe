@@ -38,6 +38,8 @@ from typing import Optional
 from config import paths
 from storage.workbench_sessions_service import (
     ProjectAccessDeniedError,
+    ReservedSessionError,
+    SessionArchivedError,
     SessionBackendLockedError,
     archive_session,
     backfill_session_title,
@@ -49,14 +51,19 @@ from storage.workbench_sessions_service import (
     is_session_archived,
     list_sessions,
     list_sessions_page,
-    reset_running_agent_status,
+    require_enabled_agent_backend,
+    require_enabled_agent_identity,
     set_agent_status,
     touch_session,
     update_session,
 )
+from vibe.i18n import t as i18n_t
 
 __all__ = [
     "ProjectAccessDeniedError",
+    "SESSION_ARCHIVED_I18N_KEY",
+    "ReservedSessionError",
+    "SessionArchivedError",
     "SessionBackendLockedError",
     "archive_session",
     "backfill_session_title",
@@ -68,13 +75,45 @@ __all__ = [
     "is_session_archived",
     "list_sessions",
     "list_sessions_page",
-    "reset_running_agent_status",
     "set_agent_status",
+    "session_archived_message",
     "touch_session",
     "update_session",
     "reserve_agent_session",
     "reserve_standalone_agent_session",
 ]
+
+
+# --- Localized copy for the terminal-archive refusal ------------------
+#
+# ``SessionArchivedError`` carries a developer-facing sentence (it names the
+# session id), but the ``message`` a route puts in its 409 body is USER-visible:
+# direct API/CLI consumers read it verbatim, and a Web UI client that lacks the
+# ``errors.session_archived`` translation renders it as the fallback. So it has to
+# come from ``vibe/i18n`` rather than an English literal at the route (AGENTS.md
+# §6). Shaped exactly like ``core.show_session_events.localized_show_event_error``:
+# a module-level key constant beside the error it describes (so the parity guard in
+# ``tests/test_i18n_backend_keys.py`` can pin it) plus a factory that resolves the
+# user's configured language and degrades to English if the config is unreadable.
+SESSION_ARCHIVED_I18N_KEY = "error.sessionArchived"
+
+
+def session_archived_message(lang: Optional[str] = None) -> str:
+    """User-facing copy for a write refused because the session is archived.
+
+    ``lang`` defaults to the configured UI language; an unreadable/missing config
+    (a brand-new install, a partially-written file) falls back to English rather
+    than failing the response.
+    """
+
+    if not lang:
+        from config.v2_config import V2Config
+
+        try:
+            lang = V2Config.load().language
+        except Exception:
+            lang = "en"
+    return i18n_t(SESSION_ARCHIVED_I18N_KEY, lang)
 
 
 # --- Reservation helpers (IM-style scope_key + session_anchor) --------
@@ -127,6 +166,8 @@ def reserve_agent_session(
     visibility: str = "foreground",
     metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
+    require_enabled_agent: bool = False,
+    expected_reference_agent_id: Optional[str] = None,
 ) -> Optional[str]:
     """Reserve a new ``agent_sessions`` row keyed by an IM-style scope.
 
@@ -148,6 +189,8 @@ def reserve_agent_session(
             workdir=workdir,
             visibility=visibility,
             metadata=metadata,
+            require_enabled_agent=require_enabled_agent,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
     finally:
         service.close()
@@ -165,6 +208,8 @@ def reserve_standalone_agent_session(
     visibility: str = "background",
     metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
+    require_enabled_agent: bool = False,
+    expected_reference_agent_id: Optional[str] = None,
 ) -> Optional[str]:
     """Reserve a background-capable session with no Scope."""
 
@@ -180,6 +225,8 @@ def reserve_standalone_agent_session(
             workdir=workdir,
             visibility=visibility,
             metadata=metadata,
+            require_enabled_agent=require_enabled_agent,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
     finally:
         service.close()

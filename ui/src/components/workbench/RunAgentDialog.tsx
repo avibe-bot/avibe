@@ -7,6 +7,7 @@ import { useApi } from '../../context/ApiContext';
 import type { VibeAgentFull, WorkbenchProject } from '../../context/ApiContext';
 import { Button } from '../ui/button';
 import { Select } from '../ui/select';
+import { errorMessage } from '@/lib/errorMessage';
 
 interface RunAgentDialogProps {
   agent: VibeAgentFull;
@@ -66,8 +67,8 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
         reasoning_effort: agent.reasoning_effort || undefined,
       });
       navigate(`/chat/${encodeURIComponent(session.id)}`);
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
       setSubmitting(false);
     }
   };

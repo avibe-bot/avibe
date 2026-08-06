@@ -3,8 +3,12 @@ import pytest
 from vibe.authorization import (
     AuthorizationContext,
     InstanceAuthorizationError,
+    REMOTE_HTTP_ALLOWED,
+    REMOTE_HTTP_LOCAL_ONLY,
+    REMOTE_HTTP_PAYLOAD_FILTERED,
     can_receive_workbench_event,
     context_from_session_payload,
+    http_authorization_policy,
     require_instance_role,
     required_instance_role,
     trusted_local_context,
@@ -15,19 +19,28 @@ def _remote_context(role: str) -> AuthorizationContext:
     return AuthorizationContext(instance_role=role, is_remote=True)
 
 
-def test_role_capabilities_are_monotonic() -> None:
+def test_remote_roles_keep_management_monotonic_but_execution_disabled() -> None:
     viewer = AuthorizationContext(instance_role="viewer", is_remote=True)
     editor = AuthorizationContext(instance_role="editor", is_remote=True)
     owner = AuthorizationContext(instance_role="owner", is_remote=True)
 
     assert viewer.can_read_instance is True
     assert viewer.can_chat is False
+    assert viewer.can_use_cloud_asr is False
     assert editor.can_read_instance is True
-    assert editor.can_chat is True
+    assert editor.can_chat is False
+    assert editor.can_use_cloud_asr is True
     assert editor.can_manage_projects is False
+    assert owner.can_chat is False
+    assert owner.can_use_cloud_asr is True
     assert owner.can_manage_projects is True
     assert owner.can_manage_agents is True
+    assert owner.can_use_terminal is False
+    assert owner.can_use_files is False
+    assert owner.can_use_system is False
     assert trusted_local_context().can_manage_instance is True
+    assert trusted_local_context().can_chat is True
+    assert trusted_local_context().can_use_cloud_asr is False
 
 
 @pytest.mark.parametrize(
@@ -63,12 +76,14 @@ def test_context_uses_role_not_diagnostic_source_for_owner() -> None:
             "vibe_instance_id": "inst-1",
             "vibe_instance_role": "editor",
             "vibe_instance_access_source": "owner",
+            "vibe_instance_authorization_revision": 0,
         }
     )
 
     assert context.is_instance_owner is False
-    assert context.can_chat is True
+    assert context.can_chat is False
     assert context.can_manage_instance is False
+    assert context.authorization_revision == 0
 
 
 def test_malformed_role_context_fails_closed() -> None:
@@ -106,11 +121,92 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("PUT", "/api/resource-policies/agent/agent-1") == "owner"
     assert required_instance_role("GET", "/api/sessions/ses-1/draft") == "editor"
     assert required_instance_role("POST", "/api/sessions/ses-1/messages") == "editor"
+    assert required_instance_role("POST", "/api/sessions/ses-1/fork") == "editor"
     assert required_instance_role("POST", "/api/projects") == "owner"
     assert required_instance_role("GET", "/api/new-management-surface") == "owner"
     assert required_instance_role("GET", "/show/ses-1/") == "viewer"
     assert required_instance_role("POST", "/show/ses-1/api/action") == "editor"
     assert required_instance_role("GET", "/assets/app.js") is None
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/doctor"),
+        ("POST", "/api/doctor"),
+        ("POST", "/api/logs"),
+        ("POST", "/api/ui/reload"),
+        ("POST", "/api/opencode/options"),
+        ("POST", "/api/opencode/setup-permission"),
+        ("POST", "/api/vault/secrets"),
+        ("PATCH", "/api/vault/secrets/secret-1"),
+        ("DELETE", "/api/vault/grants/grant-1"),
+        ("POST", "/api/vault/grants"),
+        ("POST", "/api/vault/sign"),
+        ("POST", "/api/skills/preview"),
+        ("POST", "/api/users"),
+        ("POST", "/api/users/user-1/admin"),
+        ("DELETE", "/api/users/user-1"),
+        ("POST", "/api/bind-codes"),
+        ("DELETE", "/api/bind-codes/code-1"),
+        ("GET", "/api/vault/future-capability"),
+        ("GET", "/api/dock/future-capability"),
+        ("GET", "/api/web-push/future-capability"),
+        ("GET", "/api/models/future-capability"),
+        ("GET", "/api/harness/future-capability"),
+        ("GET", "/api/users/future-capability"),
+        ("GET", "/api/bind-codes/future-capability"),
+        ("GET", "/api/future-owner-capability"),
+        ("POST", "/api/future-owner-capability"),
+    ],
+)
+def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_only(
+    method,
+    path,
+) -> None:
+    policy = http_authorization_policy(method, path)
+
+    assert policy.minimum_role == "owner"
+    assert policy.remote_access == REMOTE_HTTP_LOCAL_ONLY
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "expected"),
+    [
+        ("GET", "/api/projects", REMOTE_HTTP_ALLOWED),
+        ("PUT", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
+        ("PUT", "/api/resource-policies/agent/agent-1", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/models/runtime/status", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/models/agents/codex/chain", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/backend/codex/runtime", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/opencode/permission-status", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/vault/audit", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/dock/pins", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/web-push/subscriptions", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/harness/runs/run-1", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/users", REMOTE_HTTP_ALLOWED),
+        ("GET", "/show/ses-1/", REMOTE_HTTP_ALLOWED),
+        ("POST", "/show/ses-1/__show/events", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/config", REMOTE_HTTP_PAYLOAD_FILTERED),
+        ("PATCH", "/api/projects/proj-1", REMOTE_HTTP_PAYLOAD_FILTERED),
+        ("PATCH", "/api/sessions/ses-1", REMOTE_HTTP_PAYLOAD_FILTERED),
+        ("GET", "/api/settings", REMOTE_HTTP_LOCAL_ONLY),
+        ("HEAD", "/api/settings", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/settings", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/settings/thread", REMOTE_HTTP_LOCAL_ONLY),
+        ("DELETE", "/api/settings/thread", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/bind-codes", REMOTE_HTTP_LOCAL_ONLY),
+        ("DELETE", "/api/projects/proj-1", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/sessions/ses-1/fork", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/show/ses-1/api/action", REMOTE_HTTP_LOCAL_ONLY),
+    ],
+)
+def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
+    method,
+    path,
+    expected,
+) -> None:
+    assert http_authorization_policy(method, path).remote_access == expected
 
 
 def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:

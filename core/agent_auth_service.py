@@ -12,7 +12,7 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from modules.claude_sdk_compat import (
     CLAUDE_SDK_AVAILABLE,
@@ -23,6 +23,7 @@ from modules.claude_sdk_compat import (
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_AUTH_OWNER,
     AVIBE_CLAUDE_PROCESS_OWNER_ENV,
+    _reap_pid_set,
     get_claude_client_pid,
     register_claude_owned_process,
 )
@@ -53,10 +54,12 @@ OPENCODE_API_KEY_PROMPT_RE = re.compile(r"enteryourapikey", re.IGNORECASE)
 OPENCODE_CREDENTIAL_COUNT_RE = re.compile(r"\b(\d+)\s+credential(?:s)?\b", re.IGNORECASE)
 CLAUDE_LOGIN_METHODS = {"claudeai", "console"}
 OPENCODE_DIRECT_SETUP_URLS = {"opencode": "https://opencode.ai/auth"}
+CLAUDE_PROBE_DISCONNECT_TIMEOUT_SECONDS = 3.0
+CLAUDE_PROBE_PROCESS_EXIT_GRACE_SECONDS = 0.2
 
 
 def _pick_probe_response_excerpt(stdout_text: str) -> str:
-    """Return the first content-bearing line from Codex/Claude probe stdout.
+    """Return the first content-bearing line from a backend probe response.
 
     The CLIs emit decorations the user doesn't care about: warnings
     (``warning:``, ``ERROR:``, bubblewrap notices), session
@@ -104,8 +107,13 @@ def _pick_probe_response_excerpt(stdout_text: str) -> str:
     return candidate
 
 
-def _classify_test_failure(stdout: str, stderr: str) -> str:
-    """Map a backend CLI's failure output to a specific UI error code.
+def _classify_test_failure(
+    stdout: str,
+    stderr: str,
+    *,
+    auth_mode: str | None = None,
+) -> str:
+    """Map a backend runtime's failure output to a specific UI error code.
 
     The Settings → Backends "Test connection" panel routes the returned
     ``error`` string into an i18n key (``settings.backends.testFailure*``),
@@ -122,7 +130,10 @@ def _classify_test_failure(stdout: str, stderr: str) -> str:
         return "cli_failed"
 
     if "not logged in" in text:
-        return "not_logged_in"
+        # Gateways sometimes use this wording when an API credential was
+        # missing or arrived in the wrong header. In explicit API-key mode,
+        # sending the user through OAuth login is the wrong recovery path.
+        return "invalid_credentials" if auth_mode == "api_key" else "not_logged_in"
 
     # Auth-side rejections (key wrong / revoked / rejected).
     auth_needles = (
@@ -234,7 +245,6 @@ def classify_auth_error(backend: str, error_text: str) -> bool:
             "authentication",
             "credential",
             "api key",
-            "provider",
             "failed to send message: 401",
             "failed to start async prompt: 401",
         )
@@ -481,30 +491,38 @@ class AgentAuthService:
         # flows ignore a non-default cli_path and fall through to
         # ``$PATH``, breaking installs that pin a specific binary.
         backend_cfg = self._resolve_backend_config(backend)
+        if backend_cfg is None:
+            try:
+                from config.v2_config import V2Config
+
+                backend_cfg = getattr(V2Config.load().agents, backend, None)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Failed to load persisted %s config for Settings probe",
+                    backend,
+                    exc_info=True,
+                )
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
         return cli_path or backend
 
-    def _resolve_claude_probe_cwd(self) -> str:
-        """Return the cwd that a Settings Claude probe should execute in.
-
-        Plain ``claude -p`` loads project hooks, MCP config, and CLAUDE.md from
-        the process cwd. Use the same default runtime cwd as live Agent turns so
-        the Settings test reflects the actual Claude runtime instead of the UI
-        server launch directory.
-        """
+    def _resolve_backend_probe_cwd(self, backend: str, *, prepare: bool = False) -> str:
+        """Resolve the configured runtime cwd without mutating it by default."""
         config = getattr(getattr(self, "controller", None), "config", None)
         candidates = (
-            getattr(self._resolve_backend_config("claude"), "cwd", None),
+            getattr(self._resolve_backend_config(backend), "cwd", None),
             getattr(getattr(config, "runtime", None), "default_cwd", None),
+            getattr(config, "default_cwd", None),
         )
         for raw in candidates:
             if isinstance(raw, str) and raw.strip():
                 path = os.path.abspath(os.path.expanduser(raw.strip()))
+                if not prepare:
+                    return path
                 try:
                     os.makedirs(path, exist_ok=True)
                     return path
                 except OSError as exc:
-                    logger.warning("Failed to prepare Claude Settings probe cwd=%s: %s", path, exc)
+                    logger.warning("Failed to prepare %s Settings probe cwd=%s: %s", backend, path, exc)
         return os.getcwd()
 
     def _build_claude_full_subprocess_env(self, *, force_oauth: bool = False) -> dict[str, str]:
@@ -517,21 +535,19 @@ class AgentAuthService:
         Anthropic/Claude variable, then layer back only the allowed values so
         OAuth-mode filtering really deletes stale shell credentials.
         """
-        env_override = dict(os.environ)
-        for key in list(env_override.keys()):
-            if key.startswith("ANTHROPIC_") or key.startswith("CLAUDE_"):
-                env_override.pop(key, None)
+        from vibe.claude_config import (
+            build_claude_subprocess_env,
+            materialize_claude_subprocess_env,
+        )
 
-        from vibe.claude_config import build_claude_subprocess_env
-
-        env_override.update(
+        return materialize_claude_subprocess_env(
             build_claude_subprocess_env(
                 self._resolve_backend_config("claude"),
                 base_env=os.environ,
                 force_oauth=force_oauth,
-            )
+            ),
+            base_env=os.environ,
         )
-        return env_override
 
     async def _resolve_opencode_provider(self, context: MessageContext) -> str:
         override_agent = None
@@ -860,7 +876,13 @@ class AgentAuthService:
         flow.awaiting_code = False
         await self._send_message(context, f"✅ {self._t('command.setup.codeSubmitted', backend=flow.backend)}")
 
-    async def maybe_consume_setup_reply(self, context: MessageContext, message: str) -> bool:
+    async def maybe_consume_setup_reply(
+        self,
+        context: MessageContext,
+        message: str,
+        *,
+        claim_native_event: Callable[[], bool] | None = None,
+    ) -> bool:
         """Intercept plain-text replies for active setup flows before normal agent routing."""
         if not message or message.lstrip().startswith("/"):
             return False
@@ -868,6 +890,8 @@ class AgentAuthService:
         flow = self._find_flow_for_submission(context, "claude")
         if flow is not None and flow.backend == "claude" and flow.initiator_user_id == context.user_id:
             if self._allows_proactive_code_submission(flow) and self._parse_claude_callback_code(message) is not None:
+                if claim_native_event is not None and not claim_native_event():
+                    return True
                 await self.submit_code(context, message, backend_hint="claude")
                 return True
 
@@ -879,6 +903,8 @@ class AgentAuthService:
             and opencode_flow.awaiting_code
             and self._looks_like_direct_opencode_credential(message)
         ):
+            if claim_native_event is not None and not claim_native_event():
+                return True
             await self.submit_code(context, message.strip(), backend_hint="opencode")
             return True
 
@@ -893,7 +919,7 @@ class AgentAuthService:
         output: MessageOutput | None = None,
         terminal_error: str | None = None,
     ) -> bool:
-        """Emit a reset-oauth button when the backend error is auth-related.
+        """Emit the recovery action appropriate for an auth-related error.
 
         Each backend error-emit site calls this FIRST and emits its own failure
         path only when this returns ``False``. When this DOES handle the error,
@@ -901,29 +927,45 @@ class AgentAuthService:
         through the outbound chokepoint with a silent terminal failure. No-op
         off-workbench (the outbound resolves no session id).
         """
-        if not classify_auth_error(backend, error_text):
+        auth_text = "\n".join(
+            text for text in (error_text, terminal_error) if str(text or "").strip()
+        )
+        if not classify_auth_error(backend, auth_text):
             return False
 
-        recovery_text = f"{error_text}\n\n{self._t('command.setup.resetPrompt', backend=backend)}"
-        await self._send_message_with_button(
-            context,
-            recovery_text,
-            button_text=self._t("button.resetOAuth"),
-            callback_data=f"auth_setup:{backend}",
+        backend_config = self._resolve_backend_config(backend)
+        uses_codex_api_key = (
+            backend == "codex"
+            and getattr(backend_config, "auth_mode", None) == "api_key"
         )
-        # The IM send above goes through ``send_message_with_buttons``, which is NOT
-        # a durable ``messages`` row, and the web Chat renders only durable rows —
-        # so persist the recovery text (error + reset instruction) HERE, the single
-        # home for it, rather than each backend persisting an error-only copy that
-        # drops the actionable reset prompt (Codex P2). No-op for contexts without
-        # a resolvable scope (persist_agent_message guards internally).
+        if uses_codex_api_key:
+            recovery_text = f"{error_text}\n\n{self._t('command.setup.apiKeyRecoveryPrompt', backend=backend)}"
+            await self._send_message(context, recovery_text)
+        else:
+            recovery_text = f"{error_text}\n\n{self._t('command.setup.resetPrompt', backend=backend)}"
+            await self._send_message_with_button(
+                context,
+                recovery_text,
+                button_text=self._t("button.resetOAuth"),
+                callback_data=f"auth_setup:{backend}",
+            )
+        # Transport sends are not durable ``messages`` rows, and the web Chat
+        # renders only durable rows. Persist the recovery text here, the single
+        # home for it, rather than letting each backend store an error-only copy
+        # that drops the actionable recovery prompt. No-op for contexts without a
+        # resolvable scope (persist_agent_message guards internally).
         #
         # The durable row has NO inline button, so persist a BUTTON-FREE variant:
         # ``resetPrompt`` says "use the button below", which is a dangling
         # instruction on the workbench Chat. Point at the cross-platform
         # ``/setup {backend}`` command instead so the persisted copy is actionable
         # everywhere (Codex P2).
-        durable_text = f"{error_text}\n\n{self._t('command.setup.resetPromptPlain', backend=backend)}"
+        durable_prompt = (
+            self._t("command.setup.apiKeyRecoveryPrompt", backend=backend)
+            if uses_codex_api_key
+            else self._t("command.setup.resetPromptPlain", backend=backend)
+        )
+        durable_text = f"{error_text}\n\n{durable_prompt}"
         try:
             from core.message_mirror import persist_agent_message
 
@@ -1003,10 +1045,21 @@ class AgentAuthService:
         fallback_text = self._t("command.setup.claudeMethodFallback")
         await self._send_message_with_keyboard(context, text, keyboard, fallback_text=fallback_text)
 
-    async def _start_codex_process(self, *, force_reset: bool) -> asyncio.subprocess.Process:
+    async def _start_codex_process(
+        self,
+        *,
+        force_reset: bool,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
+    ) -> asyncio.subprocess.Process:
         binary = self._get_cli_binary("codex")
         if force_reset:
-            await self._run_utility_command(binary, "logout")
+            await self._run_utility_command(
+                binary,
+                "logout",
+                prepare_start=on_irreversible_start,
+            )
         return await asyncio.create_subprocess_exec(
             binary,
             "login",
@@ -1022,12 +1075,20 @@ class AgentAuthService:
         *,
         force_reset: bool,
         login_with_claude_ai: bool,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> tuple[ClaudeSDKClient, str, ClaudeOAuthAttempt]:
         if not CLAUDE_SDK_AVAILABLE:
             raise ModuleNotFoundError("claude_agent_sdk is required for Claude setup flows")
 
         if force_reset:
-            await self._run_utility_command(self._get_cli_binary("claude"), "auth", "logout")
+            await self._run_utility_command(
+                self._get_cli_binary("claude"),
+                "auth",
+                "logout",
+                prepare_start=on_irreversible_start,
+            )
         # Claude Code re-applies ``settings.json`` env at startup, so an
         # OAuth flow must clear stale API-key settings before the control
         # client or follow-up probes launch.
@@ -1211,14 +1272,23 @@ class AgentAuthService:
         self,
         *cmd: str,
         env: dict[str, str] | None = None,
+        prepare_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> tuple[bool, str | None]:
         """Run a short CLI side-call. Returns ``(ok, error_excerpt)``.
 
         Callers that don't care about the outcome (setup preflight)
         can ignore the return; ``remove_web_auth`` uses it to surface
         ``codex logout`` / ``claude auth logout`` failures so the UI
-        doesn't lie about a partial sign-out.
+        doesn't lie about a partial sign-out. ``prepare_start`` persists
+        pre-command state and may return a spawn-failure restoration.
         """
+        restore_on_spawn_failure = (
+            prepare_start()
+            if prepare_start is not None
+            else None
+        )
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1226,6 +1296,14 @@ class AgentAuthService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
+        except Exception as err:  # noqa: BLE001
+            if restore_on_spawn_failure is not None:
+                restore_on_spawn_failure()
+            if prepare_start is not None:
+                raise
+            logger.info("Utility command raised for %s: %s", " ".join(cmd), err)
+            return False, str(err)
+        try:
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=20)
             if process.returncode == 0:
                 return True, None
@@ -1905,6 +1983,9 @@ class AgentAuthService:
         *,
         force_reset: bool = True,
         provider_id: Optional[str] = None,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> WebAuthFlow:
         """Start an OAuth flow initiated from the Settings page.
 
@@ -1932,7 +2013,10 @@ class AgentAuthService:
 
         try:
             if backend == "codex":
-                flow.process = await self._start_codex_process(force_reset=force_reset)
+                flow.process = await self._start_codex_process(
+                    force_reset=force_reset,
+                    on_irreversible_start=on_irreversible_start,
+                )
                 flow.reader_task = asyncio.create_task(self._read_codex_output_web(flow))
                 flow.waiter_task = asyncio.create_task(self._wait_for_codex_completion_web(flow))
             elif backend == "claude":
@@ -1940,6 +2024,7 @@ class AgentAuthService:
                     context=None,
                     force_reset=force_reset,
                     login_with_claude_ai=True,
+                    on_irreversible_start=on_irreversible_start,
                 )
                 flow.claude_client = client
                 flow.claude_oauth_attempt = attempt
@@ -2155,44 +2240,22 @@ class AgentAuthService:
         timeout: float = 45.0,
         model: str | None = None,
     ) -> dict[str, Any]:
-        """Send a 1-token probe ("Hi") through the backend CLI.
+        """Send ``Hi`` through the backend's production Agent transport.
 
-        Validates both the credentials and the endpoint (when ``base_url``
-        is configured) by running ``claude --print "Hi"`` /
-        ``codex exec "Hi"``. Returns elapsed milliseconds + a short
-        response excerpt on success; surfaces stderr on failure.
-
-        ``model`` overrides the CLI's configured default — useful for
-        users whose ``config.toml`` selects a slow reasoning model
-        (e.g. ``gpt-5.4`` with ``model_reasoning_effort=xhigh``) where
-        even "Hi" can take minutes to round-trip. The frontend's Test
-        panel exposes a small select pre-filled from the routing
-        catalog so the user can probe a specific model.
+        Claude uses the Agent SDK stream and Codex uses app-server JSON-RPC,
+        matching normal Avibe turns. OpenCode keeps its provider-scoped probe
+        because it already uses the live ``opencode serve`` session API.
         """
-        # remove_web_auth and test_web_auth are claude / codex specific
-        # (single-backend subprocess invocations). OpenCode uses the
-        # per-provider DELETE / dedicated probe endpoints elsewhere.
         if backend not in {"claude", "codex"}:
             return {"ok": False, "error": "unsupported_backend"}
 
         binary = self._get_cli_binary(backend)
-        prompt = "Hi"
-        probe_cwd = None
+        probe_cwd = self._resolve_backend_probe_cwd(
+            backend,
+            prepare=backend == "claude",
+        )
+        auth_mode = None
         if backend == "claude":
-            probe_cwd = self._resolve_claude_probe_cwd()
-            # ``-p`` switches Claude Code into non-interactive print mode
-            # and exits after the first complete reply. Deliberately do
-            # not pass ``--bare`` here: recent Claude Code builds document
-            # that bare mode skips OAuth/keychain reads and only accepts
-            # API-key auth. This Settings probe should answer the user's
-            # real question: whether the current Avibe Claude setup can
-            # run an Agent turn. It follows the normal print-mode launch
-            # path used by live Claude sessions.
-            cmd = [binary]
-            cmd.append("-p")
-            if isinstance(model, str) and model.strip():
-                cmd.extend(["--model", model.strip()])
-            cmd.append(prompt)
             backend_cfg = self._resolve_backend_config("claude")
             auth_mode = getattr(backend_cfg, "auth_mode", None)
             auth_mode_set = bool(getattr(backend_cfg, "auth_mode_set", False))
@@ -2201,116 +2264,271 @@ class AgentAuthService:
                     await self._clear_claude_settings_env_for_oauth()
                 except Exception as err:  # noqa: BLE001
                     return {"ok": False, "error": "settings_cleanup_failed", "detail": str(err)}
-            try:
-                env_override = self._build_claude_full_subprocess_env()
-            except Exception as err:  # noqa: BLE001
-                if auth_mode == "oauth" and auth_mode_set:
-                    return {"ok": False, "error": "spawn_failed", "detail": str(err)}
-                env_override = dict(os.environ)
-        else:
-            # Codex single-shot mode. ``--skip-git-repo-check`` bypasses
-            # Codex's per-project trust gate. We also force
-            # ``model_reasoning_effort=low`` so a config.toml that
-            # selects ``xhigh`` reasoning (deep thinking + 30 s+ for any
-            # prompt) doesn't blow past our 45 s test timeout — the
-            # probe is "auth + endpoint reachable", not "exercise the
-            # reasoning chain". ``-c key=value`` overrides config.toml
-            # entries per invocation.
-            #
-            # NOT ``minimal``: OpenAI's Responses API rejects ``minimal``
-            # reasoning when ``image_gen`` / ``web_search`` tools are
-            # attached (which Codex auto-attaches for chat models with
-            # no override flag to disable). The 400 reads ``"The
-            # following tools cannot be used with reasoning.effort
-            # 'minimal'"``. ``low`` is described in the model catalog
-            # as "Fast responses with lighter reasoning" — still fast
-            # enough for a probe, compatible with all tool sets.
-            cmd = [
-                binary,
-                "exec",
-                "--skip-git-repo-check",
-                "-c",
-                "model_reasoning_effort=low",
-            ]
-            if isinstance(model, str) and model.strip():
-                cmd.extend(["-c", f"model={model.strip()}"])
-            cmd.append(prompt)
-            env_override = dict(os.environ)
 
         started = time.monotonic()
+        diagnostics: list[str] = []
+
+        def record_diagnostic(detail: str) -> None:
+            text = str(detail or "").strip()
+            if text:
+                diagnostics.append(text)
+                del diagnostics[:-40]
+
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                # Close stdin explicitly — Codex's ``exec`` mode reads a
-                # second prompt from stdin when the parent's stdin is
-                # open (e.g. ``codex exec "Hi" < /dev/null`` works fine,
-                # but inheriting an open stdin makes it block forever).
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env_override,
-                cwd=probe_cwd,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                # Drain whatever the CLI managed to emit before we kill it
-                # so we can still classify the failure. Codex in particular
-                # retries 401 / network errors several times before exit;
-                # the killed-mid-retry case loses the real error code if we
-                # just report ``timed_out``. Read with a tight wait so the
-                # kill path stays fast.
-                process.kill()
-                partial_stdout = b""
-                partial_stderr = b""
-                try:
-                    partial_stdout, partial_stderr = await asyncio.wait_for(
-                        process.communicate(), timeout=3.0
-                    )
-                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                    pass
-                stdout_partial = (partial_stdout or b"").decode("utf-8", errors="replace").strip()
-                stderr_partial = (partial_stderr or b"").decode("utf-8", errors="replace").strip()
-                classified = _classify_test_failure(stdout_partial, stderr_partial)
-                result = {
-                    "ok": False,
-                    "error": classified if classified != "cli_failed" else "timed_out",
-                    "duration_ms": int((time.monotonic() - started) * 1000),
-                }
-                if stderr_partial or stdout_partial:
-                    result["detail"] = (stderr_partial or stdout_partial)[:600]
-                return result
+            if backend == "claude":
+                probe = self._run_claude_agent_probe(
+                    binary=binary,
+                    cwd=probe_cwd,
+                    model=model,
+                    on_diagnostic=record_diagnostic,
+                )
+            else:
+                probe = self._run_codex_agent_probe(
+                    binary=binary,
+                    cwd=probe_cwd,
+                    model=model,
+                    on_diagnostic=record_diagnostic,
+                )
+            response_text = await asyncio.wait_for(probe, timeout=timeout)
+        except asyncio.TimeoutError:
+            detail = "\n".join(diagnostics).strip()
+            classified = _classify_test_failure("", detail, auth_mode=auth_mode)
+            result: dict[str, Any] = {
+                "ok": False,
+                "error": classified if classified != "cli_failed" else "timed_out",
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            }
+            if detail:
+                result["detail"] = detail[:600]
+            return result
         except FileNotFoundError:
             return {"ok": False, "error": "cli_not_found", "detail": binary}
         except Exception as err:  # noqa: BLE001
-            return {"ok": False, "error": "spawn_failed", "detail": str(err)}
-
-        duration_ms = int((time.monotonic() - started) * 1000)
-        stdout_text = (stdout or b"").decode("utf-8", errors="replace").strip()
-        stderr_text = (stderr or b"").decode("utf-8", errors="replace").strip()
-
-        if process.returncode != 0:
-            classified = _classify_test_failure(stdout_text, stderr_text)
+            detail = str(err).strip()
+            if "no such file or directory" in detail.lower() or "claude code not found" in detail.lower():
+                error = "cli_not_found"
+            else:
+                error = _classify_test_failure("", detail, auth_mode=auth_mode)
             return {
                 "ok": False,
-                "error": classified,
-                "exit_code": process.returncode,
-                "detail": (stderr_text or stdout_text)[:600],
-                "duration_ms": duration_ms,
+                "error": error,
+                "detail": detail[:600],
+                "duration_ms": int((time.monotonic() - started) * 1000),
             }
 
-        # Pick the model's actual response out of chatty CLI output.
-        # Codex in particular prepends a session header, a "codex"
-        # label line, "tokens used" footer, ``Reconnecting...`` retry
-        # warnings, and bubblewrap notices — the first non-blank line
-        # would always be a warning or label. Skip known non-content
-        # lines and take the first remaining one as the excerpt.
-        excerpt = _pick_probe_response_excerpt(stdout_text)
         return {
             "ok": True,
-            "duration_ms": duration_ms,
-            "excerpt": excerpt,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "excerpt": _pick_probe_response_excerpt(response_text),
         }
+
+    async def _run_claude_agent_probe(
+        self,
+        *,
+        binary: str,
+        cwd: str,
+        model: str | None,
+        on_diagnostic: Callable[[str], None] | None = None,
+    ) -> str:
+        """Run an isolated turn through the same Claude Agent SDK transport."""
+        from modules.agents.model_hub import claude_setting_sources_for_launch
+        from vibe.claude_config import build_claude_subprocess_env
+
+        stderr_lines: list[str] = []
+
+        def capture_stderr(line: str) -> None:
+            text = (line or "").strip()
+            if text:
+                stderr_lines.append(text)
+                del stderr_lines[:-40]
+                if on_diagnostic is not None:
+                    on_diagnostic(text)
+
+        claude_env = build_claude_subprocess_env(self._resolve_backend_config("claude"))
+        claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_AUTH_OWNER
+        option_kwargs: dict[str, Any] = {
+            "permission_mode": "bypassPermissions",
+            "cwd": cwd,
+            "setting_sources": claude_setting_sources_for_launch(None),
+            "sandbox": {"enabled": False},
+            "tools": [],
+            "max_turns": 1,
+            "env": claude_env,
+            "stderr": capture_stderr,
+            "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
+        }
+        if binary and binary != "claude":
+            option_kwargs["cli_path"] = os.path.expanduser(binary)
+        if isinstance(model, str) and model.strip():
+            option_kwargs["extra_args"] = {"model": model.strip()}
+
+        client = ClaudeSDKClient(options=ClaudeAgentOptions(**option_kwargs))
+        assistant_text = ""
+        assistant_error = ""
+        terminal_text = ""
+        try:
+            await client.connect()
+            register_claude_owned_process(client, owner=AVIBE_CLAUDE_AUTH_OWNER)
+            governor_from_controller(self.controller).apply_to_pid(
+                get_claude_client_pid(client),
+                label="claude connection probe",
+            )
+            await client.query("Hi")
+            async for message in client.receive_response():
+                content = getattr(message, "content", None)
+                if isinstance(content, list):
+                    text_parts = [
+                        str(getattr(block, "text", "")).strip()
+                        for block in content
+                        if str(getattr(block, "text", "")).strip()
+                    ]
+                    if text_parts:
+                        assistant_text = "\n".join(text_parts)
+                message_error = getattr(message, "error", None)
+                if message_error:
+                    assistant_error = str(message_error)
+                    if on_diagnostic is not None:
+                        on_diagnostic(assistant_error)
+                if hasattr(message, "is_error"):
+                    result_text = str(getattr(message, "result", "") or "").strip()
+                    if bool(getattr(message, "is_error", False)):
+                        errors = getattr(message, "errors", None)
+                        detail_parts = [result_text, assistant_error]
+                        if isinstance(errors, list):
+                            detail_parts.extend(str(item) for item in errors if item)
+                        detail = "; ".join(part for part in detail_parts if part)
+                        raise RuntimeError(detail or "Claude Agent turn failed")
+                    if result_text:
+                        terminal_text = result_text
+            if terminal_text:
+                return terminal_text
+            if assistant_error:
+                raise RuntimeError(assistant_error)
+            if assistant_text:
+                return assistant_text
+            raise RuntimeError("Claude Agent turn returned no response")
+        except Exception as err:
+            detail = str(err).strip()
+            stderr = "\n".join(stderr_lines).strip()
+            if stderr and stderr not in detail:
+                raise RuntimeError(f"{detail}\n{stderr}".strip()) from err
+            raise
+        finally:
+            await self._disconnect_claude_probe_client(client)
+
+    async def _disconnect_claude_probe_client(self, client: ClaudeSDKClient) -> None:
+        """Bound probe cleanup so a wedged SDK disconnect cannot defeat its timeout."""
+        pid = get_claude_client_pid(client)
+        try:
+            await asyncio.wait_for(
+                self._disconnect_claude_client(client),
+                timeout=CLAUDE_PROBE_DISCONNECT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Claude connection probe did not disconnect within the cleanup timeout")
+        if not pid:
+            return
+
+        transport = getattr(client, "_transport", None)
+        process = getattr(transport, "_process", None)
+        wait = getattr(process, "wait", None)
+        if callable(wait):
+            try:
+                await asyncio.wait_for(
+                    wait(),
+                    timeout=CLAUDE_PROBE_PROCESS_EXIT_GRACE_SECONDS,
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Claude connection probe process wait failed; reaping by pid",
+                    exc_info=True,
+                )
+        await _reap_pid_set({pid}, terminate_timeout=2.0, logger=logger)
+
+    async def _run_codex_agent_probe(
+        self,
+        *,
+        binary: str,
+        cwd: str,
+        model: str | None,
+        on_diagnostic: Callable[[str], None] | None = None,
+    ) -> str:
+        """Reuse a matching direct runtime, or own a temporary direct runtime."""
+        from config import paths
+        from config.v2_compat import CodexCompatConfig
+        from config.v2_config import DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+        from modules.agents.codex import (
+            CODEX_CONNECTION_PROBE_DIR,
+            CodexConnectionProbeRuntimeMismatchError,
+        )
+
+        backend_cfg = self._resolve_backend_config("codex")
+        runtime_config = CodexCompatConfig(
+            enabled=bool(getattr(backend_cfg, "enabled", True)),
+            binary=binary,
+            extra_args=list(getattr(backend_cfg, "extra_args", None) or []),
+            idle_timeout_seconds=int(
+                getattr(
+                    backend_cfg,
+                    "idle_timeout_seconds",
+                    DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+                )
+            ),
+            auth_mode=str(getattr(backend_cfg, "auth_mode", "oauth") or "oauth"),
+        )
+        agent_service = getattr(self.controller, "agent_service", None)
+        agents = getattr(agent_service, "agents", None)
+        agent = agents.get("codex") if isinstance(agents, dict) else None
+        probe = getattr(agent, "probe_connection", None)
+        can_reuse = getattr(agent, "can_reuse_direct_connection_probe", None)
+        live_config = getattr(agent, "codex_config", None)
+        live_matches = live_config is None or (
+            str(getattr(live_config, "binary", "")) == runtime_config.binary
+            and list(getattr(live_config, "extra_args", None) or [])
+            == runtime_config.extra_args
+            and str(getattr(live_config, "auth_mode", "oauth") or "oauth")
+            == runtime_config.auth_mode
+        )
+        direct_runtime = not callable(can_reuse) or bool(can_reuse(cwd))
+        if callable(probe) and live_matches and direct_runtime:
+            try:
+                return await probe(
+                    cwd,
+                    model=model,
+                    on_diagnostic=on_diagnostic,
+                )
+            except CodexConnectionProbeRuntimeMismatchError:
+                pass
+
+        probe_agent = self._create_codex_probe_agent(runtime_config)
+        isolated_cwd = str(paths.get_runtime_dir() / CODEX_CONNECTION_PROBE_DIR)
+        try:
+            return await probe_agent.probe_connection(
+                isolated_cwd,
+                model=model,
+                on_diagnostic=on_diagnostic,
+            )
+        finally:
+            try:
+                await probe_agent.shutdown_runtime()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to stop controller-owned Codex probe runtime",
+                    exc_info=True,
+                )
+
+    def _create_codex_probe_agent(self, runtime_config: Any) -> Any:
+        """Create an unregistered CodexAgent whose runtime this service owns."""
+        from modules.agents.codex import CodexAgent
+
+        return CodexAgent(
+            self.controller,
+            runtime_config,
+            registered_runtime=False,
+        )
 
     async def test_opencode_provider(
         self,
@@ -2347,7 +2565,7 @@ class AgentAuthService:
             return {"ok": False, "error": "opencode_server_unavailable"}
 
         # Match normal OpenCode turns: caller override, the selected OpenCode
-        # agent's model, Avibe's V2 fallback, then the provider catalog.
+        # Agent's model, then the provider catalog.
         chosen_model = (model or "").strip()
         backend_config = self._resolve_backend_config("opencode")
         default_provider = getattr(backend_config, "default_provider", None)
@@ -2360,15 +2578,6 @@ class AgentAuthService:
             chosen_model = (
                 resolve_opencode_configured_default_model(
                     runtime_agent_model,
-                    default_provider=default_provider,
-                    provider_id=provider_id,
-                )
-                or ""
-            )
-        if not chosen_model and backend_config is not None:
-            chosen_model = (
-                resolve_opencode_configured_default_model(
-                    getattr(backend_config, "default_model", None),
                     default_provider=default_provider,
                     provider_id=provider_id,
                 )

@@ -10,6 +10,9 @@ export type UseMessageSearchOptions = {
   // Debounce window in ms — the query must stop changing this long before a
   // request is sent. Defaults to 200.
   debounceMs?: number;
+  // Opt archived sessions into the results. Off by default — archived hits are
+  // read-only, so surfacing them is an explicit user choice, never sticky.
+  includeArchived?: boolean;
 };
 
 export type UseMessageSearchState = {
@@ -29,6 +32,7 @@ export function useMessageSearch(
   const { connectWorkbenchEvents, searchMessages } = useApi();
   const minLength = opts?.minLength ?? 1;
   const debounceMs = opts?.debounceMs ?? 200;
+  const includeArchived = opts?.includeArchived ?? false;
 
   const [results, setResults] = useState<MessageSearchResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -73,7 +77,7 @@ export function useMessageSearch(
 
     const timer = window.setTimeout(() => {
       const seq = (seqRef.current += 1);
-      searchMessages(trimmed)
+      searchMessages(trimmed, { includeArchived })
         .then((res) => {
           if (seq !== seqRef.current) return;
           setResults(res);
@@ -93,7 +97,7 @@ export function useMessageSearch(
       window.clearTimeout(timer);
       seqRef.current += 1;
     };
-  }, [query, minLength, debounceMs, searchMessages, authorizationVersion]);
+  }, [query, minLength, debounceMs, includeArchived, searchMessages, authorizationVersion]);
 
   return { results, loading, error };
 }

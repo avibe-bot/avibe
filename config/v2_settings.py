@@ -27,6 +27,7 @@ _BIND_CODE_PREFIX = "vr-"
 _BIND_CODE_RANDOM_LENGTH = 10
 _BIND_CODE_ALPHABET = string.ascii_letters + string.digits
 _MAX_ACTIVE_BIND_CODES = 10
+_UNSET_AGENT_BINDING = object()
 
 
 def normalize_show_message_types(show_message_types: Optional[List[str]]) -> List[str]:
@@ -219,6 +220,9 @@ class ChannelSettings:
     # Per-channel require_bind gate: None/False=off (any channel member), True=only
     # process messages from bound users; unbound senders are silently ignored.
     require_bind: Optional[bool] = None
+    # Internal optimistic-concurrency token. The API mirrors it as
+    # ``expected_agent_name`` while persisted settings JSON omits it.
+    _agent_name_at_load: object = field(default=_UNSET_AGENT_BINDING, repr=False, compare=False)
 
 
 @dataclass
@@ -239,6 +243,7 @@ class UserSettings:
     routing: RoutingSettings = field(default_factory=RoutingSettings)
     dm_chat_id: str = ""
     pending_bind_menu_hint: bool = False
+    _agent_name_at_load: object = field(default=_UNSET_AGENT_BINDING, repr=False, compare=False)
 
 
 @dataclass
@@ -522,7 +527,13 @@ class SettingsStore:
         self._file_mtime += 1
 
     def save(self) -> None:
-        self._service.save_state(self.settings)
+        try:
+            self._service.save_state(self.settings)
+        except Exception:
+            # API helpers mutate the singleton before saving. A refused transaction
+            # must restore the durable snapshot before any later read or save.
+            self._load()
+            raise
         self._service.has_external_write()
         self._file_mtime += 1
 
@@ -548,9 +559,12 @@ class SettingsStore:
 
     def set_channels_for_platform(self, platform: str, channels: Dict[str, ChannelSettings]) -> None:
         prefix = f"{platform}{SCOPED_KEY_SEP}"
-        self.settings.channels = {k: v for k, v in self.settings.channels.items() if not k.startswith(prefix)}
+        previous = self.settings.channels
+        self.settings.channels = {k: v for k, v in previous.items() if not k.startswith(prefix)}
         for channel_id, settings in channels.items():
-            self.settings.channels[self._channel_key(str(channel_id), platform)] = settings
+            key = self._channel_key(str(channel_id), platform)
+            self._carry_agent_binding_expectation(previous.get(key), settings)
+            self.settings.channels[key] = settings
 
     def get_threads_for_platform(self, platform: str) -> Dict[str, Dict[str, ChannelSettings]]:
         result: Dict[str, Dict[str, ChannelSettings]] = {}
@@ -593,7 +607,9 @@ class SettingsStore:
         settings: ChannelSettings,
         platform: Optional[str] = None,
     ) -> None:
-        self.settings.threads[self._thread_key(channel_id, thread_id, platform)] = settings
+        key = self._thread_key(channel_id, thread_id, platform)
+        self._carry_agent_binding_expectation(self.settings.threads.get(key), settings)
+        self.settings.threads[key] = settings
         self.save()
 
     def delete_thread(
@@ -653,9 +669,12 @@ class SettingsStore:
 
     def set_users_for_platform(self, platform: str, users: Dict[str, UserSettings]) -> None:
         prefix = f"{platform}{SCOPED_KEY_SEP}"
-        self.settings.users = {k: v for k, v in self.settings.users.items() if not k.startswith(prefix)}
+        previous = self.settings.users
+        self.settings.users = {k: v for k, v in previous.items() if not k.startswith(prefix)}
         for user_id, settings in users.items():
-            self.settings.users[self._user_key(str(user_id), platform)] = settings
+            key = self._user_key(str(user_id), platform)
+            self._carry_agent_binding_expectation(previous.get(key), settings)
+            self.settings.users[key] = settings
 
     def get_channel(self, channel_id: str, platform: Optional[str] = None) -> ChannelSettings:
         key = self._channel_key(channel_id, platform)
@@ -681,6 +700,7 @@ class SettingsStore:
 
     def update_channel(self, channel_id: str, settings: ChannelSettings, platform: Optional[str] = None) -> None:
         key = self._channel_key(channel_id, platform)
+        self._carry_agent_binding_expectation(self.settings.channels.get(key), settings)
         self.settings.channels[key] = settings
         self.save()
 
@@ -807,8 +827,23 @@ class SettingsStore:
             return True, is_admin
 
     def update_user(self, user_id: str, settings: UserSettings, platform: Optional[str] = None) -> None:
-        self.settings.users[self._user_key(user_id, platform)] = settings
+        key = self._user_key(user_id, platform)
+        self._carry_agent_binding_expectation(self.settings.users.get(key), settings)
+        self.settings.users[key] = settings
         self.save()
+
+    @staticmethod
+    def _carry_agent_binding_expectation(previous: object, current: object) -> None:
+        current_expected = getattr(current, "_agent_name_at_load", _UNSET_AGENT_BINDING)
+        if current_expected is not _UNSET_AGENT_BINDING:
+            return
+        if previous is None:
+            setattr(current, "_agent_name_at_load", None)
+            return
+        expected = getattr(previous, "_agent_name_at_load", _UNSET_AGENT_BINDING)
+        if expected is _UNSET_AGENT_BINDING:
+            expected = getattr(getattr(previous, "routing", None), "agent_name", None)
+        setattr(current, "_agent_name_at_load", expected)
 
     def remove_user(self, user_id: str, platform: Optional[str] = None) -> bool:
         key = self._user_key(user_id, platform)

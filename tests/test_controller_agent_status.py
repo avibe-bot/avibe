@@ -21,6 +21,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.controller import Controller
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.services.dispatch import TurnDispatchOutcome
 from modules.agents.service import AgentService
 
 
@@ -93,8 +95,21 @@ def test_run_marks_running_at_acceptance_before_dispatch(monkeypatch, tmp_path):
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from storage.importer import ensure_sqlite_state
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
 
     ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        create_agent_session_row(
+            conn,
+            session_id="ses-accept",
+            scope_id=None,
+            session_anchor=None,
+            agent_backend="claude",
+            agent_variant="claude",
+            workdir=str(tmp_path),
+        )
 
     import core.session_turns as session_turns_module
     from core.session_turns import SessionTurnManager
@@ -109,11 +124,14 @@ def test_run_marks_running_at_acceptance_before_dispatch(monkeypatch, tmp_path):
 
     async def _dispatch(controller_arg, context, text, **kwargs):
         dispatched.append(text)
+        # The manager branches on the outcome to settle a run whose turn ended with no
+        # terminal result, so a double returns one (here: the honest result path).
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
-    monkeypatch.setattr(session_turns_module, "dispatch_turn", _dispatch)
+    monkeypatch.setattr(session_turns_module, "dispatch_turn_with_outcome", _dispatch)
 
     async def _exercise():
-        await mgr._run("ses-accept", _ctx("ses-accept"), "hi")
+        await mgr.submit("ses-accept", _ctx("ses-accept"), "hi")
         # _run returns right after acceptance; the dispatch task hasn't run yet
         # (single-threaded loop) — the running mark must already be recorded.
         assert ("ses-accept", "running") in calls

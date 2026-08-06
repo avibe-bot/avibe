@@ -1,0 +1,264 @@
+{
+  "$comment": "Explicit ledger of the lint violations that predate the UI lint cleanup and are not fixed by it. `npm run lint` fails on anything not recorded here, on a recorded entry that grows, and on a recorded entry that shrinks without being re-recorded. See scripts/lint-baseline.mjs. Regenerate with `npm run lint:baseline`; raising a count needs a reviewer to agree in the PR.",
+  "rationale": {
+    "@typescript-eslint/no-explicit-any": "The untyped edge of the Python API. Each one is a response body, an SSE event payload or a third-party callback that reaches the UI as `any`. Typing them is a per-endpoint contract change against the backend, not a lint fix, and doing it as one sweep would produce a diff nobody can review. The ratchet's job here is to stop a NEW endpoint from landing untyped; the recorded ones come down endpoint by endpoint.",
+    "react-hooks/set-state-in-effect": "Legitimate-looking `reset derived state when the subject changes` and prop-mirroring effects in components with no test coverage. Each rewrite changes when a render happens, so each needs its own regression test first; batching them behind a lint deadline is how a subtle render-order bug ships.",
+    "react-hooks/preserve-manual-memoization": "Advice for adopting the React Compiler, not a defect. `babel-plugin-react-compiler` is not in this project's Vite plugin list, so no shipped behaviour depends on these; they become actionable in the change that turns the compiler on.",
+    "react-refresh/only-export-components": "`src/context/ApiContext.tsx` only. Every other context module in the UI now splits its handle from its provider, but this one is 3142 lines with ~78 consumers, and the split means relocating the ~1200-line provider in the single most contended file in the repository (36 unmerged branches currently modify it). The cost is a merge conflict for everyone else, and the benefit is hot-reload for one file \u2014 so it belongs in a change that owns ApiContext, not in a lint cleanup.",
+    "react-hooks/exhaustive-deps": "Inline `eslint-disable` comments predating this cleanup. Each one also opts its component out of the compiler-backed hook analysis, so the suppressed count is a direct measure of the UI the other react-hooks rules cannot see: removing all 43 raises the error count rather than lowering it. Frozen here so that area cannot grow while it is retired component by component.",
+    "react-hooks/refs": "Inline suppressions of the render-phase ref rule, in the same unanalysable area as the exhaustive-deps ones above. Frozen so no new render-phase ref access can be hidden behind a comment."
+  },
+  "violations": {
+    "src/components/AppShell.tsx": {
+      "@typescript-eslint/no-explicit-any": 2,
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/Dashboard.tsx": {
+      "@typescript-eslint/no-explicit-any": 9
+    },
+    "src/components/InstallHint.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/Wizard.tsx": {
+      "@typescript-eslint/no-explicit-any": 9
+    },
+    "src/components/settings/SettingsBackendsPage.tsx": {
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/components/settings/SettingsMessagingPage.tsx": {
+      "@typescript-eslint/no-explicit-any": 3,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/SettingsPlatformsPage.tsx": {
+      "@typescript-eslint/no-explicit-any": 10
+    },
+    "src/components/settings/SettingsServicePage.tsx": {
+      "@typescript-eslint/no-explicit-any": 4
+    },
+    "src/components/settings/models/modelsApi.ts": {
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/components/settings/providers/ClaudeProviderConfig.tsx": {
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/components/settings/providers/CodexProviderConfig.tsx": {
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/components/settings/shared/useBackendRuntime.ts": {
+      "@typescript-eslint/no-explicit-any": 2
+    },
+    "src/components/settings/shared/useOAuthFlowLock.ts": {
+      "react-hooks/preserve-manual-memoization": 1
+    },
+    "src/components/shared/RoutingConfigPanel.tsx": {
+      "@typescript-eslint/no-explicit-any": 3,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/steps/AgentDetection.tsx": {
+      "@typescript-eslint/no-explicit-any": 3
+    },
+    "src/components/steps/ChannelList.tsx": {
+      "@typescript-eslint/no-explicit-any": 29
+    },
+    "src/components/steps/DiscordConfig.tsx": {
+      "@typescript-eslint/no-explicit-any": 6
+    },
+    "src/components/steps/DoctorPanel.tsx": {
+      "@typescript-eslint/no-explicit-any": 4
+    },
+    "src/components/steps/LarkConfig.tsx": {
+      "@typescript-eslint/no-explicit-any": 6
+    },
+    "src/components/steps/ModeSelection.tsx": {
+      "@typescript-eslint/no-explicit-any": 2
+    },
+    "src/components/steps/PlatformSelection.tsx": {
+      "@typescript-eslint/no-explicit-any": 7
+    },
+    "src/components/steps/SlackConfig.tsx": {
+      "@typescript-eslint/no-explicit-any": 4
+    },
+    "src/components/steps/Summary.tsx": {
+      "@typescript-eslint/no-explicit-any": 9
+    },
+    "src/components/steps/TelegramConfig.tsx": {
+      "@typescript-eslint/no-explicit-any": 4
+    },
+    "src/components/steps/UserList.tsx": {
+      "@typescript-eslint/no-explicit-any": 6
+    },
+    "src/components/steps/WeChatConfig.tsx": {
+      "@typescript-eslint/no-explicit-any": 4
+    },
+    "src/components/steps/Welcome.tsx": {
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/components/ui/secret-request-card.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/ui/vault-chat-requests.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/AppsEditorPage.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/ChatPage.tsx": {
+      "@typescript-eslint/no-explicit-any": 1,
+      "react-hooks/preserve-manual-memoization": 2,
+      "react-hooks/set-state-in-effect": 3
+    },
+    "src/components/workbench/FileTree.tsx": {
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/workbench/HarnessPage.tsx": {
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/components/workbench/TerminalView.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/VaultsPage.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/harnessLifecycle.test.ts": {
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/components/workbench/harnessLifecycle.ts": {
+      "@typescript-eslint/no-explicit-any": 5
+    },
+    "src/context/ApiContext.tsx": {
+      "@typescript-eslint/no-explicit-any": 52,
+      "react-refresh/only-export-components": 1
+    },
+    "src/context/DockProvider.tsx": {
+      "react-hooks/preserve-manual-memoization": 5
+    },
+    "src/context/StatusContext.ts": {
+      "@typescript-eslint/no-explicit-any": 3
+    },
+    "src/context/StatusProvider.tsx": {
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/context/apiErrorParse.ts": {
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/lib/platforms.ts": {
+      "@typescript-eslint/no-explicit-any": 12
+    },
+    "src/lib/secretFields.ts": {
+      "@typescript-eslint/no-explicit-any": 4
+    },
+    "src/lib/useMessageSearch.ts": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/lib/useNewSession.ts": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/lib/usePendingVaultRequests.ts": {
+      "react-hooks/preserve-manual-memoization": 1
+    }
+  },
+  "suppressions": {
+    "src/App.tsx": {
+      "react-hooks/refs": 1
+    },
+    "src/components/apps/AppWindow.tsx": {
+      "react-hooks/exhaustive-deps": 2
+    },
+    "src/components/settings/SettingsBackendsPage.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/settings/models/SourceOrderDrawer.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/settings/models/menus/AddCustomModelDialog.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/settings/models/menus/OpenCodeMenuDrawer.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/settings/providers/OpencodeProviderConfig.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/settings/shared/useBackendRuntime.ts": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/settings/shared/useOpencodePermission.ts": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/steps/AgentDetection.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/steps/ChannelList.tsx": {
+      "react-hooks/exhaustive-deps": 3
+    },
+    "src/components/steps/DoctorPanel.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/steps/LarkConfig.tsx": {
+      "react-hooks/exhaustive-deps": 3
+    },
+    "src/components/steps/LogsPanel.tsx": {
+      "react-hooks/exhaustive-deps": 2
+    },
+    "src/components/steps/SlackConfig.tsx": {
+      "react-hooks/exhaustive-deps": 3
+    },
+    "src/components/ui/directory-browser.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/ui/editor-dialog.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/ui/vault-approval-card.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/ui/vault-secret-form.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/workbench/AgentsPage.tsx": {
+      "react-hooks/exhaustive-deps": 2
+    },
+    "src/components/workbench/AppsFileBrowserPage.tsx": {
+      "react-hooks/exhaustive-deps": 2
+    },
+    "src/components/workbench/EditorApp.tsx": {
+      "react-hooks/exhaustive-deps": 2
+    },
+    "src/components/workbench/FilePicker.tsx": {
+      "react-hooks/exhaustive-deps": 3
+    },
+    "src/components/workbench/FileTree.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/workbench/GlobalPromptsDialog.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/workbench/InboxPage.tsx": {
+      "react-hooks/exhaustive-deps": 2
+    },
+    "src/components/workbench/MentionEditor.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/workbench/MonacoEditor.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/workbench/ProjectAgentsMdDialog.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/components/workbench/WebPushControl.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/context/ApiContext.tsx": {
+      "react-hooks/exhaustive-deps": 1
+    },
+    "src/context/WindowManagerProvider.tsx": {
+      "react-hooks/refs": 1
+    },
+    "src/lib/useLatestRef.ts": {
+      "react-hooks/refs": 1
+    },
+    "src/lib/vaultTags.test.ts": {
+      "@typescript-eslint/no-explicit-any": 1
+    }
+  }
+}

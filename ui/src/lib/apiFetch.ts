@@ -40,18 +40,63 @@ async function fetchCsrfToken(): Promise<string> {
   return token;
 }
 
-export async function ensureCsrfToken(): Promise<string> {
+const startCsrfTokenFetch = (): Promise<string> => {
+  const pending = fetchCsrfToken();
+  csrfTokenPromise = pending;
+  void pending.then(
+    () => {
+      if (csrfTokenPromise === pending) csrfTokenPromise = null;
+    },
+    () => {
+      if (csrfTokenPromise === pending) csrfTokenPromise = null;
+    },
+  );
+  return pending;
+};
+
+const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException('request aborted', 'AbortError'));
+  }
+  return new Promise<Value>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason ?? new DOMException('request aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+};
+
+export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
   const existing = readCookie(CSRF_COOKIE_NAME);
   if (existing) {
     return existing;
   }
 
   if (!csrfTokenPromise) {
-    csrfTokenPromise = fetchCsrfToken().finally(() => {
-      csrfTokenPromise = null;
-    });
+    startCsrfTokenFetch();
   }
-  return csrfTokenPromise;
+  const pending = csrfTokenPromise!;
+  try {
+    return await waitForSignal(pending, signal);
+  } catch (error) {
+    // A deadline-bound caller must be able to retry even if the shared fetch
+    // ignores cancellation. Other callers already waiting on it remain intact.
+    if (signal?.aborted && csrfTokenPromise === pending) {
+      csrfTokenPromise = null;
+    }
+    throw error;
+  }
 }
 
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
@@ -67,7 +112,7 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   }
 
   if (MUTATING_METHODS.has(method)) {
-    const token = await ensureCsrfToken();
+    const token = await ensureCsrfToken(init.signal ?? undefined);
     headers.set(CSRF_HEADER_NAME, token);
   }
 

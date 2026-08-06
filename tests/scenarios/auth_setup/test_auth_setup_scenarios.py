@@ -1,5 +1,8 @@
 import asyncio
+import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,13 +11,36 @@ from unittest.mock import AsyncMock, patch
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from config.v2_config import (
+    AgentsConfig,
+    ModelHubModelConfig,
+    ModelHubSourceConfig,
+    ModelHubSourceStateConfig,
+    RuntimeConfig,
+    SlackConfig,
+    V2Config,
+)
+from core.agent_auth_service import AgentAuthService
+from core.handlers.model_hub.service import ModelHubError
+from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
+from tests.scenario_harness.model_hub_native_oauth import NativeOAuthScenarioHarness
 from tests.scenario_harness.organization_management import (
     REMOTE_ORIGIN,
     OrganizationManagementScenarioHarness,
 )
 from vibe import cloud_management
+from vibe.api import (
+    get_claude_auth,
+    save_claude_auth,
+    test_backend_auth_async as probe_backend_auth_async,
+)
+from vibe.claude_config import (
+    build_claude_subprocess_env,
+    materialize_claude_subprocess_env,
+    read_claude_settings_env,
+)
 
 
 class _FakeNextTurnRuntime:
@@ -46,6 +72,15 @@ class _FakeCodexNextTurnRuntime:
         return "turn-ok"
 
 
+class _CodexProviderBindingSessions:
+    def get_agent_session_id(self, *_args, **_kwargs):
+        return "thread-existing"
+
+    def ensure_agent_session_id(self, *_args, **_kwargs):
+        return "ses-provider"
+
+    def bind_agent_session(self, *_args, **_kwargs):
+        return "ses-provider"
 class OrganizationManagementAuthScenarioTests(unittest.TestCase):
     def setUp(self):
         self.harness = OrganizationManagementScenarioHarness()
@@ -307,7 +342,612 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
         self.assertNotIn("cloud_management_error", success.headers["location"])
 
 
+class _ReloadingV2ConfigController:
+    @property
+    def config(self):
+        return V2Config.load()
+
+
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_claude_oauth_to_explicit_auth_token_reaches_next_turn(self):
+        """Scenario: AUTH-SETUP-904"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        home = Path(state_dir.name)
+        claude_home = home / ".claude"
+        claude_home.mkdir()
+        credentials_path = claude_home / ".credentials.json"
+        credentials_path.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "oauth-access",
+                        "refreshToken": "oauth-refresh",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        harness = AuthSetupScenarioHarness()
+        runner = ScenarioRunner(harness)
+        cleanup_calls = []
+        restart_calls = []
+
+        def clear_oauth(service=None):
+            cleanup_calls.append(service)
+            credentials_path.unlink()
+            return {"ok": True}
+
+        def restart_backend(name, *, metadata=None):
+            restart_calls.append((name, metadata))
+            return {"ok": True, "message": "refreshed"}
+
+        def capture_oauth_state(current):
+            current.before_switch = get_claude_auth()
+
+        def save_auth_token(current):
+            current.save_result = save_claude_auth(
+                {
+                    "auth_mode": "api_key",
+                    "api_key": "relay-secret",
+                    "credential_type": "auth_token",
+                    "base_url": "https://relay.example/v1",
+                }
+            )
+
+        def capture_next_turn_env(current):
+            claude_config = V2Config.load().agents.claude
+            current.next_turn_env = materialize_claude_subprocess_env(
+                build_claude_subprocess_env(claude_config),
+                base_env={"PATH": "/usr/bin"},
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AVIBE_HOME": str(home / ".avibe"),
+                    "CLAUDE_CONFIG_DIR": str(claude_home),
+                },
+            ),
+            patch("vibe.api._get_oauth_service", return_value=harness.service),
+            patch(
+                "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
+                side_effect=clear_oauth,
+            ),
+            patch("vibe.api.restart_backend", side_effect=restart_backend),
+            patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
+        ):
+            config = V2Config(
+                mode="self_host",
+                version="v2",
+                slack=SlackConfig(bot_token=""),
+                runtime=RuntimeConfig(default_cwd="."),
+                agents=AgentsConfig(),
+            )
+            config.agents.claude.auth_mode = "oauth"
+            config.agents.claude.auth_mode_set = True
+            config.save()
+
+            await runner.run(
+                ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
+                ScenarioStep("save_auth_token", save_auth_token),
+                ScenarioStep("launch_next_turn", capture_next_turn_env),
+            )
+
+        self.assertEqual(harness.before_switch["active_auth_mode"], "oauth")
+        self.assertEqual(harness.save_result["active_auth_mode"], "api_key")
+        self.assertEqual(harness.save_result["credential_type"], "auth_token")
+        self.assertEqual(
+            harness.save_result["settings_env_key_var"],
+            "ANTHROPIC_AUTH_TOKEN",
+        )
+        self.assertNotIn("relay-secret", json.dumps(harness.save_result))
+        self.assertEqual(
+            harness.next_turn_env["ANTHROPIC_AUTH_TOKEN"],
+            "relay-secret",
+        )
+        self.assertEqual(
+            harness.next_turn_env["ANTHROPIC_BASE_URL"],
+            "https://relay.example/v1",
+        )
+        self.assertNotIn("ANTHROPIC_API_KEY", harness.next_turn_env)
+        self.assertEqual(cleanup_calls, [harness.service])
+        self.assertEqual(
+            restart_calls,
+            [
+                (
+                    "claude",
+                    {"reason": "save_claude_auth", "source": "ui_api"},
+                )
+            ],
+        )
+        ScenarioExpect.step_history(
+            runner,
+            ["confirm_oauth_is_active", "save_auth_token", "launch_next_turn"],
+        )
+
+    async def test_claude_oauth_to_api_key_probe_drops_stale_auth_token(self):
+        """Scenario: AUTH-SETUP-905"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        home = Path(state_dir.name)
+        claude_home = home / ".claude"
+        claude_home.mkdir()
+        credentials_path = claude_home / ".credentials.json"
+        credentials_path.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "oauth-access",
+                        "refreshToken": "oauth-refresh",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        harness = AuthSetupScenarioHarness()
+        runner = ScenarioRunner(harness)
+        service = AgentAuthService(_ReloadingV2ConfigController())
+        cleanup_calls = []
+        restart_calls = []
+
+        def clear_oauth(cleanup_service=None):
+            cleanup_calls.append(cleanup_service)
+            credentials_path.unlink()
+            return {"ok": True}
+
+        def restart_backend(name, *, metadata=None):
+            restart_calls.append((name, metadata))
+            return {"ok": True, "message": "refreshed"}
+
+        def capture_oauth_state(current):
+            current.before_switch = get_claude_auth()
+
+        def save_api_key(current):
+            current.save_result = save_claude_auth(
+                {
+                    "auth_mode": "api_key",
+                    "api_key": "relay-api-key",
+                    "credential_type": "api_key",
+                    "base_url": "https://ai.coinsummer.com",
+                }
+            )
+
+        async def run_connection_probe(current):
+            current.test_result = await probe_backend_auth_async("claude")
+
+        class FakeClaudeSDKClient:
+            def __init__(self, *, options):
+                harness.probe_options = options
+
+            async def connect(self):
+                return None
+
+            async def query(self, text):
+                harness.probe_query = text
+
+            async def receive_response(self):
+                yield SimpleNamespace(
+                    is_error=False,
+                    result="relay-probe-ok",
+                    content=[],
+                    error=None,
+                )
+
+            async def disconnect(self):
+                return None
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AVIBE_HOME": str(home / ".avibe"),
+                    "CLAUDE_CONFIG_DIR": str(claude_home),
+                    "ANTHROPIC_API_KEY": "stale-parent-api-key",
+                    "ANTHROPIC_AUTH_TOKEN": "stale-parent-auth-token",
+                    "ANTHROPIC_BASE_URL": "https://stale-parent.example",
+                },
+            ),
+            patch("vibe.api._get_oauth_service", return_value=service),
+            patch(
+                "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
+                side_effect=clear_oauth,
+            ),
+            patch("vibe.api.restart_backend", side_effect=restart_backend),
+            patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
+            patch("core.agent_auth_service.ClaudeSDKClient", FakeClaudeSDKClient),
+        ):
+            config = V2Config(
+                mode="self_host",
+                version="v2",
+                slack=SlackConfig(bot_token=""),
+                runtime=RuntimeConfig(default_cwd=str(home)),
+                agents=AgentsConfig(),
+            )
+            config.agents.claude.auth_mode = "oauth"
+            config.agents.claude.auth_mode_set = True
+            config.agents.claude.cli_path = "claude-probe"
+            config.save()
+
+            await runner.run(
+                ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
+                ScenarioStep("save_api_key", save_api_key),
+                ScenarioStep("test_connection", run_connection_probe),
+            )
+            harness.saved_settings_env = read_claude_settings_env()
+
+        self.assertEqual(harness.before_switch["active_auth_mode"], "oauth")
+        self.assertEqual(harness.save_result["active_auth_mode"], "api_key")
+        self.assertEqual(harness.save_result["credential_type"], "api_key")
+        self.assertEqual(
+            harness.save_result["settings_env_key_var"],
+            "ANTHROPIC_API_KEY",
+        )
+        self.assertEqual(
+            harness.saved_settings_env,
+            {
+                "ANTHROPIC_API_KEY": "relay-api-key",
+                "ANTHROPIC_BASE_URL": "https://ai.coinsummer.com",
+            },
+        )
+        self.assertTrue(harness.test_result["ok"])
+        self.assertEqual(harness.test_result["excerpt"], "relay-probe-ok")
+        self.assertEqual(harness.probe_query, "Hi")
+        self.assertEqual(harness.probe_options.cli_path, "claude-probe")
+        self.assertEqual(
+            harness.probe_options.env["ANTHROPIC_API_KEY"],
+            "relay-api-key",
+        )
+        self.assertEqual(harness.probe_options.env["ANTHROPIC_AUTH_TOKEN"], "")
+        self.assertEqual(
+            harness.probe_options.env["ANTHROPIC_BASE_URL"],
+            "https://ai.coinsummer.com",
+        )
+        self.assertEqual(cleanup_calls, [service])
+        self.assertEqual(
+            restart_calls,
+            [
+                (
+                    "claude",
+                    {"reason": "save_claude_auth", "source": "ui_api"},
+                )
+            ],
+        )
+        ScenarioExpect.step_history(
+            runner,
+            ["confirm_oauth_is_active", "save_api_key", "test_connection"],
+        )
+
+    async def test_codex_connection_probe_reuses_persistent_app_server(self):
+        """Scenario: AUTH-SETUP-906"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        home = Path(state_dir.name)
+        harness = AuthSetupScenarioHarness()
+        runner = ScenarioRunner(harness)
+        requests = []
+
+        class FakeCodexTransport:
+            is_initialized = True
+
+            async def send_request(self, method, params):
+                requests.append((method, params))
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                await agent._on_notification(
+                    "item/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turnId": "turn-probe",
+                        "item": {"type": "agentMessage", "text": "codex-probe-ok"},
+                    },
+                )
+                await agent._on_notification(
+                    "turn/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turn": {"id": "turn-probe", "status": "completed"},
+                    },
+                )
+                return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(self):
+                await asyncio.Event().wait()
+
+        controller = _ReloadingV2ConfigController()
+        agent = object.__new__(CodexAgent)
+        agent.controller = controller
+        agent._transports = {str(home): FakeCodexTransport()}
+        agent._transport_last_activity = {}
+        agent._connection_probes = {}
+        agent._connection_probe_turns = {}
+        agent._connection_probe_cwds = {}
+        agent._get_or_create_transport = AsyncMock(
+            return_value=agent._transports[str(home)]
+        )
+        controller.agent_service = SimpleNamespace(agents={"codex": agent})
+        service = AgentAuthService(controller)
+
+        async def run_connection_probe(current):
+            current.test_result = await probe_backend_auth_async(
+                "codex",
+                model="gpt-5.4-mini",
+            )
+
+        with (
+            patch.dict(os.environ, {"AVIBE_HOME": str(home / ".avibe")}),
+            patch("vibe.api._get_oauth_service", return_value=service),
+        ):
+            config = V2Config(
+                mode="self_host",
+                version="v2",
+                slack=SlackConfig(bot_token=""),
+                runtime=RuntimeConfig(default_cwd=str(home)),
+                agents=AgentsConfig(),
+            )
+            config.agents.codex.cli_path = "codex-probe"
+            config.save()
+            await runner.run(ScenarioStep("test_connection", run_connection_probe))
+
+        self.assertTrue(harness.test_result["ok"])
+        self.assertEqual(harness.test_result["excerpt"], "codex-probe-ok")
+        agent._get_or_create_transport.assert_awaited_once_with(
+            str(home),
+            allow_runtime_replacement=False,
+        )
+        self.assertEqual(
+            requests,
+            [
+                (
+                    "thread/start",
+                    {
+                        "cwd": str(
+                            (home / ".avibe" / "runtime" / "codex-connection-probe").resolve()
+                        ),
+                        "approvalPolicy": "never",
+                        "sandbox": "read-only",
+                        "ephemeral": True,
+                        "developerInstructions": (
+                            "This is a connection probe. Do not use tools. "
+                            "Reply with a short greeting."
+                        ),
+                    },
+                ),
+                (
+                    "turn/start",
+                    {
+                        "threadId": "thread-probe",
+                        "input": [{"type": "text", "text": "Hi"}],
+                        "approvalPolicy": "never",
+                        "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+                        "effort": "low",
+                        "model": "gpt-5.4-mini",
+                    },
+                ),
+            ],
+        )
+        ScenarioExpect.step_history(runner, ["test_connection"])
+
+    async def test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch(self):
+        """Scenario: AUTH-SETUP-903"""
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            config=SimpleNamespace(platform="avibe", reply_enhancements=True)
+        )
+        agent.codex_config = SimpleNamespace(
+            default_model=None,
+            auth_mode="api_key",
+            base_url="https://relay.example/v1",
+        )
+        agent.sessions = _CodexProviderBindingSessions()
+        agent._session_mgr = SimpleNamespace(set_thread_id=lambda *_args: None)
+        agent._build_thread_developer_instructions = lambda _request: None
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={},
+                user_id="U1",
+                channel_id="C1",
+                thread_id=None,
+            ),
+            base_session_id="base-provider",
+            session_key="avibe::project::provider",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_id=None,
+            vibe_agent_name=None,
+        )
+        provider_config = {
+            "name": "OpenAI",
+            "base_url": "https://relay.example/v1",
+            "wire_api": "responses",
+            "requires_openai_auth": True,
+            "supports_websockets": False,
+        }
+
+        calls = []
+
+        async def send_request(method, params):
+            calls.append((method, params))
+            if method == "config/read":
+                return {
+                    "config": {
+                        "model_provider": "openai-managed",
+                        "model_providers": {"openai-managed": provider_config},
+                    }
+                }
+            if method == "thread/read":
+                return {
+                    "thread": {
+                        "id": "thread-existing",
+                        "modelProvider": "openai-managed",
+                    }
+                }
+            if method == "thread/resume":
+                return {"thread": {"id": "thread-existing"}}
+            raise AssertionError(f"Unexpected Codex request: {method}")
+
+        thread_id = await agent._start_or_resume_thread(
+            SimpleNamespace(send_request=send_request),
+            request,
+        )
+
+        self.assertEqual(thread_id, "thread-existing")
+        resume = next(params for method, params in calls if method == "thread/resume")
+        self.assertEqual(resume["modelProvider"], "openai-managed")
+
+    async def test_native_model_hub_reauth_confirms_before_honest_failure(self):
+        """Scenario: AUTH-SETUP-106"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(
+            Path(state_dir.name),
+        )
+        source = ModelHubSourceConfig(
+            id="src_native0001",
+            kind="subscription",
+            vendor="anthropic",
+            display_name="Claude subscription",
+            protocol="anthropic",
+            supply_channel="native_cli",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[
+                ModelHubModelConfig(
+                    id="claude-opus-4-6",
+                    provenance="discovered",
+                )
+            ],
+        )
+        harness.store.config.sources.append(source)
+        harness.store.config.refresh_follow_orders()
+
+        with self.assertRaises(ModelHubError) as refused:
+            await harness.service.reauth_source(source.id, {})
+
+        self.assertEqual(
+            refused.exception.code,
+            "reauth_confirmation_required",
+        )
+        self.assertEqual(harness.agent_auth.flows, {})
+        self.assertEqual(harness.store.config.sources[0].state.status, "standby")
+        self.assertEqual(
+            [model.id for model in harness.store.config.sources[0].models],
+            ["claude-opus-4-6"],
+        )
+
+        started = await harness.service.reauth_source(
+            source.id,
+            {"acknowledge_irreversible": True},
+        )
+        flow_id = started["flow"]["flow_id"]
+        self.assertEqual(started["flow"]["intent"], "reauth")
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
+        self.assertEqual(
+            harness.store.config.sources[0].state.status,
+            "needs_action",
+        )
+        self.assertEqual(harness.store.config.sources[0].models, [])
+
+        harness.agent_auth.timeout(flow_id)
+        failed = await harness.service.oauth_status(flow_id)
+
+        self.assertEqual(failed["flow"]["state"], "failed")
+        self.assertNotIn("source", failed)
+        self.assertEqual(
+            harness.store.config.sources[0].state.status,
+            "needs_action",
+        )
+        self.assertEqual(
+            harness.service.get_agent_sources("claude")["supply_status"],
+            "interrupted",
+        )
+
+    async def test_native_reauth_reuses_a_pending_flow_and_cancel_commits_a_finished_one(self):
+        """Scenario: AUTH-SETUP-107
+
+        Pins the three server-side rules the 模型 page's re-auth dialog is built
+        on, in the order a single abandoned journey meets them: a start REUSES a
+        live pending flow, cancelling a pending flow destroys the very flow a
+        successor would have reused, and the same cancel against a FINISHED flow
+        materializes the re-auth instead of cancelling it.
+
+        This is also the closed-loop evidence for the client-side ownership rules
+        in `ui/src/components/settings/models/asyncLifetime.ts` (`releaseFlow`):
+        the dialog only skips a teardown cancel when it no longer owns the source's
+        flow, and never skips the refetch, and both of those are conclusions about
+        the sequence asserted here. The dialog itself cannot be driven from this
+        harness — it is React, and this is an asyncio TestCase with no DOM — so the
+        UI-side interleavings are exercised in `asyncLifetime.test.ts` against the
+        same rules.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(Path(state_dir.name))
+        source = ModelHubSourceConfig(
+            id="src_native0001",
+            kind="subscription",
+            vendor="anthropic",
+            display_name="Claude subscription",
+            protocol="anthropic",
+            supply_channel="native_cli",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+        )
+        harness.store.config.sources.append(source)
+        harness.store.config.refresh_follow_orders()
+        ack = {"acknowledge_irreversible": True}
+
+        # 1. A second start for the same source is handed the SAME flow, and the
+        #    irreversible half is not paid twice: one spawn, one marking.
+        first = await harness.service.reauth_source(source.id, ack)
+        flow_id = first["flow"]["flow_id"]
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
+        self.assertEqual(harness.store.config.sources[0].state.status, "needs_action")
+        self.assertEqual(harness.store.config.sources[0].models, [])
+
+        reused = await harness.service.reauth_source(source.id, ack)
+        self.assertEqual(reused["flow"]["flow_id"], flow_id)
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
+        # A start answers with the flow ALONE — no repair tail — which is why the
+        # page has to re-read a start that comes back already finished.
+        self.assertEqual(set(reused), {"flow"})
+
+        # 2. Cancelling a still-pending flow destroys it, so the next start has to
+        #    open a new one — and pay the irreversible half again.
+        await harness.service.oauth_cancel(flow_id)
+        self.assertEqual(harness.agent_auth.cancelled, [flow_id])
+
+        restarted = await harness.service.reauth_source(source.id, ack)
+        successor_flow_id = restarted["flow"]["flow_id"]
+        self.assertNotEqual(successor_flow_id, flow_id)
+        self.assertEqual(
+            harness.agent_auth.start_calls,
+            [("claude", True), ("claude", True)],
+        )
+        self.assertEqual(harness.store.config.sources[0].state.status, "needs_action")
+        self.assertEqual(harness.store.config.sources[0].models, [])
+
+        # 3. The same call against a FINISHED flow is not a cancel at all: it
+        #    materializes the re-auth. Nothing polls the status first, so this call
+        #    is the only thing that could have written the row.
+        harness.agent_auth.complete(successor_flow_id)
+        await harness.service.oauth_cancel(successor_flow_id)
+
+        self.assertEqual(harness.agent_auth.cancelled, [flow_id])
+        repaired = harness.store.config.sources[0]
+        self.assertEqual(repaired.state.status, "standby")
+        self.assertIn("claude-opus-4-6", [model.id for model in repaired.models])
+        self.assertEqual(
+            harness.service.get_agent_sources("claude")["supply_status"],
+            "ok",
+        )
+
     async def test_codex_failure_scenario_emits_reset_path(self):
         """Scenario: AUTH-SETUP-202"""
         harness = AuthSetupScenarioHarness()

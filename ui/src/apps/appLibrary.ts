@@ -3,7 +3,7 @@
 // layer (LibraryApp / ShowPagesView) resolves each row's icon, title, and badge
 // from the registry + loaded Show Pages.
 
-import { showDockId } from '../context/DockContext';
+import { showDockId } from '../context/dockDoc';
 
 export type AppRowKind = 'builtin' | 'showpage';
 

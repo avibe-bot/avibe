@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from core.services.session_fork import (
+    SESSION_AGENT_UNAVAILABLE_CODE,
     SessionForkError,
     SourceMessageAnchor,
     fork_anchor_is_terminal_agent_output,
@@ -23,14 +25,19 @@ from core.vibe_agents import VibeAgentStore
 from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
-from storage import messages_service
-from storage.models import agent_runs, agent_sessions, scope_settings
+from storage import message_deliveries, messages_service
+from storage.models import agent_events, agent_runs, agent_sessions, messages, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
 
 
-def _seed_source_session(db_path: Path, tmp_path: Path) -> str:
+def _seed_source_session(db_path: Path, tmp_path: Path, *, backend: str = "codex") -> str:
     SQLiteSessionsService(db_path).close()
+    store = VibeAgentStore(db_path)
+    try:
+        worker = store.create(name="worker", backend=backend)
+    finally:
+        store.close()
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -48,8 +55,8 @@ def _seed_source_session(db_path: Path, tmp_path: Path) -> str:
                     role=None,
                     workdir=str(tmp_path),
                     agent_name="worker",
-                    agent_backend="codex",
-                    agent_variant="codex",
+                    agent_backend=backend,
+                    agent_variant=backend,
                     model="gpt-5",
                     reasoning_effort="medium",
                     require_mention=None,
@@ -63,9 +70,9 @@ def _seed_source_session(db_path: Path, tmp_path: Path) -> str:
                 conn,
                 scope_id=scope_id,
                 session_anchor=None,
-                agent_backend="codex",
-                agent_variant="codex",
-                agent_id="agent-worker",
+                agent_backend=backend,
+                agent_variant=backend,
+                agent_id=worker.id,
                 agent_name="worker",
                 model="gpt-5",
                 reasoning_effort="medium",
@@ -76,6 +83,52 @@ def _seed_source_session(db_path: Path, tmp_path: Path) -> str:
             )
     finally:
         engine.dispose()
+
+
+def _seed_started_delivery(conn, *, scope_id: str, session_id: str, text: str) -> str:
+    delivery_id = message_deliveries.new_delivery_id()
+    turn_id = message_deliveries.new_turn_id()
+    attempt_id = message_deliveries.new_attempt_id()
+    delivery = message_deliveries.insert_delivery(
+        conn,
+        delivery_id=delivery_id,
+        session_id=session_id,
+        priority="p3",
+        state="reserved",
+        snapshot=message_deliveries.message_snapshot(
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type="user",
+            text=text,
+        ),
+        dispatch_text=text,
+    )
+    claimed = message_deliveries.claim_start_batch(
+        conn,
+        turn_id=turn_id,
+        session_id=session_id,
+        backend="codex",
+        deliveries=[delivery],
+        dispatch_text=text,
+        attempt_id=attempt_id,
+    )
+    assert message_deliveries.bind_native_start(
+        conn,
+        turn_id,
+        expected_version=int(claimed["turn"]["version"]),
+        runtime_key=f"runtime:{turn_id}",
+        runtime_turn_id=f"runtime-turn:{turn_id}",
+        native_turn_id=f"native:{turn_id}",
+    ) is not None
+    assert message_deliveries.materialize_start_acceptance(
+        conn,
+        turn_id=turn_id,
+        evidence={"kind": "test_native_acceptance"},
+    )
+    return turn_id
 
 
 def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path) -> None:
@@ -228,7 +281,7 @@ def test_reserve_forked_session_infers_running_input_anchor_without_live_hint(
 
 def test_reserve_forked_session_does_not_infer_trim_for_claude(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="claude")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -304,7 +357,7 @@ def test_reserve_forked_opencode_running_fork_records_frozen_native_message(
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", ["user", "assistant", "user"])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -378,7 +431,7 @@ def test_reserve_forked_opencode_active_run_freezes_native_boundary_without_live
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", ["user", "assistant", "user"])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -466,7 +519,7 @@ def test_reserve_forked_opencode_running_first_turn_records_user_boundary(
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", ["user"])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -513,7 +566,7 @@ def test_reserve_forked_session_clears_stale_opencode_active_run_boundary(
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", ["user"])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -561,7 +614,7 @@ def test_reserve_forked_opencode_missing_boundary_preserves_trim_intent(
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", [])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -694,6 +747,11 @@ def test_reserve_forked_session_keeps_im_anchor_and_resets_variant_for_agent_ove
 def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     SQLiteSessionsService(db_path).close()
+    store = VibeAgentStore(db_path)
+    try:
+        worker = store.create(name="worker", backend="codex")
+    finally:
+        store.close()
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -736,7 +794,7 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
                 session_anchor="slack_171717.123",
                 agent_backend="codex",
                 agent_variant="codex",
-                agent_id="agent-worker",
+                agent_id=worker.id,
                 agent_name="worker",
                 workdir=str(tmp_path),
                 native_session_id="thread-source",
@@ -794,6 +852,11 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
 def test_reserve_forked_session_reanchors_explicit_parent_scope(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     SQLiteSessionsService(db_path).close()
+    store = VibeAgentStore(db_path)
+    try:
+        worker = store.create(name="worker", backend="codex")
+    finally:
+        store.close()
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -828,7 +891,7 @@ def test_reserve_forked_session_reanchors_explicit_parent_scope(tmp_path: Path) 
                 session_anchor="slack_171717.123",
                 agent_backend="codex",
                 agent_variant="codex",
-                agent_id="agent-worker",
+                agent_id=worker.id,
                 agent_name="worker",
                 workdir=str(tmp_path),
                 native_session_id="thread-source",
@@ -875,6 +938,79 @@ def test_reserve_forked_session_rejects_backend_change(tmp_path: Path) -> None:
             agent_name="claude-worker",
             db_path=db_path,
         )
+
+
+def test_reserve_forked_session_rejects_archived_inherited_agent(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    store = VibeAgentStore(db_path)
+    try:
+        replacement = store.create(name="reviewer", backend="codex")
+        archived = store.archive("worker")
+        assert archived is not None
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            session_count = conn.execute(
+                select(func.count()).select_from(agent_sessions)
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    with pytest.raises(SessionForkError, match="source session Agent is unavailable") as exc_info:
+        reserve_forked_session(source_session_id=source_id, db_path=db_path)
+    assert exc_info.value.code == SESSION_AGENT_UNAVAILABLE_CODE
+    assert exc_info.value.details == {"source_session_id": source_id}
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            assert (
+                conn.execute(select(func.count()).select_from(agent_sessions)).scalar_one()
+                == session_count
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(
+        source_session_id=source_id,
+        agent_name=replacement.name,
+        db_path=db_path,
+    )
+    assert result.agent_id == replacement.id
+    assert result.agent_name == replacement.name
+
+
+def test_reserve_forked_session_canonicalizes_legacy_inherited_agent_name(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == source_id)
+                .values(agent_name="WORKER")
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.agent_name == "worker"
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(
+                select(agent_sessions.c.agent_name).where(
+                    agent_sessions.c.id == result.session_id
+                )
+            ).scalar_one() == "worker"
+    finally:
+        engine.dispose()
 
 
 def test_reserve_forked_session_agent_override_keeps_source_model_when_not_overridden(tmp_path: Path) -> None:
@@ -1101,6 +1237,72 @@ def test_fork_source_state_tracks_nonterminal_messages_after_anchor(
         engine.dispose()
 
 
+def test_fork_source_state_uses_delivery_acceptance_for_anchor_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == source_id)
+            ).mappings().one()
+            conn.execute(
+                messages.insert(),
+                [
+                    {
+                        "id": "msg_prior_result",
+                        "scope_id": row["scope_id"],
+                        "session_id": source_id,
+                        "platform": "avibe",
+                        "author": "agent",
+                        "type": "result",
+                        "source": None,
+                        "content_text": "prior result",
+                        "content_json": "{}",
+                        "metadata_json": "{}",
+                        "created_at": "2026-08-04T00:00:02.000000Z",
+                        "updated_at": "2026-08-04T00:00:02.000000Z",
+                        "delivered_at": None,
+                    },
+                    {
+                        "id": "msg_queued_anchor",
+                        "scope_id": row["scope_id"],
+                        "session_id": source_id,
+                        "platform": "avibe",
+                        "author": "user",
+                        "type": "user",
+                        "source": "user",
+                        "content_text": "queued prompt",
+                        "content_json": "{}",
+                        "metadata_json": "{}",
+                        "created_at": "2026-08-04T00:00:01.000000Z",
+                        "updated_at": "2026-08-04T00:00:03.000000Z",
+                        "delivered_at": "2026-08-04T00:00:03.000000Z",
+                    },
+                ],
+            )
+
+        state = fork_source_state(
+            {
+                "source_session_id": source_id,
+                "source_message_id": "msg_queued_anchor",
+            }
+        )
+
+        assert state.has_messages_after_anchor is False
+        assert state.latest_after_anchor_author is None
+        assert state.has_terminal_agent_output_after_anchor is False
+    finally:
+        engine.dispose()
+
+
 def test_fork_source_state_ignores_notify_as_terminal_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1240,16 +1442,22 @@ def test_fork_source_state_ignores_operational_rows_after_anchor(
                 message_type="user",
                 text="do the long task",
             )
-            for message_type in ("queued", "pending", "draft", "notify"):
-                messages_service.append(
-                    conn,
-                    scope_id=row["scope_id"],
-                    session_id=source_id,
-                    platform="avibe",
-                    author="agent",
-                    message_type=message_type,
-                    text=message_type,
-                )
+            message_deliveries.enqueue_queued(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                text="queued",
+            )
+            message_deliveries.set_draft(conn, source_id, "draft")
+            messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="notify",
+                text="notify",
+            )
 
         state = fork_source_state({"source_session_id": source_id, "source_message_id": user["id"]})
 
@@ -1320,6 +1528,17 @@ def test_harness_message_is_an_input_turn() -> None:
         author="harness",
         message_type="harness",
     ).is_running_input_turn is True
+
+
+def test_dispatching_annotation_is_an_input_turn() -> None:
+    assert SourceMessageAnchor(
+        author="harness",
+        message_type=messages_service.ANNOTATION_TYPE,
+    ).is_running_input_turn is True
+    assert SourceMessageAnchor(
+        author="user",
+        message_type=messages_service.ANNOTATION_TYPE,
+    ).is_running_input_turn is False
 
 
 def test_fork_source_state_tracks_harness_turn_after_anchor(
@@ -1411,9 +1630,7 @@ def test_fork_metadata_from_session_metadata_preserves_trim_fields() -> None:
 
 
 def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: Path) -> None:
-    """A codex/opencode source whose latest turn completed SILENTLY (the invisible
-    ``silent`` marker follows its input + activity) is TERMINAL — the fork must not
-    trim/roll back the completed turn as if it were still running."""
+    """A reply-less durable terminal snapshot prevents running-Turn trimming."""
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path)  # agent_backend='codex'
     engine = create_sqlite_engine(db_path)
@@ -1422,17 +1639,22 @@ def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: 
             scope_id = conn.execute(
                 select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
             ).mappings().one()["scope_id"]
-            messages_service.append(
-                conn, scope_id=scope_id, session_id=source_id, platform="avibe",
-                author="user", message_type="user", text="do the thing",
+            turn_id = _seed_started_delivery(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                text="do the thing",
             )
             messages_service.append(
                 conn, scope_id=scope_id, session_id=source_id, platform="avibe",
                 author="agent", message_type="assistant", text="working",
             )
-            messages_service.append(
-                conn, scope_id=scope_id, session_id=source_id, platform="avibe",
-                author="agent", message_type=messages_service.SILENT_TYPE, text="",
+            message_deliveries.terminalize_turn(
+                conn,
+                turn_id,
+                outcome="completed",
+                settled_by="terminal_result",
+                evidence_kind="test_replyless_completion",
             )
     finally:
         engine.dispose()
@@ -1440,3 +1662,538 @@ def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: 
     result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
     # A terminal exists after the input anchor → not a running turn → no trim.
     assert result.fork.trim_latest_running_turn is False
+
+
+def test_not_written_successor_does_not_mask_accepted_source_turn(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            turn_id = _seed_started_delivery(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                text="keep working",
+            )
+            successor_id = message_deliveries.new_delivery_id()
+            successor_turn_id = message_deliveries.new_turn_id()
+            successor = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=successor_id,
+                session_id=source_id,
+                priority="p0",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="replacement",
+                ),
+                dispatch_text="replacement",
+            )
+            message_deliveries.insert_turn(
+                conn,
+                turn_id=successor_turn_id,
+                session_id=source_id,
+                initial_delivery_id=successor_id,
+                state="waiting",
+                backend="codex",
+            )
+            assert message_deliveries.cas_delivery(
+                conn,
+                successor_id,
+                expected_version=int(successor["version"]),
+                expected_states=("reserved",),
+                values={
+                    "state": "interrupt_waiting",
+                    "turn_id": successor_turn_id,
+                    "turn_role": "initial",
+                    "turn_position": 0,
+                },
+            ) is not None
+            message_deliveries.terminalize_turn(
+                conn,
+                successor_turn_id,
+                outcome="not_written",
+                settled_by="definitive_stop_receipt",
+                evidence_kind="stop_refused",
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.trim_latest_running_turn is True
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            message_deliveries.terminalize_turn(
+                conn,
+                turn_id,
+                outcome="completed",
+                settled_by="terminal_result",
+                evidence_kind="replyless_completion",
+            )
+    finally:
+        engine.dispose()
+
+    completed = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert completed.fork.trim_latest_running_turn is False
+
+
+def test_fork_anchor_uses_active_turn_initial_delivery_before_transcript_order(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            previous_result = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="previous result persisted after the queued submission",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == previous_result["id"])
+                .values(
+                    created_at="2026-08-01T00:02:00Z",
+                    updated_at="2026-08-01T00:02:00Z",
+                )
+            )
+            delivery_id = message_deliveries.new_delivery_id()
+            turn_id = message_deliveries.new_turn_id()
+            attempt_id = message_deliveries.new_attempt_id()
+            delivery = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=source_id,
+                priority="p3",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="queued before the previous result",
+                ),
+                dispatch_text="queued before the previous result",
+                now="2026-08-01T00:01:00Z",
+            )
+            claimed = message_deliveries.claim_start_batch(
+                conn,
+                turn_id=turn_id,
+                session_id=source_id,
+                backend="codex",
+                deliveries=[delivery],
+                dispatch_text="queued before the previous result",
+                attempt_id=attempt_id,
+            )
+            assert message_deliveries.bind_native_start(
+                conn,
+                turn_id,
+                expected_version=int(claimed["turn"]["version"]),
+                runtime_key="runtime",
+                runtime_turn_id="runtime-turn",
+                native_turn_id="native-turn",
+            ) is not None
+            assert message_deliveries.materialize_start_acceptance(
+                conn,
+                turn_id=turn_id,
+                evidence={"kind": "delayed_start_acceptance"},
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.source_message_id == delivery_id
+    assert result.fork.trim_latest_running_turn is True
+
+
+@pytest.mark.parametrize("start_receipt", ["unwritten", "unknown"])
+def test_fork_anchor_treats_pre_materialization_start_as_running(
+    tmp_path: Path,
+    start_receipt: str,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            previous_result = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="previous terminal boundary",
+            )
+            delivery_id = message_deliveries.new_delivery_id()
+            turn_id = message_deliveries.new_turn_id()
+            attempt_id = message_deliveries.new_attempt_id()
+            delivery = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=source_id,
+                priority="p3",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="possibly written native input",
+                ),
+                dispatch_text="possibly written native input",
+            )
+            claimed = message_deliveries.claim_start_batch(
+                conn,
+                turn_id=turn_id,
+                session_id=source_id,
+                backend="codex",
+                deliveries=[delivery],
+                dispatch_text="possibly written native input",
+                attempt_id=attempt_id,
+            )
+            if start_receipt == "unknown":
+                assert message_deliveries.mark_start_unknown(
+                    conn,
+                    turn_id,
+                    expected_version=int(claimed["turn"]["version"]),
+                    receipt={"reason": "restart_without_native_evidence"},
+                ) is not None
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.source_message_id == previous_result["id"]
+    assert result.fork.trim_latest_running_turn is True
+
+
+def test_reserve_forked_session_migrated_silent_completion_is_terminal_no_trim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A migrated legacy silent event remains a terminal fork boundary."""
+
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            message_micros = int(
+                datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1_000_000
+            )
+            monkeypatch.setattr(
+                messages_service,
+                "_new_message_id",
+                lambda: f"msg_{message_micros:015x}{'0' * 8}",
+            )
+            message = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="latest completed input",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == message["id"])
+                .values(
+                    created_at="2026-08-01T00:00:00Z",
+                    updated_at="2026-08-01T00:00:00Z",
+                )
+            )
+            conn.execute(
+                agent_events.insert().values(
+                    id="evt_legacy_silent_fork_boundary",
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    turn_id=None,
+                    run_id=None,
+                    platform="avibe",
+                    agent_name="worker",
+                    backend="codex",
+                    event_type="silent_terminal",
+                    visibility="trace",
+                    sequence=None,
+                    content_text=None,
+                    content_json="{}",
+                    metadata_json=json.dumps(
+                        {
+                            "legacy_message_id": "msg_legacy_silent",
+                            "migration_revision": "20260731_0043",
+                        }
+                    ),
+                    source="agent",
+                    created_at="2026-08-01T00:00:01Z",
+                    updated_at="2026-08-01T00:00:01Z",
+                )
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.trim_latest_running_turn is False
+
+
+def test_earlier_same_second_silent_terminal_does_not_close_latest_input(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    base = 1_800_000_000_000_000
+    timestamp = "2026-08-01T00:00:00Z"
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(
+                    agent_sessions.c.id == source_id
+                )
+            ).scalar_one()
+            conn.execute(
+                agent_events.insert().values(
+                    id=f"evt_{base + 1_000:015x}{'0' * 8}",
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    event_type="silent_terminal",
+                    visibility="trace",
+                    content_json="{}",
+                    metadata_json="{}",
+                    source="agent",
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+            conn.execute(
+                messages.insert().values(
+                    id=f"msg_{base + 2_000:015x}{'0' * 8}",
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    type="user",
+                    source="user",
+                    content_text="new still-running input",
+                    content_json="{}",
+                    metadata_json="{}",
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.trim_latest_running_turn is True
+
+
+def test_forking_an_inherited_null_session_keeps_its_explicit_pins(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-248 — an OMITTED fork override COPIES the column, so it copies the pin.
+
+    ``reserve_forked_session`` resolves ``target_model = _clean_optional(model) if
+    model is not None else row["model"]``: when the caller passes no ``model`` /
+    ``reasoning_effort``, the fork's column is the SOURCE's column, verbatim. The
+    source's ``explicit_setting_overrides`` marker is a claim about that same
+    value, so for a copied field the claim is still true and must survive the fork.
+
+    The first version of this guard reconciled it exactly backwards — it cleared
+    the marker for the fields the fork had NOT supplied, i.e. precisely the copied
+    ones. Forking an explicit-null session (the user pinned "no model, no effort"
+    on purpose, or a preserved ``create_once`` rebind did, HFR-244) then produced a
+    fork that merely *looked* like it inherited nulls. Nothing is visible until the
+    Agent's defaults next move: the marker is gone, so turn-start materialization
+    (HFR-249) pins today's Agent default onto the fork and dispatch runs it with a
+    model and a reasoning effort the source had deliberately pinned away.
+
+    Asserted on the real ``AgentRequest``, because that is the only place the
+    difference is observable — a NULL session column means "inherit from the Agent"
+    to every other session, so the marker is the ONLY thing standing between the
+    fork's nulls and the Agent's live defaults.
+    """
+    import asyncio
+
+    from core.scheduled_tasks import ScheduledTaskStore
+    from modules.agents.base import AgentRequest
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+    from storage.sessions_service import resolve_scope_from_legacy_key
+    from tests.test_scheduled_tasks import _binding_env, _dispatching_binding_service
+
+    db_path = _binding_env(tmp_path, monkeypatch, backends=("claude", "codex"), default="codex")
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        # The Agent model is explicit by invariant; the session below pins it away.
+        source_agent = agent_store.create(name="nightly", backend="claude")
+    finally:
+        agent_store.close()
+    assert source_agent.model == "claude-opus-5"
+    assert source_agent.reasoning_effort is None
+
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        scope_id = resolve_scope_from_legacy_key(
+            conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+        )
+        assert scope_id is not None
+        source_id = create_agent_session_row(
+            conn,
+            scope_id=scope_id,
+            session_anchor="slack_C123:definition_abc",
+            agent_backend="claude",
+            agent_variant="claude",
+            agent_id=source_agent.id,
+            agent_name=source_agent.name,
+            # NULL columns + the marker naming them: this session pins "nothing",
+            # it does not inherit.
+            model=None,
+            reasoning_effort=None,
+            native_session_id="native-1",
+            workdir=str(tmp_path),
+            title="Source",
+            metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+        )
+
+    # The fork supplies NEITHER setting: both columns are copied from the source.
+    forked = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+    assert forked.model is None and forked.reasoning_effort is None
+
+    # The Agent gains defaults AFTER the fork — an ordinary Agent Settings edit,
+    # with no way to know a fork of an explicit-null session points at it.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        edited_agent = agent_store.update("nightly", model="claude-opus-4-6", reasoning_effort="high")
+    finally:
+        agent_store.close()
+    # Proves the request's nulls below are a real pin, not an empty fixture.
+    assert edited_agent.model == "claude-opus-4-6"
+    assert edited_agent.reasoning_effort == "high"
+
+    # A turn on the FORKED session, through the real MessageHandler dispatch path.
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=forked.session_id,
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    asyncio.run(service._execute_task(task, execution_id="exec-1", disable_one_shot=False))
+
+    assert len(dispatched) == 1, "the turn on the forked session never reached the backend"
+    backend_name, request = dispatched[0]
+    assert isinstance(request, AgentRequest), "the captured request is not the production type"
+    assert backend_name == edited_agent.backend
+    assert request.vibe_agent_name == "nightly", (
+        "precondition: the fork still runs as the source's Agent, only its settings moved"
+    )
+    assert request.vibe_agent_model is None, (
+        f"dispatch handed the backend model={request.vibe_agent_model!r} from the Agent's "
+        "CURRENT settings; the forked session pinned none and the fork copied that pin"
+    )
+    assert request.vibe_agent_reasoning_effort is None, (
+        f"dispatch handed the backend reasoning_effort="
+        f"{request.vibe_agent_reasoning_effort!r} the forked session never had"
+    )
+
+    # ...and the durable record must agree. Read AFTER dispatch on purpose: the
+    # turn-start route materialization is what converts a dropped marker into a
+    # PERMANENT change (HFR-249), so an unmarked fork does not just mis-route this
+    # run -- the Agent's current default becomes the fork's pinned model forever.
+    with engine.connect() as conn:
+        forked_row = conn.execute(
+            select(
+                agent_sessions.c.model,
+                agent_sessions.c.reasoning_effort,
+                agent_sessions.c.metadata_json,
+            ).where(agent_sessions.c.id == forked.session_id)
+        ).one()
+    forked_metadata = json.loads(forked_row.metadata_json or "{}")
+    assert set(forked_metadata.get(SESSION_SETTINGS_OVERRIDE_KEY) or ()) == {
+        "model",
+        "reasoning_effort",
+    }, (
+        "the fork copied the source's NULL model / reasoning_effort but dropped their "
+        f"explicit-override marker (metadata marker={forked_metadata.get(SESSION_SETTINGS_OVERRIDE_KEY)!r}); "
+        "the copied nulls now read as 'inherit from the Agent' and the next Agent "
+        "default change silently gives the fork settings the source pinned away"
+    )
+    assert forked_row.model is None, (
+        f"the forked session acquired model={forked_row.model!r} from the Agent's CURRENT "
+        "settings; the source pinned none and the fork copied that pin"
+    )
+    assert forked_row.reasoning_effort is None, (
+        f"the forked session acquired reasoning_effort={forked_row.reasoning_effort!r} it never had"
+    )
+
+    # The inverse half, so "preserve the marker" cannot degenerate into "always
+    # preserve it": a fork that SUPPLIES a concrete model owns that setting. Its
+    # column is non-NULL, dispatch reads it directly, and a marker entry claiming
+    # an explicit pin on a value the fork replaced would be stale on the next edit.
+    respecified = reserve_forked_session(
+        source_session_id=source_id, model="claude-sonnet-4-9", db_path=db_path
+    )
+    assert respecified.model == "claude-sonnet-4-9"
+    with engine.connect() as conn:
+        respecified_metadata = json.loads(
+            conn.execute(
+                select(agent_sessions.c.metadata_json).where(
+                    agent_sessions.c.id == respecified.session_id
+                )
+            ).scalar_one()
+            or "{}"
+        )
+    marked = set(respecified_metadata.get(SESSION_SETTINGS_OVERRIDE_KEY) or ())
+    assert "model" not in marked, (
+        f"the fork replaced model with a concrete value but kept it marked explicit "
+        f"(marker={sorted(marked)}), so a later edit of that column keeps routing the "
+        "value the fork was given"
+    )
+    # The field the fork still did NOT supply is still copied, so still pinned.
+    assert "reasoning_effort" in marked, (
+        f"supplying model dropped the untouched reasoning_effort pin too (marker={sorted(marked)})"
+    )

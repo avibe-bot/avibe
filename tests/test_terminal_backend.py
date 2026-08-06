@@ -1428,7 +1428,7 @@ def test_terminal_websocket_unsupported_accepts_before_policy_close(monkeypatch)
     assert websocket.calls == [("accept", None), ("close", 1008)]
 
 
-def test_terminal_websocket_closes_at_authorization_refresh_deadline(monkeypatch):
+def test_remote_terminal_websocket_is_rejected_before_authorization_refresh(monkeypatch):
     from vibe import remote_access
 
     class BlockingTerminalService:
@@ -1455,10 +1455,7 @@ def test_terminal_websocket_closes_at_authorization_refresh_deadline(monkeypatch
 
     asyncio.run(ui_server.terminal_websocket(websocket, "test"))
 
-    assert websocket.calls == [
-        ("accept", None),
-        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
-    ]
+    assert websocket.calls == [("close", 1008)]
 
 
 def test_terminal_websocket_rejects_forwarded_request(monkeypatch, tmp_path):
@@ -1644,7 +1641,7 @@ def test_terminal_delete_rejects_forwarded_origin_proxy_without_terminating(monk
     assert terminated == []
 
 
-def test_terminal_delete_scopes_remote_subject_and_rejects_cross_subject(monkeypatch, tmp_path):
+def test_remote_terminal_delete_is_rejected_before_service_access(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
@@ -1679,13 +1676,11 @@ def test_terminal_delete_scopes_remote_subject_and_rejects_cross_subject(monkeyp
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
     )
 
-    assert response.status_code == 404
-    assert malicious_response.status_code == 404
-    assert terminated == [
-        ui_server._terminal_effective_session_id("shared-session", "user-2"),
-        ui_server._terminal_effective_session_id(user_one_effective, "user-2"),
-    ]
-    assert user_one_effective not in terminated
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+    assert malicious_response.status_code == 403
+    assert malicious_response.get_json()["code"] == "remote_execution_disabled"
+    assert terminated == []
 
 
 def test_terminal_service_ignores_invalid_limit_env(monkeypatch):

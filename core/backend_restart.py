@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 from collections.abc import Awaitable, Callable
@@ -59,7 +60,7 @@ class BackendRestartCoordinator:
                 agent_service.end_backend_drain(backend)
                 await session_turns.end_backend_drain(backend, resume_deferred=False)
                 raise
-            had_active_work = self._has_active_turns(backend)
+            had_active_work = await self._has_active_turns(backend)
             task = asyncio.create_task(self._run(backend), name=f"backend-restart:{backend}")
             self._tasks[backend] = task
             task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
@@ -82,12 +83,17 @@ class BackendRestartCoordinator:
         except Exception:
             logger.exception("Backend restart failed for %s", backend)
 
-    def _has_active_turns(self, backend: str) -> bool:
+    async def _has_active_turns(self, backend: str) -> bool:
         service = self.controller.agent_service
         if service.runtime_turn_tokens_for_backend(backend):
             return True
         probe = getattr(service, "backend_runtime_active", None)
-        return bool(callable(probe) and probe(backend))
+        if not callable(probe):
+            return False
+        result = probe(backend)
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
 
     async def _run(self, backend: str) -> None:
         forced = False
@@ -95,7 +101,7 @@ class BackendRestartCoordinator:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._drain_timeout
         try:
-            while self._has_active_turns(backend):
+            while await self._has_active_turns(backend):
                 if loop.time() >= deadline:
                     forced = True
                     session_ids = self.controller.session_turns.active_runtime_session_ids_for_backend(backend)

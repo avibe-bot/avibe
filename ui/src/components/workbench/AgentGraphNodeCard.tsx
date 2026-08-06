@@ -50,7 +50,7 @@ export const AgentGraphNodeCard: React.FC<AgentGraphNodeCardProps> = ({
   const backendClass = BACKEND_TEXT[node.agent_backend as Backend] ?? 'text-muted';
   const background = isBackground(node);
   const timeLabel = node.live
-    ? formatElapsed(node.elapsed_seconds)
+    ? formatElapsed(node.elapsed_seconds, t)
     : formatRelativeTime(node.last_active_at ?? node.created_at, t);
 
   return (
@@ -72,7 +72,7 @@ export const AgentGraphNodeCard: React.FC<AgentGraphNodeCardProps> = ({
       <div className="flex min-w-0 items-center gap-1.5">
         <StatusGlyph node={node} />
         <span className="truncate text-[12px] font-semibold text-foreground">
-          {node.agent_name ?? '—'}
+          {node.agent_display_name ?? node.agent_name ?? '—'}
         </span>
         {node.agent_backend && (
           <span

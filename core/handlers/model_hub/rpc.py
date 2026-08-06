@@ -18,18 +18,31 @@ async def dispatch_model_hub_rpc(
         return await service.create_source(payload.get("source"))
     if operation == "patch_source":
         return await service.patch_source(payload.get("source_id"), payload.get("patch"))
+    if operation == "replace_credential":
+        return await service.replace_credential(
+            payload.get("source_id"),
+            payload.get("credential"),
+        )
+    if operation == "reauth_source":
+        return await service.reauth_source(
+            payload.get("source_id"),
+            payload.get("reauth"),
+        )
     if operation == "delete_source":
         await service.delete_source(payload.get("source_id"), force=payload.get("force") is True)
         return None
-    if operation == "test_source":
-        source, discovered = await service.test_source(payload.get("source_id"))
+    if operation == "refresh_source":
+        source, discovered = await service.refresh_source(payload.get("source_id"))
         return {"source": source, "discovered": discovered}
-    if operation == "priority":
-        return service.priority()
-    if operation == "set_priority":
-        return await service.set_priority(payload.get("order"))
     if operation == "list_agents":
         return service.list_agents()
+    if operation == "get_agent_sources":
+        return service.get_agent_sources(payload.get("backend"))
+    if operation == "set_agent_sources":
+        return await service.set_agent_sources(
+            payload.get("backend"),
+            payload.get("sources"),
+        )
     if operation == "set_agent_mode":
         return await service.set_agent_mode(payload.get("backend"), payload.get("mode"))
     if operation == "set_mappings":
@@ -42,6 +55,15 @@ async def dispatch_model_hub_rpc(
         return await service.delete_custom_model(payload.get("source_id"), payload.get("model_id"))
     if operation == "list_events":
         return service.list_events(limit=payload.get("limit", 20), before=payload.get("before"))
+    if operation == "get_agent_chain":
+        return service.agent_chain(payload.get("backend"), payload.get("model_id"))
+    if operation == "probe_agent":
+        return await service.probe_agent(
+            payload.get("backend"),
+            payload.get("model_id"),
+        )
+    if operation == "get_turn_provenance":
+        return service.get_turn_provenance(payload.get("turn_id"))
     if operation == "oauth_start":
         return await service.oauth_start(payload.get("oauth"))
     if operation == "oauth_status":
@@ -57,4 +79,6 @@ async def dispatch_model_hub_rpc(
         return await service.migration_apply(payload.get("item_ids"))
     if operation == "runtime_status":
         return await service.runtime_status()
+    if operation == "runtime_start":
+        return await service.runtime_start()
     raise ModelHubError("source_not_found", status=404)

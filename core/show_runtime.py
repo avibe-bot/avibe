@@ -114,8 +114,9 @@ class ShowRuntimeManager:
             and not self.manifest_path
             and not self.manifest_url
             and not _packaged_runtime_manifest_exists()
+            and _running_from_development_checkout()
         ):
-            source_value = _RUNTIME_SOURCE_ARCHIVE
+            source_value = _RUNTIME_SOURCE_GITHUB
         self.auto_install = _auto_install_enabled() if auto_install is None else auto_install
         self.package_spec = package_spec or os.environ.get("VIBE_SHOW_RUNTIME_PACKAGE_SPEC") or _RUNTIME_PACKAGE
         self.runtime_source = _normalize_runtime_source(source_value)
@@ -1446,6 +1447,11 @@ def _packaged_runtime_manifest_exists() -> bool:
     except Exception:
         return False
     return resource.is_file()
+
+
+def _running_from_development_checkout() -> bool:
+    source_root = Path(__file__).resolve().parents[1]
+    return (source_root / "pyproject.toml").is_file() and (source_root / "main.py").is_file()
 
 
 def _normalize_runtime_source(value: str | None) -> str:

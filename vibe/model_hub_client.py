@@ -24,9 +24,11 @@ def _decode(response: httpx.Response) -> Any:
     if response.status_code >= 400 or body.get("ok") is not True:
         code = body.get("error")
         detail = body.get("detail")
+        data = {key: value for key, value in body.items() if key not in {"ok", "error", "detail", "contract_version"}}
         error = ModelHubError(
             code if isinstance(code, str) else "engine_down",
             status=response.status_code if response.status_code >= 400 else 503,
+            data=data,
         )
         if isinstance(detail, str):
             error.detail = detail
@@ -86,21 +88,36 @@ class ModelHubRemoteService:
     async def patch_source(self, source_id: str, payload: dict) -> dict:
         return await _rpc("patch_source", {"source_id": source_id, "patch": payload})
 
+    async def replace_credential(self, source_id: str, payload: object) -> dict:
+        return await _rpc(
+            "replace_credential",
+            {"source_id": source_id, "credential": payload},
+        )
+
+    async def reauth_source(self, source_id: str, payload: object) -> dict:
+        return await _rpc(
+            "reauth_source",
+            {"source_id": source_id, "reauth": payload},
+        )
+
     async def delete_source(self, source_id: str, *, force: bool = False) -> None:
         await _rpc("delete_source", {"source_id": source_id, "force": force})
 
-    async def test_source(self, source_id: str) -> tuple[dict, int]:
-        result = await _rpc("test_source", {"source_id": source_id})
+    async def refresh_source(self, source_id: str) -> tuple[dict, int]:
+        result = await _rpc("refresh_source", {"source_id": source_id})
         return result["source"], result["discovered"]
-
-    def priority(self) -> dict:
-        return _rpc_sync("priority")
-
-    async def set_priority(self, order: object) -> dict:
-        return await _rpc("set_priority", {"order": order})
 
     def list_agents(self) -> list[dict]:
         return _rpc_sync("list_agents")
+
+    def get_agent_sources(self, backend: str) -> dict:
+        return _rpc_sync("get_agent_sources", {"backend": backend})
+
+    async def set_agent_sources(self, backend: str, sources: object) -> dict:
+        return await _rpc(
+            "set_agent_sources",
+            {"backend": backend, "sources": sources},
+        )
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         return await _rpc("set_agent_mode", {"backend": backend, "mode": mode})
@@ -123,6 +140,25 @@ class ModelHubRemoteService:
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         return _rpc_sync("list_events", {"limit": limit, "before": before})
 
+    def agent_chain(self, backend: str, model_id: str) -> dict:
+        return _rpc_sync(
+            "get_agent_chain",
+            {"backend": backend, "model_id": model_id},
+        )
+
+    async def probe_agent(
+        self,
+        backend: str,
+        model_id: Optional[str] = None,
+    ) -> dict:
+        return await _rpc(
+            "probe_agent",
+            {"backend": backend, "model_id": model_id},
+        )
+
+    def get_turn_provenance(self, turn_id: str) -> dict:
+        return _rpc_sync("get_turn_provenance", {"turn_id": turn_id})
+
     async def oauth_start(self, payload: dict) -> dict:
         return await _rpc("oauth_start", {"oauth": payload})
 
@@ -143,3 +179,6 @@ class ModelHubRemoteService:
 
     async def runtime_status(self) -> dict:
         return await _rpc("runtime_status")
+
+    async def runtime_start(self) -> dict:
+        return await _rpc("runtime_start")

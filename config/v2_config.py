@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Mapping, Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
 from config import paths
@@ -30,6 +30,21 @@ logger = logging.getLogger(__name__)
 CONFIG_LOCK = threading.RLock()
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
+
+# Harness run staleness sweep (``docs/plans/agent-run-zombie-settlement.md`` §4.4).
+# How often the sweep may run at all — it rides the scheduler's existing 2 s tick, so
+# this only rate-limits the candidate query.
+DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS = 60
+# How long a ``running`` agent run may have no live owner before it is declared
+# orphaned. Must comfortably exceed the gap between claiming a row and registering the
+# executing turn, so a legitimately-starting run is never swept.
+DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS = 120
+# How long a ``queued`` run may sit while its transport is unavailable. Long enough
+# that a brief IM reconnect just delivers late instead of failing the run.
+DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS = 1800
+# How long a workbench queue hold may go unrefreshed. Deliberately the longest of the
+# three: a session actively recovering its queue keeps touching the row.
+DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS = 3600
 
 # Absolute-time backstop for evicting a Codex transport whose turn is stuck
 # "active" forever (e.g. the ``codex app-server`` wedged or silently
@@ -75,10 +90,25 @@ DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
+# A provider runtime can keep an accepted OpenCode prompt in retry forever without
+# surfacing a terminal message. Bound that lifecycle independently of per-request
+# HTTP timeouts; 90 minutes matches the watchdog threshold reported in #1190 and
+# remains adjustable for workloads that legitimately need longer turns.
+DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 90 * 60
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
 DEFAULT_AGENT_PROGRESS_STYLE = "off"
+MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
+MODEL_HUB_BACKENDS = ("claude", "codex", "opencode")
+MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
+
+
+def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
+    """Return the backend-authoritative Model Hub release capability."""
+
+    source = os.environ if environ is None else environ
+    return source.get(MODEL_HUB_ENABLED_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _validate_optional_datetime(value: object, field_path: str) -> Optional[str]:
@@ -408,6 +438,23 @@ class RuntimeConfig:
     # workload. "auto" enables it only when Avibe can create and write the
     # delegated cgroup; unsupported systems silently fall back to legacy spawn.
     resource_governance: dict = field(default_factory=lambda: {"mode": "auto"})
+    # Harness run staleness sweep. A Run whose executor died, whose transport never
+    # came back, or whose workbench queue hold was never released has nothing left to
+    # write its terminal state, so it would sit ``running``/``queued`` forever. The
+    # sweep terminalizes those on evidence (see
+    # ``docs/plans/agent-run-zombie-settlement.md`` §4). Each key is seconds and ``0``
+    # disables that class; the defaults are the product decision, so there is no UI.
+    harness_run_sweep_interval_seconds: int = DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS
+    harness_run_orphan_grace_seconds: int = DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS
+    harness_run_queued_ttl_seconds: int = DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS
+    harness_run_hold_ttl_seconds: int = DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS
+    # Echo the Harness-originated prompt into the IM conversation when a background
+    # task (scheduled task, watch, webhook, hook, ``vibe agent run``) starts an agent
+    # turn there. The Workbench transcript already renders that prompt from the
+    # ``harness`` Message row; an IM channel had no equivalent, so a scheduled reply
+    # arrived as an answer to a question nobody in the channel could see. Off means
+    # today's behavior (result only).
+    harness_prompt_echo: bool = True
 
 
 @dataclass
@@ -415,9 +462,9 @@ class OpenCodeConfig:
     enabled: bool = True
     cli_path: str = "opencode"
     default_agent: Optional[str] = None
-    default_model: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
+    active_turn_timeout_seconds: int = DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
     # Provider the user picked in Settings → Backends → OpenCode. The provider
     # catalog itself lives in ~/.config/opencode/opencode.json (OpenCode's own
     # state file). Stays ``None`` until the user explicitly chooses so legacy
@@ -431,7 +478,6 @@ class OpenCodeConfig:
 class ClaudeConfig:
     enabled: bool = True
     cli_path: str = "claude"
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" relies on Claude Code's own credential storage;
     # "api_key" injects ANTHROPIC_API_KEY (and optionally ANTHROPIC_BASE_URL)
@@ -456,7 +502,6 @@ class ClaudeConfig:
 class CodexConfig:
     enabled: bool = True
     cli_path: str = "codex"
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" defers to whatever ~/.codex/config.toml already
     # has (typically `auth.method = "ChatGPT"`); "api_key" writes the
@@ -522,7 +567,7 @@ class ModelHubModelConfig:
 
 @dataclass
 class ModelHubSourceStateConfig:
-    status: Literal["active", "standby", "cooldown", "error"] = "standby"
+    status: Literal["active", "standby", "cooldown", "needs_action", "error"] = "standby"
     retry_at: Optional[str] = None
     detail_key: Optional[str] = None
 
@@ -533,10 +578,32 @@ class ModelHubSourceStateConfig:
         status = payload.get("status")
         retry_at = payload.get("retry_at")
         detail_key = payload.get("detail_key")
-        if status not in {"active", "standby", "cooldown", "error"}:
+        if status not in {"active", "standby", "cooldown", "needs_action", "error"}:
             raise ValueError("Config 'model_hub.sources.state.status' is invalid")
         if detail_key is not None and not isinstance(detail_key, str):
             raise ValueError("Config 'model_hub.sources.state.detail_key' must be a string or null")
+        cooldown_keys = {
+            None,
+            "models.source.cooldown.network",
+            "models.source.cooldown.timeout",
+            "models.source.cooldown.rate_limited",
+            "models.source.cooldown.quota_exhausted",
+            "models.source.cooldown.server_error",
+        }
+        needs_action_keys = {
+            "models.source.needs_action.oauth_expired",
+            "models.source.needs_action.balance_exhausted",
+            "models.source.needs_action.credential_revoked",
+            "models.source.needs_action.account_banned",
+        }
+        if status in {"active", "standby"} and (retry_at is not None or detail_key is not None):
+            raise ValueError(f"Config healthy source state '{status}' cannot carry blocker detail")
+        if status == "cooldown" and (retry_at is None or detail_key not in cooldown_keys):
+            raise ValueError("Config cooldown source state requires retry_at and a known detail key")
+        if status == "needs_action" and (retry_at is not None or detail_key not in needs_action_keys):
+            raise ValueError("Config needs_action source state requires a known detail key")
+        if status == "error" and (retry_at is not None or detail_key != "models.source.error.unclassified"):
+            raise ValueError("Config error source state requires the generic error detail key")
         return cls(
             status=status,
             retry_at=_validate_optional_datetime(retry_at, "model_hub.sources.state.retry_at"),
@@ -552,6 +619,7 @@ class ModelHubSourceUsageConfig:
     cycle_used_pct: Optional[float] = None
     month_spend_cents: Optional[int] = None
     currency: Optional[str] = None
+    projected_exhaust_at: Optional[str] = None
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubSourceUsageConfig":
@@ -566,6 +634,7 @@ class ModelHubSourceUsageConfig:
             raise ValueError("Config 'model_hub.sources.usage.cycle_used_pct' must be between 0 and 100")
         month_spend_cents = payload.get("month_spend_cents")
         currency = payload.get("currency")
+        projected_exhaust_at = payload.get("projected_exhaust_at")
         if month_spend_cents is not None and (
             isinstance(month_spend_cents, bool) or not isinstance(month_spend_cents, int) or month_spend_cents < 0
         ):
@@ -576,6 +645,10 @@ class ModelHubSourceUsageConfig:
             cycle_used_pct=cycle_used_pct,
             month_spend_cents=month_spend_cents,
             currency=currency,
+            projected_exhaust_at=_validate_optional_datetime(
+                projected_exhaust_at,
+                "model_hub.sources.usage.projected_exhaust_at",
+            ),
         )
 
     def to_payload(self) -> dict:
@@ -583,6 +656,7 @@ class ModelHubSourceUsageConfig:
             "cycle_used_pct": self.cycle_used_pct,
             "month_spend_cents": self.month_spend_cents,
             "currency": self.currency,
+            "projected_exhaust_at": self.projected_exhaust_at,
         }
 
 
@@ -597,6 +671,8 @@ class ModelHubSourceConfig:
     billing: Literal["monthly", "metered"]
     state: ModelHubSourceStateConfig
     models: list[ModelHubModelConfig]
+    created_at: str = MODEL_HUB_LEGACY_CREATED_AT
+    last_discovered_at: Optional[str] = None
     base_url: Optional[str] = None
     experimental_consent_at: Optional[str] = None
     usage: Optional[ModelHubSourceUsageConfig] = None
@@ -638,6 +714,8 @@ class ModelHubSourceConfig:
         credential_ref = payload.get("credential_ref")
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
+        created_at = payload.get("created_at")
+        last_discovered_at = payload.get("last_discovered_at")
         if base_url is not None and not isinstance(base_url, str):
             raise ValueError("Config 'model_hub.sources.base_url' is invalid")
         if credential_ref is not None and not isinstance(credential_ref, str):
@@ -656,6 +734,17 @@ class ModelHubSourceConfig:
             billing=billing,
             state=ModelHubSourceStateConfig.from_payload(payload.get("state")),
             models=[ModelHubModelConfig.from_payload(model) for model in models_payload],
+            created_at=(
+                _validate_optional_datetime(
+                    created_at,
+                    "model_hub.sources.created_at",
+                )
+                or MODEL_HUB_LEGACY_CREATED_AT
+            ),
+            last_discovered_at=_validate_optional_datetime(
+                last_discovered_at,
+                "model_hub.sources.last_discovered_at",
+            ),
             base_url=base_url,
             experimental_consent_at=_validate_optional_datetime(
                 consent_at,
@@ -670,6 +759,8 @@ class ModelHubSourceConfig:
     def to_payload(self) -> dict:
         payload = {
             "id": self.id,
+            "created_at": self.created_at,
+            "last_discovered_at": self.last_discovered_at,
             "kind": self.kind,
             "vendor": self.vendor,
             "display_name": self.display_name,
@@ -743,10 +834,36 @@ class ModelHubMenuConfig:
 
 
 @dataclass
+class ModelHubAgentSourcesConfig:
+    policy: Literal["follow", "custom"] = "follow"
+    order: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "ModelHubAgentSourcesConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.agents.sources' must be an object")
+        if set(payload) != {"policy", "order"}:
+            raise ValueError("Config 'model_hub.agents.sources' must contain policy and order")
+        policy = payload.get("policy")
+        order = payload.get("order")
+        if policy not in {"follow", "custom"}:
+            raise ValueError("Config 'model_hub.agents.sources.policy' is invalid")
+        if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
+            raise ValueError("Config 'model_hub.agents.sources.order' must be an array of strings")
+        if len(set(order)) != len(order):
+            raise ValueError("Config 'model_hub.agents.sources.order' must be unique")
+        return cls(policy=policy, order=list(order))
+
+    def to_payload(self) -> dict:
+        return {"policy": self.policy, "order": list(self.order)}
+
+
+@dataclass
 class ModelHubAgentSupplyConfig:
     backend: Literal["claude", "codex", "opencode"]
     mode: Literal["hub", "direct"]
     menu_kind: Literal["fixed", "open"]
+    sources: ModelHubAgentSourcesConfig = field(default_factory=ModelHubAgentSourcesConfig)
     mappings: list[ModelHubMappingConfig] = field(default_factory=list)
     menu: Optional[ModelHubMenuConfig] = None
 
@@ -778,6 +895,7 @@ class ModelHubAgentSupplyConfig:
         if not isinstance(mappings_payload, list):
             raise ValueError("Config 'model_hub.agents.mappings' must be an array")
         menu_payload = payload.get("menu")
+        sources_payload = payload.get("sources")
         if backend == "opencode" and menu_payload is None:
             menu_payload = {"view": "featured", "checked": []}
         if backend != "opencode" and menu_payload is not None:
@@ -786,6 +904,11 @@ class ModelHubAgentSupplyConfig:
             backend=backend,
             mode=mode,
             menu_kind=menu_kind,
+            sources=(
+                ModelHubAgentSourcesConfig.from_payload(sources_payload)
+                if sources_payload is not None
+                else ModelHubAgentSourcesConfig()
+            ),
             mappings=[ModelHubMappingConfig.from_payload(mapping) for mapping in mappings_payload],
             menu=ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None,
         )
@@ -795,6 +918,7 @@ class ModelHubAgentSupplyConfig:
             "backend": self.backend,
             "mode": self.mode,
             "menu_kind": self.menu_kind,
+            "sources": self.sources.to_payload(),
             "mappings": [mapping.to_payload() for mapping in self.mappings],
             "menu": self.menu.to_payload() if self.menu else None,
         }
@@ -803,36 +927,63 @@ class ModelHubAgentSupplyConfig:
 @dataclass
 class ModelHubConfig:
     sources: list[ModelHubSourceConfig] = field(default_factory=list)
-    priority_order: list[str] = field(default_factory=list)
     agents: dict[str, ModelHubAgentSupplyConfig] = field(
         default_factory=lambda: {
-            backend: ModelHubAgentSupplyConfig.default(backend, mode="direct")
-            for backend in ("claude", "codex", "opencode")
+            backend: ModelHubAgentSupplyConfig.default(backend, mode="direct") for backend in MODEL_HUB_BACKENDS
         }
     )
     subscription_hub_experimental: bool = False
 
-    @classmethod
-    def fresh(cls) -> "ModelHubConfig":
-        return cls(
-            agents={
-                backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
-                for backend in ("claude", "codex", "opencode")
-            }
-        )
+    @staticmethod
+    def source_eligible_for_backend(
+        source: ModelHubSourceConfig,
+        backend: str,
+    ) -> bool:
+        if backend not in MODEL_HUB_BACKENDS:
+            return False
+        if source.kind == "api_key":
+            return source.supply_channel == "hub"
+        expected_backend = {"anthropic": "claude", "openai": "codex"}.get(source.vendor)
+        return expected_backend == backend
+
+    def recommended_source_order(self, backend: str) -> list[str]:
+        def sort_key(source: ModelHubSourceConfig) -> tuple[object, ...]:
+            if source.kind == "subscription":
+                return (
+                    0,
+                    0 if source.supply_channel == "native_cli" else 1,
+                    source.id,
+                )
+            created_at = datetime.fromisoformat(source.created_at.replace("Z", "+00:00"))
+            return (1, created_at.timestamp(), source.id)
+
+        return [
+            source.id
+            for source in sorted(self.sources, key=sort_key)
+            if self.source_eligible_for_backend(source, backend)
+        ]
+
+    def effective_source_order(self, backend: str) -> list[str]:
+        sources = self.agents[backend].sources
+        if sources.policy == "follow":
+            return self.recommended_source_order(backend)
+        return list(sources.order)
+
+    def refresh_follow_orders(self) -> None:
+        for backend in MODEL_HUB_BACKENDS:
+            sources = self.agents[backend].sources
+            if sources.policy == "follow":
+                sources.order = self.recommended_source_order(backend)
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
         sources_payload = payload.get("sources") or []
-        priority_order = payload.get("priority_order") or []
         agents_payload = payload.get("agents") or {}
         experimental = payload.get("subscription_hub_experimental", False)
         if not isinstance(sources_payload, list):
             raise ValueError("Config 'model_hub.sources' must be an array")
-        if not isinstance(priority_order, list) or not all(isinstance(item, str) for item in priority_order):
-            raise ValueError("Config 'model_hub.priority_order' must be an array of strings")
         if not isinstance(agents_payload, dict):
             raise ValueError("Config 'model_hub.agents' must be an object")
         if not isinstance(experimental, bool):
@@ -841,15 +992,12 @@ class ModelHubConfig:
         source_ids = [source.id for source in sources]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("Config 'model_hub.sources' contains duplicate ids")
-        if len(set(priority_order)) != len(priority_order) or set(priority_order) != set(source_ids):
-            raise ValueError("Config 'model_hub.priority_order' must be a permutation of source ids")
         agents = {
             backend: ModelHubAgentSupplyConfig.from_payload(
-                agents_payload.get(backend)
-                or ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload(),
+                agents_payload.get(backend) or ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload(),
                 expected_backend=backend,
             )
-            for backend in ("claude", "codex", "opencode")
+            for backend in MODEL_HUB_BACKENDS
         }
         for source in sources:
             if source.kind == "subscription" and source.supply_channel == "hub":
@@ -857,18 +1005,39 @@ class ModelHubConfig:
                     raise ValueError("Config hub-held subscription source requires recorded experimental consent")
             elif source.experimental_consent_at is not None:
                 raise ValueError("Config experimental consent is only valid for hub-held subscription sources")
-        return cls(
+        config = cls(
             sources=sources,
-            priority_order=list(priority_order),
             agents=agents,
             subscription_hub_experimental=experimental,
         )
+        for backend in MODEL_HUB_BACKENDS:
+            configured_sources = agents[backend].sources
+            invalid_id = next(
+                (
+                    source_id
+                    for source_id in configured_sources.order
+                    if source_id not in source_ids
+                    or not config.source_eligible_for_backend(
+                        next(source for source in sources if source.id == source_id),
+                        backend,
+                    )
+                ),
+                None,
+            )
+            if invalid_id is not None:
+                raise ValueError(
+                    f"Config 'model_hub.agents.{backend}.sources.order' contains "
+                    f"ineligible or missing source '{invalid_id}'"
+                )
+            if configured_sources.policy == "follow":
+                recommended = config.recommended_source_order(backend)
+                configured_sources.order = recommended
+        return config
 
     def to_payload(self) -> dict:
         return {
             "sources": [source.to_payload() for source in self.sources],
-            "priority_order": list(self.priority_order),
-            "agents": {backend: self.agents[backend].to_payload() for backend in ("claude", "codex", "opencode")},
+            "agents": {backend: self.agents[backend].to_payload() for backend in MODEL_HUB_BACKENDS},
             "subscription_hub_experimental": self.subscription_hub_experimental,
         }
 
@@ -914,6 +1083,11 @@ class VibeCloudRemoteAccessConfig:
     instance_secret: str = ""
     session_secret: str = ""
     cloudflared_path: str = ""
+    transport_protocol: str = "auto"
+    auto_recovery: bool = True
+    optimization_profile: str = "balanced"
+    edge_ip_version: str = "4"
+    edge_bind_address: str = ""
     dev_login_hint: str = ""
 
 
@@ -1173,8 +1347,8 @@ class V2Config:
 
         model_hub_payload = payload.get("model_hub")
         if model_hub_payload is None:
-            # Existing installs predate Model Hub and must remain in Direct mode
-            # until the user explicitly migrates. Fresh defaults seed Hub mode.
+            # Existing installs predate Model Hub and remain in Direct mode until
+            # the user explicitly opts in after the release capability is enabled.
             model_hub = ModelHubConfig()
         else:
             model_hub = ModelHubConfig.from_payload(model_hub_payload)
@@ -1221,6 +1395,54 @@ class V2Config:
                 **_filter_dataclass_fields(VibeCloudRemoteAccessConfig, vibe_cloud_payload)
             ),
         )
+        remote_access.vibe_cloud.transport_protocol = str(
+            remote_access.vibe_cloud.transport_protocol or "auto"
+        ).strip().lower()
+        if remote_access.vibe_cloud.transport_protocol not in {"auto", "quic", "http2"}:
+            raise ValueError(
+                "Config 'remote_access.vibe_cloud.transport_protocol' must be 'auto', 'quic', or 'http2'"
+            )
+        raw_auto_recovery = remote_access.vibe_cloud.auto_recovery
+        if isinstance(raw_auto_recovery, str):
+            remote_access.vibe_cloud.auto_recovery = raw_auto_recovery.strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        else:
+            remote_access.vibe_cloud.auto_recovery = bool(raw_auto_recovery)
+        remote_access.vibe_cloud.optimization_profile = str(
+            remote_access.vibe_cloud.optimization_profile or "balanced"
+        ).strip().lower()
+        if remote_access.vibe_cloud.optimization_profile not in {
+            "stable",
+            "balanced",
+            "low_latency",
+        }:
+            raise ValueError(
+                "Config 'remote_access.vibe_cloud.optimization_profile' must be "
+                "'stable', 'balanced', or 'low_latency'"
+            )
+        remote_access.vibe_cloud.edge_ip_version = str(
+            remote_access.vibe_cloud.edge_ip_version or "4"
+        ).strip().lower()
+        if remote_access.vibe_cloud.edge_ip_version not in {"auto", "4", "6"}:
+            raise ValueError(
+                "Config 'remote_access.vibe_cloud.edge_ip_version' must be 'auto', '4', or '6'"
+            )
+        remote_access.vibe_cloud.edge_bind_address = str(
+            remote_access.vibe_cloud.edge_bind_address or ""
+        ).strip()
+        if remote_access.vibe_cloud.edge_bind_address:
+            try:
+                remote_access.vibe_cloud.edge_bind_address = str(
+                    ipaddress.ip_address(remote_access.vibe_cloud.edge_bind_address)
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "Config 'remote_access.vibe_cloud.edge_bind_address' must be an IP address"
+                ) from exc
 
         audio_asr_payload = payload.get("audio_asr") or {}
         if not isinstance(audio_asr_payload, dict):
@@ -1371,6 +1593,11 @@ class V2Config:
                 "default_cwd": self.runtime.default_cwd,
                 "log_level": self.runtime.log_level,
                 "resource_governance": self.runtime.resource_governance,
+                "harness_run_sweep_interval_seconds": self.runtime.harness_run_sweep_interval_seconds,
+                "harness_run_orphan_grace_seconds": self.runtime.harness_run_orphan_grace_seconds,
+                "harness_run_queued_ttl_seconds": self.runtime.harness_run_queued_ttl_seconds,
+                "harness_run_hold_ttl_seconds": self.runtime.harness_run_hold_ttl_seconds,
+                "harness_prompt_echo": self.runtime.harness_prompt_echo,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,

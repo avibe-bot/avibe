@@ -8,17 +8,20 @@ import threading
 import time
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
-from core.backend_failure import is_backend_failure_notification
 from storage import messages_service, web_push_service
 from storage.models import agent_sessions, messages
+from vibe.message_types import spec_for, types_with
 from vibe.authorization import AuthorizationContext, context_from_session_payload
 
 logger = logging.getLogger(__name__)
 
-_NOTIFIABLE_TYPES = {"result", "error", "notify"}
-_UNREAD_GATED_TYPES = {"result"}
+_NOTIFIABLE_TYPES = {
+    *types_with("webPush"),
+    *types_with("webPushWhenEvents"),
+}
+_UNREAD_GATED_TYPES = set(types_with("unread"))
 WEB_PUSH_NOTIFICATION_DELAY_SECONDS = 3.0
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
@@ -27,9 +30,13 @@ WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
 
 def _is_notifiable_message(message_type: Any, metadata: Any = None) -> bool:
     normalized_type = str(message_type or "").strip()
-    return normalized_type in {"result", "error"} or is_backend_failure_notification(
-        normalized_type,
-        metadata,
+    spec = spec_for(normalized_type)
+    return bool(
+        spec["webPush"]
+        or (
+            isinstance(metadata, dict)
+            and metadata.get("event") in spec["webPushWhenEvents"]
+        )
     )
 
 
@@ -59,8 +66,21 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
         return
     if not _is_notifiable_message(message.get("type"), message.get("metadata")):
         return
-    if not message.get("session_id"):
-        return
+
+    # ``session_id`` used to be a hard requirement, which made this the LAST rung of
+    # the failure-notification ladder to be empty rather than the one that always
+    # resolves. A definition created from a plain CLI invocation has no caller
+    # provenance at all (``_session_creation_metadata_from_caller`` returns ``{}``
+    # for a ``None`` caller), so it has no channel to fall back to and no user to DM;
+    # an unscoped ``create_per_run`` definition can have no delivery key either. For
+    # such a definition every earlier rung is empty, and a notice with nowhere to go
+    # is a notice that is never written — for exactly the runs nobody is watching.
+    #
+    # A workspace-addressed notice needs no session because it is addressed to the
+    # workspace. Where a session IS named the deep link still points at it.
+    session_id = message.get("session_id")
+    url = f"/chat/{session_id}" if session_id else "/harness"
+    tag = f"session:{session_id}" if session_id else "harness:failure"
 
     # ``badge_count`` is computed per subscription owner at send time, not from
     # this one session's unread count. That keeps it current after the debounce
@@ -68,10 +88,10 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
     payload = {
         "title": inbox_row.get("title") or inbox_row.get("project_name") or "avibe",
         "body": (message.get("text") or inbox_row.get("preview_text") or "").strip()[:240],
-        "url": f"/chat/{message['session_id']}",
-        "tag": f"session:{message['session_id']}",
+        "url": url,
+        "tag": tag,
         "message_id": message.get("id"),
-        "session_id": message.get("session_id"),
+        "session_id": session_id,
     }
     thread = threading.Thread(target=_send_to_enabled_subscriptions, args=(payload,), daemon=True)
     thread.start()
@@ -138,6 +158,7 @@ def web_push_authorization_context_record(
         "vibe_organization_member_id": context.organization_member_id,
         "vibe_organization_role": context.organization_role,
         "vibe_membership_version": context.membership_version,
+        "vibe_instance_authorization_revision": context.authorization_revision,
     }
     record.update({key: value for key, value in optional_claims.items() if value is not None})
     return record
@@ -149,6 +170,15 @@ def _metadata_authorization_contexts(metadata: dict[str, Any]) -> dict[str, Auth
     raw_contexts = metadata.get(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA)
     if not isinstance(raw_contexts, list):
         return {}
+    try:
+        from core.services import settings as settings_service
+
+        config = settings_service.load_config()
+    except FileNotFoundError:
+        config = None
+    except Exception:
+        logger.debug("web push: could not load authorization revision config", exc_info=True)
+        return {}
     contexts: dict[str, AuthorizationContext] = {}
     for raw_context in raw_contexts:
         if not isinstance(raw_context, dict):
@@ -157,6 +187,13 @@ def _metadata_authorization_contexts(metadata: dict[str, Any]) -> dict[str, Auth
         if not isinstance(user_key, str) or not user_key.startswith("remote:"):
             continue
         if remote_access.session_needs_authorization_refresh(raw_context):
+            continue
+        if config is not None:
+            if not remote_access.session_authorization_is_current(config, raw_context):
+                continue
+        elif raw_context.get("vibe_instance_authorization_revision") is not None:
+            # A signed revision cannot be validated without the paired-device
+            # configuration and fresh local watermark.
             continue
         context = context_from_session_payload(raw_context)
         if context.subject and user_key == f"remote:{context.subject}" and context.can_read_instance:
@@ -181,7 +218,7 @@ def _web_push_owner_metadata_for_message(
     agent_row = conn.execute(
         select(
             messages.c.session_id,
-            messages.c.created_at,
+            messages_service.transcript_order_value(messages).label("transcript_at"),
             messages.c.id,
             messages.c.type,
             messages.c.metadata_json,
@@ -196,7 +233,9 @@ def _web_push_owner_metadata_for_message(
         _parse_metadata(agent_row[4]),
     ):
         return None, {}
-    session_id, created_at, row_id = agent_row[0], agent_row[1], agent_row[2]
+    session_id, transcript_at, row_id = agent_row[0], agent_row[1], agent_row[2]
+
+    user_order = messages_service.transcript_order_value(messages)
 
     user_rows = conn.execute(
         select(messages.c.metadata_json)
@@ -212,10 +251,12 @@ def _web_push_owner_metadata_for_message(
             )
         )
         .where(
-            (messages.c.created_at < created_at)
-            | ((messages.c.created_at == created_at) & (messages.c.id < row_id))
+            or_(
+                user_order < transcript_at,
+                and_(user_order == transcript_at, messages.c.id < row_id),
+            )
         )
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(user_order.desc(), messages.c.id.desc())
     ).all()
     for user_row in user_rows:
         try:

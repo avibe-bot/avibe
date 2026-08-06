@@ -12,10 +12,10 @@ on:
         required: true
         type: string
       model:
-        description: "OpenAI model (default: gpt-5.5)"
+        description: "OpenAI model (default: gpt-5.6-sol)"
         required: false
         type: string
-        default: "gpt-5.5"
+        default: "gpt-5.6-sol"
       max_commits:
         description: "Max commits to summarize"
         required: false
@@ -379,7 +379,7 @@ jobs:
         id: notes
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ github.event.inputs.model || 'gpt-5.5' }}
+          OPENAI_MODEL: ${{ github.event.inputs.model || 'gpt-5.6-sol' }}
           TAG: ${{ steps.tag.outputs.tag }}
           RANGE: ${{ steps.commits.outputs.range }}
           COMMIT_COUNT: ${{ steps.commits.outputs.commit_count }}

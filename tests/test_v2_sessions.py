@@ -180,6 +180,33 @@ def test_active_poll_persists_typing_cleanup_context(tmp_path, monkeypatch):
     assert poll.reasoning_effort == "high"
 
 
+def test_active_poll_records_native_prompt_acceptance_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    store = SessionsStore()
+    sessions = SessionsFacade(store)
+    sessions.add_active_poll(
+        opencode_session_id="oc-accepted",
+        base_session_id="base",
+        channel_id="channel",
+        thread_id="thread",
+        settings_key="channel",
+        working_path="/tmp/work",
+        baseline_message_ids=[],
+        prompt_started_at=None,
+    )
+
+    sessions.update_active_poll_state(
+        "oc-accepted",
+        prompt_started_at=1234.5,
+    )
+
+    reloaded = SessionsStore()
+    reloaded.load()
+    poll = reloaded.get_active_poll("oc-accepted")
+    assert poll is not None
+    assert poll.prompt_started_at == 1234.5
+
+
 # --- session_mappings migration tests ---
 
 

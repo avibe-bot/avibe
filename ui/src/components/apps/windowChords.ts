@@ -27,3 +27,89 @@ export function inTextEntrySurface(el: Element | null): boolean {
     'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], .monaco-editor, .xterm',
   );
 }
+
+/**
+ * Bind one chord to a mounted same-origin iframe's own document.
+ *
+ * A keydown inside an iframe never reaches the parent window, so every parent-level
+ * chord is dead while the frame has focus unless it is bound here too. `match` is
+ * given the event and the frame's focused element (its realm, hence the duck-typed
+ * predicates above); returning true consumes the key and runs `run`.
+ */
+export function bindFrameChord(
+  iframe: HTMLIFrameElement,
+  match: (event: KeyboardEvent, activeInFrame: Element | null) => boolean,
+  run: () => void,
+): () => void {
+  const onKeyDown = (event: KeyboardEvent) => {
+    let active: Element | null = null;
+    try {
+      active = iframe.contentDocument?.activeElement ?? null;
+    } catch {
+      active = null;
+    }
+    if (!match(event, active)) return;
+    event.preventDefault();
+    run();
+  };
+
+  const attach = () => {
+    try {
+      // The WindowProxy can survive navigation, so remove before every load-time
+      // attach to keep exactly one capture listener on the active document.
+      iframe.contentWindow?.removeEventListener('keydown', onKeyDown, true);
+      iframe.contentWindow?.addEventListener('keydown', onKeyDown, true);
+    } catch {
+      // Cross-origin frames are not expected for the private Show Page surface.
+    }
+  };
+
+  attach();
+  iframe.addEventListener('load', attach);
+  return () => {
+    iframe.removeEventListener('load', attach);
+    try {
+      iframe.contentWindow?.removeEventListener('keydown', onKeyDown, true);
+    } catch {
+      // The frame may already be torn down.
+    }
+  };
+}
+
+/** Bind the browser-safe close chord to one mounted same-origin Show Page frame. */
+export function bindShowPageFrameCloseShortcut(
+  iframe: HTMLIFrameElement,
+  onClose: () => void,
+): () => void {
+  return bindFrameChord(
+    iframe,
+    (event, active) =>
+      event.code === 'KeyW' &&
+      event.altKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.shiftKey &&
+      !inTextEntrySurface(active),
+    onClose,
+  );
+}
+
+/** Resolve focused window chrome, including controls rendered in a body portal. */
+export function windowIdForKeyboardTarget(target: Element | null, layer: Element | null): string | null {
+  if (!target || !layer) return null;
+
+  const windowRoot = target.closest?.('[data-window-id]');
+  if (windowRoot && layer.contains(windowRoot)) {
+    return windowRoot.getAttribute('data-window-id');
+  }
+
+  const portalledRoot = target.closest?.('[data-window-owner-id]');
+  const ownerId = portalledRoot?.getAttribute('data-window-owner-id');
+  if (!ownerId) return null;
+
+  // A data attribute outside this layer cannot nominate an arbitrary window.
+  for (const candidate of layer.querySelectorAll('[data-window-id]')) {
+    if (candidate.getAttribute('data-window-id') === ownerId) return ownerId;
+  }
+  return null;
+}

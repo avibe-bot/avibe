@@ -16,7 +16,7 @@ from typing import Any
 
 from config import paths
 from core.git_binary import ResolvedGit, resolve_git
-from vibe.message_identity import HARNESS_TYPE
+from vibe.message_types import input_author_type_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,20 @@ _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _MAIN_ANCHOR_REF = "refs/avibe/checkpoint-main"
 _TURN_STATE_KEY = "_avibe_show_git_checkpoint"
 _CHECKPOINT_STATUS_VERSION = 1
+TURN_CHECKPOINT_INPUT_AUTHOR_TYPES = (
+    *input_author_type_pairs(),
+    ("user", "pending"),
+    ("harness", "pending"),
+)
+TURN_CHECKPOINT_INPUT_TYPES = tuple(
+    dict.fromkeys(
+        message_type
+        for _author, message_type in TURN_CHECKPOINT_INPUT_AUTHOR_TYPES
+    )
+)
+_TURN_CHECKPOINT_INPUT_AUTHOR_TYPE_SET = frozenset(
+    TURN_CHECKPOINT_INPUT_AUTHOR_TYPES
+)
 _checkpoint_service_active: bool | None = None
 _SCRUBBED_GIT_ENV = {
     "GIT_DIR",
@@ -53,6 +67,9 @@ _SCRUBBED_GIT_ENV = {
     "GIT_COMMITTER_DATE",
     "EMAIL",
 }
+_INPUT_TURN_MESSAGE_TYPES = tuple(
+    dict.fromkeys(message_type for _, message_type in input_author_type_pairs())
+)
 
 SHOW_GIT_AGENT_CONTRACT = (
     "History is saved automatically around each turn; do not manage versions yourself.",
@@ -80,12 +97,14 @@ class TurnCheckpointContext:
     message: str = ""
     run_id: str | None = None
     message_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
 class _ActiveTurnCheckpoint:
     context: TurnCheckpointContext
     started_at: str
+    turn_id: str | None = None
 
 
 def _record_checkpoint_service_state(active: bool) -> None:
@@ -241,16 +260,135 @@ def _run_id_from_native_message_id(value: Any) -> str | None:
     return run_id or None
 
 
-def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -> TurnCheckpointContext:
+def _delivery_snapshot_text(value: Any) -> str:
+    try:
+        snapshot = json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(snapshot, dict):
+        return ""
+    return _read_message_text(
+        snapshot.get("content_text"),
+        snapshot.get("content_json"),
+    )
+
+
+def load_turn_checkpoint_context(
+    session_id: str,
+    *,
+    turn_id: str | None = None,
+    after: str | None = None,
+) -> TurnCheckpointContext:
     """Read the driving message/run without changing the turn event payload."""
 
     try:
-        from sqlalchemy import select
+        from sqlalchemy import func, select, tuple_
 
         from storage.db import get_cached_sqlite_engine
-        from storage.models import agent_runs, messages
+        from storage.messages_service import transcript_order_value
+        from storage.models import (
+            agent_runs,
+            message_deliveries,
+            messages,
+            session_turns,
+        )
 
         with get_cached_sqlite_engine().connect() as conn:
+            turn_query = select(
+                session_turns.c.id,
+                session_turns.c.initial_delivery_id,
+                session_turns.c.created_at,
+                session_turns.c.started_at,
+            ).where(session_turns.c.session_id == session_id)
+            if turn_id:
+                turn_query = turn_query.where(session_turns.c.id == turn_id).limit(1)
+            elif after is None:
+                turn_query = (
+                    turn_query.where(session_turns.c.state.in_(("starting", "active")))
+                    .order_by(
+                        func.coalesce(
+                            session_turns.c.started_at,
+                            session_turns.c.created_at,
+                        ).desc(),
+                        session_turns.c.id.desc(),
+                    )
+                    .limit(1)
+                )
+            else:
+                turn_query = (
+                    turn_query.where(
+                        func.coalesce(
+                            session_turns.c.started_at,
+                            session_turns.c.created_at,
+                        )
+                        >= after
+                    )
+                    .order_by(
+                        func.coalesce(
+                            session_turns.c.started_at,
+                            session_turns.c.created_at,
+                        ).asc(),
+                        session_turns.c.id.asc(),
+                    )
+                    .limit(1)
+                )
+            turn = conn.execute(turn_query).first()
+            if turn is not None:
+                delivery = conn.execute(
+                    select(
+                        message_deliveries.c.id,
+                        message_deliveries.c.message_id,
+                        message_deliveries.c.snapshot_json,
+                    )
+                    .where(
+                        message_deliveries.c.id == turn.initial_delivery_id
+                    )
+                    .limit(1)
+                ).first()
+                if delivery is not None:
+                    run_id = conn.execute(
+                        select(agent_runs.c.id)
+                        .where(agent_runs.c.delivery_id == delivery.id)
+                        .where(agent_runs.c.run_type != "watch_runtime")
+                        .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if delivery.message_id:
+                        message_row = conn.execute(
+                            select(
+                                messages.c.id,
+                                messages.c.author,
+                                messages.c.type,
+                                messages.c.content_text,
+                                messages.c.content_json,
+                                messages.c.native_message_id,
+                            )
+                            .where(messages.c.id == delivery.message_id)
+                            .limit(1)
+                        ).first()
+                        if message_row is not None:
+                            return TurnCheckpointContext(
+                                message=_read_message_text(
+                                    message_row.content_text,
+                                    message_row.content_json,
+                                ),
+                                run_id=(
+                                    str(run_id)
+                                    if run_id is not None
+                                    else _run_id_from_native_message_id(
+                                        message_row.native_message_id
+                                    )
+                                ),
+                                message_id=str(message_row.id),
+                                turn_id=str(turn.id),
+                            )
+                    return TurnCheckpointContext(
+                        message=_delivery_snapshot_text(delivery.snapshot_json),
+                        run_id=str(run_id) if run_id is not None else None,
+                        message_id=str(delivery.id),
+                        turn_id=str(turn.id),
+                    )
+
             active_run = conn.execute(
                 select(agent_runs.c.id, agent_runs.c.message, agent_runs.c.prompt)
                 .where(agent_runs.c.session_id == session_id)
@@ -266,26 +404,34 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
 
             message_query = select(
                 messages.c.id,
+                messages.c.author,
                 messages.c.type,
                 messages.c.content_text,
                 messages.c.content_json,
                 messages.c.native_message_id,
             ).where(messages.c.session_id == session_id)
+            message_order = transcript_order_value(messages)
             if after is None:
-                message_query = (
-                    message_query.where(messages.c.type.not_in(("queued", "draft", "harness_dedupe")))
-                    .order_by(messages.c.created_at.desc(), messages.c.id.desc())
-                    .limit(1)
-                )
+                message_query = message_query.order_by(
+                    message_order.desc(), messages.c.id.desc()
+                ).limit(1)
             else:
                 message_query = (
-                    message_query.where(messages.c.type.in_(("user", "pending", HARNESS_TYPE)))
-                    .where(messages.c.created_at >= after)
-                    .order_by(messages.c.created_at.asc(), messages.c.id.asc())
+                    message_query.where(
+                        tuple_(messages.c.author, messages.c.type).in_(
+                            TURN_CHECKPOINT_INPUT_AUTHOR_TYPES
+                        )
+                    )
+                    .where(message_order >= after)
+                    .order_by(message_order.asc(), messages.c.id.asc())
                     .limit(1)
                 )
             message_row = conn.execute(message_query).first()
-            if message_row is None or message_row.type not in {"user", "pending", HARNESS_TYPE}:
+            if (
+                message_row is None
+                or (message_row.author, message_row.type)
+                not in _TURN_CHECKPOINT_INPUT_AUTHOR_TYPE_SET
+            ):
                 return TurnCheckpointContext()
             return TurnCheckpointContext(
                 message=_read_message_text(message_row.content_text, message_row.content_json),
@@ -709,7 +855,11 @@ class ShowGitCheckpointService:
         # Workbench and /internal/dispatch may already have published their UI
         # lifecycle before backend execution reached this shared boundary.
         if owns_bus_lifecycle:
-            self._bus.publish("turn.start", {"session_id": session_id})
+            turn_id = str(payload.get("turn_token") or "").strip()
+            event = {"session_id": session_id}
+            if turn_id:
+                event["turn_id"] = turn_id
+            self._bus.publish("turn.start", event)
 
     def end_turn(self, context: Any) -> None:
         """Publish checkpoint end from the shared terminal-result boundary."""
@@ -725,7 +875,11 @@ class ShowGitCheckpointService:
         payload[_TURN_STATE_KEY] = {**state, "ended": True, "message_linked": message_linked}
         context.platform_specific = payload
         if session_id and (not state.get("start_observed") or state.get("owns_bus_lifecycle")):
-            self._bus.publish("turn.end", {"session_id": session_id})
+            turn_id = str(payload.get("turn_token") or "").strip()
+            event = {"session_id": session_id}
+            if turn_id:
+                event["turn_id"] = turn_id
+            self._bus.publish("turn.end", event)
 
     def _handle_event(self, event_type: str, data: Any) -> None:
         if event_type not in {"turn.start", "turn.end"} or not isinstance(data, dict):
@@ -744,21 +898,43 @@ class ShowGitCheckpointService:
         try:
             if event_type == "turn.start":
                 started_at = datetime.now(timezone.utc).isoformat()
-                context = load_turn_checkpoint_context(session_id)
-                self._active_turns[session_id] = _ActiveTurnCheckpoint(context=context, started_at=started_at)
+                turn_id = str(data.get("turn_id") or "").strip() or None
+                context = (
+                    load_turn_checkpoint_context(session_id, turn_id=turn_id)
+                    if turn_id
+                    else load_turn_checkpoint_context(session_id)
+                )
+                self._active_turns[session_id] = _ActiveTurnCheckpoint(
+                    context=context,
+                    started_at=started_at,
+                    turn_id=turn_id or context.turn_id,
+                )
                 self._repository(session_id).checkpoint(PRE_TURN, run_id=context.run_id)
                 return
 
             active = self._active_turns.pop(session_id, None)
             if active is None:
-                context = load_turn_checkpoint_context(session_id)
+                turn_id = str(data.get("turn_id") or "").strip() or None
+                context = (
+                    load_turn_checkpoint_context(session_id, turn_id=turn_id)
+                    if turn_id
+                    else load_turn_checkpoint_context(session_id)
+                )
                 start_context = TurnCheckpointContext()
             else:
                 start_context = active.context
                 context = (
                     TurnCheckpointContext()
                     if start_context.message_id is not None
-                    else load_turn_checkpoint_context(session_id, after=active.started_at)
+                    else load_turn_checkpoint_context(
+                        session_id,
+                        turn_id=active.turn_id,
+                    )
+                    if active.turn_id
+                    else load_turn_checkpoint_context(
+                        session_id,
+                        after=active.started_at,
+                    )
                 )
             run_id = start_context.run_id or context.run_id
             self._repository(session_id).checkpoint(

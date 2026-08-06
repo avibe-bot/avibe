@@ -46,6 +46,15 @@ export function showPagePrivatePath(sessionId: string): string {
   return `/show/${encodeURIComponent(sessionId)}/`;
 }
 
+/** Mark a local Show Page route as framed by a parent-owned annotation control.
+ * The injected overlay reads this parameter to hide its standalone floating FAB
+ * and accept control messages from the workbench host instead. */
+export function showPageEmbeddedPath(path: string): string {
+  const url = new URL(path, 'http://avibe.local');
+  url.searchParams.set('vibe-embed', '1');
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
 /** The URL for a page's own HTML icon, served by the dedicated
  *  `GET /api/show-pages/<sid>/icon` endpoint (§7.1f). ALL href resolution + policy
  *  lives server-side; the URL carries the session id in the PATH plus the

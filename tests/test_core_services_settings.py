@@ -59,6 +59,11 @@ def test_default_config_is_fresh_and_needs_setup():
     # default leaking in and persisting a phantom Slack transport on skip.
     assert config.platforms.enabled == []
     assert config.platforms.primary == "avibe"
+    assert {agent.mode for agent in config.model_hub.agents.values()} == {"direct"}
+
+    from vibe.runtime import default_config as runtime_default_config
+
+    assert {agent.mode for agent in runtime_default_config().model_hub.agents.values()} == {"direct"}
 
 
 def test_load_config_or_default_returns_default_without_persisting(isolated_state, tmp_path):

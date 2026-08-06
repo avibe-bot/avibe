@@ -34,6 +34,7 @@ from config.v2_settings import (
     GuildSettings,
     UserSettings,
     RoutingSettings,
+    _UNSET_AGENT_BINDING,
     normalize_show_message_types,
     _parse_routing,
     _routing_to_dict,
@@ -68,6 +69,10 @@ from modules.agents.catalog import (
 )
 from modules.agents.subagent_router import list_codex_subagents
 from core.vibe_agents import (
+    AgentArchivedEditError,
+    AgentArchiveError,
+    AgentNameValidationError,
+    AgentReferenceRewriteError,
     VibeAgentAccessError,
     VibeAgentStore,
     iter_global_agent_files,
@@ -829,9 +834,88 @@ def _validate_enabled_platform_runtime_credentials(
             raise ValueError(f"Config '{fields_text}' must be provided when {platform} is enabled")
 
 
-def save_config(payload: dict, *, allow_memory: bool = False) -> V2Config:
-    """Save general settings while preserving Memory's dedicated settings block."""
+def _remote_access_network_signature(config: V2Config | None) -> tuple[str, str]:
+    if config is None:
+        return ("4", "")
+    cloud = config.remote_access.vibe_cloud
+    return (
+        str(cloud.edge_ip_version or "4").strip().lower(),
+        str(cloud.edge_bind_address or "").strip(),
+    )
 
+
+_REMOTE_ACCESS_CONNECTOR_CONTROL_FIELDS = (
+    "transport_protocol",
+    "edge_ip_version",
+    "edge_bind_address",
+)
+
+
+def _remote_access_connector_control_signature(config: V2Config | None) -> tuple[str, str, str]:
+    if config is None:
+        return ("auto", "4", "")
+    cloud = config.remote_access.vibe_cloud
+    return (
+        str(cloud.transport_protocol or "auto").strip().lower(),
+        str(cloud.edge_ip_version or "4").strip().lower(),
+        str(cloud.edge_bind_address or "").strip(),
+    )
+
+
+def remote_access_runtime_changed(previous: V2Config | None, current: V2Config) -> bool:
+    """Return whether a generic config save must reconcile the Connector runtime."""
+
+    if previous is None:
+        return bool(current.remote_access.vibe_cloud.enabled)
+
+    def signature(config: V2Config) -> tuple[object, ...]:
+        cloud = config.remote_access.vibe_cloud
+        return (
+            config.remote_access.provider,
+            bool(cloud.enabled),
+            str(cloud.public_url or ""),
+            str(cloud.tunnel_token or ""),
+            str(cloud.cloudflared_path or ""),
+            *_remote_access_connector_control_signature(config),
+        )
+
+    return signature(previous) != signature(current)
+
+
+def _validate_remote_access_network_change(
+    config: V2Config,
+    base_config: V2Config | None,
+    *,
+    require_current_binding: bool = False,
+) -> None:
+    if (
+        not require_current_binding
+        and _remote_access_network_signature(config) == _remote_access_network_signature(base_config)
+    ):
+        return
+    from vibe import remote_access
+
+    error = remote_access.edge_binding_error(config)
+    if error == "edge_bind_address_unavailable":
+        raise ValueError(
+            "Config 'remote_access.vibe_cloud.edge_bind_address' must be assigned "
+            "to an active network interface"
+        )
+    if error == "edge_bind_address_family_mismatch":
+        raise ValueError(
+            "Config 'remote_access.vibe_cloud.edge_bind_address' must match "
+            "'remote_access.vibe_cloud.edge_ip_version'"
+        )
+
+
+def save_config(
+    payload: dict,
+    *,
+    allow_memory: bool = False,
+    validate_remote_access_network: bool = True,
+    generic_remote_access: bool = False,
+) -> V2Config:
+    """Save general settings while preserving Memory's dedicated settings block."""
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
 
@@ -880,6 +964,30 @@ def save_config(payload: dict, *, allow_memory: bool = False) -> V2Config:
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        connector_controls_changed = (
+            base_config is not None
+            and _remote_access_connector_control_signature(config)
+            != _remote_access_connector_control_signature(base_config)
+        )
+        if generic_remote_access and connector_controls_changed:
+            fields = "', '".join(
+                f"remote_access.vibe_cloud.{field}"
+                for field in _REMOTE_ACCESS_CONNECTOR_CONTROL_FIELDS
+            )
+            raise ValueError(
+                f"Config '{fields}' must be changed through "
+                "'/api/remote-access/settings'"
+            )
+        if validate_remote_access_network:
+            _validate_remote_access_network_change(
+                config,
+                base_config,
+                require_current_binding=(
+                    generic_remote_access
+                    and config.remote_access.vibe_cloud.enabled
+                    and remote_access_runtime_changed(base_config, config)
+                ),
+            )
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         if guild_scope_update is not None:
             _save_discord_guild_scope_update(*guild_scope_update)
@@ -1039,6 +1147,17 @@ def config_to_payload(
             "default_cwd": config.runtime.default_cwd,
             "log_level": config.runtime.log_level,
             "resource_governance": config.runtime.resource_governance,
+            # The config-only Harness knobs have no UI, but this payload IS the
+            # deep-merge base every ``/api/config`` save builds on: a key omitted here
+            # is absent from the merged payload, so ``from_payload`` rebuilds
+            # ``RuntimeConfig`` with the dataclass default and silently reverts the
+            # on-disk value (a ``harness_prompt_echo: false`` opt-out would come back
+            # enabled after any unrelated settings save — Codex P1).
+            "harness_prompt_echo": config.runtime.harness_prompt_echo,
+            "harness_run_sweep_interval_seconds": config.runtime.harness_run_sweep_interval_seconds,
+            "harness_run_orphan_grace_seconds": config.runtime.harness_run_orphan_grace_seconds,
+            "harness_run_queued_ttl_seconds": config.runtime.harness_run_queued_ttl_seconds,
+            "harness_run_hold_ttl_seconds": config.runtime.harness_run_hold_ttl_seconds,
         },
         "agents": {
             "opencode": config.agents.opencode.__dict__,
@@ -1111,6 +1230,39 @@ def client_config_payload(config: V2Config) -> dict:
     payload = config_to_payload(config)
     payload.pop("memory", None)
     return payload
+
+
+_REMOTE_CONFIG_UI_FIELDS = (
+    "instance_name",
+    "default_instance_name",
+    "chat_message_font_size",
+    "show_agent_activity",
+    "show_tool_calls",
+)
+
+
+def remote_config_payload(config: V2Config) -> dict:
+    """Return the explicit remote-safe projection of generic configuration.
+
+    Instance role determines which remote routes a caller may use, but it does
+    not make the caller trusted to inspect local filesystem layout, executable
+    paths, or runtime configuration. Keep this as an allowlist so new local
+    settings remain local by default.
+    """
+
+    payload = client_config_payload(config)
+    ui_payload = payload.get("ui")
+    return {
+        "mode": payload.get("mode"),
+        "version": payload.get("version"),
+        "setup_state": payload.get("setup_state"),
+        "language": payload.get("language"),
+        "ui": {
+            key: ui_payload[key]
+            for key in _REMOTE_CONFIG_UI_FIELDS
+            if isinstance(ui_payload, dict) and key in ui_payload
+        },
+    }
 
 
 def _merge_legacy_discord_guild_scope_fields(
@@ -1444,11 +1596,14 @@ def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
         return {
             "id": payload["id"],
             "name": payload["name"],
+            "display_name": payload["display_name"],
             "description": payload["description"],
             "backend": payload["backend"],
             "model": payload["model"],
             "reasoning_effort": payload["reasoning_effort"],
             "enabled": payload["enabled"],
+            "archived": payload["archived"],
+            "archived_at": payload["archived_at"],
             "source": payload["source"],
             "updated_at": payload["updated_at"],
         }
@@ -1464,13 +1619,22 @@ def _parse_agent_enabled_field(payload: dict, *, default: Optional[bool] = None)
     raise ValueError("Agent enabled must be a JSON boolean")
 
 
-def get_vibe_agents(*, backend: Optional[str] = None, include_disabled: bool = False) -> dict:
+def get_vibe_agents(
+    *,
+    backend: Optional[str] = None,
+    include_disabled: bool = False,
+    include_archived: bool = False,
+) -> dict:
     _ensure_builtin_default_agents()
     user_context = resolve_resource_access_context()
     store = VibeAgentStore()
     try:
         normalized_backend = validate_agent_backend(backend) if backend else None
-        agents = store.list_agents(include_disabled=include_disabled, user_context=user_context)
+        agents = store.list_agents(
+            include_disabled=include_disabled,
+            include_archived=include_archived,
+            user_context=user_context,
+        )
         if normalized_backend:
             agents = [agent for agent in agents if agent.backend == normalized_backend]
         default_agent = store.get_default_agent()
@@ -1607,17 +1771,20 @@ def create_vibe_agent(payload: dict) -> dict:
         raise ValueError("Agent metadata must be an object")
     store = VibeAgentStore()
     try:
-        agent = store.create(
-            name=str(payload.get("name") or "").strip(),
-            backend=validate_agent_backend(str(payload.get("backend") or "")),
-            description=payload.get("description"),
-            model=payload.get("model"),
-            reasoning_effort=payload.get("reasoning_effort") or payload.get("effort"),
-            system_prompt=payload.get("system_prompt"),
-            metadata=metadata,
-            enabled=_parse_agent_enabled_field(payload, default=True),
-            user_context=resolve_resource_access_context(),
-        )
+        try:
+            agent = store.create(
+                name=str(payload.get("name") or "").strip(),
+                backend=validate_agent_backend(str(payload.get("backend") or "")),
+                description=payload.get("description"),
+                model=payload.get("model"),
+                reasoning_effort=payload.get("reasoning_effort") or payload.get("effort"),
+                system_prompt=payload.get("system_prompt"),
+                metadata=metadata,
+                enabled=_parse_agent_enabled_field(payload, default=True),
+                user_context=resolve_resource_access_context(),
+            )
+        except AgentNameValidationError as exc:
+            return _agent_name_validation_error(exc)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
         store.close()
@@ -1626,8 +1793,6 @@ def create_vibe_agent(payload: dict) -> dict:
 def update_vibe_agent(name: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
-    if "name" in payload and str(payload.get("name") or "").strip() and str(payload.get("name")).strip() != name:
-        raise ValueError("Agent name is immutable")
     if "backend" in payload:
         raise ValueError("Agent backend is immutable")
 
@@ -1662,16 +1827,73 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
     unknown = sorted(set(payload) - allowed_fields - {"name"})
     if unknown:
         raise ValueError(f"Unsupported Agent fields: {', '.join(unknown)}")
-    if not kwargs:
+    new_name = str(payload.get("name") or "").strip() if "name" in payload else ""
+    renaming = bool(new_name and new_name != name)
+    if renaming and kwargs:
+        raise ValueError("Agent rename cannot be combined with other field updates")
+    if not kwargs and not renaming:
         raise ValueError("No editable Agent fields were provided")
 
     store = VibeAgentStore()
     try:
         context = resolve_resource_access_context()
-        agent = store.update(name, user_context=context, **kwargs)
+        try:
+            agent = (
+                store.rename(name, new_name, user_context=context)
+                if renaming
+                else store.update(name, user_context=context, **kwargs)
+            )
+        except AgentNameValidationError as exc:
+            return _agent_name_validation_error(exc)
+        except AgentArchivedEditError as exc:
+            return _agent_archived_edit_error(exc)
+        except AgentReferenceRewriteError as exc:
+            return _agent_reference_rewrite_error(exc)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
         store.close()
+
+
+def _agent_name_validation_error(exc: AgentNameValidationError) -> dict:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentNameValidation.{exc.code}"
+    return {
+        "ok": False,
+        "code": exc.code,
+        "message": backend_t(f"{key}.message", lang, agent=exc.agent_name),
+        "hint": backend_t(f"{key}.hint", lang, agent=exc.agent_name),
+    }
+
+
+def _agent_archived_edit_error(exc: AgentArchivedEditError) -> dict:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
+    return {
+        "ok": False,
+        "code": exc.code,
+        "message": backend_t(f"{key}.message", lang, agent=exc.agent_name),
+        "hint": backend_t(f"{key}.hint", lang, agent=exc.agent_name),
+    }
+
+
+def _agent_reference_rewrite_error(exc: AgentReferenceRewriteError) -> dict:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
+    return {
+        "ok": False,
+        "code": exc.code,
+        "message": backend_t(f"{key}.message", lang),
+        "hint": backend_t(f"{key}.hint", lang),
+    }
 
 
 def remove_vibe_agent(name: str) -> dict:
@@ -1679,25 +1901,33 @@ def remove_vibe_agent(name: str) -> dict:
     try:
         context = resolve_resource_access_context()
         store.require_manageable(name, user_context=context)
-        counts = store.reference_counts(name)
-        if any(counts.values()):
-            return {
-                "ok": False,
-                "code": "agent_in_use",
-                "message": f"agent '{name}' is still referenced",
-                "references": counts,
-            }
         try:
-            removed = store.remove(name, user_context=context)
-        except ValueError as exc:
+            archived = store.archive(name, user_context=context)
+        except AgentArchiveError as exc:
+            try:
+                lang = V2Config.load().language
+            except Exception:
+                lang = "en"
             return {
                 "ok": False,
-                "code": "agent_builtin",
-                "message": str(exc),
+                "code": exc.code,
+                "message": backend_t(
+                    f"error.agentArchive.{exc.code}.message",
+                    lang,
+                    agent=exc.agent_name,
+                ),
             }
-        if not removed:
+        except AgentReferenceRewriteError as exc:
+            return _agent_reference_rewrite_error(exc)
+        if archived is None:
             return {"ok": False, "code": "agent_not_found", "message": f"agent '{name}' not found"}
-        return {"ok": True, "removed_agent": name}
+        return {
+            "ok": True,
+            "removed_agent": archived.original_name,
+            "archived_agent": _vibe_agent_payload(archived.agent, brief=True),
+            "references": archived.references,
+            "default_agent_name": archived.default_agent_name,
+        }
     finally:
         store.close()
 
@@ -1747,7 +1977,10 @@ def _publish_vaults_updated(
     """Publish a UI-server-local vault update event for refetch-on-event pages."""
 
     try:
+        from uuid import uuid4
+
         from core.inbox_events import VAULTS_UPDATED_EVENT, vaults_updated_payload
+        from vibe.inbox_bridge import remember_local_event
         from vibe.sse_broker import broker
 
         payload = vaults_updated_payload(
@@ -1758,16 +1991,25 @@ def _publish_vaults_updated(
             grant_status=grant_status,
             secret_name=secret_name,
         )
-        broker.publish(VAULTS_UPDATED_EVENT, payload)
-        if broker.subscriber_count() == 0:
-            try:
-                from vibe import internal_client
-
-                internal_client.publish_event_sync(VAULTS_UPDATED_EVENT, payload, timeout=1.5)
-            except Exception:
-                logger.debug("vaults.updated bridge publish failed", exc_info=True)
+        event_id = uuid4().hex
     except Exception:
-        logger.debug("vaults.updated publish failed", exc_info=True)
+        logger.debug("vaults.updated event construction failed", exc_info=True)
+        return
+    try:
+        broker.publish(VAULTS_UPDATED_EVENT, payload)
+        remember_local_event(event_id)
+    except Exception:
+        logger.debug("vaults.updated local publish failed", exc_info=True)
+    try:
+        from vibe import internal_client
+
+        internal_client.publish_event_sync(
+            VAULTS_UPDATED_EVENT,
+            {**payload, "_event_id": event_id},
+            timeout=1.5,
+        )
+    except Exception:
+        logger.debug("vaults.updated bridge publish failed", exc_info=True)
 
 
 def _notify_vault_request_created(request: dict | None) -> None:
@@ -4432,7 +4674,7 @@ def get_settings(platform: Optional[str] = None) -> dict:
     if target_platform == "discord":
         _migrate_discord_guild_scope_from_config(store)
     payload = _settings_to_payload(store, platform=target_platform)
-    payload["agent_catalog"] = get_vibe_agents()
+    payload["agent_catalog"] = get_vibe_agents(include_archived=True)
     return payload
 
 
@@ -4488,6 +4730,9 @@ def save_settings(payload: dict) -> dict:
                 routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
                 require_mention=channel_payload.get("require_mention"),
                 require_bind=channel_payload.get("require_bind"),
+                _agent_name_at_load=channel_payload.get(
+                    "expected_agent_name", _UNSET_AGENT_BINDING
+                ),
             )
         store.set_channels_for_platform(platform, channels)
     if "guilds" in payload or "guild_allowlist" in payload:
@@ -4533,6 +4778,9 @@ def save_thread_settings(payload: dict) -> dict:
         routing=routing,
         require_mention=require_mention,
         require_bind=settings_payload.get("require_bind", base.require_bind),
+        _agent_name_at_load=settings_payload.get(
+            "expected_agent_name", _UNSET_AGENT_BINDING
+        ),
     )
     store.update_thread(channel_id, thread_id, settings, platform=platform)
     return {
@@ -5284,7 +5532,15 @@ def _scope_settings_payload(settings: ChannelSettings, platform: str) -> dict:
         "require_mention": settings.require_mention,
         "require_bind": settings.require_bind,
         "routing": routing_to_compat_dict(settings.routing),
+        "expected_agent_name": _agent_binding_expectation(settings),
     }
+
+
+def _agent_binding_expectation(settings: ChannelSettings | UserSettings) -> Optional[str]:
+    expected_agent_name = settings._agent_name_at_load
+    if expected_agent_name is _UNSET_AGENT_BINDING:
+        return settings.routing.agent_name
+    return expected_agent_name
 
 
 def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
@@ -5323,6 +5579,7 @@ def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
             "show_message_types": _normalize_show_message_types_for_platform(u.show_message_types, platform),
             "custom_cwd": u.custom_cwd,
             "routing": routing_to_compat_dict(u.routing),
+            "expected_agent_name": _agent_binding_expectation(u),
         }
     for bc in store.settings.bind_codes:
         payload["bind_codes"].append(
@@ -5889,16 +6146,7 @@ def _effort_values(reasoning_entries: object) -> list[str]:
     return out
 
 
-def _backend_default_model(config: Optional[V2Config], backend: str) -> Optional[str]:
-    if config is None:
-        return None
-    agents = getattr(config, "agents", None)
-    backend_cfg = getattr(agents, backend, None) if agents is not None else None
-    value = getattr(backend_cfg, "default_model", None) if backend_cfg is not None else None
-    return value or None
-
-
-def _flat_catalog_models(catalog: dict, default_model: Optional[str]) -> list[dict]:
+def _flat_catalog_models(catalog: dict) -> list[dict]:
     """Shape claude_models()/codex_models() output into the unified models list."""
     reasoning_map = catalog.get("reasoning_options") or {}
     models: list[dict] = []
@@ -5909,7 +6157,6 @@ def _flat_catalog_models(catalog: dict, default_model: Optional[str]) -> list[di
             {
                 "value": model_id,
                 "label": (catalog.get("model_labels") or {}).get(model_id, model_id),
-                "default": bool(default_model) and model_id == default_model,
                 "reasoning_efforts": _effort_values(reasoning_map.get(model_id)),
             }
         )
@@ -6001,7 +6248,6 @@ def _opencode_model_options(
     return {
         "ok": True,
         "backend": "opencode",
-        "default_model": _backend_default_model(config, "opencode"),
         "default_provider": default_provider or None,
         "providers": providers_out,
         "models": models_out,
@@ -6022,8 +6268,8 @@ def agent_model_options(
     Single entry point wrapping ``claude_models`` / ``codex_models`` /
     ``opencode_options`` into one shape so the CLI and the Web UI can share it::
 
-        {ok, backend, default_model, models: [{value, default, reasoning_efforts,
-         provider?, source?}], providers?: [{id, name, custom}], source, live, notes}
+        {ok, backend, models: [{value, reasoning_efforts, provider?, source?}],
+         providers?: [{id, name, custom}], source, live, notes}
 
     ``provider`` filters OpenCode results (ignored for other backends). Narrowing
     to a single model is a presentation concern left to the caller.
@@ -6042,12 +6288,10 @@ def agent_model_options(
         data = claude_models()
         if not data.get("ok"):
             return {"ok": False, "backend": normalized_backend, "error": data.get("error") or "claude model lookup failed"}
-        default_model = _backend_default_model(config, "claude")
         result = {
             "ok": True,
             "backend": "claude",
-            "default_model": default_model,
-            "models": _flat_catalog_models(data, default_model),
+            "models": _flat_catalog_models(data),
             "source": data.get("source"),
             "live": bool(data.get("live")),
             "notes": data.get("notes"),
@@ -6057,12 +6301,10 @@ def agent_model_options(
         data = codex_models()
         if not data.get("ok"):
             return {"ok": False, "backend": normalized_backend, "error": data.get("error") or "codex model lookup failed"}
-        default_model = _backend_default_model(config, "codex")
         result = {
             "ok": True,
             "backend": "codex",
-            "default_model": default_model,
-            "models": _flat_catalog_models(data, default_model),
+            "models": _flat_catalog_models(data),
             "source": data.get("source"),
             "live": bool(data.get("live")),
             "notes": data.get("notes"),
@@ -8668,6 +8910,7 @@ def restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) -> 
 
 
 _VALID_AUTH_MODES = {"oauth", "api_key"}
+_VALID_CLAUDE_CREDENTIAL_TYPES = {"api_key", "auth_token"}
 
 
 def _mask_api_key(api_key: str | None) -> str | None:
@@ -8786,12 +9029,9 @@ def _resolve_claude_status_probe_cwd(config: Any | None) -> str | None:
 def _build_claude_status_probe_env(claude_env: dict[str, str] | None) -> dict[str, str] | None:
     if claude_env is None:
         return None
-    env = dict(os.environ)
-    for key in list(env):
-        if key.startswith("ANTHROPIC_") or key.startswith("CLAUDE_"):
-            env.pop(key, None)
-    env.update(claude_env)
-    return env
+    from vibe.claude_config import materialize_claude_subprocess_env
+
+    return materialize_claude_subprocess_env(claude_env)
 
 
 # ---------------------------------------------------------------------------
@@ -9085,23 +9325,17 @@ def remove_backend_api_key(backend: str) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("V2Config clear during remove-key failed for %s: %s", backend, exc)
 
-    # Codex has a persistent daemon — refresh it so the cleared key
-    # actually takes effect on the next request. Claude is one-shot per
-    # request so a synthetic restart is enough.
-    restart: dict
-    if backend == "codex":
-        try:
-            restart = restart_backend(
-                "codex",
-                metadata={"reason": "remove_api_key", "source": "ui_api"},
-            )
-        except Exception as exc:  # noqa: BLE001
-            restart = {"ok": False, "message": str(exc)}
-    else:
-        restart = {
-            "ok": True,
-            "message": "Claude relaunches per request; the next message uses the new auth.",
-        }
+    # Both backends keep runtime state in the controller. Codex owns a
+    # persistent app-server; Claude owns cached SDK sessions and a loaded
+    # compat config. Refresh through the same controller path so the next
+    # request observes the new auth without restarting the Avibe service.
+    try:
+        restart = restart_backend(
+            backend,
+            metadata={"reason": "remove_api_key", "source": "ui_api"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        restart = {"ok": False, "message": str(exc)}
     response: dict = {"ok": True, "restart": restart}
     if notices:
         response["notices"] = notices
@@ -9113,11 +9347,11 @@ def test_backend_auth(backend: str, model: Optional[str] = None) -> dict:
 
 
 async def test_backend_auth_async(backend: str, model: Optional[str] = None) -> dict:
-    """Send a single-token ``Hi`` probe through the backend CLI.
+    """Send a ``Hi`` probe through the backend's production Agent transport.
 
-    ``model`` lets the caller override the CLI's configured default —
-    important for Codex users whose ``config.toml`` selects a slow
-    reasoning model, where even "Hi" can blow past the test timeout.
+    Claude uses the Agent SDK and Codex uses app-server, matching normal
+    Avibe turns rather than a separate single-shot CLI mode. ``model`` lets
+    the caller select the model used by that isolated turn.
     """
     backend = (backend or "").strip().lower()
     if not supports_web_oauth(backend):
@@ -9501,6 +9735,11 @@ def get_claude_auth() -> dict:
         "settings_env_has_key": bool(disk_state.get("settings_env_has_key")),
         "settings_env_key_length": int(disk_state.get("settings_env_key_length") or 0),
         "settings_env_key_var": disk_state.get("settings_env_key_var"),
+        "credential_type": (
+            disk_state.get("credential_type")
+            if settings_key
+            else ("api_key" if configured_key else None)
+        ),
         "settings_env_base_url": disk_state.get("settings_env_base_url"),
         "settings_conflict": settings_conflict,
     }
@@ -9513,10 +9752,16 @@ def save_claude_auth(payload: dict) -> dict:
     not carry the API key because Claude Code's ``settings.json`` env block
     wins at launch anyway.
 
-    Empty ``api_key`` while in ``api_key`` mode is treated as "keep the
-    stored key" — same UX promise as Codex — so callers can PATCH the
-    base URL without re-typing the secret. An empty key with no stored
-    fallback is rejected.
+    ``credential_type`` selects Claude Code's native credential variable:
+    ``api_key`` writes ``ANTHROPIC_API_KEY`` and ``auth_token`` writes
+    ``ANTHROPIC_AUTH_TOKEN``. The Base URL is independent and never changes
+    that selection. When callers omit ``credential_type``, an existing
+    settings variable is preserved; new and legacy credentials default to
+    ``api_key`` for backwards compatibility.
+
+    Empty ``api_key`` while in ``api_key`` mode means "keep the stored
+    credential", so callers can update the Base URL or credential type without
+    re-typing the secret. An empty value with no stored fallback is rejected.
     """
     if not isinstance(payload, dict):
         return {"ok": False, "message": "Payload must be an object"}
@@ -9530,6 +9775,19 @@ def save_claude_auth(payload: dict) -> dict:
         return {"ok": False, "message": "api_key must be a string"}
     api_key = raw_api_key.strip() if isinstance(raw_api_key, str) else None
 
+    raw_credential_type = payload.get("credential_type")
+    if (
+        raw_credential_type is not None
+        and (
+            not isinstance(raw_credential_type, str)
+            or raw_credential_type not in _VALID_CLAUDE_CREDENTIAL_TYPES
+        )
+    ):
+        return {
+            "ok": False,
+            "message": backend_t("error.claudeCredentialTypeInvalid"),
+        }
+
     # Three-state ``base_url`` payload semantics (matches Codex/OpenCode):
     # absent key → keep stored value; null/blank → clear; non-blank → set.
     base_url_present = "base_url" in payload
@@ -9542,45 +9800,43 @@ def save_claude_auth(payload: dict) -> dict:
         if base_url_change == "":
             base_url_change = None
 
-    settings_auth_token = None
-    if auth_mode == "api_key" and not api_key:
-        # Reuse the live Claude settings key for base-URL-only updates.
-        # Fall back to legacy V2Config only for older installs that have
-        # not yet been migrated through this save path.
+    settings_env: dict[str, str] = {}
+    existing_credential_type: str | None = None
+    existing_credential: str | None = None
+    if auth_mode == "api_key":
         try:
             from vibe.claude_config import (
-                read_claude_api_key_from_settings,
+                read_claude_credential_from_settings,
                 read_claude_settings_env,
             )
 
-            api_key = read_claude_api_key_from_settings()
-            if not api_key:
-                env = read_claude_settings_env()
-                token = env.get("ANTHROPIC_AUTH_TOKEN")
-                settings_auth_token = token if isinstance(token, str) and token.strip() else None
+            settings_env = read_claude_settings_env()
+            existing_credential_type, existing_credential = (
+                read_claude_credential_from_settings()
+            )
         except Exception:
-            api_key = None
-            settings_auth_token = None
-        if not api_key and not settings_auth_token:
-            with CONFIG_LOCK:
-                try:
-                    existing = load_config()
-                    stored = getattr(getattr(existing, "agents", None), "claude", None)
-                    api_key = getattr(stored, "api_key", None) or None
-                except Exception:
-                    pass
-        if not api_key and not settings_auth_token:
+            settings_env = {}
+
+    credential_type = None
+    if auth_mode == "api_key":
+        credential_type = raw_credential_type or existing_credential_type or "api_key"
+    credential = api_key or existing_credential
+
+    if auth_mode == "api_key" and not credential:
+        # Fall back to legacy V2Config only for older installs that have not
+        # yet migrated their credential into Claude Code settings.
+        with CONFIG_LOCK:
+            try:
+                existing = load_config()
+                stored = getattr(getattr(existing, "agents", None), "claude", None)
+                credential = getattr(stored, "api_key", None) or None
+            except Exception:
+                pass
+        if not credential:
             return {"ok": False, "message": "api_key is required when auth_mode='api_key'"}
 
     effective_base_url = base_url_change if base_url_present else None
     if not base_url_present and auth_mode == "api_key":
-        settings_env = {}
-        try:
-            from vibe.claude_config import read_claude_settings_env
-
-            settings_env = read_claude_settings_env()
-        except Exception:
-            settings_env = {}
         existing_base = settings_env.get("ANTHROPIC_BASE_URL")
         if isinstance(existing_base, str) and existing_base.strip():
             effective_base_url = existing_base.strip()
@@ -9600,9 +9856,17 @@ def save_claude_auth(payload: dict) -> dict:
     try:
         apply_claude_auth(
             auth_mode=auth_mode,
-            api_key=api_key if auth_mode == "api_key" else None,
+            api_key=(
+                credential
+                if auth_mode == "api_key" and credential_type == "api_key"
+                else None
+            ),
             base_url=effective_base_url if auth_mode == "api_key" else None,
-            auth_token=settings_auth_token if auth_mode == "api_key" else None,
+            auth_token=(
+                credential
+                if auth_mode == "api_key" and credential_type == "auth_token"
+                else None
+            ),
         )
     except ValueError as exc:
         return {"ok": False, "message": str(exc)}
@@ -9643,14 +9907,19 @@ def save_claude_auth(payload: dict) -> dict:
                 "detail": str(exc),
             }
 
-    # Claude is one-shot per request — no daemon to restart. Return a
-    # synthetic restart result so the UI handles the same response shape
-    # as Codex / OpenCode and the toast wording can stay consistent.
+    # Claude SDK clients are cached by the controller. Roll them through
+    # the existing backend refresh path so the next turn cannot retain the
+    # previous mode's environment or loaded compatibility config.
+    try:
+        restart = restart_backend(
+            "claude",
+            metadata={"reason": "save_claude_auth", "source": "ui_api"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        restart = {"ok": False, "message": str(exc)}
+
     state = get_claude_auth()
-    state["restart"] = {
-        "ok": True,
-        "message": "Claude relaunches per request; the next message uses the new auth.",
-    }
+    state["restart"] = restart
     if isinstance(oauth_cleanup_result, dict) and oauth_cleanup_result.get("partial"):
         state["partial"] = True
         state["warning"] = oauth_cleanup_result.get("warning") or "oauth_cleanup_failed"
@@ -10103,16 +10372,12 @@ async def _get_opencode_providers_async() -> dict:
     # it became a no-op (no state change to persist), silently
     # blocking users from picking Anthropic explicitly.
     default_provider: str | None = None
-    configured_default_model: str | None = None
     try:
         config = load_config()
         cfg = getattr(getattr(config, "agents", None), "opencode", None)
         configured_default = getattr(cfg, "default_provider", None)
         if isinstance(configured_default, str) and configured_default.strip():
             default_provider = configured_default.strip()
-        raw_default_model = getattr(cfg, "default_model", None)
-        if isinstance(raw_default_model, str) and raw_default_model.strip():
-            configured_default_model = raw_default_model.strip()
     except Exception:
         pass
 
@@ -10290,12 +10555,6 @@ async def _get_opencode_providers_async() -> dict:
             default_provider=default_provider,
             provider_id=pid,
         )
-        if not preferred_model:
-            preferred_model = resolve_opencode_configured_default_model(
-                configured_default_model,
-                default_provider=default_provider,
-                provider_id=pid,
-            )
         if preferred_model:
             preferred_model = resolve_opencode_model_id(
                 config_raw,
@@ -11398,6 +11657,7 @@ def get_users(platform: Optional[str] = None) -> dict:
             "show_message_types": _normalize_show_message_types_for_platform(u.show_message_types, platform),
             "custom_cwd": u.custom_cwd,
             "routing": routing_to_compat_dict(u.routing),
+            "expected_agent_name": _agent_binding_expectation(u),
         }
     return {"ok": True, "users": users}
 
@@ -11423,6 +11683,7 @@ def save_users(payload: dict) -> dict:
             routing=_parse_routing(_normalize_backend_routing_payload(up.get("routing") or {})),
             dm_chat_id=existing.dm_chat_id if existing else "",
             pending_bind_menu_hint=existing.pending_bind_menu_hint if existing else False,
+            _agent_name_at_load=up.get("expected_agent_name", _UNSET_AGENT_BINDING),
         )
 
     # Merge instead of replace: update existing users and add new ones,

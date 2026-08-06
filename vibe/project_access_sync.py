@@ -99,9 +99,12 @@ def _request_json(
                 "X-Vibe-Device-Secret": device_secret,
             },
             timeout=timeout,
+            allow_redirects=False,
         )
     except requests.RequestException as error:
         raise ProjectAccessSyncError("project_access_sync_unreachable") from error
+    if 300 <= response.status_code < 400:
+        raise ProjectAccessSyncError("project_access_sync_redirect_blocked")
     try:
         body = response.json()
     except ValueError as error:

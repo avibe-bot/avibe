@@ -25,10 +25,23 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.run_settlement import (
+    SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_REFUSED_CONCURRENT_TURN,
+    SETTLED_BY_TERMINAL_RESULT,
+)
+from core.message_context import build_context_turn_sink_key
 from core.services.dispatch import (
     SOURCE_HUMAN,
     SOURCE_SCHEDULED,
     dispatch_turn,
+    dispatch_turn_with_outcome,
+)
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_ATTEMPTING,
+    DISPATCH_PHASE_PREWRITE,
+    backend_dispatch_attempted,
+    set_dispatch_phase,
 )
 from modules.im import MessageContext
 
@@ -98,6 +111,7 @@ def test_streaming_registers_turn_sink_and_waits_for_result():
         done_event.set()
 
     controller._get_session_key = MagicMock(return_value="slack::C")
+    controller._get_turn_sink_key = MagicMock(return_value="slack::C")
     controller.get_turn_sink = MagicMock(return_value=None)  # no turn in flight => not rejected
     controller.register_turn_sink = MagicMock(side_effect=_register)
     controller.pop_turn_sink = MagicMock()
@@ -125,6 +139,159 @@ def test_on_chunk_absent_keeps_platform_specific_untouched():
     assert ctx.platform_specific == {"existing": "value"}, (
         "no chunk callback => platform_specific must not be mutated"
     )
+
+
+def _streaming_controller(
+    *,
+    sink_settled_by: str | None,
+    in_flight: bool = False,
+    in_flight_key: str = "slack::C",
+) -> MagicMock:
+    """A controller double whose registered sink is released like the real one.
+
+    ``sink_settled_by`` is the stamp the release site would have written:
+    ``terminal_result`` for a real backend result, ``None`` for a release that left
+    no trace (``mark_turn_complete`` on a no-dispatch turn).
+
+    ``in_flight_key`` is the sink key the pre-registered turn occupies, so a test can
+    park a busy turn on a SIBLING thread's key rather than the one under dispatch.
+    """
+
+    controller = _build_controller_double()
+    sinks: dict = {}
+
+    def _register(session_key, *, on_chunk, done_event, turn_token=None, context=None):
+        sink = {"on_chunk": on_chunk, "done_event": done_event, "turn_token": turn_token}
+        if sink_settled_by is not None:
+            sink["settled_by"] = sink_settled_by
+        sinks[session_key] = sink
+        done_event.set()
+
+    controller._get_session_key = MagicMock(return_value="slack::C")
+    # The real controller derives the sink key from the session key by appending the
+    # THREAD scope; the double keeps that so a threaded context lands on its own key.
+    controller._get_turn_sink_key = MagicMock(
+        side_effect=lambda ctx: build_context_turn_sink_key(ctx, session_key="slack::C")
+    )
+    controller.get_turn_sink = MagicMock(side_effect=lambda key: sinks.get(key))
+    controller.register_turn_sink = MagicMock(side_effect=_register)
+    controller.pop_turn_sink = MagicMock(side_effect=lambda key, done=None: sinks.pop(key, None))
+    if in_flight:
+        # Pre-register a live sink for the same session: a turn is already streaming.
+        sinks[in_flight_key] = {"on_chunk": AsyncMock(), "done_event": asyncio.Event()}
+    return controller
+
+
+def test_outcome_reports_terminal_result_settlement():
+    controller = _streaming_controller(sink_settled_by=SETTLED_BY_TERMINAL_RESULT)
+    outcome = asyncio.run(dispatch_turn_with_outcome(controller, _ctx(), "hi", on_chunk=AsyncMock()))
+    assert outcome.settled_by == SETTLED_BY_TERMINAL_RESULT
+
+
+def test_outcome_reports_release_without_terminal_result():
+    # The zombie case: the waiter was released but no terminal result arrived, so a
+    # caller holding a durable run record must settle it itself.
+    controller = _streaming_controller(sink_settled_by=None)
+    outcome = asyncio.run(dispatch_turn_with_outcome(controller, _ctx(), "hi", on_chunk=AsyncMock()))
+    assert outcome.settled_by == SETTLED_BY_NO_TERMINAL_RESULT
+
+
+def test_outcome_reports_definite_prewrite_exit() -> None:
+    controller = _streaming_controller(sink_settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    async def no_backend_dispatch(context, _text):
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        return "agent is unavailable"
+
+    controller.message_handler.handle_user_message = AsyncMock(side_effect=no_backend_dispatch)
+    outcome = asyncio.run(
+        dispatch_turn_with_outcome(controller, _ctx(), "hi", on_chunk=AsyncMock())
+    )
+
+    assert outcome.backend_dispatch_attempted is False
+
+
+def test_dispatch_evidence_survives_prepared_context_replacement() -> None:
+    original = _ctx()
+    evidence = set_dispatch_phase(original, DISPATCH_PHASE_PREWRITE)
+    prepared = _ctx()
+    set_dispatch_phase(prepared, DISPATCH_PHASE_PREWRITE, evidence=evidence)
+
+    set_dispatch_phase(prepared, DISPATCH_PHASE_ATTEMPTING)
+
+    assert backend_dispatch_attempted(original) is True
+
+
+def test_outcome_reports_refused_concurrent_turn():
+    # The refusal returns BEFORE any sink is registered, so the settlement cannot
+    # ride the sink — it has to be reported directly or the caller's run row would
+    # stay open forever.
+    controller = _streaming_controller(sink_settled_by=None, in_flight=True)
+    controller._t = MagicMock(return_value="already streaming")
+    on_chunk = AsyncMock()
+    outcome = asyncio.run(dispatch_turn_with_outcome(controller, _ctx(), "hi", on_chunk=on_chunk))
+    assert outcome.settled_by == SETTLED_BY_REFUSED_CONCURRENT_TURN
+    assert outcome.error is None
+    on_chunk.assert_awaited_once()
+    controller.register_turn_sink.assert_not_called()
+    controller.message_handler.handle_user_message.assert_not_called()
+
+
+def test_busy_sibling_thread_does_not_refuse_this_threads_turn():
+    """A turn in flight on ANOTHER thread of the same channel must not block this one.
+
+    The field bug: ``dispatch_turn_with_outcome`` keyed its concurrency slot off the
+    channel-scoped ``_get_session_key``, because
+    ``resolve_context_settings_key`` deliberately drops the thread. One Telegram forum
+    topic running a 15-minute agent therefore held the ONLY slot for its whole group,
+    and every sibling topic's first turn was settled ``refused_concurrent_turn``
+    before reaching a backend — silently, since IM turns dispatch with the discarding
+    ``_noop_chunk`` — until the unrelated topic finished.
+    """
+
+    busy_sibling = MessageContext(
+        user_id="U", channel_id="C", platform="telegram", thread_id="843", message_id="m0"
+    )
+    controller = _streaming_controller(
+        sink_settled_by=SETTLED_BY_TERMINAL_RESULT,
+        in_flight=True,
+        in_flight_key=build_context_turn_sink_key(busy_sibling, session_key="slack::C"),
+    )
+    new_topic = MessageContext(
+        user_id="U", channel_id="C", platform="telegram", thread_id="847", message_id="m1"
+    )
+    outcome = asyncio.run(
+        dispatch_turn_with_outcome(controller, new_topic, "create a directory", on_chunk=AsyncMock())
+    )
+    assert outcome.settled_by == SETTLED_BY_TERMINAL_RESULT
+    controller.message_handler.handle_user_message.assert_awaited_once()
+
+
+def test_same_thread_turn_is_still_refused():
+    """The slot is still exactly one turn per THREAD — the guard must stay real."""
+
+    ctx = MessageContext(
+        user_id="U", channel_id="C", platform="telegram", thread_id="843", message_id="m1"
+    )
+    controller = _streaming_controller(
+        sink_settled_by=None,
+        in_flight=True,
+        in_flight_key=build_context_turn_sink_key(ctx, session_key="slack::C"),
+    )
+    controller._t = MagicMock(return_value="already streaming")
+    outcome = asyncio.run(dispatch_turn_with_outcome(controller, ctx, "hi", on_chunk=AsyncMock()))
+    assert outcome.settled_by == SETTLED_BY_REFUSED_CONCURRENT_TURN
+    controller.message_handler.handle_user_message.assert_not_called()
+
+
+def test_outcome_settled_by_is_none_only_without_on_chunk():
+    # ``None`` must mean exactly one thing — "no streaming caller, so no sink" —
+    # otherwise a durable caller cannot tell an unexplained release apart from a
+    # non-streaming dispatch.
+    controller = _build_controller_double()
+    outcome = asyncio.run(dispatch_turn_with_outcome(controller, _ctx(), "hi"))
+    assert outcome.settled_by is None
+    assert outcome.error == "msg_user_1"
 
 
 def test_invalid_source_raises():

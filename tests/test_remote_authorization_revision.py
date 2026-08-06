@@ -156,14 +156,14 @@ def test_revision_advance_revokes_active_editor_http_session(
     tmp_path,
     hosted_change,
 ):
-    """I1057-AC1/AC2: every narrowing cause revokes active editor mutations."""
+    """I1057-AC1/AC2: narrowing invalidates a remote session with chat disabled."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _paired_config(tmp_path)
     cookie = _organization_cookie(config)
     payload = remote_access.parse_session_cookie(config, cookie)
     assert payload is not None
-    assert context_from_session_payload(payload).can_chat is True
+    assert context_from_session_payload(payload).can_chat is False
 
     client = app.test_client()
     client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")
@@ -344,11 +344,11 @@ def test_websocket_reconnect_and_active_waiter_recheck_revision(monkeypatch, tmp
     assert ui_server._remote_access_websocket_session_payload(websocket, config) is None
 
 
-def test_terminal_websocket_fails_closed_when_revision_changes_after_gate(
+def test_terminal_websocket_rejects_stale_remote_session_before_accept(
     monkeypatch,
     tmp_path,
 ):
-    """I1057-AC4: a gate-to-accept revision race cannot drop remote identity."""
+    """I1057-AC4: a stale remote terminal request is never accepted."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _paired_config(tmp_path)
@@ -383,7 +383,6 @@ def test_terminal_websocket_fails_closed_when_revision_changes_after_gate(
     asyncio.run(ui_server.terminal_websocket(websocket, "test"))
 
     assert websocket.calls == [
-        ("accept", None),
         ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
     ]
 

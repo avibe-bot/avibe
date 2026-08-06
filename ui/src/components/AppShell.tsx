@@ -4,7 +4,8 @@ import { ArrowLeft, Bot, Brain, Building2, ChevronDown, Cpu, FolderTree, Globe, 
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { MODEL_HUB_NAV_ENABLED } from './settings/models/featureFlags';
+import { isStandaloneAppTab } from '../apps/appLaunch';
+import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
 import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
@@ -17,8 +18,9 @@ import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
-import { WindowManagerProvider } from '../context/WindowManagerContext';
-import { DockProvider } from '../context/DockContext';
+import { WindowManagerProvider } from '../context/WindowManagerProvider';
+import { DockProvider } from '../context/DockProvider';
+import { ShowPageDragProvider } from '../context/ShowPageDragProvider';
 import { WindowLayer } from './apps/WindowLayer';
 import { MobileDockDrawer } from './apps/MobileDockDrawer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
@@ -236,6 +238,13 @@ export const AppShell: React.FC = () => {
   // The mobile Dock drawer (opened from the workbench Apps tab). Like the admin
   // sheet it closes on any route change — tapping a tile navigates + dismisses.
   const [appsDrawerOpen, setAppsDrawerOpen] = useState(false);
+  // Whether this DOCUMENT was opened as a single-app tab (⌘/Ctrl-click on an app icon,
+  // §7.1m). Frozen at mount from the landing URL rather than tracked off `location`, so
+  // navigating deeper inside the tab can't suddenly restore the workbench window layout
+  // this tab exists to stay out of — nor re-enable the save that would clobber it.
+  const [standaloneAppTab] = useState(() =>
+    typeof window === 'undefined' ? false : isStandaloneAppTab(window.location.search),
+  );
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
   // static locked column that does NOT read it (resizing the shell mid-focus
   // fought iOS's scroll-into-view and flung the input off-screen); only the md+
@@ -288,6 +297,7 @@ export const AppShell: React.FC = () => {
   }
 
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
+  const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
 
   const ownerOnlyPath =
@@ -353,10 +363,8 @@ export const AppShell: React.FC = () => {
         { to: '/admin/users', label: t('nav.users'), icon: MessageCircle },
       ],
     },
-    // 模型 (Model Hub, L4): sits between 通讯平台 and 后端. Nav-gated until its
-    // backend dependencies land (MODEL_HUB_NAV_ENABLED); the route is always
-    // registered for direct access + review.
-    ...(MODEL_HUB_NAV_ENABLED
+    // 模型 (Model Hub, L4): the backend release capability is the only authority.
+    ...(modelHubEnabled
       ? [
           {
             to: '/admin/settings/models',
@@ -455,8 +463,9 @@ export const AppShell: React.FC = () => {
     // fought iOS's own scroll-into-view and threw the input off-screen. iOS instead
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
-    <WindowManagerProvider>
+    <WindowManagerProvider standalone={standaloneAppTab}>
     <DockProvider enabled={capabilities.can_use_system}>
+    <ShowPageDragProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
           layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
@@ -719,6 +728,7 @@ export const AppShell: React.FC = () => {
           the sidebar launcher. */}
       {capabilities.can_use_system && <WindowLayer />}
     </div>
+    </ShowPageDragProvider>
     </DockProvider>
     </WindowManagerProvider>
   );

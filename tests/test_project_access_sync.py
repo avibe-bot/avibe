@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
 import requests
 
 from config.v2_config import (
@@ -103,6 +104,7 @@ def test_sync_publishes_applies_and_acks_exact_revision(monkeypatch, tmp_path) -
     def request(method, url, **kwargs):
         calls.append((method, url, kwargs.get("json")))
         assert kwargs["headers"]["X-Vibe-Device-Secret"] == "device-secret"
+        assert kwargs["allow_redirects"] is False
         if url.endswith("/project-index"):
             return _Response({"poll_after_seconds": 30, "projects": []})
         if url.endswith("/project-access-intents"):
@@ -150,6 +152,27 @@ def test_sync_publishes_applies_and_acks_exact_revision(monkeypatch, tmp_path) -
         policy = project_access_service.get_project_policy(conn, project["id"])
     assert policy is not None
     assert policy["last_applied_control_plane_revision"] == 2
+
+
+def test_project_sync_rejects_redirects_without_forwarding_device_secret(monkeypatch) -> None:
+    def request(method, url, **kwargs):
+        assert method == "POST"
+        assert url == "https://control.example/project-index"
+        assert kwargs["headers"]["X-Vibe-Device-Secret"] == "device-secret"
+        assert kwargs["allow_redirects"] is False
+        return _Response({}, status_code=307)
+
+    monkeypatch.setattr(project_access_sync.requests, "request", request)
+
+    with pytest.raises(
+        project_access_sync.ProjectAccessSyncError,
+        match="project_access_sync_redirect_blocked",
+    ):
+        project_access_sync._request_json(
+            "POST",
+            "https://control.example/project-index",
+            device_secret="device-secret",
+        )
 
 
 def test_lost_ack_retries_without_reapplying_policy(monkeypatch, tmp_path) -> None:

@@ -6,14 +6,15 @@ import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
+import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import type { ShowPageAccess } from '../lib/showPageAccess';
 import {
   WorkbenchEventReconnectLoop,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
-import type { DockDoc } from './DockContext';
-import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
+import type { DockDoc } from './dockDoc';
+import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
 
 export type { InstanceCapabilities, SessionInfo };
 export type { ShowPageAccess };
@@ -361,11 +362,15 @@ export type VaultMetadataUpdatePayload = {
 };
 
 export type TunnelQualitySnapshot = {
-  schema_version: 1;
+  schema_version: 1 | 2;
   state: 'healthy' | 'degraded' | 'recovering' | 'unknown';
   grade: 'good' | 'fair' | 'poor' | 'critical' | 'unknown';
   sampled_at: string;
   protocol: 'quic' | 'http2' | 'unknown';
+  transport?: {
+    configured: 'auto' | 'quic' | 'http2';
+    effective: 'quic' | 'http2' | 'unknown';
+  };
   connector_count: number;
   ha_connections: number;
   rtt_ms: { min: number; median: number; max: number } | null;
@@ -374,15 +379,60 @@ export type TunnelQualitySnapshot = {
   window_seconds: number;
   request_errors_per_minute: number;
   packet_loss_per_minute: number;
+  request_path?: {
+    source: 'synthetic_local';
+    status: 'healthy' | 'degraded' | 'unavailable' | 'insufficient';
+    confidence: 'low' | 'medium' | 'high';
+    window_seconds: number;
+    sample_count: number;
+    success_count: number;
+    latency_ms: { p50: number; p95: number; p99: number; max: number } | null;
+    failure_rate: number;
+    slow_request_rate: {
+      over_500_ms: number;
+      over_1000_ms: number;
+      over_2000_ms: number;
+    };
+    baseline_p95_ms: number | null;
+  } | null;
   recovery: {
     state: 'idle' | 'evaluating' | 'draining' | 'cooldown';
     last_attempt_at: string | null;
-    last_trigger: 'availability' | 'latency' | 'errors' | 'manual' | null;
+    last_trigger: 'availability' | 'latency' | 'tail_latency' | 'errors' | 'manual' | null;
     last_result: 'improved' | 'no_improvement' | 'failed' | null;
     previous_median_rtt_ms: number | null;
     result_median_rtt_ms: number | null;
+    previous_protocol?: 'quic' | 'http2' | null;
+    result_protocol?: 'quic' | 'http2' | null;
+    previous_p95_ms?: number | null;
+    result_p95_ms?: number | null;
+    previous_p99_ms?: number | null;
+    result_p99_ms?: number | null;
     next_attempt_at: string | null;
     attempt_count_window: number;
+  };
+};
+
+export type CloudflareEdgeLocation = {
+  colo: string;
+  location?: string;
+  country?: string;
+};
+
+export type TunnelNetworkPath = {
+  schema_version: 1;
+  provider: 'Cloudflare';
+  asn: 13335;
+  sampled_at: string;
+  locations_pending: boolean;
+  client_access: 'local' | 'remote';
+  client_ingress: CloudflareEdgeLocation | null;
+  connector: {
+    locations: Array<CloudflareEdgeLocation & { id: string }>;
+    edge_ips: string[];
+  };
+  route: {
+    assessment: 'same_metro' | 'same_country' | 'cross_country' | 'unknown';
   };
 };
 
@@ -393,9 +443,38 @@ export type RemoteAccessStatus = {
   running: boolean;
   public_url?: string;
   pid_state?: string;
+  transport_protocol?: 'auto' | 'quic' | 'http2';
+  settings?: RemoteAccessSettings;
   tunnel_quality?: TunnelQualitySnapshot;
+  network_path?: TunnelNetworkPath;
   error?: string;
   optimization_started?: boolean;
+};
+
+export type RemoteAccessSettings = {
+  transport_protocol: 'auto' | 'quic' | 'http2';
+  auto_recovery: boolean;
+  optimization_profile: 'stable' | 'balanced' | 'low_latency';
+  edge_ip_version: 'auto' | '4' | '6';
+  edge_bind_address: string;
+};
+
+export type TunnelNetworkInterface = {
+  id: string;
+  name: string;
+  address: string;
+  ip_version: '4' | '6';
+};
+
+export type TunnelConnectivityDiagnostics = {
+  ok: boolean;
+  sampled_at: string;
+  effective_protocol: 'quic' | 'http2' | 'unknown';
+  dns: { status: 'available' | 'unavailable' | 'unknown' };
+  quic: { status: 'available' | 'unavailable' | 'unknown'; source: string };
+  http2: { status: 'available' | 'unavailable' | 'unknown'; source: string };
+  cloudflared_version?: string | null;
+  error?: string;
 };
 
 export type ApiContextType = {
@@ -491,9 +570,8 @@ export type ApiContextType = {
   removeClaudeOAuthCredentials: () => Promise<OAuthWebMutationResult>;
   // Selectively clear just the stored API key — leave OAuth credentials
   // intact. Symmetric to OpenCode's per-provider DELETE: lets the user
-  // drop a stale key without re-signing in. Codex also restarts its
-  // persistent daemon so the cleared key takes effect on the next
-  // request.
+  // drop a stale key without re-signing in. The backend runtime is
+  // refreshed so cached sessions observe the change on the next request.
   removeBackendApiKey: (backend: 'claude' | 'codex') => Promise<OAuthWebMutationResult>;
   testBackendAuth: (
     backend: 'claude' | 'codex',
@@ -569,6 +647,8 @@ export type ApiContextType = {
       display_name?: string;
       folder_path?: string;
       agent_backend?: string | null;
+      agent_id?: string | null;
+      expected_agent_id?: string | null;
       agent_name?: string | null;
       agent_variant?: string | null;
       model?: string | null;
@@ -594,9 +674,18 @@ export type ApiContextType = {
   createSession: (payload: WorkbenchSessionCreate) => Promise<WorkbenchSession>;
   forkSession: (sessionId: string) => Promise<WorkbenchSession>;
   getSession: (sessionId: string, params?: { cache?: boolean; handleError?: boolean }) => Promise<WorkbenchSession>;
+  getSessionResult: (sessionId: string) => Promise<WorkbenchSessionReadResult>;
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
   archiveSession: (sessionId: string) => Promise<WorkbenchSession>;
+  /** Subscribe to "the server just refused a write because that session is
+   *  archived". Fires for EVERY request whose error body carries
+   *  ``session_archived``, whatever the verb — the messages POST, the sessions
+   *  PATCH, fork, and every Show Page mutation — so a surface holding a stale
+   *  pre-archive row converges once, here, instead of each call site
+   *  re-implementing it (and the next verb re-introducing the same defect).
+   *  Returns an unsubscribe. */
+  onSessionArchived: (handler: (sessionId: string) => void) => () => void;
   /** Counts of resources permanently reclaimed when archiving this session
    *  (bound tasks/watches + active runs) — drives the irreversible-confirm dialog. */
   getArchivePreview: (sessionId: string) => Promise<{ tasks: number; watches: number; runs: number; queued: number }>;
@@ -609,8 +698,13 @@ export type ApiContextType = {
   // Full-text search over message content across all sessions. Backed by the
   // non-cached GET /api/search/messages (the query string varies per keystroke,
   // so caching would only bloat the read cache). Results group matches by
-  // session, sessions ordered most-recent-match first.
-  searchMessages: (q: string, opts?: { limit?: number }) => Promise<MessageSearchResult>;
+  // session, sessions ordered most-recent-match first. ``includeArchived`` opts
+  // archived sessions in (they stay excluded by default); archived groups are
+  // flagged and open read-only.
+  searchMessages: (
+    q: string,
+    opts?: { limit?: number; includeArchived?: boolean },
+  ) => Promise<MessageSearchResult>;
   sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string }) => Promise<WorkbenchMessage>;
   markSessionRead: (sessionId: string, untilMessageId?: string) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session: Record<string, number> }>;
   cancelSession: (
@@ -631,14 +725,19 @@ export type ApiContextType = {
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
-  listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
+  listVibeAgents: (params?: {
+    backend?: string;
+    includeDisabled?: boolean;
+    includeArchived?: boolean;
+    cache?: boolean;
+  }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgentOnboarding: () => Promise<VibeAgentOnboardingResult>;
   onboardVibeAgents: () => Promise<VibeAgentOnboardingResult>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
-  removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string }>;
+  removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string; archived_agent?: VibeAgentBrief; default_agent_name?: string | null }>;
   listVaultSecrets: () => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
@@ -689,13 +788,17 @@ export type ApiContextType = {
   updateSkill: (name: string, params?: { scope?: SkillScope; projectId?: string }) => Promise<SkillsMutationResult>;
   getHarnessCounts: () => Promise<HarnessCountsResult>;
   getHarnessBootstrap: (params?: HarnessBootstrapParams) => Promise<HarnessBootstrapResult>;
-  listHarnessTasks: (params?: HarnessDefinitionsParams) => Promise<HarnessTasksResult>;
+  // ``opts.handleError: false`` suppresses the global error toast (and bypasses
+  // the read cache) for best-effort background polls — e.g. the open trigger
+  // detail panel's 4s refresh, which must not toast on every tick when an
+  // endpoint is down. Matches the getSession/vault handleError idiom.
+  listHarnessTasks: (params?: HarnessDefinitionsParams, opts?: { handleError?: boolean }) => Promise<HarnessTasksResult>;
   setHarnessTaskEnabled: (taskId: string, enabled: boolean) => Promise<{ ok: boolean; task?: HarnessTask }>;
   deleteHarnessTask: (taskId: string) => Promise<{ ok: boolean; id?: string }>;
-  listHarnessWatches: (params?: HarnessDefinitionsParams) => Promise<HarnessWatchesResult>;
+  listHarnessWatches: (params?: HarnessDefinitionsParams, opts?: { handleError?: boolean }) => Promise<HarnessWatchesResult>;
   setHarnessWatchEnabled: (watchId: string, enabled: boolean) => Promise<{ ok: boolean; watch?: HarnessWatch }>;
   deleteHarnessWatch: (watchId: string) => Promise<{ ok: boolean; id?: string }>;
-  listHarnessRuns: (params?: HarnessRunsParams) => Promise<HarnessRunsResult>;
+  listHarnessRuns: (params?: HarnessRunsParams, opts?: { handleError?: boolean }) => Promise<HarnessRunsResult>;
   getHarnessRun: (runId: string) => Promise<{ ok: boolean; run: HarnessRun }>;
   getRunningAgents: () => Promise<RunningAgentsResult>;
   // Agents · 运行图 graph payload (contract §3). Realtime — refetched off SSE,
@@ -718,6 +821,9 @@ export type ApiContextType = {
   startRemoteAccess: () => Promise<RemoteAccessStatus>;
   stopRemoteAccess: () => Promise<RemoteAccessStatus>;
   optimizeRemoteAccessRoute: () => Promise<RemoteAccessStatus>;
+  getRemoteAccessNetworkInterfaces: () => Promise<{ ok: boolean; interfaces: TunnelNetworkInterface[] }>;
+  saveRemoteAccessSettings: (settings: RemoteAccessSettings) => Promise<RemoteAccessStatus>;
+  diagnoseRemoteAccess: () => Promise<TunnelConnectivityDiagnostics>;
   getAuthSession: () => Promise<SessionInfo>;
   signOut: () => Promise<{ ok: boolean }>;
 };
@@ -730,6 +836,7 @@ export type ApiContextType = {
 // absent field) means "no project default" → fall back to the global default.
 export type ProjectDefaultAgent = {
   agent_backend: string | null;
+  agent_id: string | null;
   agent_name: string | null;
   agent_variant: string | null;
   model: string | null;
@@ -775,6 +882,13 @@ export type WorkbenchSession = {
   model: string | null;
   reasoning_effort: string | null;
   status: string;
+  /** Storage projection, not a user preference: ``foreground`` = an ordinary chat,
+   *  ``background`` = hidden and undelivered, ``system`` = a row the RUNTIME owns
+   *  (kept out of session lists, still an Inbox destination — today the
+   *  workspace-notifications session, which accepts no turn, see
+   *  ``sessionReadOnlyReason``). Optional because payloads cached by an older client
+   *  predate the field; the server always sends it. */
+  visibility?: 'foreground' | 'background' | 'system';
   pinned: boolean;
   /** Live agent-runtime status driving the sidebar dot: idle (gray) /
    *  running (green) / failed (red). Distinct from the lifecycle ``status``. */
@@ -785,6 +899,11 @@ export type WorkbenchSession = {
   updated_at: string;
   last_active_at: string | null;
   metadata: Record<string, unknown>;
+};
+
+export type WorkbenchSessionReadResult = {
+  status: number;
+  session: WorkbenchSession | null;
 };
 
 export type WorkbenchSessionCreate = {
@@ -819,11 +938,14 @@ export type WorkbenchSessionUpdate = {
 export type VibeAgentBrief = {
   id: string;
   name: string;
+  display_name: string;
   description: string | null;
   backend: string;
   model: string | null;
   reasoning_effort: string | null;
   enabled: boolean;
+  archived: boolean;
+  archived_at: string | null;
   source: string;
   updated_at: string;
 };
@@ -966,6 +1088,7 @@ export type SkillsCheckResult = {
 };
 
 export type VibeAgentUpdatePayload = {
+  name?: string;
   description?: string | null;
   model?: string | null;
   reasoning_effort?: string | null;
@@ -1116,6 +1239,9 @@ export type MessageSearchSession = {
   title: string | null;
   project_id: string | null;
   project_name: string | null;
+  // True when the session is archived (only possible with includeArchived) —
+  // the group is marked in the results and the chat opens read-only.
+  archived: boolean;
   matches: MessageSearchMatch[];
 };
 
@@ -1212,17 +1338,62 @@ export type InboxFeedResult = {
 // =============================================================================
 
 // Server-resolved view of a task/watch's bound session, for the cards. A
-// workbench session carries a title and is linkable to its chat; an IM session
-// resolves to its platform + channel display name and is not linkable.
+// workbench session carries a title; an IM session resolves to its platform +
+// channel display name.
+//
+// ``session_is_workbench`` chooses the icon and which label to show.
+// ``session_openable`` — and only it — decides whether the label is a link:
+// ``/chat/<id>`` opens IM-bound sessions too, so linking on "is workbench" hid
+// working destinations behind a bare id. One predicate answers it for every
+// surface (``storage/agent_session_rows.py::session_openable_in_chat``).
 export type HarnessSessionSummary = {
   session_title: string | null;
   session_platform: string | null;
   session_scope_kind: string | null;
   session_label: string | null;
   session_is_workbench: boolean;
+  session_openable: boolean;
 };
 
-export type HarnessTask = HarnessSessionSummary & {
+// What a task/watch is *doing*, derived server-side from columns that already
+// exist. ``enabled`` is a switch and was being read as a state, which made a
+// one-shot that finished on its own indistinguishable from one the user paused.
+// ``lifecycle_detail`` is set only on ``finished`` rows and says how they ended.
+export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
+export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+export type HarnessDefinitionHealth = 'failing' | 'degraded' | 'healthy' | 'unknown';
+
+// The fields every task/watch row reads to describe its state.
+export type HarnessDefinitionState = {
+  lifecycle_state: HarnessLifecycleState | null;
+  lifecycle_detail: HarnessLifecycleDetail | null;
+  // When the scheduler will fire this next; null when nothing is promised.
+  next_run_at: string | null;
+  // When the current wait began — set only while ``waiting``, so a paused row's
+  // last start reads as history rather than a wait anyone is still in.
+  waiting_since: string | null;
+  // When the run that makes this row ``running`` actually started. Null while
+  // that run is still queued, and null in every other state — a duration for
+  // "how long has this been running" must come from the run that is running,
+  // not from whenever the row last did anything.
+  running_since: string | null;
+  // Derived from this definition's own settled run outcomes, never from
+  // ``last_run_at``/``last_error``: those are overwritten on every fire, so one
+  // success used to erase days of failure and a daily-failing cron rendered
+  // identically to a daily-succeeding one.
+  //
+  // ``failing`` = the newest verdict failed. ``degraded`` = the newest succeeded
+  // but a failure is still inside the window — a success downgrades, it does not
+  // clear. ``unknown`` = health could not be computed, which must not read as a
+  // clean bill of health.
+  health: HarnessDefinitionHealth | null;
+  // How many verdicts back the failure run reaches, and how many failures are in
+  // the window at all. Both age out on their own; neither is acknowledgment state.
+  consecutive_failures: number;
+  recent_failures: number;
+};
+
+export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
   id: string;
   name: string | null;
   agent_name: string | null;
@@ -1244,7 +1415,25 @@ export type HarnessTask = HarnessSessionSummary & {
   last_run_at: string | null;
   last_run_id: string | null;
   last_error: string | null;
-  next_run_at: string | null;
+  // Command tasks: a scheduled definition that runs a subprocess instead of
+  // prompting an Agent. Non-null ``shell_command`` OR a non-empty ``command``
+  // argv is what makes a row one (see ``taskIsCommand``); its ``prompt`` is
+  // empty and — when ``metadata.on_failure`` is ``"none"`` — it has no session
+  // at all, so nothing here may be assumed present.
+  //
+  // ``/api/harness/tasks`` serves the raw store row, so these are exactly the
+  // keys ``_scheduled_task_from_row`` writes: ``metadata`` already decoded, not
+  // ``metadata_json``.
+  shell_command?: string | null;
+  command?: unknown[] | null;
+  timeout_seconds?: number | null;
+  last_exit_code?: number | null;
+  metadata?: Record<string, unknown> | null;
+  // Where a command task's subprocess runs. Null is not "nowhere": a definition
+  // bound to a Session follows that Session's workdir, read live at fire time
+  // (``_bound_session_workdir``), so the pane names the source rather than
+  // printing a blank.
+  cwd?: string | null;
 };
 
 export type HarnessWatchRuntime = {
@@ -1254,7 +1443,7 @@ export type HarnessWatchRuntime = {
   updated_at?: string | null;
 };
 
-export type HarnessWatch = HarnessSessionSummary & {
+export type HarnessWatch = HarnessSessionSummary & HarnessDefinitionState & {
   id: string;
   name: string | null;
   agent_name: string | null;
@@ -1279,20 +1468,40 @@ export type HarnessWatch = HarnessSessionSummary & {
   updated_at: string | null;
   last_started_at: string | null;
   last_finished_at: string | null;
+  retired_at: string | null;
   last_event_at: string | null;
   last_error: string | null;
   last_exit_code: number | null;
   runtime: HarnessWatchRuntime;
+  // Whether the waiter process is alive. ``null`` means we have never seen a
+  // heartbeat for it, which is not the same as having seen it exit — the row
+  // must not report a dead waiter on the strength of never having looked.
+  process_alive: boolean | null;
 };
 
 export type HarnessRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | (string & {});
 
-export type HarnessDefinitionStatus = 'all' | 'enabled' | 'disabled';
+// Everything the list endpoint accepts. The UI offers four of these as chips
+// (see ``harnessLifecycle.ts``); the per-state values stay valid so a deep link
+// can name one exactly.
+export type HarnessDefinitionStatus =
+  | 'all'
+  | 'active'
+  | 'running'
+  | 'waiting'
+  | 'paused'
+  | 'finished';
 
+// Counts are per *state*, one bucket per lifecycle value plus the total, so a
+// chip spanning two states sums them client-side rather than asking the server
+// for a bucket named after a chip.
 export type HarnessDefinitionCounts = {
-  all: number;
-  enabled: number;
-  disabled: number;
+  total: number;
+  running: number;
+  waiting: number;
+  paused: number;
+  finished: number;
+  [key: string]: number;
 };
 
 export type HarnessRunCounts = {
@@ -1305,15 +1514,33 @@ export type HarnessRunCounts = {
   [key: string]: number;
 };
 
-export type HarnessRun = {
+// A run carries the same resolved session summary as a task/watch, so the same
+// DetailSession component renders all three. ``callback_session`` is nested
+// rather than prefix-flattened for exactly that reason.
+export type HarnessRun = HarnessSessionSummary & {
   id: string;
   request_type: string | null;
   run_type: string | null;
   status: HarnessRunStatus;
   definition_id: string | null;
+  // The task/watch this run came from, named. Present even when soft-deleted —
+  // a run outlives its definition — with ``definition_deleted`` telling the UI
+  // to show the name without a link.
+  definition_name: string | null;
+  definition_kind: 'task' | 'watch' | null;
+  definition_deleted: boolean;
+  callback_session: HarnessSessionSummary | null;
   task_id: string | null;
   source_kind: string | null;
+  // Polymorphic: a session id when ``source_kind === 'agent'``, otherwise a
+  // parent run id, a vault request handle, or a human's name. Render it raw
+  // only when ``source_session`` is null — that is the resolved form, and it is
+  // non-null exactly when the actor names a session.
   source_actor: string | null;
+  // ``source_actor`` narrowed to the session case, so the UI never has to
+  // re-derive "is this string an id?" from ``source_kind``.
+  source_session_id: string | null;
+  source_session: HarnessSessionSummary | null;
   parent_run_id: string | null;
   // Callback (report-back) lineage — serialized by the backend run row but
   // previously unrendered; the run detail surfaces these (Part B).
@@ -1355,6 +1582,10 @@ export type HarnessRun = {
 export type HarnessRunsParams = {
   status?: HarnessRunStatus;
   runType?: string;
+  // Comma-serialized server-side exclusion. ``run_type`` is an equality match,
+  // so "everything except watcher heartbeats" needs its own param — and an
+  // exclusion keeps a future run type visible by default instead of dropping it.
+  excludeRunType?: string[];
   agentName?: string;
   definitionId?: string;
   query?: string;
@@ -1387,6 +1618,9 @@ export type HarnessWatchesResult = HarnessPageResultBase<HarnessDefinitionCounts
 
 export type HarnessRunsResult = HarnessPageResultBase<HarnessRunCounts> & {
   runs: HarnessRun[];
+  // Every run_type present in the ledger, so the selector can offer a type the
+  // UI has no built-in name for. Optional: an older server omits it.
+  run_types?: string[];
 };
 
 export type HarnessCountsResult = {
@@ -1398,6 +1632,11 @@ export type HarnessCountsResult = {
 export type HarnessBootstrapParams = {
   tab?: 'tasks' | 'watches' | 'runs';
   status?: HarnessDefinitionStatus | HarnessRunStatus;
+  /** Runs tab only — mirrors the dedicated /api/harness/runs filters so the
+   * first paint already reflects the active filter instead of flashing an
+   * unfiltered page. */
+  run_type?: string;
+  exclude_run_type?: string[];
   query?: string;
   /** Scope tasks/watches to a bound session (background-work banner deep-link). */
   session_id?: string;
@@ -1745,6 +1984,7 @@ export type CodexAuthSaveResult = CodexAuthState & {
 };
 
 export type ClaudeAuthMode = 'oauth' | 'api_key';
+export type ClaudeCredentialType = 'api_key' | 'auth_token';
 
 // Claude Code reads ``~/.claude/settings.json`` at launch and its ``env``
 // block wins over inherited process env. avibe therefore writes
@@ -1773,6 +2013,7 @@ export type ClaudeAuthState = {
   settings_env_has_key: boolean;
   settings_env_key_length: number;
   settings_env_key_var: 'ANTHROPIC_API_KEY' | 'ANTHROPIC_AUTH_TOKEN' | null;
+  credential_type: ClaudeCredentialType | null;
   settings_env_base_url: string | null;
   settings_conflict: boolean;
   message?: string;
@@ -1781,6 +2022,7 @@ export type ClaudeAuthState = {
 export type ClaudeAuthPayload = {
   auth_mode: ClaudeAuthMode;
   api_key?: string | null;
+  credential_type?: ClaudeCredentialType;
   base_url?: string | null;
 };
 
@@ -1832,6 +2074,7 @@ export type OAuthWebMutationResult = {
   error?: string;
   detail?: string;
   notices?: BackendNotice[];
+  restart?: BackendRestartResult;
   // ``partial: true`` rides on ``ok: true`` when the V2Config side of
   // the operation succeeded but the CLI subprocess (``codex logout`` /
   // ``claude auth logout``) reported a non-zero exit. The caller should
@@ -1999,6 +2242,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
+  const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -2006,18 +2250,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     
     try {
       const data = await res.json();
-      // Accept the legacy ``error`` shape (string code or ``{ code, message }``) AND the
-      // top-level ``{ code, message }`` shape newer routes use (e.g. /api/vault/*), so callers
-      // always get a real ``ApiError.code`` to branch on instead of a generic status string.
-      const rawErr = data.error ?? (data.code ? { code: data.code, message: data.message } : undefined);
-      if (rawErr) {
+      const parsed = selectApiErrorFields(data, errorMessage);
+      if (parsed) {
         // Localize by code, falling back to the server-provided message so we never render a
         // key like ``errors.[object Object]``.
-        const code = typeof rawErr === 'string' ? rawErr : rawErr?.code;
-        const fallback =
-          typeof rawErr === 'string' ? rawErr : rawErr?.message ?? rawErr?.code ?? errorMessage;
-        errorCode = typeof code === 'string' ? code : null;
-        errorMessage = errorCode ? t(`errors.${errorCode}`, { defaultValue: fallback }) : fallback;
+        errorCode = parsed.code;
+        errorMessage = parsed.code
+          ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+          : parsed.fallback;
       }
     } catch {
       // Response is not JSON, use status text
@@ -2034,7 +2274,31 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Show toast to user
     showToast(errorMessage, 'error');
 
+    // Archive is TERMINAL, so this particular refusal is not a failure to retry
+    // but a state change the client missed (a backgrounded/offline tab can drop
+    // the archive SSE). Announce it once, from the one place every JSON helper
+    // funnels its errors through, so any subscriber converges no matter WHICH
+    // session-scoped write tripped it. Best-effort and non-throwing: a subscriber
+    // must never change whether/what this handler throws.
+    const archivedSessionId = archivedConflictSessionId(errorCode, path);
+    if (archivedSessionId) {
+      for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
+        try {
+          handler(archivedSessionId);
+        } catch (err) {
+          console.error('[API] session-archived subscriber failed', err);
+        }
+      }
+    }
+
     throw new ApiError(errorMessage, res.status, errorCode);
+  };
+
+  const onSessionArchived = (handler: (sessionId: string) => void) => {
+    sessionArchivedHandlersRef.current.add(handler);
+    return () => {
+      sessionArchivedHandlersRef.current.delete(handler);
+    };
   };
 
   const getJson = async (path: string, { handleError = true }: { handleError?: boolean } = {}) => {
@@ -2794,6 +3058,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       params?.cache === false
         ? getJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { handleError: params?.handleError })
         : getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}`, undefined, { handleError: params?.handleError }),
+    getSessionResult: async (sessionId) => {
+      const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      const payload = await res.json().catch(() => null);
+      return {
+        status: res.status,
+        session: res.ok && payload && typeof payload.id === 'string' ? payload : null,
+      };
+    },
     getSessionBootstrap: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`),
     updateSession: async (sessionId, payload) => {
@@ -2805,6 +3077,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return payloadJson;
     },
     archiveSession: (sessionId) => deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`),
+    onSessionArchived,
     getArchivePreview: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/archive-preview`),
     listSessionMessages: (sessionId, params) => {
@@ -2831,6 +3104,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       search.set('q', q);
       if (opts?.limit) search.set('limit', String(opts.limit));
+      if (opts?.includeArchived) search.set('include_archived', '1');
       return getJson(`/api/search/messages?${search.toString()}`);
     },
     sendSessionMessage: (sessionId, payload) =>
@@ -2912,8 +3186,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       if (params?.backend) search.set('backend', params.backend);
       if (params?.includeDisabled) search.set('include_disabled', '1');
+      if (params?.includeArchived) search.set('include_archived', '1');
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/agents?${qs}` : '/api/agents', 5_000);
+      const path = qs ? `/api/agents?${qs}` : '/api/agents';
+      return params?.cache === false ? getJson(path) : getCachedJson(path, 5_000);
     },
     getVibeAgentOnboarding: () => getJson('/api/agent-onboarding'),
     onboardVibeAgents: () => postJson('/api/agent-onboarding', {}),
@@ -3041,6 +3317,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       if (params?.tab) search.set('tab', params.tab);
       if (params?.status) search.set('status', params.status);
+      if (params?.run_type) search.set('run_type', params.run_type);
+      if (params?.exclude_run_type?.length) search.set('exclude_run_type', params.exclude_run_type.join(','));
       if (params?.query) search.set('query', params.query);
       if (params?.session_id) search.set('session_id', params.session_id);
       if (params?.page) search.set('page', String(params.page));
@@ -3048,41 +3326,42 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/harness/bootstrap?${qs}` : '/api/harness/bootstrap');
     },
-    listHarnessTasks: (params) => {
+    listHarnessTasks: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.query) search.set('query', params.query);
       if (params?.page) search.set('page', String(params.page));
       if (params?.limit) search.set('limit', String(params.limit));
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/harness/tasks?${qs}` : '/api/harness/tasks');
+      return getCachedJson(qs ? `/api/harness/tasks?${qs}` : '/api/harness/tasks', undefined, opts);
     },
     setHarnessTaskEnabled: (taskId, enabled) =>
       patchJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`, { enabled }),
     deleteHarnessTask: (taskId) => deleteJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`),
-    listHarnessWatches: (params) => {
+    listHarnessWatches: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.query) search.set('query', params.query);
       if (params?.page) search.set('page', String(params.page));
       if (params?.limit) search.set('limit', String(params.limit));
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/harness/watches?${qs}` : '/api/harness/watches');
+      return getCachedJson(qs ? `/api/harness/watches?${qs}` : '/api/harness/watches', undefined, opts);
     },
     setHarnessWatchEnabled: (watchId, enabled) =>
       patchJson(`/api/harness/watches/${encodeURIComponent(watchId)}`, { enabled }),
     deleteHarnessWatch: (watchId) => deleteJson(`/api/harness/watches/${encodeURIComponent(watchId)}`),
-    listHarnessRuns: (params) => {
+    listHarnessRuns: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.runType) search.set('run_type', params.runType);
+      if (params?.excludeRunType?.length) search.set('exclude_run_type', params.excludeRunType.join(','));
       if (params?.agentName) search.set('agent_name', params.agentName);
       if (params?.definitionId) search.set('definition_id', params.definitionId);
       if (params?.query) search.set('query', params.query);
       if (params?.page) search.set('page', String(params.page));
       if (params?.limit) search.set('limit', String(params.limit));
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/harness/runs?${qs}` : '/api/harness/runs');
+      return getCachedJson(qs ? `/api/harness/runs?${qs}` : '/api/harness/runs', undefined, opts);
     },
     getHarnessRun: (runId) => getCachedJson(`/api/harness/runs/${encodeURIComponent(runId)}`),
     connectWorkbenchEvents: (handlers) => {
@@ -3178,6 +3457,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     startRemoteAccess: () => postJson('/api/remote-access/start', {}),
     stopRemoteAccess: () => postJson('/api/remote-access/stop', {}),
     optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}),
+    getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
+    saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
+    diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
     getAuthSession: () => getJson('/api/session').then(normalizeSessionInfo),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps

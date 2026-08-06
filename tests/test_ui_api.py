@@ -983,23 +983,21 @@ def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("available_models", "configured_model", "runtime_model", "expected_model"),
+    ("available_models", "runtime_model", "expected_model"),
     [
-        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, "gpt-5.4", None, "gpt-5.4"),
-        ({"gpt-5.3-chat-latest": {}}, "gpt-5.4-new", None, "gpt-5.4-new"),
+        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, None, "gpt-5.3-chat-latest"),
+        ({"gpt-5.3-chat-latest": {}}, None, "gpt-5.3-chat-latest"),
         (
             {"gpt-5.3-chat-latest": {}, "gpt-5.4": {}, "gpt-5.4-runtime": {}},
-            "gpt-5.4",
             "openai/gpt-5.4-runtime",
             "gpt-5.4-runtime",
         ),
     ],
 )
-def test_opencode_provider_catalog_prefers_configured_agent_default_model(
+def test_opencode_provider_catalog_prefers_runtime_agent_model(
     monkeypatch,
     tmp_path,
     available_models,
-    configured_model,
     runtime_model,
     expected_model,
 ):
@@ -1045,7 +1043,6 @@ def test_opencode_provider_catalog_prefers_configured_agent_default_model(
             agents=SimpleNamespace(
                 opencode=SimpleNamespace(
                     default_provider="openai",
-                    default_model=configured_model,
                 )
             )
         ),
@@ -1458,7 +1455,7 @@ def test_detect_cli_sorts_prerelease_numerically_in_nvm(monkeypatch, tmp_path, o
     assert result["path"] == str(rc10)
 
 
-def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path):
+def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path, only_tmp_binaries):
     npm_path = tmp_path / "tools" / "npm"
     npm_path.parent.mkdir(parents=True, exist_ok=True)
     npm_path.write_text("#!/bin/sh\n")
@@ -2115,8 +2112,6 @@ def test_agent_model_options_claude_strips_default_and_marks_default(monkeypatch
             },
         },
     )
-    monkeypatch.setattr(api, "_backend_default_model", lambda config, backend: "claude-opus-4-8")
-
     result = api.agent_model_options("claude")
 
     assert result["ok"] is True
@@ -2127,8 +2122,8 @@ def test_agent_model_options_claude_strips_default_and_marks_default(monkeypatch
     assert by_value["claude-opus-4-8"]["reasoning_efforts"] == ["low", "max"]
     assert by_value["claude-opus-4-8"]["label"] == "claude-opus-4-8 [1M]"
     assert by_value["claude-sonnet-4-6"]["label"] == "claude-sonnet-4-6"
-    assert by_value["claude-opus-4-8"]["default"] is True
-    assert by_value["claude-sonnet-4-6"]["default"] is False
+    assert "default" not in by_value["claude-opus-4-8"]
+    assert "default" not in by_value["claude-sonnet-4-6"]
 
 
 def test_agent_model_options_unknown_backend():
@@ -2161,7 +2156,6 @@ def test_agent_model_options_opencode_overlay_and_provider_filter(monkeypatch):
         },
     }
     monkeypatch.setattr(api, "opencode_options", lambda cwd: fake_opencode)
-    monkeypatch.setattr(api, "_backend_default_model", lambda config, backend: None)
     monkeypatch.setattr(opencode_config, "read_opencode_custom_providers", lambda **kw: {"deepseek": {}})
 
     result = api.agent_model_options("opencode")
@@ -2664,6 +2658,7 @@ def test_telegram_auth_test_returns_response(monkeypatch):
         return {"id": 1, "username": "vibe_remote_bot"}
 
     monkeypatch.setattr(api, "_telegram_get_me", fake_get_me)
+    monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda proxy_url: proxy_url)
 
     result = api.telegram_auth_test("123456:test-token")
 
@@ -2679,6 +2674,7 @@ def test_telegram_auth_test_uses_stored_token_when_request_omits_secret(monkeypa
 
     monkeypatch.setattr(api, "_telegram_get_me", fake_get_me)
     monkeypatch.setattr(api, "_stored_platform_secret", lambda platform, field: "123456:stored-token")
+    monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda proxy_url: proxy_url)
 
     result = api.telegram_auth_test("")
 
@@ -2703,7 +2699,9 @@ def test_telegram_topic_settings_api_and_discovery_payload(tmp_path, monkeypatch
     # Scenario: TELEGRAM-TOPIC-001
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
     SettingsStore.reset_instance()
+    agent_store = VibeAgentStore()
     try:
+        agent_store.create(name="reviewer", backend="codex")
         store = SettingsStore.get_instance()
         store.update_channel("-1001", ChannelSettings(enabled=True, require_mention=True), platform="telegram")
         chat_discovery.remember_chat(
@@ -2733,6 +2731,7 @@ def test_telegram_topic_settings_api_and_discovery_payload(tmp_path, monkeypatch
         assert saved["ok"] is True
         assert settings["threads"]["-1001"]["42"]["require_mention"] is False
         assert settings["threads"]["-1001"]["42"]["require_bind"] is True
+        assert settings["threads"]["-1001"]["42"]["expected_agent_name"] == "reviewer"
         group = next(channel for channel in chats["channels"] if channel["id"] == "-1001")
         assert group["topics"][0]["name"] == "Releases"
         assert group["topics"][0]["configured"] is True
@@ -2742,6 +2741,7 @@ def test_telegram_topic_settings_api_and_discovery_payload(tmp_path, monkeypatch
         assert api.get_settings("telegram")["threads"] == {}
     finally:
         SettingsStore.reset_instance()
+        agent_store.close()
 
 
 def test_telegram_topic_settings_materialize_inherited_mention_default(tmp_path, monkeypatch):
@@ -2796,6 +2796,112 @@ def test_vibe_agent_api_crud_and_settings_catalog(tmp_path, monkeypatch):
     assert settings["agent_catalog"]["default_agent_name"] == "reviewer"
     assert any(agent["backend"] == "codex" for agent in settings["agent_catalog"]["agents"])
     assert updated["agent"]["model"] == "gpt-5.5"
+
+
+def test_vibe_agent_api_delete_archives_and_hides_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    api.create_vibe_agent({"name": "reviewer", "backend": "codex"})
+    api.create_vibe_agent({"name": "zz-fallback", "backend": "codex"})
+
+    removed = api.remove_vibe_agent("reviewer")
+
+    assert removed["ok"] is True
+    assert removed["removed_agent"] == "reviewer"
+    assert removed["archived_agent"]["name"].startswith("_reviewer-")
+    assert removed["archived_agent"]["display_name"] == "reviewer"
+    assert removed["archived_agent"]["archived"] is True
+    assert "reviewer" not in [agent["name"] for agent in api.get_vibe_agents(include_disabled=True)["agents"]]
+    archived = api.get_vibe_agents(include_disabled=True, include_archived=True)["agents"]
+    assert removed["archived_agent"]["name"] in [agent["name"] for agent in archived]
+
+
+def test_vibe_agent_api_localizes_archive_refusal(tmp_path, monkeypatch):
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    store.create(name="only-agent", backend="codex")
+    store.set_default_agent_name("only-agent")
+    monkeypatch.setattr(api, "VibeAgentStore", lambda: store)
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        staticmethod(lambda: type("Config", (), {"language": "zh"})()),
+    )
+
+    result = api.remove_vibe_agent("only-agent")
+
+    assert result["ok"] is False
+    assert result["code"] == "agent_no_default_replacement"
+    assert result["message"] == "没有其他已启用 Agent 时，无法归档默认 Agent `only-agent`。"
+
+
+def test_vibe_agent_api_localizes_invalid_reference_metadata_on_rename(monkeypatch):
+    class RefusingStore:
+        def rename(self, _name, _new_name, *, user_context=None):
+            raise api.AgentReferenceRewriteError()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(api, "VibeAgentStore", RefusingStore)
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        staticmethod(lambda: type("Config", (), {"language": "zh"})()),
+    )
+
+    result = api.update_vibe_agent("worker", {"name": "renamed-worker"})
+
+    assert result == {
+        "ok": False,
+        "code": "agent_reference_metadata_invalid",
+        "message": "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。",
+        "hint": "请修复或删除元数据异常的任务或监控，然后重试。",
+    }
+
+
+def test_vibe_agent_api_localizes_archived_edit_refusal(tmp_path, monkeypatch):
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    store.create(name="archive-fallback", backend="codex")
+    store.create(name="worker", backend="codex")
+    archived = store.archive("worker")
+    assert archived is not None
+    monkeypatch.setattr(api, "VibeAgentStore", lambda: store)
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        staticmethod(lambda: type("Config", (), {"language": "zh"})()),
+    )
+
+    result = api.update_vibe_agent(archived.archived_name, {"description": "changed"})
+
+    assert result == {
+        "ok": False,
+        "code": "agent_archived_read_only",
+        "message": f"Agent `{archived.archived_name}` 已归档，无法编辑。",
+        "hint": "已归档 Agent 为只读状态，仅供现有持久引用继续使用。",
+    }
+
+
+def test_vibe_agent_api_localizes_reserved_create_and_rename_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        staticmethod(lambda: type("Config", (), {"language": "zh"})()),
+    )
+
+    create_result = api.create_vibe_agent({"name": "_hidden", "backend": "codex"})
+    api.create_vibe_agent({"name": "worker", "backend": "codex"})
+    rename_result = api.update_vibe_agent("worker", {"name": "review/team"})
+
+    assert create_result == {
+        "ok": False,
+        "code": "agent_name_reserved",
+        "message": "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。",
+        "hint": "请选择不以下划线 `_` 开头的 Agent 名称。",
+    }
+    assert rename_result["ok"] is False
+    assert rename_result["code"] == "agent_name_path_separator"
+    assert rename_result["message"] == "Agent 名称不能包含 `/` 或 `\\`。"
 
 
 def test_vibe_agent_catalog_ensures_builtin_defaults_for_enabled_backends(tmp_path, monkeypatch):
@@ -2945,6 +3051,7 @@ def test_builtin_default_agent_does_not_lock_existing_user_agent(tmp_path, monke
     store = VibeAgentStore()
     try:
         created = store.create(name="opencode", backend="opencode")
+        store.create(name="zz-fallback", backend="opencode")
         ensured = store.ensure_builtin_default_agent(backend="opencode")
 
         assert ensured.id == created.id

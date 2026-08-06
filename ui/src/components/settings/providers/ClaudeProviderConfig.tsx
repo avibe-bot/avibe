@@ -21,13 +21,18 @@ import { BackendOAuthPanel } from '../BackendOAuthPanel';
 import { BackendTestPanel } from '../BackendTestPanel';
 import { BackendRuntimeCard } from '../shared/BackendRuntimeCard';
 import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
-import { MODEL_HUB_NAV_ENABLED } from '../models/featureFlags';
+import { useModelHubCapability } from '../models/useModelHubCapability';
 import { SegmentedRadio } from '../shared/SegmentedRadio';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { useOAuthFlowLock } from '../shared/useOAuthFlowLock';
 import { useApi } from '@/context/ApiContext';
-import type { ClaudeAuthMode, ClaudeAuthState } from '@/context/ApiContext';
+import type {
+  ClaudeAuthMode,
+  ClaudeAuthState,
+  ClaudeCredentialType,
+} from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { errorMessage } from '@/lib/errorMessage';
 
 const BACKEND_ID = 'claude';
 const DEFAULT_CLI = 'claude';
@@ -37,6 +42,7 @@ export const ClaudeProviderConfig: React.FC<{
 }> = ({ hideEnableToggle } = {}) => {
   const { t } = useTranslation();
   const api = useApi();
+  const modelHubEnabled = useModelHubCapability();
   const { showToast } = useToast();
 
   // Runtime state — CLI detection + lifecycle. Shared with Codex /
@@ -57,11 +63,14 @@ export const ClaudeProviderConfig: React.FC<{
   // saved key as a read-only mask (``sk-ant-•••cd34``) with a pencil to
   // replace it; true = empty editable input ready for a fresh secret.
   const [editingKey, setEditingKey] = useState(false);
+  const [credentialType, setCredentialType] = useState<ClaudeCredentialType>('api_key');
   const [baseUrl, setBaseUrl] = useState('');
   // Snapshot the last loaded/saved auth-mode + base_url so we can hide
   // the Save button when nothing has changed (page feedback: no-op
   // Save buttons are noise).
   const [savedAuthMode, setSavedAuthMode] = useState<ClaudeAuthMode>('oauth');
+  const [savedCredentialType, setSavedCredentialType] =
+    useState<ClaudeCredentialType>('api_key');
   const [savedBaseUrl, setSavedBaseUrl] = useState('');
   // Freeze the auth-mode segmented radio while the OAuth panel is mid-
   // handshake. Shared with Codex / OpenCode via ``useOAuthFlowLock``.
@@ -87,9 +96,12 @@ export const ClaudeProviderConfig: React.FC<{
         const initialMode =
           data.active_auth_mode !== 'none' ? data.active_auth_mode : data.auth_mode;
         const initialBase = data.base_url || '';
+        const initialCredentialType = data.credential_type || 'api_key';
         setAuthMode(initialMode);
+        setCredentialType(initialCredentialType);
         setBaseUrl(initialBase);
         setSavedAuthMode(initialMode);
+        setSavedCredentialType(initialCredentialType);
         setSavedBaseUrl(initialBase);
         // The masked preview lives in ``authState.api_key_masked``;
         // ``apiKey`` stays empty until the user clicks "Replace".
@@ -117,14 +129,22 @@ export const ClaudeProviderConfig: React.FC<{
     [t]
   );
 
+  const credentialTypeOptions = useMemo(
+    () =>
+      [
+        { id: 'api_key' as const, label: t('settings.backends.claudeCredentialTypeApiKey') },
+        { id: 'auth_token' as const, label: t('settings.backends.claudeCredentialTypeAuthToken') },
+      ] as const,
+    [t]
+  );
+
   const apiKeyStatus = authState?.has_api_key
     ? t('settings.backends.claudeApiKeyConfigured', { length: authState.api_key_length })
     : t('settings.backends.claudeApiKeyMissing');
 
   const onRemoveApiKey = async () => {
-    // Drop just the API key from V2Config; leaves Claude Code's own OAuth
-    // token store alone. Lets the user clear a stale key without having to
-    // also re-do OAuth.
+    // Drop just the API key from Claude Code settings; leave its OAuth token
+    // store alone. Lets the user clear a stale key without redoing OAuth.
     const confirmed = window.confirm(
       t('settings.backends.claudeApiKeyRemoveConfirm') as string,
     );
@@ -143,14 +163,26 @@ export const ClaudeProviderConfig: React.FC<{
       }
       const fresh = await api.getClaudeAuth();
       setAuthState(fresh);
+      const freshCredentialType = fresh.credential_type || 'api_key';
+      setCredentialType(freshCredentialType);
+      setSavedCredentialType(freshCredentialType);
       setBaseUrl(fresh.base_url || '');
       setSavedBaseUrl(fresh.base_url || '');
       setApiKey('');
       setEditingKey(false);
-      showToast(t('settings.backends.claudeApiKeyRemoved'), 'success');
-    } catch (err: any) {
+      if (result.restart?.ok === false) {
+        showToast(
+          result.restart.message || t('settings.backends.claudeApiKeyRemoveFailed', {
+            detail: 'runtime refresh failed',
+          }),
+          'warning',
+        );
+      } else {
+        showToast(t('settings.backends.claudeApiKeyRemoved'), 'success');
+      }
+    } catch (err) {
       showToast(
-        t('settings.backends.claudeApiKeyRemoveFailed', { detail: err?.message || 'unknown' }),
+        t('settings.backends.claudeApiKeyRemoveFailed', { detail: errorMessage(err) || 'unknown' }),
         'error',
       );
     } finally {
@@ -166,6 +198,7 @@ export const ClaudeProviderConfig: React.FC<{
         api_key: authMode === 'api_key' ? (apiKey || undefined) : null,
       };
       if (authMode === 'api_key') {
+        payload.credential_type = credentialType;
         payload.base_url = baseUrl.trim() || null;
       }
       const result = await api.saveClaudeAuth(payload as any);
@@ -177,28 +210,29 @@ export const ClaudeProviderConfig: React.FC<{
       const nextMode =
         result.active_auth_mode !== 'none' ? result.active_auth_mode : result.auth_mode;
       const nextBase = result.base_url || '';
+      const nextCredentialType = result.credential_type || credentialType;
       setAuthMode(nextMode);
+      setCredentialType(nextCredentialType);
       setBaseUrl(nextBase);
       setSavedAuthMode(nextMode);
+      setSavedCredentialType(nextCredentialType);
       setSavedBaseUrl(nextBase);
       setApiKey('');
       setEditingKey(false);
-      // Claude restart is synthetic (one-shot CLI) so result.restart.ok
-      // is always true; treat any falsy state defensively just in case.
-      if (result.partial) {
+      if (result.restart?.ok === false) {
+        showToast(result.restart.message || t('settings.backends.claudeSaveSuccess'), 'warning');
+      } else if (result.partial) {
         showToast(
           t('settings.backends.claudeSavePartial', {
             detail: result.detail || result.warning || 'oauth_cleanup_failed',
           }),
           'warning',
         );
-      } else if (result.restart?.ok === false) {
-        showToast(result.restart.message || t('settings.backends.claudeSaveSuccess'), 'warning');
       } else {
         showToast(t('settings.backends.claudeSaveSuccess'), 'success');
       }
-    } catch (err: any) {
-      showToast(err?.message || t('settings.backends.claudeSaveFailed'), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) || t('settings.backends.claudeSaveFailed'), 'error');
     } finally {
       setAuthSaving(false);
     }
@@ -222,7 +256,7 @@ export const ClaudeProviderConfig: React.FC<{
       />
 
       {/* Model Hub 供给方式 card (L5); flag-gated until the hub feature is advertised. */}
-      {MODEL_HUB_NAV_ENABLED && <BackendSupplyModeCard backend="claude" />}
+      {modelHubEnabled === true && <BackendSupplyModeCard backend="claude" />}
 
       {authLoading ? (
         <div className="text-sm text-muted">{t('common.loading')}</div>
@@ -242,7 +276,7 @@ export const ClaudeProviderConfig: React.FC<{
                     <CheckCircle2 className="size-3" />
                     {authState.active_auth_mode === 'oauth'
                       ? t('settings.backends.activeAuthOauth')
-                      : t('settings.backends.activeAuthApiKey')}
+                      : t('settings.backends.claudeActiveAuthCredential')}
                   </Badge>
                 )}
                 {authState?.active_auth_mode === 'none' && (
@@ -306,8 +340,26 @@ export const ClaudeProviderConfig: React.FC<{
             {authMode === 'api_key' && (
               <>
                 <div className="flex flex-col gap-2">
+                  <Label className="text-xs font-medium uppercase text-muted">
+                    {t('settings.backends.claudeCredentialTypeLabel')}
+                  </Label>
+                  <SegmentedRadio
+                    value={credentialType}
+                    onChange={setCredentialType}
+                    options={credentialTypeOptions}
+                    ariaLabel={t('settings.backends.claudeCredentialTypeLabel') as string}
+                    disabled={authSaving}
+                  />
+                  <p className="text-[12px] leading-relaxed text-muted">
+                    {credentialType === 'api_key'
+                      ? t('settings.backends.claudeCredentialTypeApiKeyHint')
+                      : t('settings.backends.claudeCredentialTypeAuthTokenHint')}
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
                   <Label htmlFor="claude-api-key" className="text-xs font-medium uppercase text-muted">
-                    {t('settings.backends.claudeApiKeyLabel')}
+                    {t('settings.backends.claudeCredentialValueLabel')}
                   </Label>
                   {authState?.has_api_key && !editingKey ? (
                     // Same masked-preview affordance the Codex page uses;
@@ -358,7 +410,11 @@ export const ClaudeProviderConfig: React.FC<{
                         type="password"
                         autoComplete="off"
                         spellCheck={false}
-                        placeholder={t('settings.backends.claudeApiKeyPlaceholder') as string}
+                        placeholder={t(
+                          credentialType === 'api_key'
+                            ? 'settings.backends.claudeApiKeyPlaceholder'
+                            : 'settings.backends.claudeAuthTokenPlaceholder'
+                        ) as string}
                         value={apiKey}
                         onChange={(e) => setApiKey(e.target.value)}
                         className="pl-9 font-mono"
@@ -453,6 +509,7 @@ export const ClaudeProviderConfig: React.FC<{
             {authMode === 'api_key' && (() => {
               const dirty =
                 authMode !== savedAuthMode ||
+                credentialType !== savedCredentialType ||
                 apiKey.trim().length > 0 ||
                 baseUrl.trim() !== savedBaseUrl.trim();
               if (!dirty) return null;

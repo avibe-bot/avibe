@@ -1,0 +1,149 @@
+{
+  "_contract": "docs/plans/show-annotation-message-type/contract.ts",
+  "_spec": "docs/plans/show-annotation-message-type.md",
+  "_frozen_fields": [
+    "type",
+    "author",
+    "content.text",
+    "content.annotation",
+    "content.attachments",
+    "metadata._queued_dispatch_text"
+  ],
+  "_notes": [
+    "These are representative rows from `GET /api/sessions/<id>/messages`. `_frozen_fields` is the machine-readable cross-lane boundary; all other values are production-shaped illustrations.",
+    "`content.annotation` is frozen: exactly `direction`, `action`, and optional `quote`. Adding a field means the card draws something new, which needs a design change first.",
+    "`metadata` keys beyond `source`, `show_event_id`, `show_event_type`, `show_event_scope`, and `_queued_dispatch_text` are Lane BE's choice — nothing in the UI reads them. `_queued_dispatch_text` presence is frozen; its machine-only body and the other metadata values are illustrative.",
+    "`content.attachments[].url` must be `/api/media/<attachment_id>` so `isProxyMediaUrl` passes and the image renders inline instead of degrading to a click-through card."
+  ],
+  "examples": [
+    {
+      "_name": "forward / user annotation, comment only, dispatched immediately",
+      "row": {
+        "id": "msg_01J8XK2Q4W",
+        "type": "annotation",
+        "author": "harness",
+        "source": "harness",
+        "author_name": "show_annotation",
+        "author_id": "evt_7f3a91c2",
+        "native_message_id": "show:evt_7f3a91c2",
+        "text": "这里的标题太小了，正文和它几乎一样重",
+        "content": {
+          "text": "这里的标题太小了，正文和它几乎一样重",
+          "annotation": {
+            "direction": "user",
+            "action": "created",
+            "quote": "Model Hub"
+          }
+        },
+        "metadata": {
+          "source": "show_page",
+          "show_event_id": "evt_7f3a91c2",
+          "show_event_type": "human.annotation.created",
+          "show_event_scope": "default",
+          "anchor_kind": "element",
+          "anchor_selector": "main > section:nth-of-type(2) > h2",
+          "_queued_dispatch_text": "[show-annotation] comment\n\n这里的标题太小了，正文和它几乎一样重\n\nAnchor kind: element\n\nQuote: Model Hub\nAnchor: main > section:nth-of-type(2) > h2\n\nShow event id: evt_7f3a91c2\n\n如需在页面上原位回应，可执行：\n  vibe show reply evt_7f3a91c2 --message '<你的回答>'\n（也可以直接修改页面内容来响应，按场景选择。）"
+        },
+        "created_at": "2026-07-27T10:14:02.417Z"
+      }
+    },
+    {
+      "_name": "forward / user annotation with a screenshot region, queued behind a running turn",
+      "row": {
+        "id": "msg_01J8XK5M8T",
+        "type": "queued",
+        "author": "harness",
+        "source": "harness",
+        "author_name": "show_annotation",
+        "author_id": "evt_b0c4d5e6",
+        "native_message_id": "show:evt_b0c4d5e6",
+        "text": "这两个卡片的间距不一致",
+        "content": {
+          "text": "这两个卡片的间距不一致",
+          "annotation": {
+            "direction": "user",
+            "action": "created"
+          },
+          "attachments": [
+            {
+              "url": "/api/media/med_9a71c33f8b2e",
+              "name": "annotation-region.png",
+              "mime": "image/png",
+              "kind": "image",
+              "width": 1240,
+              "height": 620
+            }
+          ]
+        },
+        "metadata": {
+          "source": "show_page",
+          "show_event_id": "evt_b0c4d5e6",
+          "show_event_type": "human.annotation.created",
+          "show_event_scope": "default",
+          "anchor_kind": "screenshot",
+          "screenshot_region": "x:120, y:340, 1240x620",
+          "_queued_dispatch_text": "[show-annotation] comment\n\n这两个卡片的间距不一致\n\nAnchor kind: screenshot\nScreenshot: state/media/med_9a71c33f8b2e.png (1240x620)\nScreenshot region: x:120, y:340, 1240x620\n\nShow event id: evt_b0c4d5e6\n\n如需在页面上原位回应，可执行：\n  vibe show reply evt_b0c4d5e6 --message '<你的回答>'\n（也可以直接修改页面内容来响应，按场景选择。）"
+        },
+        "created_at": "2026-07-27T10:15:48.006Z"
+      },
+      "_invariant": "While `type` is `queued` this row appears in the queue strip ONLY. It is absent from the transcript fetch and from the live stream, because neither may look at `metadata.source`. When the turn drains, the flushed row is minted with `type: \"annotation\"` and `_queued_dispatch_text` is stripped."
+    },
+    {
+      "_name": "reverse / agent mark",
+      "row": {
+        "id": "msg_01J8XKB1Q9",
+        "type": "annotation",
+        "author": "agent",
+        "source": null,
+        "author_name": null,
+        "author_id": null,
+        "native_message_id": "show:evt_c8d9e0f1",
+        "text": "标题已经改成 20px/600，正文降到 14px，层级现在拉开了。",
+        "content": {
+          "text": "标题已经改成 20px/600，正文降到 14px，层级现在拉开了。",
+          "annotation": {
+            "direction": "agent",
+            "action": "created",
+            "quote": "Model Hub"
+          }
+        },
+        "metadata": {
+          "source": "show_page",
+          "show_event_id": "evt_c8d9e0f1",
+          "show_event_type": "assistant.mark.created",
+          "show_event_scope": "default"
+        },
+        "created_at": "2026-07-27T10:19:31.882Z"
+      },
+      "_invariant": "`type: \"annotation\"` is in `TRANSCRIPT_TYPES`, so this row streams live to an open Chat page and a refetch returns exactly the same single row."
+    },
+    {
+      "_name": "reverse / agent mark closing out a user annotation",
+      "row": {
+        "id": "msg_01J8XKF7R3",
+        "type": "annotation",
+        "author": "agent",
+        "source": null,
+        "author_name": null,
+        "author_id": null,
+        "native_message_id": "show:evt_d2e3f4a5",
+        "text": "间距统一到 16px 了。",
+        "content": {
+          "text": "间距统一到 16px 了。",
+          "annotation": {
+            "direction": "agent",
+            "action": "resolved"
+          }
+        },
+        "metadata": {
+          "source": "show_page",
+          "show_event_id": "evt_d2e3f4a5",
+          "show_event_type": "assistant.mark.resolved",
+          "show_event_scope": "default"
+        },
+        "created_at": "2026-07-27T10:21:07.140Z"
+      },
+      "_invariant": "`action: \"resolved\"` renders a distinct state element on the card. The title stays exactly `Agent 批注`."
+    }
+  ]
+}

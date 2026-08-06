@@ -17,11 +17,17 @@ import { Button } from '../ui/button';
 export const QuickReplies: React.FC<{
   options: string[];
   chosen?: string | null;
+  // Read-only transcript (an archived session): the group renders exactly as
+  // recorded — options, and the ✓ on the chosen one — but is locked outright.
+  // The lock already existed for "answered"; a session that can never accept
+  // another message is the same non-interactive state, so it reuses it instead
+  // of hiding the group and losing part of the transcript.
+  readOnly?: boolean;
   onChoose: (choice: string) => boolean | void | Promise<boolean | void>;
-}> = ({ options, chosen, onChoose }) => {
+}> = ({ options, chosen, readOnly = false, onChoose }) => {
   const [clicked, setClicked] = React.useState<string | null>(null);
   const selected = clicked ?? chosen ?? null;
-  const locked = selected !== null;
+  const locked = readOnly || selected !== null;
 
   // Once the authoritative answer arrives (``chosen`` loaded from the agent
   // message), drop the optimistic lock and let ``chosen`` own the displayed state

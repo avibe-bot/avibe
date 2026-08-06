@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avibe.bot/contracts/tunnel-quality-runtime-status-v2.schema.json",
+  "title": "Avibe Tunnel Quality Runtime Status v2",
+  "description": "Bounded connector and public request-path quality reported by a paired Avibe runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state",
+    "grade",
+    "sampled_at",
+    "protocol",
+    "transport",
+    "connector_count",
+    "ha_connections",
+    "rtt_ms",
+    "baseline_median_rtt_ms",
+    "edge_locations",
+    "window_seconds",
+    "request_errors_per_minute",
+    "packet_loss_per_minute",
+    "request_path",
+    "recovery"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "state": { "type": "string", "enum": ["healthy", "degraded", "recovering", "unknown"] },
+    "grade": { "type": "string", "enum": ["good", "fair", "poor", "critical", "unknown"] },
+    "sampled_at": { "type": "string", "format": "date-time" },
+    "protocol": { "type": "string", "enum": ["quic", "http2", "unknown"] },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured", "effective"],
+      "properties": {
+        "configured": { "type": "string", "enum": ["auto", "quic", "http2"] },
+        "effective": { "type": "string", "enum": ["quic", "http2", "unknown"] }
+      }
+    },
+    "connector_count": { "type": "integer", "minimum": 0, "maximum": 25 },
+    "ha_connections": { "type": "integer", "minimum": 0, "maximum": 4 },
+    "rtt_ms": { "$ref": "#/$defs/latencyRange" },
+    "baseline_median_rtt_ms": { "type": ["number", "null"], "minimum": 0 },
+    "edge_locations": {
+      "type": "array",
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9-]{2,32}$" }
+    },
+    "window_seconds": { "type": "integer", "minimum": 15, "maximum": 600 },
+    "request_errors_per_minute": { "type": "number", "minimum": 0 },
+    "packet_loss_per_minute": { "type": "number", "minimum": 0 },
+    "request_path": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "status",
+            "confidence",
+            "window_seconds",
+            "sample_count",
+            "success_count",
+            "latency_ms",
+            "failure_rate",
+            "slow_request_rate",
+            "baseline_p95_ms"
+          ],
+          "properties": {
+            "source": { "const": "synthetic_local" },
+            "status": { "type": "string", "enum": ["healthy", "degraded", "unavailable", "insufficient"] },
+            "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+            "window_seconds": { "type": "integer", "minimum": 30, "maximum": 600 },
+            "sample_count": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "success_count": { "type": "integer", "minimum": 0, "maximum": 100 },
+            "latency_ms": { "$ref": "#/$defs/requestLatency" },
+            "failure_rate": { "$ref": "#/$defs/rate" },
+            "slow_request_rate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["over_500_ms", "over_1000_ms", "over_2000_ms"],
+              "properties": {
+                "over_500_ms": { "$ref": "#/$defs/rate" },
+                "over_1000_ms": { "$ref": "#/$defs/rate" },
+                "over_2000_ms": { "$ref": "#/$defs/rate" }
+              }
+            },
+            "baseline_p95_ms": { "type": ["number", "null"], "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "last_attempt_at",
+        "last_trigger",
+        "last_result",
+        "previous_median_rtt_ms",
+        "result_median_rtt_ms",
+        "previous_protocol",
+        "result_protocol",
+        "previous_p95_ms",
+        "result_p95_ms",
+        "previous_p99_ms",
+        "result_p99_ms",
+        "next_attempt_at",
+        "attempt_count_window"
+      ],
+      "properties": {
+        "state": { "type": "string", "enum": ["idle", "evaluating", "draining", "cooldown"] },
+        "last_attempt_at": { "$ref": "#/$defs/nullableDateTime" },
+        "last_trigger": { "type": ["string", "null"], "enum": ["availability", "latency", "tail_latency", "errors", "manual", null] },
+        "last_result": { "type": ["string", "null"], "enum": ["improved", "no_improvement", "failed", null] },
+        "previous_median_rtt_ms": { "$ref": "#/$defs/nullableMetric" },
+        "result_median_rtt_ms": { "$ref": "#/$defs/nullableMetric" },
+        "previous_protocol": { "type": ["string", "null"], "enum": ["quic", "http2", null] },
+        "result_protocol": { "type": ["string", "null"], "enum": ["quic", "http2", null] },
+        "previous_p95_ms": { "$ref": "#/$defs/nullableMetric" },
+        "result_p95_ms": { "$ref": "#/$defs/nullableMetric" },
+        "previous_p99_ms": { "$ref": "#/$defs/nullableMetric" },
+        "result_p99_ms": { "$ref": "#/$defs/nullableMetric" },
+        "next_attempt_at": { "$ref": "#/$defs/nullableDateTime" },
+        "attempt_count_window": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "nullableDateTime": { "type": ["string", "null"], "format": "date-time" },
+    "nullableMetric": { "type": ["number", "null"], "minimum": 0 },
+    "rate": { "type": "number", "minimum": 0, "maximum": 1 },
+    "latencyRange": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min", "median", "max"],
+          "properties": {
+            "min": { "type": "number", "minimum": 0 },
+            "median": { "type": "number", "minimum": 0 },
+            "max": { "type": "number", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "requestLatency": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95", "p99", "max"],
+          "properties": {
+            "p50": { "type": "number", "minimum": 0 },
+            "p95": { "type": "number", "minimum": 0 },
+            "p99": { "type": "number", "minimum": 0 },
+            "max": { "type": "number", "minimum": 0 }
+          }
+        }
+      ]
+    }
+  }
+}

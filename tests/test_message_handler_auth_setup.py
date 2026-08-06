@@ -3,7 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -65,10 +65,6 @@ class _StubSessions:
         self.recorded = []
         self._claimed = set()
 
-    def seed_legacy_claim(self, channel_id, thread_ts, message_ts):
-        """Simulate a dedup row written before keys were platform-namespaced."""
-        self._claimed.add((channel_id, thread_ts, message_ts))
-
     def is_message_already_processed(self, channel_id, thread_ts, message_ts):
         return (channel_id, thread_ts, message_ts) in self._claimed
 
@@ -83,6 +79,9 @@ class _StubSessions:
         self._claimed.add(key)
         self.recorded.append(key)
         return True
+
+    def seed_legacy_claim(self, channel_id, thread_ts, message_ts):
+        self._claimed.add((channel_id, thread_ts, message_ts))
 
 
 class _StubSettingsManager:
@@ -215,6 +214,67 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sessions.recorded, [("im:slack:C1", "im:slack:m2", "im:slack:m2")])
         controller.agent_auth_service.maybe_consume_setup_reply.assert_awaited_once()
+
+    async def test_durable_setup_reply_claims_native_event_before_consuming(self):
+        controller = _StubController()
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        consumed = []
+        flow_active = True
+
+        async def consume_once(context, message, *, claim_native_event):
+            nonlocal flow_active
+            if not flow_active:
+                return False
+            if not claim_native_event():
+                return True
+            consumed.append(message)
+            flow_active = False
+            return True
+
+        controller.agent_auth_service.maybe_consume_setup_reply = AsyncMock(
+            side_effect=consume_once
+        )
+        handler = MessageHandler(controller)
+        handler._is_duplicate_human_delivery = Mock(
+            side_effect=lambda context: handler._native_human_event_processed(context)
+        )
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            message_id="m-setup",
+        )
+
+        await handler.handle_user_message(context, "sk-opencode-secret")
+        await handler.handle_user_message(context, "sk-opencode-secret")
+
+        self.assertEqual(consumed, ["sk-opencode-secret"])
+        self.assertEqual(
+            controller.settings_manager.sessions.recorded,
+            [("im:slack:C1", "im:slack:m-setup", "im:slack:m-setup")],
+        )
+        self.assertEqual(
+            controller.agent_auth_service.maybe_consume_setup_reply.await_count,
+            1,
+        )
+        controller.session_turns.deliver.assert_not_awaited()
+
+    async def test_consumed_control_fence_precedes_delivery_lookup(self):
+        controller = _StubController()
+        handler = MessageHandler(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="telegram",
+            message_id="1",
+        )
+        assert handler._claim_native_human_event(context)
+
+        with patch(
+            "storage.db.get_cached_sqlite_engine",
+            side_effect=AssertionError("Delivery lookup must not run"),
+        ):
+            assert handler._is_duplicate_human_delivery(context)
 
 
 if __name__ == "__main__":

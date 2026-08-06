@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from core import web_push_notifications
-from storage import messages_service, project_access_service, web_push_service
+from storage import message_deliveries, messages_service, project_access_service, web_push_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions
+from storage.models import agent_sessions, messages
 from storage.settings_service import upsert_scope
 from vibe import remote_access
 from vibe.authorization import AuthorizationContext
@@ -25,6 +25,21 @@ def _remote_authorization_record(user_key: str) -> dict:
     )
     assert record is not None
     return record
+
+
+def _paired_revision_config(revision: int):
+    from core.services.settings import default_config
+
+    config = default_config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.instance_id = "inst-push"
+    cloud.instance_secret = "device-secret"
+    cloud.backend_url = "https://backend.test"
+    config.save()
+    remote_access._clear_authorization_revision_cache()
+    remote_access._replace_authorization_revision(config, revision)
+    return config
 
 
 def test_maybe_notify_inbox_message_schedules_agent_result(monkeypatch):
@@ -202,6 +217,96 @@ def test_backend_failure_notify_passes_durable_web_push_gates(monkeypatch, tmp_p
     engine.dispose()
 
 
+def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_acceptance_owner",
+            now="2026-08-04T00:00:00.000000Z",
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_acceptance_owner",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_acceptance_owner",
+                native_session_id="",
+                title="Acceptance owner",
+                status="active",
+                metadata_json="{}",
+                created_at="2026-08-04T00:00:00.000000Z",
+                updated_at="2026-08-04T00:00:00.000000Z",
+                last_active_at="2026-08-04T00:00:00.000000Z",
+            )
+        )
+        before = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_acceptance_owner",
+            platform="avibe",
+            author="user",
+            source="user",
+            metadata={"_web_push_user_key": "remote:before"},
+            message_type="user",
+            text="accepted before result",
+        )
+        after = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_acceptance_owner",
+            platform="avibe",
+            author="user",
+            source="user",
+            metadata={"_web_push_user_key": "remote:after"},
+            message_type="user",
+            text="accepted after result",
+        )
+        result = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_acceptance_owner",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="done",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == before["id"])
+            .values(
+                created_at="2026-08-04T00:00:01.000000Z",
+                delivered_at="2026-08-04T00:00:02.000000Z",
+            )
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == after["id"])
+            .values(
+                created_at="2026-08-04T00:00:02.000000Z",
+                delivered_at="2026-08-04T00:00:04.000000Z",
+            )
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == result["id"])
+            .values(created_at="2026-08-04T00:00:03.000000Z")
+        )
+
+    with engine.connect() as conn:
+        assert web_push_notifications._web_push_user_keys_for_message(
+            conn,
+            result["id"],
+        ) == ["remote:before"]
+    engine.dispose()
+
+
 def test_send_to_enabled_subscriptions_waits_then_sends_to_owner_devices(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
@@ -314,6 +419,129 @@ def test_send_to_enabled_subscriptions_waits_then_sends_to_owner_devices(monkeyp
     assert [send[0]["endpoint"] for send in sends] == [
         "https://push.example.test/a",
     ]
+
+
+def test_send_to_enabled_subscriptions_rejects_stale_instance_authorization_revision(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_revision_config(41)
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-04T00:00:00Z"
+    authorization_record = web_push_notifications.web_push_authorization_context_record(
+        "remote:user-a",
+        AuthorizationContext(
+            instance_role="editor",
+            subject="user-a",
+            email="member@example.com",
+            instance_access_source="email",
+            claims_issued_at=int(web_push_notifications.time.time()),
+            authorization_revision=41,
+            is_remote=True,
+        ),
+    )
+    assert authorization_record is not None
+    assert authorization_record["vibe_instance_authorization_revision"] == 41
+
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_revision",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_push_revision",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_push_revision",
+                native_session_id="",
+                title="Revision Push",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_revision",
+            platform="avibe",
+            author="user",
+            source="user",
+            author_id="remote:user-a",
+            metadata={
+                "_web_push_user_key": "remote:user-a",
+                "_web_push_authorization_contexts": [authorization_record],
+            },
+            message_type="user",
+            text="Please finish",
+        )
+        first_result = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_revision",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Done before revocation",
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload={
+                "endpoint": "https://push.example.test/revision",
+                "keys": {"p256dh": "revision-key", "auth": "revision-auth"},
+            },
+        )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Revision Push",
+            "body": "Done before revocation",
+            "session_id": "ses_push_revision",
+            "message_id": first_result["id"],
+        }
+    )
+    assert len(sends) == 1
+
+    remote_access._replace_authorization_revision(config, 42)
+    with engine.begin() as conn:
+        stale_result = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_revision",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Done after revocation",
+        )
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Revision Push",
+            "body": "Done after revocation",
+            "session_id": "ses_push_revision",
+            "message_id": stale_result["id"],
+        }
+    )
+
+    assert len(sends) == 1
+    engine.dispose()
 
 
 def test_send_to_enabled_subscriptions_rechecks_restricted_project_access(monkeypatch, tmp_path):
@@ -916,16 +1144,22 @@ def test_send_to_enabled_subscriptions_ignores_queued_owner(monkeypatch, tmp_pat
                 last_active_at=now,
             )
         )
-        messages_service.append(
+        message_deliveries.insert_delivery(
             conn,
-            scope_id=scope_id,
+            delivery_id="msg_queued_owner",
             session_id="ses_queued_owner",
-            platform="avibe",
-            author="user",
-            source="user",
-            message_type=messages_service.QUEUED_TYPE,
-            metadata={"_web_push_user_key": "remote:user-b"},
-            text="queued while prior turn runs",
+            priority="p3",
+            state="queued",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id="ses_queued_owner",
+                platform="avibe",
+                author="user",
+                source="user",
+                metadata={"_web_push_user_key": "remote:user-b"},
+                text="queued while prior turn runs",
+            ),
+            dispatch_text="queued while prior turn runs",
         )
         message = messages_service.append(
             conn,

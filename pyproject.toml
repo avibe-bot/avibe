@@ -49,6 +49,7 @@ dependencies = [
     "slack-sdk>=3.26.0",
     "discord.py>=2.4.0",
     "aiohttp>=3.8.0",
+    "markdown-it-py>=4.2.0",
     "markdown_to_mrkdwn>=0.2.0",
     "typing_extensions>=4.12.2",
     "PyYAML>=6.0",
@@ -102,6 +103,8 @@ artifacts = [
     "vibe/model_hub_runtime/cliproxyapi_manifest.json",
 ]
 
+[tool.hatch.build.hooks.custom]
+
 [tool.hatch.build.targets.wheel]
 packages = ["vibe", "config", "core", "modules", "storage"]
 
@@ -117,7 +120,10 @@ include = [
     "core/**",
     "modules/**",
     "storage/**",
+    "hatch_build.py",
     "main.py",
+    "scripts/prepare_local_show_runtime_manifest.py",
+    "scripts/show_runtime_manifest_asset.py",
     "ui/dist/**",
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
@@ -141,11 +147,12 @@ asyncio_mode = "auto"
 markers = [
     "integration: platform integration tests requiring Docker + platform tokens",
     "uses_real_paths: opt out of the autouse home/config isolation so the test can exercise real path resolvers (must remain read-only)",
+    "no_sqlite_template: opt out of the pre-migrated SQLite template for migration/bootstrap tests",
 ]
 
 [dependency-groups]
 dev = [
     "jsonschema>=4.26.0",
     "pytest>=9.0.3",
-    "pytest-asyncio>=1.3.0",
+    "pytest-asyncio>=1.4.0",
 ]

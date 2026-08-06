@@ -1,0 +1,401 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/turn-provenance.schema.json",
+  "title": "TurnProvenance",
+  "description": "v4 debug record for one exactly attributed Hub turn. A record is written only when the turn FSM can attribute every included attempt to this turn; ambiguous attempts produce no provenance record. turn_id therefore remains required and no attribution-grain marker exists. The attempt sequence is failed_attempts followed by exactly one terminating slot when a source attempt terminated the turn: served, terminal_error, or canceled_attempt.",
+  "type": "object",
+  "required": [
+    "contract_version",
+    "turn_id",
+    "ts",
+    "agent",
+    "requested_model_id",
+    "outcome",
+    "failed_attempts",
+    "served",
+    "terminal_error",
+    "canceled_attempt",
+    "model_supply_state"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": { "const": 4 },
+    "turn_id": {
+      "type": "string",
+      "description": "Opaque id in the existing turn/session id space."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the FSM settled the turn."
+    },
+    "agent": {
+      "enum": ["claude", "codex", "opencode"],
+      "description": "Backend identifier. Mirrors AgentSupply.backend exactly."
+    },
+    "requested_model_id": {
+      "type": "string",
+      "description": "Caller-facing menu identifier before mapping."
+    },
+    "outcome": {
+      "enum": [
+        "served",
+        "exhausted",
+        "failed_terminal",
+        "no_candidate",
+        "canceled"
+      ],
+      "description": "FSM terminal classification. canceled is emitted only from explicit Stop/cancel truth, never inferred from a dropped transport."
+    },
+    "failed_attempts": {
+      "type": "array",
+      "description": "Candidates tried and left behind through fallback, in order. Skipped candidates are not attempts.",
+      "items": {
+        "type": "object",
+        "required": [
+          "source_id",
+          "resolved_model_id",
+          "channel",
+          "via_mapping",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^src_[a-z0-9]{8,}$"
+          },
+          "resolved_model_id": { "type": "string" },
+          "channel": { "enum": ["native_cli", "hub"] },
+          "via_mapping": { "type": "boolean" },
+          "reason": {
+            "enum": [
+              "quota_exhausted",
+              "rate_limited",
+              "server_error",
+              "network",
+              "credential_expired",
+              "credential_revoked",
+              "balance_exhausted",
+              "account_banned",
+              "permission_denied",
+              "unclassified_error"
+            ],
+            "description": "The attempt-failure partition of ResolutionEvent.reason. permission_denied records a request-scoped denial and does not imply source-global state. The mirror registry enforces totality.",
+            "$comment": "Targeted v4c, review finding 3680338859: core/handlers/model_hub/classification.py:98-125 distinguishes the runtime-preserved permission_error code from source-global credential_revoked. The failed attempt remains useful turn evidence even though no Source state is mutated."
+          }
+        }
+      }
+    },
+    "served": {
+      "type": ["object", "null"],
+      "description": "The attempt that completed the turn; non-null only for outcome served.",
+      "required": ["source_id", "resolved_model_id", "channel", "via_mapping"],
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^src_[a-z0-9]{8,}$"
+        },
+        "resolved_model_id": { "type": "string" },
+        "channel": { "enum": ["native_cli", "hub"] },
+        "via_mapping": { "type": "boolean" }
+      }
+    },
+    "terminal_error": {
+      "type": ["object", "null"],
+      "description": "The attempt that stopped the turn with a non-fallback failure.",
+      "required": [
+        "source_id",
+        "resolved_model_id",
+        "channel",
+        "via_mapping",
+        "reason",
+        "stream_started"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^src_[a-z0-9]{8,}$"
+        },
+        "resolved_model_id": { "type": "string" },
+        "channel": { "enum": ["native_cli", "hub"] },
+        "via_mapping": { "type": "boolean" },
+        "reason": {
+          "enum": [
+            "invalid_parameter",
+            "protocol_error",
+            "tool_incompatible",
+            "stream_interrupted"
+          ]
+        },
+        "stream_started": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "reason": { "const": "stream_interrupted" } },
+            "required": ["reason"]
+          },
+          "then": {
+            "required": ["stream_started"],
+            "properties": { "stream_started": { "const": true } }
+          }
+        }
+      ]
+    },
+    "canceled_attempt": {
+      "type": ["object", "null"],
+      "description": "The in-flight attempt interrupted by explicit Stop/cancel. It carries identity but no failure reason because the source did not fail. null is honest when cancellation settled before any source attempt started.",
+      "required": ["source_id", "resolved_model_id", "channel", "via_mapping"],
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^src_[a-z0-9]{8,}$"
+        },
+        "resolved_model_id": { "type": "string" },
+        "channel": { "enum": ["native_cli", "hub"] },
+        "via_mapping": { "type": "boolean" }
+      }
+    },
+    "model_supply_state": {
+      "type": ["string", "null"],
+      "enum": ["waiting", "interrupted", null],
+      "description": "Model-scoped cause for no_candidate. null for every other outcome."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "served" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
+        "properties": {
+          "served": { "type": "object" },
+          "terminal_error": { "type": "null" },
+          "canceled_attempt": { "type": "null" },
+          "model_supply_state": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "outcome": { "const": "exhausted" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
+        "properties": {
+          "served": { "type": "null" },
+          "terminal_error": { "type": "null" },
+          "canceled_attempt": { "type": "null" },
+          "failed_attempts": { "minItems": 1 },
+          "model_supply_state": { "type": "null" }
+        }
+      }
+    },
+    {
+      "$comment": "failed_attempts deliberately has no minItems: the first candidate can be terminal.",
+      "if": {
+        "properties": { "outcome": { "const": "failed_terminal" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
+        "properties": {
+          "served": { "type": "null" },
+          "terminal_error": { "type": "object" },
+          "canceled_attempt": { "type": "null" },
+          "model_supply_state": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "outcome": { "const": "no_candidate" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
+        "properties": {
+          "served": { "type": "null" },
+          "terminal_error": { "type": "null" },
+          "canceled_attempt": { "type": "null" },
+          "failed_attempts": { "maxItems": 0 },
+          "model_supply_state": { "type": "string" }
+        }
+      }
+    },
+    {
+      "$comment": "canceled_attempt is deliberately nullable: Stop can settle before an upstream attempt starts. When an attempt was in flight, the producer fills this slot without a reason.",
+      "if": {
+        "properties": { "outcome": { "const": "canceled" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
+        "properties": {
+          "served": { "type": "null" },
+          "terminal_error": { "type": "null" },
+          "canceled_attempt": { "type": ["object", "null"] },
+          "model_supply_state": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "contract_version": 4,
+      "turn_id": "turn_01k9x2m4",
+      "ts": "2026-07-29T06:32:11Z",
+      "agent": "claude",
+      "requested_model_id": "claude-opus-4-6",
+      "outcome": "served",
+      "failed_attempts": [
+        {
+          "source_id": "src_claudepro1",
+          "resolved_model_id": "claude-opus-4-6",
+          "channel": "native_cli",
+          "via_mapping": false,
+          "reason": "quota_exhausted"
+        }
+      ],
+      "served": {
+        "source_id": "src_anthkey01",
+        "resolved_model_id": "claude-opus-4-6",
+        "channel": "hub",
+        "via_mapping": false
+      },
+      "terminal_error": null,
+      "canceled_attempt": null,
+      "model_supply_state": null
+    },
+    {
+      "contract_version": 4,
+      "turn_id": "turn_01k9x33p",
+      "ts": "2026-07-29T06:41:02Z",
+      "agent": "opencode",
+      "requested_model_id": "zhipuai/glm-5.2",
+      "outcome": "exhausted",
+      "failed_attempts": [
+        {
+          "source_id": "src_relay9c1x",
+          "resolved_model_id": "glm-5.2",
+          "channel": "hub",
+          "via_mapping": false,
+          "reason": "balance_exhausted"
+        }
+      ],
+      "served": null,
+      "terminal_error": null,
+      "canceled_attempt": null,
+      "model_supply_state": null
+    },
+    {
+      "contract_version": 4,
+      "turn_id": "turn_01k9x3zq",
+      "ts": "2026-07-29T06:48:20Z",
+      "agent": "codex",
+      "requested_model_id": "gpt-5.3-codex",
+      "outcome": "no_candidate",
+      "failed_attempts": [],
+      "served": null,
+      "terminal_error": null,
+      "canceled_attempt": null,
+      "model_supply_state": "waiting"
+    },
+    {
+      "contract_version": 4,
+      "turn_id": "turn_01k9x4b7",
+      "ts": "2026-07-29T07:02:44Z",
+      "agent": "claude",
+      "requested_model_id": "claude-opus-4-6",
+      "outcome": "failed_terminal",
+      "failed_attempts": [],
+      "served": null,
+      "terminal_error": {
+        "source_id": "src_anthkey01",
+        "resolved_model_id": "claude-opus-4-6",
+        "channel": "hub",
+        "via_mapping": false,
+        "reason": "stream_interrupted",
+        "stream_started": true
+      },
+      "canceled_attempt": null,
+      "model_supply_state": null
+    },
+    {
+      "contract_version": 4,
+      "turn_id": "turn_01k9x5ca",
+      "ts": "2026-07-29T07:08:00Z",
+      "agent": "codex",
+      "requested_model_id": "gpt-5.3-codex",
+      "outcome": "canceled",
+      "failed_attempts": [],
+      "served": null,
+      "terminal_error": null,
+      "canceled_attempt": {
+        "source_id": "src_codexplus1",
+        "resolved_model_id": "gpt-5.3-codex",
+        "channel": "native_cli",
+        "via_mapping": false
+      },
+      "model_supply_state": null
+    },
+    {
+      "contract_version": 4,
+      "turn_id": "turn_01k9x6db",
+      "ts": "2026-07-30T05:55:00Z",
+      "agent": "claude",
+      "requested_model_id": "claude-opus-4-6",
+      "outcome": "served",
+      "failed_attempts": [
+        {
+          "source_id": "src_primary01",
+          "resolved_model_id": "claude-opus-4-6",
+          "channel": "hub",
+          "via_mapping": false,
+          "reason": "permission_denied"
+        }
+      ],
+      "served": {
+        "source_id": "src_backup001",
+        "resolved_model_id": "claude-opus-4-6",
+        "channel": "hub",
+        "via_mapping": false
+      },
+      "terminal_error": null,
+      "canceled_attempt": null,
+      "model_supply_state": null
+    }
+  ]
+}

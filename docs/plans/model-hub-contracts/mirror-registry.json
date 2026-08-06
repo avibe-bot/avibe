@@ -1,0 +1,217 @@
+{
+  "contract_version": 4,
+  "entries": [
+    {
+      "id": "M1",
+      "vocabulary": "source state detail keys",
+      "rule": "equality",
+      "sets": [
+        {
+          "schema": "source.schema.json",
+          "paths": [
+            "/properties/state/allOf/1/then/properties/detail_key",
+            "/properties/state/allOf/2/then/properties/detail_key",
+            "/properties/state/allOf/3/then/properties/detail_key"
+          ],
+          "exclude": [null]
+        },
+        {
+          "schema": "probe-result.schema.json",
+          "paths": ["/properties/error"],
+          "exclude": [null],
+          "extras": ["models.probe.native_cli_unavailable"]
+        }
+      ]
+    },
+    {
+      "id": "M2",
+      "vocabulary": "source status to chain health",
+      "rule": "mapping",
+      "home": {
+        "schema": "source.schema.json",
+        "path": "/properties/state/properties/status"
+      },
+      "target": {
+        "schema": "agent-chain.schema.json",
+        "path": "/properties/chain/items/properties/health"
+      },
+      "mapping": {
+        "active": "healthy",
+        "standby": "healthy",
+        "cooldown": "cooldown",
+        "needs_action": "needs_action",
+        "error": "error"
+      }
+    },
+    {
+      "id": "M3",
+      "vocabulary": "attempt failure causes",
+      "rule": "partition",
+      "home": {
+        "schema": "resolution-event.schema.json",
+        "path": "/properties/reason"
+      },
+      "member": {
+        "schema": "turn-provenance.schema.json",
+        "path": "/properties/failed_attempts/items/properties/reason"
+      },
+      "exclusions": [
+        "recovery",
+        "manual",
+        "mapping"
+      ],
+      "exclusion_sets": [
+        {
+          "schema": "resolution-event.schema.json",
+          "path": "/allOf/0/then/properties/reason"
+        }
+      ]
+    },
+    {
+      "id": "M4",
+      "vocabulary": "non-self-healing cause to detail key",
+      "rule": "bijection",
+      "home": {
+        "schema": "resolution-event.schema.json",
+        "path": "/properties/reason"
+      },
+      "target_sets": [
+        {
+          "schema": "source.schema.json",
+          "paths": [
+            "/properties/state/allOf/2/then/properties/detail_key",
+            "/properties/state/allOf/3/then/properties/detail_key"
+          ]
+        }
+      ],
+      "pairs": {
+        "credential_expired": "models.source.needs_action.oauth_expired",
+        "credential_revoked": "models.source.needs_action.credential_revoked",
+        "balance_exhausted": "models.source.needs_action.balance_exhausted",
+        "account_banned": "models.source.needs_action.account_banned",
+        "unclassified_error": "models.source.error.unclassified"
+      }
+    },
+    {
+      "id": "M5",
+      "vocabulary": "supply state taxonomy",
+      "rule": "projection",
+      "home": {
+        "schema": "agent-supply.schema.json",
+        "path": "/properties/supply_status",
+        "exclude": [null]
+      },
+      "targets": [
+        {
+          "schema": "agent-supply.schema.json",
+          "path": "/properties/named_agents/items/properties/supply_status",
+          "exclude": [null],
+          "drop_from_home": []
+        },
+        {
+          "schema": "agent-chain.schema.json",
+          "path": "/properties/supply_state",
+          "drop_from_home": ["degraded"]
+        },
+        {
+          "schema": "turn-provenance.schema.json",
+          "path": "/properties/model_supply_state",
+          "exclude": [null],
+          "drop_from_home": ["ok", "degraded"]
+        }
+      ]
+    },
+    {
+      "id": "M6",
+      "vocabulary": "backend identifiers",
+      "rule": "equality",
+      "sets": [
+        {
+          "schema": "agent-supply.schema.json",
+          "paths": ["/properties/backend"]
+        },
+        {
+          "schema": "agent-chain.schema.json",
+          "paths": ["/properties/backend"]
+        },
+        {
+          "schema": "probe-result.schema.json",
+          "paths": ["/properties/backend"]
+        },
+        {
+          "schema": "turn-provenance.schema.json",
+          "paths": ["/properties/agent"]
+        },
+        {
+          "schema": "resolution-event.schema.json",
+          "paths": ["/properties/agent"],
+          "extras": ["system"]
+        }
+      ]
+    },
+    {
+      "id": "M7",
+      "vocabulary": "supply channel",
+      "rule": "equality",
+      "sets": [
+        {
+          "schema": "source.schema.json",
+          "paths": ["/properties/supply_channel"]
+        },
+        {
+          "schema": "agent-chain.schema.json",
+          "paths": ["/properties/chain/items/properties/channel"]
+        },
+        {
+          "schema": "turn-provenance.schema.json",
+          "paths": [
+            "/properties/failed_attempts/items/properties/channel",
+            "/properties/served/properties/channel",
+            "/properties/terminal_error/properties/channel",
+            "/properties/canceled_attempt/properties/channel"
+          ]
+        },
+        {
+          "schema": "probe-result.schema.json",
+          "paths": ["/properties/channel"]
+        }
+      ]
+    },
+    {
+      "id": "M8",
+      "vocabulary": "native CLI process availability",
+      "rule": "mapping",
+      "home": {
+        "schema": "agent-chain.schema.json",
+        "path": "/properties/chain/items/properties/reason/anyOf/0"
+      },
+      "targets": [
+        {
+          "schema": "agent-supply.schema.json",
+          "path": "/properties/sources/properties/eligibility/items/properties/process_availability_reason",
+          "exclude": [null],
+          "mapping": {
+            "native_cli_unavailable": "native_cli_unavailable"
+          }
+        },
+        {
+          "schema": "probe-result.schema.json",
+          "path": "/allOf/6/then/properties/error",
+          "mapping": {
+            "native_cli_unavailable": "models.probe.native_cli_unavailable"
+          }
+        }
+      ]
+    },
+    {
+      "id": "N1",
+      "vocabulary": "source recommendation rule",
+      "rule": "none",
+      "home": {
+        "schema": "agent-supply.schema.json",
+        "path": "/properties/sources/properties/policy"
+      },
+      "reason": "The deterministic ordering predicate has one normative home in model-hub.md section 4.2 and is not a shared vocabulary."
+    }
+  ]
+}

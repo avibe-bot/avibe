@@ -51,6 +51,50 @@ def test_flow_registry_defaults_legacy_bindings_to_no_consent(tmp_path):
     assert binding.completed is False
 
 
+def test_flow_registry_returns_latest_pending_reauth_for_source(tmp_path):
+    registry = OAuthFlowRegistry(tmp_path / "oauth_flows.json")
+    registry.remember(
+        "oaf_first001",
+        "native_cli",
+        "src_native001",
+        "anthropic",
+        intent="reauth",
+    )
+    registry.remember(
+        "oaf_second01",
+        "native_cli",
+        "src_native001",
+        "anthropic",
+        intent="reauth",
+    )
+    registry.remember(
+        "oaf_create01",
+        "hub",
+        "src_native001",
+        "anthropic",
+    )
+    registry.complete("oaf_second01")
+
+    pending = registry.pending_reauth("src_native001")
+
+    assert pending is not None
+    assert pending[0] == "oaf_first001"
+
+    registry.remember(
+        "oaf_replaced1",
+        "native_cli",
+        "src_native001",
+        "anthropic",
+        intent="reauth",
+        replace_flow_id="oaf_first001",
+    )
+
+    assert registry.binding("oaf_first001") is None
+    replaced = registry.pending_reauth("src_native001")
+    assert replaced is not None
+    assert replaced[0] == "oaf_replaced1"
+
+
 def test_native_status_trusts_codex_keyring_success_but_not_active_api_keys():
     assert _signed_in(
         "codex",

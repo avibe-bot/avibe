@@ -413,6 +413,9 @@ def _enrich_from_db(rows: list[dict[str, Any]]) -> None:
                     scopes.c.platform.label("scope_platform"),
                     scopes.c.scope_type.label("scope_scope_type"),
                     scopes.c.display_name.label("scope_display_name"),
+                    # Only so ``openable_in_chat`` can ask the shared predicate
+                    # rather than answer "it exists, so yes" on its own.
+                    scopes.c.native_type.label("scope_native_type"),
                 )
                 .select_from(agent_sessions.outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id))
                 .where(agent_sessions.c.session_anchor.in_(anchors))
@@ -457,6 +460,8 @@ def _apply_session_meta(r: dict[str, Any], meta: dict[str, Any]) -> None:
 
     Pure (no I/O) so it can be unit-tested without a DB.
     """
+    from storage.agent_session_rows import session_openable_in_chat
+
     scope_id = meta.get("scope_id")
     # Canonical scopes columns win; fall back to splitting scope_id when the
     # scope row is missing (FK is nullable / SET NULL).
@@ -475,7 +480,9 @@ def _apply_session_meta(r: dict[str, Any], meta: dict[str, Any]) -> None:
     # Run lineage owns precise trigger provenance; this live-process view only
     # distinguishes whether a persisted Session exists.
     r["trigger_source"] = r.get("trigger_source") or "human"
-    r["openable_in_chat"] = bool(meta.get("id"))
+    r["openable_in_chat"] = session_openable_in_chat(
+        session_id=meta.get("id"), scope_native_type=meta.get("scope_native_type")
+    )
 
 
 async def _end_orphan_pid(pid: int) -> dict[str, Any]:
@@ -603,15 +610,21 @@ async def _end_claude(controller: "Controller", composite_key: Optional[str], ba
         pid = get_claude_client_pid(client)
     except Exception:  # noqa: BLE001
         pid = None
-    # Interrupt any in-flight turn first (best-effort), then disconnect + free the
-    # SDK client / subprocess via the same path idle-eviction uses.
+    agent = _get_agent(controller, "claude")
+    end_runtime_session = getattr(agent, "end_runtime_session", None)
     try:
-        if hasattr(client, "interrupt"):
-            await client.interrupt()
-    except Exception:  # noqa: BLE001
-        logger.debug("end: claude interrupt failed for %s", ck, exc_info=True)
-    try:
-        await session_handler.cleanup_session(ck)
+        if callable(end_runtime_session):
+            ended = await end_runtime_session(ck)
+            if ended is False:
+                return {"ok": False, "error": "session_not_live"}
+        else:
+            # Compatibility for teardown while the Claude adapter is not registered.
+            try:
+                if hasattr(client, "interrupt"):
+                    await client.interrupt()
+            except Exception:  # noqa: BLE001
+                logger.debug("end: claude interrupt failed for %s", ck, exc_info=True)
+            await session_handler.cleanup_session(ck)
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: claude cleanup_session failed for %s: %s", ck, exc)
         return {"ok": False, "error": "cleanup_failed", "detail": str(exc)}
@@ -838,7 +851,8 @@ def _build_session_row_stop_context(
     ``avibe::<session_id>``, which can stop the backend when backend ids are
     patched in, but cannot find the dispatch sink registered under the original
     scope key. Rebuild the same scope context that ``_execute_agent_run`` used so
-    ``controller._get_session_key`` resolves to the live sink.
+    ``controller._get_turn_sink_key`` resolves to the live sink — including the
+    row's ``thread_id``, which that key is scoped by.
     """
     if not session_id:
         return None

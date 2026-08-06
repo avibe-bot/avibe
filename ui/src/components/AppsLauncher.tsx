@@ -6,6 +6,7 @@ import clsx from 'clsx';
 import { Dock } from './apps/Dock';
 import { ContextMenu, ContextMenuItem } from './ui/context-menu';
 import { useWindowManager } from '../context/WindowManagerContext';
+import { useShowPageDrag } from '../context/showPageDrag';
 
 // The sidebar bottom-left "Apps" button that reveals the Dock.
 //   - hover        → the Dock floats up ABOVE the button (transient preview; the
@@ -19,8 +20,10 @@ import { useWindowManager } from '../context/WindowManagerContext';
 export const AppsLauncher: React.FC = () => {
   const { t } = useTranslation();
   const wm = useWindowManager();
+  const showPageDrag = useShowPageDrag();
   const [pinned, setPinned] = useState(false);
   const [hovering, setHovering] = useState(false);
+  const [dragHovering, setDragHovering] = useState(false);
   // Cursor-positioned right-click menu, on the shared ContextMenu primitive.
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const closeTimer = useRef<number | null>(null);
@@ -28,7 +31,13 @@ export const AppsLauncher: React.FC = () => {
   // cleared once the cursor actually leaves the trigger+panel.
   const suppressHover = useRef(false);
 
-  const visible = pinned || hovering;
+  const visible = pinned || hovering || (showPageDrag.active && dragHovering);
+
+  useEffect(() => {
+    const resetDragHover = () => setDragHovering(false);
+    window.addEventListener('dragend', resetDragHover);
+    return () => window.removeEventListener('dragend', resetDragHover);
+  }, []);
 
   const openHover = () => {
     if (suppressHover.current) return;
@@ -72,7 +81,43 @@ export const AppsLauncher: React.FC = () => {
     // The sidebar aside owns the stacking context (z-10, below the window layer z-20), so the Apps
     // button is covered by a maximized window like the rest of the sidebar. `relative` is just the
     // positioning context for the Dock popover below; the popover's z-50 is scoped to the sidebar.
-    <div className="relative flex-1" onMouseEnter={openHover} onMouseLeave={queueClose}>
+    <div
+      className="relative flex-1"
+      data-show-page-dock-drop-target
+      onMouseEnter={openHover}
+      onMouseLeave={queueClose}
+      onDragEnter={(event) => {
+        if (!showPageDrag.active) return;
+        event.preventDefault();
+        setDragHovering(true);
+      }}
+      onDragOver={(event) => {
+        if (!showPageDrag.active) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        setDragHovering(true);
+      }}
+      onDragLeave={(event) => {
+        const next = event.relatedTarget;
+        if (next instanceof Node && event.currentTarget.contains(next)) return;
+        setDragHovering(false);
+      }}
+      onDrop={(event) => {
+        if (!showPageDrag.active) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setDragHovering(false);
+        // Keep the Dock visible just long enough for the optimistic pin to land
+        // and be seen. Entering the Dock cancels this timer via openHover.
+        setHovering(true);
+        if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+        closeTimer.current = window.setTimeout(() => {
+          setHovering(false);
+          closeTimer.current = null;
+        }, 1200);
+        showPageDrag.dropToDock();
+      }}
+    >
       <button
         type="button"
         onClick={onClick}

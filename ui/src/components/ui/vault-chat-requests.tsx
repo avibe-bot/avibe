@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import type { VaultRequest } from '@/context/ApiContext';
-import { buttonVariants } from './button';
+import { buttonVariants } from './button-variants';
 import { VaultApprovalDialog } from './vault-approval-dialog';
 import { VaultRequestCard } from './vault-request-card';
 

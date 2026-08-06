@@ -6,13 +6,12 @@ The UI server runs as its own subprocess; this module is how it reaches
 
 Single responsibility: keep all the socket-path / httpx-transport /
 SSE-parsing boilerplate out of the UI route bodies. Routes call
-``dispatch_async(...)`` to start a fire-and-forget turn (the Chat page — the
-reply arrives over the persistent ``message.new`` session stream, not the
-response), ``stream_dispatch(...)`` to run a turn and stream its chunks back
-(the Show-page dispatch flow), ``stream_events(...)`` to subscribe to the
-controller's event feed, and ``cancel_dispatch`` / ``send_now`` /
-``turn_state`` / ``health`` for the turn-control surface — each raising
-``InternalServerUnavailable`` so the route can degrade gracefully.
+``dispatch_async(...)`` to start a fire-and-forget turn (the reply arrives over
+the persistent ``message.new`` session stream, not the response),
+``stream_events(...)`` to subscribe to the controller's event feed, and
+``cancel_dispatch`` / ``send_now`` / ``turn_state`` / ``health`` for the
+turn-control surface — each raising ``InternalServerUnavailable`` so the route
+can degrade gracefully.
 """
 
 from __future__ import annotations
@@ -62,12 +61,7 @@ MEMORY_INSTALL_TIMEOUT_SECONDS = 300.0
 
 
 class InternalServerUnavailable(Exception):
-    """Raised when the dispatch socket cannot be reached.
-
-    Routes should catch this and degrade to the queue-based fallback so
-    a controller crash or socket-bind race doesn't take down the
-    user-facing send-compose flow.
-    """
+    """Raised when the dispatch socket cannot be reached before acceptance."""
 
 
 class InternalServerTimeout(Exception):
@@ -296,7 +290,7 @@ async def dispatch_async(
     payload: dict[str, Any],
     *,
     socket_path: Optional[Path] = None,
-    timeout: float = 10.0,
+    timeout: float | None = 10.0,
 ) -> dict[str, Any]:
     """Start a fire-and-forget turn on the controller and return immediately.
 
@@ -304,8 +298,9 @@ async def dispatch_async(
     responds ``202`` right away (the reply arrives over the persistent
     ``message.new`` session stream, not this response). Returns
     ``{"status_code", "body"}`` so the caller can distinguish a started turn
-    (202) from a concurrent-turn refusal (409). Raises
-    ``InternalServerUnavailable`` on socket failure so the route can degrade.
+    from one accepted into the shared queue. A pre-connect failure raises
+    ``InternalServerUnavailable``; a post-connect timeout raises
+    ``InternalServerTimeout`` because acceptance is unknown.
     """
 
     target = await _verified_socket_path_async(socket_path)
@@ -317,8 +312,12 @@ async def dispatch_async(
             timeout=httpx.Timeout(timeout, connect=5.0),
         ) as client:
             resp = await client.post("/internal/dispatch_async", json=payload)
-    except _SOCKET_ERRORS as exc:
+    except _SOCKET_CONNECT_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        # Once the socket connected, a timeout is acceptance-unknown: the
+        # controller request may still settle the durable reservation.
+        raise InternalServerTimeout(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
@@ -617,6 +616,34 @@ def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str,
     return headers
 
 
+async def test_backend_auth(
+    backend: str,
+    *,
+    model: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """Run a Settings connection probe on the controller-owned Agent runtime."""
+
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    payload: dict[str, Any] = {"backend": backend}
+    if model:
+        payload["model"] = model
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            resp = await client.post("/internal/backend-auth/test", json=payload)
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
 async def notify_vault_request_created(
     request_payload: dict[str, Any],
     *,
@@ -725,7 +752,12 @@ async def end_running_agent(payload: dict[str, Any], *, socket_path: Optional[Pa
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def send_now(session_id: str, *, socket_path: Optional[Path] = None) -> dict[str, Any]:
+async def send_now(
+    session_id: str,
+    *,
+    expected_delivery_id: str | None = None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
     """Ask the controller to run a session's send-while-busy queue immediately
     ("立即发送"): interrupt any running turn + flush the queue. Returns
     ``{status_code, body}``; raises ``InternalServerUnavailable`` on socket
@@ -743,7 +775,14 @@ async def send_now(session_id: str, *, socket_path: Optional[Path] = None) -> di
             # slow-but-successful interrupt isn't read-timed-out.
             timeout=httpx.Timeout(30.0, connect=1.0),
         ) as client:
-            resp = await client.post(f"/internal/send-now/{session_id}")
+            resp = await client.post(
+                f"/internal/send-now/{session_id}",
+                params=(
+                    {"expected_delivery_id": expected_delivery_id}
+                    if expected_delivery_id
+                    else None
+                ),
+            )
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}

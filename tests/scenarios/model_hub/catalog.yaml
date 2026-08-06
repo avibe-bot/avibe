@@ -7,6 +7,7 @@ capability:
     - tests/test_model_hub_config.py
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
+    - tests/test_model_hub_runtime.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
 status_legend:
@@ -14,6 +15,12 @@ status_legend:
   partial: unit or contract coverage exists but the cross-lane loop is incomplete
   gap: owned by a later lane or integration pass
 scenarios:
+  - id: MH-RUNTIME-001
+    name: Service restart reports an installed engine as idle until first demand
+    status: partial
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
@@ -44,12 +51,24 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_resolution.py::test_quota_failure_cools_source_switches_and_emits_redacted_events
-  - id: MH-PRI-001
-    name: Priority reorder takes effect on the next turn
+  - id: MH-SRC-REFRESH-001
+    name: Manual source refresh replaces discovery inventory and freshness timestamp
     status: partial
-    kind: ordering
+    kind: recovery
     layer: unit_contract
     test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
+  - id: MH-PRI-001
+    name: Per-agent source-order mutations and follow restoration take effect immediately
+    status: covered
+    kind: ordering
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_pri_001_order_mutations_change_the_next_turn
+  - id: MH-SEL-001
+    name: Unpinned Hub activation stays honest and resolves the turn model
+    status: covered
+    kind: selection
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_unpinned_hub_projection_is_null_while_explicit_turn_resolves
   - id: MH-MAP-001
     name: Mapping applies to Claude Code only
     status: partial
@@ -165,6 +184,7 @@ scenarios:
 next_priority:
   - MH-RES-001
   - MH-PRI-001
+  - MH-SEL-001
   - MH-MAP-001
   - MH-OC-001
   - MH-CHAN-001

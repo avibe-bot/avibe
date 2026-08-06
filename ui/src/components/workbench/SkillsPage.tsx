@@ -17,6 +17,7 @@ import { SkillDetailPanel } from './skills/SkillDetailPanel';
 import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
+import { errorMessage } from '@/lib/errorMessage';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
 const skillKey = (s: SkillBrief) => `${s.scope}:${s.name}`;
@@ -95,8 +96,8 @@ export const SkillsPage: React.FC = () => {
         setError(res.error?.message ?? 'Failed to list skills');
         setSkills([]);
       }
-    } catch (err: any) {
-      if (reqId === listReq.current) setError(err?.message ?? String(err));
+    } catch (err) {
+      if (reqId === listReq.current) setError(errorMessage(err) ?? String(err));
     } finally {
       if (reqId === listReq.current) setLoading(false);
     }
@@ -172,8 +173,8 @@ export const SkillsPage: React.FC = () => {
         : await api.removeSkill(selected.name, { scope: selected.scope, projectId: projectArg, backends: [backend] });
       if (!res.ok) showToast(res.error?.message ?? BACKEND_LABEL[backend], 'error');
       await refresh();
-    } catch (err: any) {
-      showToast(err?.message ?? String(err), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) ?? String(err), 'error');
     } finally {
       setBusyBackend(null);
     }
@@ -192,8 +193,8 @@ export const SkillsPage: React.FC = () => {
       } else {
         showToast(res.error?.message ?? selected.name, 'error');
       }
-    } catch (err: any) {
-      showToast(err?.message ?? String(err), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) ?? String(err), 'error');
     }
   };
 
@@ -209,8 +210,8 @@ export const SkillsPage: React.FC = () => {
       } else {
         showToast(res.error?.message ?? selected.name, 'error');
       }
-    } catch (err: any) {
-      showToast(err?.message ?? String(err), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) ?? String(err), 'error');
     } finally {
       setUpdating(false);
     }
@@ -326,8 +327,8 @@ export const SkillsPage: React.FC = () => {
                 } else {
                   showToast(res.message || t('skills.installFailed'), 'error');
                 }
-              } catch (err: any) {
-                showToast(err?.message || t('skills.installFailed'), 'error');
+              } catch (err) {
+                showToast(errorMessage(err) || t('skills.installFailed'), 'error');
               } finally {
                 setInstallingAskill(false);
               }

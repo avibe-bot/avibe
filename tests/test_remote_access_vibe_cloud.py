@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import urllib.parse
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -1114,6 +1115,11 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
             "ok": True,
             "running": True,
             "binary_found": True,
+            "network_path": {
+                "schema_version": 1,
+                "connector": {"edge_ips": ["198.41.192.47"]},
+            },
+            "settings": {"edge_bind_address": "192.0.2.99"},
             "tunnel_quality": {
                 "schema_version": 1,
                 "state": "healthy",
@@ -1132,8 +1138,42 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
     assert payload["expected_origin_service"] == "http://127.0.0.1:5123"
     assert payload["observed_origin_service"] == "http://100.97.103.112:5123"
     assert payload["tunnel_quality"]["grade"] == "good"
+    assert "network_path" not in payload
+    assert "198.41.192.47" not in json.dumps(payload)
+    assert "settings" not in payload
+    assert "192.0.2.99" not in json.dumps(payload)
 
 
+def test_ra_tq_014_runtime_status_payload_includes_v2_request_path(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.save()
+    monkeypatch.setattr(remote_access, "_local_ui_healthy", lambda cfg: True)
+    monkeypatch.setattr(remote_access, "_observed_cloudflared_origin_service", lambda: "http://127.0.0.1:5123")
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda cfg=None: {
+            "ok": True,
+            "running": True,
+            "binary_found": True,
+            "tunnel_quality": {
+                "schema_version": 2,
+                "state": "degraded",
+                "grade": "critical",
+                "sampled_at": "2026-08-03T12:45:00Z",
+                "request_path": {
+                    "confidence": "high",
+                    "latency_ms": {"p50": 202, "p95": 1100, "p99": 2300, "max": 2700},
+                },
+            },
+        },
+    )
+
+    payload = remote_access.runtime_status_payload(config, event="tunnel_quality")
+
+    assert payload["tunnel_quality"]["schema_version"] == 2
+    assert payload["tunnel_quality"]["request_path"]["latency_ms"]["p95"] == 1100
 def test_runtime_status_payload_omits_unknown_observed_origin(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
@@ -1749,6 +1789,93 @@ def test_status_preserves_pid_file_when_process_command_is_unknown(monkeypatch, 
     assert remote_access._state_path().exists()
 
 
+def test_ra_tq_025_status_computes_network_path_only_for_local_api(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    pid = 123
+    remote_access._pid_path().parent.mkdir(parents=True, exist_ok=True)
+    remote_access._pid_path().write_text(str(pid), encoding="utf-8")
+    runtime.write_json(
+        remote_access._state_path(),
+        {
+            "pid": pid,
+            "active": {"pid": pid, "metrics_url": "http://127.0.0.1:29001"},
+        },
+    )
+    runtime.write_json(
+        remote_access._quality_state_path(),
+        {"schema_version": 2, "edge_locations": ["sin09", "sin12"]},
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda candidate: candidate == pid)
+    monkeypatch.setattr(runtime, "get_process_command", lambda candidate: "cloudflared tunnel run")
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda cfg: "/usr/local/bin/cloudflared")
+    monkeypatch.setattr(
+        remote_access.tunnel_quality,
+        "scrape_metrics",
+        lambda metrics_url: SimpleNamespace(edge_locations=("sin09", "sin12")),
+    )
+    calls = []
+    monkeypatch.setattr(
+        remote_access.cloudflare_network,
+        "network_path_snapshot",
+        lambda locations, metrics_url, *, client_colo=None, client_access="local": calls.append(
+            (locations, metrics_url, client_colo, client_access)
+        )
+        or {"schema_version": 1},
+    )
+
+    internal_status = remote_access.status(config)
+    local_status = remote_access.status(
+        config,
+        client_colo="SIN",
+        client_access="remote",
+        include_network_path=True,
+    )
+
+    assert "network_path" not in internal_status
+    assert local_status["network_path"] == {"schema_version": 1}
+    assert calls == [(["sin09", "sin12"], "http://127.0.0.1:29001", "SIN", "remote")]
+
+
+def test_ra_tq_025_status_rejects_edge_locations_when_live_scrape_fails(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    pid = 123
+    remote_access._pid_path().parent.mkdir(parents=True, exist_ok=True)
+    remote_access._pid_path().write_text(str(pid), encoding="utf-8")
+    runtime.write_json(
+        remote_access._state_path(),
+        {
+            "pid": pid,
+            "active": {"pid": pid, "metrics_url": "http://127.0.0.1:29001"},
+        },
+    )
+    runtime.write_json(
+        remote_access._quality_state_path(),
+        {"schema_version": 2, "edge_locations": ["nrt01"]},
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda candidate: candidate == pid)
+    monkeypatch.setattr(runtime, "get_process_command", lambda candidate: "cloudflared tunnel run")
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda cfg: "/usr/local/bin/cloudflared")
+
+    def unavailable_metrics(_metrics_url):
+        raise OSError("metrics unavailable")
+
+    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", unavailable_metrics)
+    observed_locations = []
+    monkeypatch.setattr(
+        remote_access.cloudflare_network,
+        "network_path_snapshot",
+        lambda locations, metrics_url, **kwargs: observed_locations.append(locations)
+        or {"schema_version": 1},
+    )
+
+    result = remote_access.status(config, include_network_path=True)
+
+    assert result["network_path"] == {"schema_version": 1}
+    assert observed_locations == [[]]
+
+
 def test_start_refuses_duplicate_connector_when_process_command_is_unknown(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     pid = 123
@@ -2040,6 +2167,53 @@ def test_start_clears_previous_cloudflared_logs_before_spawn(monkeypatch, tmp_pa
     assert spawn_args == [[binary, "tunnel", "--metrics", "127.0.0.1:29999", "--no-autoupdate", "run"]]
 
 
+def test_start_falls_back_to_auto_when_preferred_protocol_is_not_ready(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    binary = "/usr/local/bin/cloudflared"
+    preferred_pid = 222
+    fallback_pid = 333
+    alive = {preferred_pid, fallback_pid}
+    spawned_protocols = []
+    spawned_pids = iter([preferred_pid, fallback_pid])
+    metrics_urls = iter(["http://127.0.0.1:29998", "http://127.0.0.1:29999"])
+
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda cfg: binary)
+    monkeypatch.setattr(remote_access, "_version", lambda path: "cloudflared test")
+    monkeypatch.setattr(remote_access, "_allocate_metrics_url", lambda: next(metrics_urls))
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in alive)
+    monkeypatch.setattr(runtime, "get_process_command", lambda pid: f"{binary} tunnel run")
+    monkeypatch.setattr(remote_access, "_wait_connector_ready", lambda *args, **kwargs: False)
+
+    def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
+        pid = next(spawned_pids)
+        spawned_protocols.append(env["TUNNEL_TRANSPORT_PROTOCOL"])
+        pid_path.write_text(str(pid), encoding="utf-8")
+        return pid
+
+    def stop_pid(pid, timeout=8):
+        alive.discard(pid)
+        return True
+
+    monkeypatch.setattr(runtime, "spawn_background", spawn_background)
+    monkeypatch.setattr(runtime, "stop_pid", stop_pid)
+    previous_preference = remote_access._PREFERRED_PROTOCOL
+    remote_access._PREFERRED_PROTOCOL = "http2"
+    try:
+        result = remote_access.start(config)
+    finally:
+        remote_access._PREFERRED_PROTOCOL = previous_preference
+
+    state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
+    assert result["ok"] is True
+    assert result["pid"] == fallback_pid
+    assert spawned_protocols == ["http2", "auto"]
+    assert preferred_pid not in alive
+    assert state["active"]["requested_protocol"] == "auto"
+
+
 def test_effective_ui_bind_host_uses_setup_host_when_tunnel_disabled() -> None:
     config = _config()
     config.remote_access.vibe_cloud.enabled = False
@@ -2240,26 +2414,51 @@ def test_mint_cloud_token_returns_none_on_backend_error(monkeypatch) -> None:
     assert remote_access.mint_cloud_token(config, sub="u", email="e@x.com") is None
 
 
-def test_cloud_token_for_request_mints_for_authenticated_user(monkeypatch) -> None:
+@pytest.mark.parametrize("role", ("editor", "owner"))
+def test_cloud_token_for_request_mints_for_authorized_remote_asr(
+    monkeypatch,
+    role,
+) -> None:
     config = _cloud_broker_config()
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
-    cookie = _session_cookie(config)
+    cookie = _session_cookie(config, role=role)
+    captured: dict = {}
 
-    monkeypatch.setattr(
-        remote_access,
-        "_json_request",
-        lambda *a, **k: {"access_token": "ct_xyz", "expires_in": 43200},
-    )
+    def fake_json_request(*args, **kwargs):
+        captured["payload"] = args[1]
+        return {"access_token": "ct_xyz", "expires_in": 43200}
 
-    before = int(time.time())
-    result = remote_access.cloud_token_for_request(config, cookie)
-    after = int(time.time())
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
 
-    assert result is not None
-    assert result["base_url"] == "https://avibe.bot"
-    assert result["token"] == "ct_xyz"
-    assert result["scope"] == "asr"
-    assert before + 43200 <= result["expires_at"] <= after + 43200
+    token = remote_access.cloud_token_for_request(config, cookie)
+
+    assert token is not None
+    assert token["base_url"] == "https://avibe.bot"
+    assert token["token"] == "ct_xyz"
+    assert token["scope"] == "asr"
+    assert token["expires_at"] > int(time.time())
+    assert captured["payload"] == {
+        "sub": "user-1",
+        "email": "alex@example.com",
+        "scope": "asr",
+    }
+
+
+def test_cloud_token_for_request_rejects_non_asr_scope(monkeypatch) -> None:
+    config = _cloud_broker_config()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    cookie = _session_cookie(config, role="owner")
+    called = False
+
+    def fake_json_request(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"access_token": "ct_xyz", "expires_in": 43200}
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
+
+    assert remote_access.cloud_token_for_request(config, cookie, scope="future") is None
+    assert called is False
 
 
 def test_cloud_token_for_request_returns_none_without_valid_session(monkeypatch) -> None:
@@ -2309,3 +2508,153 @@ def test_cloud_token_for_request_requires_editor_role(monkeypatch) -> None:
 
     assert remote_access.cloud_token_for_request(config, cookie) is None
     assert called is False
+
+
+def test_ra_tq_029_connector_environment_applies_ip_and_interface_controls() -> None:
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.tunnel_token = "tunnel-token"
+    cloud.edge_ip_version = "4"
+    cloud.edge_bind_address = "192.0.2.10"
+
+    environment = remote_access._connector_environment(config, "http2")
+
+    assert environment["TUNNEL_TOKEN"] == "tunnel-token"
+    assert environment["TUNNEL_TRANSPORT_PROTOCOL"] == "http2"
+    assert environment["TUNNEL_EDGE_IP_VERSION"] == "4"
+    assert environment["TUNNEL_EDGE_BIND_ADDRESS"] == "192.0.2.10"
+
+
+def test_ra_tq_029_network_interfaces_exclude_unusable_addresses(monkeypatch) -> None:
+    monkeypatch.setattr(
+        remote_access.psutil,
+        "net_if_stats",
+        lambda: {
+            "en0": SimpleNamespace(isup=True),
+            "lo0": SimpleNamespace(isup=True),
+            "down0": SimpleNamespace(isup=False),
+        },
+    )
+    monkeypatch.setattr(
+        remote_access.psutil,
+        "net_if_addrs",
+        lambda: {
+            "en0": [
+                SimpleNamespace(family=remote_access.socket.AF_INET, address="192.0.2.10"),
+                SimpleNamespace(family=remote_access.socket.AF_INET6, address="2001:db8::10%en0"),
+                SimpleNamespace(family=remote_access.socket.AF_INET6, address="fe80::1%en0"),
+            ],
+            "lo0": [SimpleNamespace(family=remote_access.socket.AF_INET, address="127.0.0.1")],
+            "down0": [SimpleNamespace(family=remote_access.socket.AF_INET, address="198.51.100.2")],
+        },
+    )
+
+    result = remote_access.network_interfaces()
+
+    assert result == {
+        "ok": True,
+        "interfaces": [
+            {"id": "en0:192.0.2.10", "name": "en0", "address": "192.0.2.10", "ip_version": "4"},
+            {"id": "en0:2001:db8::10", "name": "en0", "address": "2001:db8::10", "ip_version": "6"},
+        ],
+    }
+
+
+def test_ra_tq_030_connectivity_diagnostics_do_not_guess_quic_reachability(monkeypatch) -> None:
+    config = _config()
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda loaded=None: {
+            "running": True,
+            "binary_version": "2026.3.0",
+            "tunnel_quality": {"protocol": "http2", "transport": {"effective": "http2"}},
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_bounded_tunnel_addresses",
+        lambda: [(remote_access.socket.AF_INET, "198.51.100.10")],
+    )
+    monkeypatch.setattr(remote_access, "_tcp_tunnel_reachable", lambda *args, **kwargs: True)
+
+    result = remote_access.connectivity_diagnostics(config)
+
+    assert result["dns"]["status"] == "available"
+    assert result["http2"]["status"] == "available"
+    assert result["quic"] == {"status": "unknown", "source": "not_observed"}
+
+
+@pytest.mark.parametrize(
+    "sample_age_before_restart",
+    [remote_access.QUALITY_COMPARISON_MAX_AGE_SECONDS + 1, 1],
+)
+def test_ra_tq_030_connectivity_diagnostics_requires_fresh_active_protocol(
+    monkeypatch,
+    sample_age_before_restart,
+) -> None:
+    config = _config()
+    now = time.time()
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda loaded=None: {
+            "running": True,
+            "pid": 222,
+            "binary_version": "2026.3.0",
+            "tunnel_quality": {
+                "protocol": "quic",
+                "transport": {"effective": "quic"},
+                "sampled_at": remote_access.tunnel_quality.utc_timestamp(
+                    now - sample_age_before_restart
+                ),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_state_connector",
+        lambda name: {"pid": 222, "started_at": now} if name == "active" else None,
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_bounded_tunnel_addresses",
+        lambda: [(remote_access.socket.AF_INET, "198.51.100.10")],
+    )
+    monkeypatch.setattr(remote_access, "_tcp_tunnel_reachable", lambda *args, **kwargs: False)
+
+    result = remote_access.connectivity_diagnostics(config)
+
+    assert result["effective_protocol"] == "unknown"
+    assert result["quic"] == {"status": "unknown", "source": "not_observed"}
+    assert result["http2"] == {"status": "unavailable", "source": "tcp_probe"}
+
+
+def test_ra_tq_030_connectivity_diagnostics_filters_dns_by_selected_family(
+    monkeypatch,
+) -> None:
+    config = _config()
+    config.remote_access.vibe_cloud.edge_ip_version = "6"
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda loaded=None: {
+            "running": False,
+            "binary_version": "2026.3.0",
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_bounded_tunnel_addresses",
+        lambda: [(remote_access.socket.AF_INET, "198.51.100.10")],
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_tcp_tunnel_reachable",
+        lambda *args, **kwargs: pytest.fail("no selected-family address is available"),
+    )
+
+    result = remote_access.connectivity_diagnostics(config)
+
+    assert result["dns"]["status"] == "unavailable"
+    assert result["http2"]["status"] == "unknown"

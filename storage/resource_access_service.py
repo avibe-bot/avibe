@@ -31,6 +31,7 @@ ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
 RESOURCE_ORGANIZATIONS_META_KEY = "resource_access_organizations"
+REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE = "remote_autonomous_harness_disabled"
 
 
 class ResourceAccessError(ValueError):
@@ -201,6 +202,26 @@ def resolve_resource_access_context(
     return trusted_local_context()
 
 
+def ensure_local_harness_definition_write(
+    user_context: ResourceUserContext | Mapping[str, Any] | None = None,
+) -> ResourceUserContext:
+    """Keep executable Harness definitions on the trusted-local side."""
+
+    context = resolve_resource_access_context(user_context)
+    if context.is_remote:
+        raise ResourceAccessError(REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE)
+    return context
+
+
+def metadata_has_remote_resource_context(metadata: Mapping[str, Any] | None) -> bool:
+    """Return whether persisted metadata records a remote-origin principal."""
+
+    return isinstance(metadata, Mapping) and isinstance(
+        metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY),
+        Mapping,
+    )
+
+
 def metadata_with_resource_user_context(
     metadata: Mapping[str, Any] | None,
     user_context: ResourceUserContext | Mapping[str, Any] | None = None,
@@ -222,6 +243,8 @@ def metadata_with_resource_user_context(
         "vibe_membership_version": context.membership_version,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
+        "claims_issued_at": context.claims_issued_at,
+        "vibe_instance_authorization_revision": context.authorization_revision,
         "authorization_expires_at": _resource_context_expires_at(context),
     }
     return result
@@ -239,7 +262,11 @@ def resource_user_context_from_metadata(
     *,
     now: int | None = None,
 ) -> ResourceUserContext | None:
-    """Restore a remote definition creator context, or None for local legacy work."""
+    """Restore remote provenance for non-executable compatibility callers.
+
+    The returned object is not autonomous execution authority. Task and Watch
+    executors reject metadata carrying this provenance before calling here.
+    """
 
     if not isinstance(metadata, Mapping):
         return None

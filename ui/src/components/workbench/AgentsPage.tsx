@@ -25,7 +25,12 @@ import {
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
-import type { VibeAgentBrief, VibeAgentFull, VibeAgentOnboardingResult } from '../../context/ApiContext';
+import type {
+  VibeAgentBrief,
+  VibeAgentFull,
+  VibeAgentOnboardingResult,
+  VibeAgentUpdatePayload,
+} from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { AgentGraphTab } from './AgentGraphTab';
 import { useToast } from '../../context/ToastContext';
@@ -53,10 +58,7 @@ import {
   BACKEND_TEXT as BACKEND_ICON_CLASS,
   type Backend,
 } from '../../lib/backendAccent';
-
-// Sentinel option that clears the model override back to the backend default
-// (a combobox can't submit an empty value, so this is the explicit clear path).
-const MODEL_DEFAULT_OPTION = '__default__';
+import { errorMessage } from '@/lib/errorMessage';
 
 type AgentsTabKey = 'definitions' | 'running';
 const AGENTS_TAB_ORDER: AgentsTabKey[] = ['definitions', 'running'];
@@ -69,7 +71,7 @@ export const AgentsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const { capabilities } = useInstanceAuthorization();
+  const { capabilities, remote } = useInstanceAuthorization();
   const [agentsTab, setAgentsTab] = useState<AgentsTabKey>('definitions');
   const [runningActiveCount, setRunningActiveCount] = useState<number | null>(null);
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
@@ -89,6 +91,8 @@ export const AgentsPage: React.FC = () => {
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
+  const visibleTabs = remote ? (['definitions'] as const) : AGENTS_TAB_ORDER;
+  const activeTab = remote ? 'definitions' : agentsTab;
 
   const refreshOnboarding = useCallback(async () => {
     if (!capabilities.can_manage_agents) {
@@ -115,8 +119,8 @@ export const AgentsPage: React.FC = () => {
         const fresh = result.agents.find((a) => a.name === selected.name);
         if (!fresh) setSelected(null);
       }
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
     } finally {
       setLoading(false);
     }
@@ -149,6 +153,10 @@ export const AgentsPage: React.FC = () => {
   }, [selected]);
 
   const fetchRunningActiveCount = useCallback(async () => {
+    if (remote) {
+      setRunningActiveCount(null);
+      return;
+    }
     try {
       const result = await api.getRunningAgents();
       if (result.ok && result.counts) {
@@ -163,7 +171,7 @@ export const AgentsPage: React.FC = () => {
     } catch {
       setRunningActiveCount(null);
     }
-  }, [api]);
+  }, [api, remote]);
 
   // Keep the badge fresh on every tab (including 运行) so it never depends on
   // the graph view's filters.
@@ -172,6 +180,10 @@ export const AgentsPage: React.FC = () => {
   }, [fetchRunningActiveCount]);
 
   useEffect(() => {
+    if (remote) {
+      setEventBridgeConnected(false);
+      return;
+    }
     return api.connectWorkbenchEvents({
       onConnected: (data) => {
         if (data.source === 'controller') {
@@ -190,9 +202,10 @@ export const AgentsPage: React.FC = () => {
       onSessionStatus: () => fetchRunningActiveCount(),
       onAuthorizationChanged: () => void refresh(),
     });
-  }, [api, fetchRunningActiveCount, refresh]);
+  }, [api, fetchRunningActiveCount, refresh, remote]);
 
   useEffect(() => {
+    if (remote) return;
     // Reconcile the badge even while SSE is connected: process death / orphan /
     // reap is a sampled snapshot with no run/session SSE event, so a slow
     // liveness poll keeps the count fresh (30s connected, 8s disconnected),
@@ -242,7 +255,7 @@ export const AgentsPage: React.FC = () => {
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, fetchRunningActiveCount]);
+  }, [eventBridgeConnected, fetchRunningActiveCount, remote]);
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
@@ -254,8 +267,8 @@ export const AgentsPage: React.FC = () => {
           // never optimistically, or a failed fetch hides the list with no panel.
           if (openDetail) setDetailOpen(true);
         }
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
       }
     },
     [api],
@@ -291,16 +304,16 @@ export const AgentsPage: React.FC = () => {
   };
 
 
-  const updateField = async (patch: Partial<VibeAgentFull>) => {
+  const updateField = async (patch: VibeAgentUpdatePayload) => {
     if (!selected) return;
     try {
-      const result = await api.updateVibeAgent(selected.name, patch as any);
+      const result = await api.updateVibeAgent(selected.name, patch);
       if (result.ok) {
         setSelected(result.agent);
         refresh();
       }
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
     }
   };
 
@@ -331,13 +344,11 @@ export const AgentsPage: React.FC = () => {
         setSelected(null);
         refresh();
         void refreshOnboarding();
-      } else if (result.code === 'agent_in_use') {
-        setError(t('agents.deleteInUse', { name: selected.name }));
       } else if (result.message) {
         setError(result.message);
       }
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
     }
   };
 
@@ -366,8 +377,8 @@ export const AgentsPage: React.FC = () => {
           'error',
         );
       }
-    } catch (err: any) {
-      showToast(t('agents.importFailed', { error: err?.message ?? String(err) }), 'error');
+    } catch (err) {
+      showToast(t('agents.importFailed', { error: errorMessage(err) ?? String(err) }), 'error');
     } finally {
       setImporting(null);
     }
@@ -385,8 +396,8 @@ export const AgentsPage: React.FC = () => {
           : t('agents.onboarding.saved', { count: result.created ?? 0 }),
         result.sync?.ok === false ? 'warning' : 'success',
       );
-    } catch (err: any) {
-      showToast(t('agents.onboarding.failed', { error: err?.message ?? String(err) }), 'error');
+    } catch (err) {
+      showToast(t('agents.onboarding.failed', { error: errorMessage(err) ?? String(err) }), 'error');
     } finally {
       setOnboardingSubmitting(false);
     }
@@ -420,10 +431,10 @@ export const AgentsPage: React.FC = () => {
         }
       />
 
-      {/* Sub-tab row: Definitions | Running */}
+      {/* Local runtime diagnostics are intentionally unavailable remotely. */}
       <div className="flex items-center gap-0 overflow-x-auto border-b border-border">
-        {AGENTS_TAB_ORDER.map((key) => {
-          const active = agentsTab === key;
+        {visibleTabs.map((key) => {
+          const active = activeTab === key;
           return (
             <button
               key={key}
@@ -459,10 +470,10 @@ export const AgentsPage: React.FC = () => {
         })}
       </div>
 
-      {/* 运行 tab body — the run graph (replaces the old flat running list). */}
-      {agentsTab === 'running' && <AgentGraphTab />}
+      {/* The run graph is a trusted-local process diagnostic. */}
+      {!remote && activeTab === 'running' && <AgentGraphTab />}
 
-      {agentsTab === 'definitions' && onboardingInventory && (
+      {activeTab === 'definitions' && onboardingInventory && (
         <OrganizationAgentOnboarding
           inventory={onboardingInventory}
           expanded={onboardingExpanded}
@@ -474,7 +485,7 @@ export const AgentsPage: React.FC = () => {
       )}
 
       {/* Toolbar — design.pen Imduv: search + backend filter + spacer + Import + 新建 Agent */}
-      <div className={clsx('flex flex-wrap items-center gap-2.5', agentsTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
+      <div className={clsx('flex flex-wrap items-center gap-2.5', activeTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
         <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
@@ -497,7 +508,7 @@ export const AgentsPage: React.FC = () => {
         </Button>
       </div>
 
-      {agentsTab === 'definitions' && error && (
+      {activeTab === 'definitions' && error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
           {error}
         </div>
@@ -512,7 +523,7 @@ export const AgentsPage: React.FC = () => {
       <div
         className={clsx(
           'grid gap-5',
-          agentsTab === 'running' && 'hidden',
+          activeTab === 'running' && 'hidden',
           // `minmax(0,1fr)` + `min-w-0` keep the list column shrinkable; bare
           // `1fr` would let a long agent row push the fixed detail card off-screen.
           selected ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px]' : 'grid-cols-1',
@@ -836,7 +847,7 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
 interface DetailProps {
   agent: VibeAgentFull;
   isDefault: boolean;
-  onChange: (patch: Partial<VibeAgentFull>) => void;
+  onChange: (patch: VibeAgentUpdatePayload) => void;
   onSetDefault: () => Promise<void>;
   onRenamed: (newName: string) => void;
   onDelete: () => void;
@@ -846,8 +857,8 @@ interface DetailProps {
 // Mirrors design.pen s7QaWQ. Header (name + close X) → Enable card →
 // Name → Backend (read-only) → Model (Combobox) → Reasoning effort →
 // System Prompt (collapsible) → footer Run / Delete. Name is editable
-// for user agents (rename = create-then-delete since backend keeps name
-// as the immutable reference id). System agents lock the name.
+// for user agents. The backend renames the row and its references atomically;
+// system agents keep their locked identity.
 const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, onSetDefault, onRenamed, onDelete, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -916,9 +927,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
   // Effort options follow the backend + selected model when the catalog provides them.
   const effortOptions = resolveEffortOptions(agent.backend, model, reasoningOptions);
 
-  // Backend rejects PATCH /agents/<name> with a new name; the supported
-  // way to rename is create-then-delete. We only let user agents do this
-  // (system agents block both delete and name change).
+  // Only user Agents can be renamed; the backend moves every durable name
+  // reference in the same transaction.
   const commitRename = async () => {
     const trimmed = name.trim();
     if (!trimmed || trimmed === agent.name) {
@@ -931,40 +941,11 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
     }
     setRenaming(true);
     try {
-      // Clone with new name first so we never end up nameless on failure.
-      await api.createVibeAgent({
-        name: trimmed,
-        backend: agent.backend,
-        description: agent.description,
-        model: agent.model,
-        reasoning_effort: agent.reasoning_effort,
-        system_prompt: agent.system_prompt,
-        metadata: agent.metadata,
-        enabled: agent.enabled,
-      });
-      const removeResult = await api.removeVibeAgent(agent.name);
-      if (!removeResult.ok) {
-        // Old name still has references — keep it but tell the user the
-        // new one exists too.
-        showToast(removeResult.message || t('agents.renameKeptOld'), 'warning');
-      } else {
-        showToast(t('agents.renameSuccess'), 'success');
-      }
-      // Carry the default over to the new name. removeVibeAgent() drops the
-      // old row without moving default_agent_name, so renaming the default
-      // agent would otherwise silently fall the default back to another agent.
-      if (isDefault) {
-        try {
-          await api.setDefaultVibeAgent(trimmed);
-        } catch (defErr: any) {
-          showToast(defErr?.message ?? String(defErr), 'warning');
-        }
-      }
-      // Refresh the list and re-select the renamed agent so the old name
-      // drops out and the clone shows as the selected detail row.
+      await api.updateVibeAgent(agent.name, { name: trimmed });
+      showToast(t('agents.renameSuccess'), 'success');
       onRenamed(trimmed);
-    } catch (err: any) {
-      showToast(err?.message ?? String(err), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) ?? String(err), 'error');
       setName(agent.name);
     } finally {
       setRenaming(false);
@@ -977,8 +958,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
     try {
       await onSetDefault();
       showToast(t('agents.detail.defaultSet', { name: agent.name }), 'success');
-    } catch (err: any) {
-      showToast(err?.message ?? String(err), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) ?? String(err), 'error');
     } finally {
       setSettingDefault(false);
     }
@@ -1115,18 +1096,16 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
         </div>
       </Field>
 
-      {/* Model — Combobox with chevron + searchable + custom values. The
-          leading "backend default" option lets the user clear the override
-          back to model: null (a combobox can't otherwise submit an empty
-          value, so picking it is the only clear path). */}
+      {/* Model — Combobox with chevron + searchable + custom values. */}
       <Field label={t('agents.detail.model')}>
         <Combobox
-          options={[{ value: MODEL_DEFAULT_OPTION, label: t('agents.detail.modelDefault') }, ...modelOptions]}
+          options={modelOptions}
           value={model}
           onValueChange={(next) => {
-            const value = next === MODEL_DEFAULT_OPTION ? '' : next;
+            const value = next.trim();
+            if (!value) return;
             setModel(value);
-            const patch: Partial<VibeAgentFull> = { model: value.trim() || null };
+            const patch: Partial<VibeAgentFull> = { model: value };
             // If the new model can't use the current effort, fall back to a
             // valid one and persist it in the same patch — otherwise the record
             // keeps an effort the model can't run (Codex P2).

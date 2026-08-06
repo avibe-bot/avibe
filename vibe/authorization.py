@@ -36,6 +36,16 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
 )
 _EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated", "show.event"})
 
+REMOTE_HTTP_ALLOWED = "allowed"
+REMOTE_HTTP_LOCAL_ONLY = "local_only"
+REMOTE_HTTP_PAYLOAD_FILTERED = "payload_filtered"
+
+
+@dataclass(frozen=True)
+class HttpAuthorizationPolicy:
+    minimum_role: str | None
+    remote_access: str = REMOTE_HTTP_ALLOWED
+
 
 @dataclass(frozen=True)
 class AuthorizationContext:
@@ -50,6 +60,7 @@ class AuthorizationContext:
     group_ids: frozenset[str] = frozenset()
     membership_version: str | None = None
     claims_issued_at: int | None = None
+    authorization_revision: int | None = None
     is_remote: bool = False
     is_trusted_local: bool = False
 
@@ -76,7 +87,13 @@ class AuthorizationContext:
 
     @property
     def can_chat(self) -> bool:
-        return self.has_role("editor")
+        return not self.is_remote and self.has_role("editor")
+
+    @property
+    def can_use_cloud_asr(self) -> bool:
+        """Allow the explicit remote Cloud ASR capability, not local execution."""
+
+        return self.is_remote and self.has_role("editor")
 
     @property
     def can_manage_projects(self) -> bool:
@@ -103,19 +120,19 @@ class AuthorizationContext:
 
     @property
     def can_use_terminal_files(self) -> bool:
-        return self.has_role("owner")
+        return not self.is_remote and self.has_role("owner")
 
     @property
     def can_use_terminal(self) -> bool:
-        return self.has_role("owner")
+        return not self.is_remote and self.has_role("owner")
 
     @property
     def can_use_files(self) -> bool:
-        return self.has_role("owner")
+        return not self.is_remote and self.has_role("owner")
 
     @property
     def can_use_system(self) -> bool:
-        return self.has_role("owner")
+        return not self.is_remote and self.has_role("owner")
 
     def capability_projection(self) -> dict[str, bool]:
         return {
@@ -157,6 +174,16 @@ def _optional_positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationContext:
     role = _optional_string(payload.get("vibe_instance_role", payload.get("instance_role")))
     if role not in INSTANCE_ROLES:
@@ -196,6 +223,12 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
         ),
         claims_issued_at=_optional_positive_int(
             payload.get("claims_issued_at", payload.get("iat"))
+        ),
+        authorization_revision=_optional_nonnegative_int(
+            payload.get(
+                "vibe_instance_authorization_revision",
+                payload.get("authorization_revision"),
+            )
         ),
         is_remote=True,
     )
@@ -318,6 +351,189 @@ _EDITOR_HTTP_RULES = tuple(
     )
 )
 
+_REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("DELETE", r"^/api/sessions/[^/]+(?:/queue/[^/]+)?$"),
+        ("POST", r"^/api/sessions/[^/]+/fork$"),
+        (
+            "POST",
+            r"^/api/sessions/[^/]+/(?:messages|attachments|cancel|queue/[^/]+/send-now)$",
+        ),
+        ("POST", r"^/api/asr/transcribe$"),
+        ("POST", r"^/api/show/sessions/[^/]+/(?:events|prewarm)$"),
+        ("GET", r"^/api/settings$"),
+        ("HEAD", r"^/api/settings$"),
+        ("POST", r"^/api/settings$"),
+        ("POST", r"^/api/settings/thread$"),
+        ("DELETE", r"^/api/settings/thread$"),
+        ("GET", r"^/api/bind-codes$"),
+        ("DELETE", r"^/api/projects/[^/]+$"),
+    )
+)
+
+_REMOTE_PAYLOAD_FILTERED_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        (
+            "POST",
+            r"^/api/(?:config|projects|sessions)$",
+        ),
+        ("PATCH", r"^/api/(?:projects|sessions)/[^/]+$"),
+    )
+)
+
+# Positive allowlist for remote-safe owner surfaces. Any route that mutates
+# local Agent, IM, Vault, or other execution state must stay absent here and
+# therefore use the fail-closed local-only default below.
+_REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
+    (methods, re.compile(pattern))
+    for methods, pattern in (
+        (frozenset({"GET", "HEAD", "POST"}), r"^/api/agent-onboarding$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/agents/[^/]+$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|settings|vmk|requests|requests/[^/]+|provision-requests/[^/]+|provision-requests/by-id/[^/]+|grants|audit)$",
+        ),
+        (
+            frozenset({"POST"}),
+            r"^/api/show-pages/[^/]+/(?:ensure|rotate-share|share-id|visibility)$",
+        ),
+        (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
+        (frozenset({"POST"}), r"^/api/dock/pins$"),
+        (frozenset({"DELETE"}), r"^/api/dock/pins/[^/]+$"),
+        (frozenset({"PUT"}), r"^/api/dock/order$"),
+        (frozenset({"PUT"}), r"^/api/workbench/prefs$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/web-push/(?:status|vapid-public-key)$",
+        ),
+        (
+            frozenset({"POST"}),
+            r"^/api/web-push/(?:status|subscriptions|test)$",
+        ),
+        (frozenset({"DELETE"}), r"^/api/web-push/subscriptions$"),
+        (
+            frozenset({"PUT"}),
+            r"^/api/resource-policies/[^/]+/[^/]+$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/(?:projects/[^/]+/agents-md|global-prompts)$",
+        ),
+        (frozenset({"GET", "HEAD"}), r"^/api/skills/(?:check|find)$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/models/(?:sources|agents|events|runtime/status)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/models/agents/[^/]+/(?:sources|chain)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/models/(?:turns/[^/]+/provenance|oauth/status/[^/]+)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/backend/(?:[^/]+/runtime|(?:claude|codex)/auth|[^/]+/auth/oauth/status/[^/]+)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/(?:opencode/permission-status|remote-access/status)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/harness/(?:counts|tasks|watches|runs|bootstrap|runs/[^/]+)$",
+        ),
+        (frozenset({"GET", "HEAD"}), r"^/api/users$"),
+    )
+)
+
+
+def _http_rule_matches(
+    method: str,
+    path: str,
+    rules: tuple[tuple[str, re.Pattern[str]], ...],
+) -> bool:
+    return any(rule_method == method and pattern.fullmatch(path) for rule_method, pattern in rules)
+
+
+def _owner_http_rule_matches(method: str, path: str) -> bool:
+    return any(
+        method in methods and pattern.fullmatch(path)
+        for methods, pattern in _REMOTE_OWNER_ALLOWED_HTTP_RULES
+    )
+
+
+def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy:
+    """Return role and remote-exposure policy for one HTTP request.
+
+    Explicit viewer/editor and owner-management routes keep their approved remote
+    behavior. Unknown API routes fail closed to trusted-local callers so adding a
+    new owner-only endpoint cannot silently expose local machine capabilities.
+    """
+
+    normalized_method = method.upper()
+    # Organization management is an explicit Cloud proxy namespace. Cloud user
+    # identity and object authorization are re-evaluated by that boundary.
+    if path.startswith("/api/cloud-management/"):
+        return HttpAuthorizationPolicy("viewer")
+    if path.startswith("/show/"):
+        is_read = normalized_method in {"GET", "HEAD", "OPTIONS"}
+        # The server-owned event endpoint does not proxy into Show Runtime. Its
+        # handler rejects any remote request that would dispatch an Agent turn
+        # before the event store can reserve a delivery.
+        is_safe_human_event = normalized_method == "POST" and re.fullmatch(
+            r"^/show/[^/]+/(?:__show/events|__events)$",
+            path,
+        )
+        minimum_role = "viewer" if is_read else "editor"
+        remote_access = (
+            REMOTE_HTTP_ALLOWED
+            if is_read or is_safe_human_event
+            else REMOTE_HTTP_LOCAL_ONLY
+        )
+        return HttpAuthorizationPolicy(minimum_role, remote_access)
+    if not path.startswith("/api/"):
+        return HttpAuthorizationPolicy(None)
+
+    minimum_role = "owner"
+    if _http_rule_matches(normalized_method, path, _VIEWER_HTTP_MUTATION_RULES):
+        # These mutations enforce Show Page ownership and Organization authority
+        # in the resource service. Admit a viewer to that final authorization gate.
+        minimum_role = "viewer"
+    else:
+        for rule_method, pattern in _EDITOR_HTTP_RULES:
+            if normalized_method == rule_method and pattern.fullmatch(path):
+                minimum_role = "editor"
+                break
+        else:
+            if normalized_method in {"GET", "HEAD", "OPTIONS"} and any(
+                pattern.fullmatch(path) for pattern in _VIEWER_HTTP_RULES
+            ):
+                minimum_role = "viewer"
+
+    if _http_rule_matches(normalized_method, path, _REMOTE_LOCAL_ONLY_HTTP_RULES):
+        remote_access = REMOTE_HTTP_LOCAL_ONLY
+    elif _http_rule_matches(
+        normalized_method,
+        path,
+        _REMOTE_PAYLOAD_FILTERED_HTTP_RULES,
+    ):
+        remote_access = REMOTE_HTTP_PAYLOAD_FILTERED
+    elif minimum_role in {"viewer", "editor"} or _owner_http_rule_matches(
+        normalized_method,
+        path,
+    ):
+        remote_access = REMOTE_HTTP_ALLOWED
+    else:
+        remote_access = REMOTE_HTTP_LOCAL_ONLY
+    return HttpAuthorizationPolicy(minimum_role, remote_access)
+
 
 def required_instance_role(method: str, path: str) -> str | None:
     """Return the minimum role for a remote HTTP request.
@@ -327,27 +543,4 @@ def required_instance_role(method: str, path: str) -> str | None:
     cannot accidentally become available to editors or viewers.
     """
 
-    normalized_method = method.upper()
-    # Organization management establishes and evaluates a separate Cloud user
-    # identity. Any authenticated Instance viewer may enter that identity gate;
-    # the Cloud service then re-evaluates Organization role and object ownership
-    # for every read and mutation.
-    if path.startswith("/api/cloud-management/"):
-        return "viewer"
-    if path.startswith("/show/"):
-        return "viewer" if normalized_method in {"GET", "HEAD", "OPTIONS"} else "editor"
-    if not path.startswith("/api/"):
-        return None
-    # These routes enforce Show Page ownership and Organization authority in
-    # the resource service. The HTTP gate only admits an authenticated viewer
-    # so page-specific authorization can make the final decision.
-    for rule_method, pattern in _VIEWER_HTTP_MUTATION_RULES:
-        if normalized_method == rule_method and pattern.fullmatch(path):
-            return "viewer"
-    for rule_method, pattern in _EDITOR_HTTP_RULES:
-        if normalized_method == rule_method and pattern.fullmatch(path):
-            return "editor"
-    if normalized_method in {"GET", "HEAD", "OPTIONS"}:
-        if any(pattern.fullmatch(path) for pattern in _VIEWER_HTTP_RULES):
-            return "viewer"
-    return "owner"
+    return http_authorization_policy(method, path).minimum_role

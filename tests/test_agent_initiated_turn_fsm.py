@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import session_turns
+from core.message_context import build_context_turn_sink_key
+from core.run_settlement import SETTLED_BY_STOPPED
 
 
 def _ctx(session_id: str = "s1"):
@@ -36,6 +38,10 @@ def _manager():
     controller = SimpleNamespace(
         _session_id_from_context=lambda ctx: (getattr(ctx, "platform_specific", None) or {}).get("agent_session_id"),
         _get_session_key=lambda ctx: f"avibe::{(getattr(ctx, 'platform_specific', None) or {}).get('agent_session_id')}",
+        _get_turn_sink_key=lambda ctx: build_context_turn_sink_key(
+            ctx,
+            session_key=f"avibe::{(getattr(ctx, 'platform_specific', None) or {}).get('agent_session_id')}",
+        ),
         set_agent_status=lambda sid, status: None,
         command_handler=SimpleNamespace(handle_stop=AsyncMock(return_value=True)),
     )
@@ -78,7 +84,7 @@ class RegisterAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         # Natural completion flushes the send-while-busy queue (mirrors _run).
         mgr.flush_queue.assert_awaited()
 
-    async def test_cancel_interrupts_backend_and_settles_without_flush(self):
+    async def test_cancel_interrupts_backend_and_resumes_queue(self):
         mgr, controller = _manager()
         ctx = _ctx("s2")
         with patch("core.inbox_events.bus.publish"):
@@ -94,7 +100,23 @@ class RegisterAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             controller.command_handler.handle_stop.assert_awaited()
             self.assertTrue(result.get("ok"))
             self.assertNotIn("s2", mgr.in_flight)
-            # A plain Stop keeps the queue (no flush on cancellation).
+            # Stop ends the active turn, so an idle Session resumes its queue.
+            mgr.flush_queue.assert_awaited_once_with("s2")
+
+    async def test_teardown_cancel_does_not_resume_queue(self):
+        mgr, _ = _manager()
+        ctx = _ctx("s-shutdown")
+        with patch("core.inbox_events.bus.publish"):
+            self.assertTrue(mgr.register_agent_initiated_turn(ctx))
+            turn = mgr.in_flight["s-shutdown"]
+            await _settle()
+
+            turn.cancel_settled_by = SETTLED_BY_STOPPED
+            turn.cancel_defers_queue_resume = True
+            turn.task.cancel()
+            await asyncio.gather(turn.task, return_exceptions=True)
+
+            self.assertNotIn("s-shutdown", mgr.in_flight)
             mgr.flush_queue.assert_not_awaited()
 
     async def test_noop_without_workbench_session_id(self):

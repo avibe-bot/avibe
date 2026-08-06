@@ -120,7 +120,30 @@ def test_dispatch_async_missing_socket_raises_unavailable(tmp_path):
         asyncio.run(internal_client.dispatch_async({"session_id": "s", "text": "x"}, socket_path=sock))
 
 
-def test_reconcile_platforms_round_trip(tmp_path, socket_path):
+def test_dispatch_async_read_timeout_reports_acceptance_unknown(socket_path):
+    sock = socket_path
+
+    class TimingOutClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _path, json):
+            raise httpx.ReadTimeout("response deadline elapsed")
+
+    with patch("vibe.internal_client.httpx.AsyncClient", return_value=TimingOutClient()):
+        with pytest.raises(internal_client.InternalServerTimeout):
+            asyncio.run(
+                internal_client.dispatch_async(
+                    {"session_id": "s", "text": "x"},
+                    socket_path=sock,
+                )
+            )
+
+
+def test_reconcile_platforms_round_trip(socket_path):
     app = FastAPI()
     calls: list[bool] = []
 
@@ -361,6 +384,45 @@ def test_memory_sync_read_helper_sends_agent_session_header(socket_path):
 
     assert result["body"] == {"state": "ready"}
     assert captured["x-avibe-caller-session"] == "ses-admin"
+
+
+def test_backend_auth_round_trip(socket_path):
+    app = FastAPI()
+    captured: dict = {}
+
+    @app.post("/internal/backend-auth/test")
+    async def _test(payload: dict):
+        captured["payload"] = payload
+        return {"ok": True, "excerpt": "hello"}
+
+    sock = socket_path
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.test_backend_auth(
+                "codex",
+                model="gpt-5.4-mini",
+                socket_path=sock,
+            )
+
+    result = asyncio.run(_go())
+
+    assert captured["payload"] == {"backend": "codex", "model": "gpt-5.4-mini"}
+    assert result == {
+        "status_code": 200,
+        "body": {"ok": True, "excerpt": "hello"},
+    }
+
+
+def test_backend_auth_missing_socket_raises_unavailable(tmp_path):
+    with pytest.raises(internal_client.InternalServerUnavailable):
+        asyncio.run(
+            internal_client.test_backend_auth(
+                "claude",
+                socket_path=tmp_path / "missing.sock",
+            )
+        )
 
 
 def test_notify_vault_request_created_round_trip(tmp_path, socket_path):

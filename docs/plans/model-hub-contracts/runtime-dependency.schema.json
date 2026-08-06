@@ -2,11 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/runtime-dependency.schema.json",
   "title": "RuntimeDependency",
-  "description": "Managed engine dependency manifest + status (spec §8; S3 verdict: generalize the Show Runtime managed-archive installer, effort M; process/health/config stay per-runtime). Pinned values below are the S1 survey result and are normative until the next explicit re-pin. Platform set expanded 2026-07-25 (orchestrator decision after F1 smoke proved linux-arm64 fail-closed blocks regression verification). Avibe-owned mirror remains the L7 pre-GA gate; URLs stay upstream until then.",
+  "description": "v4 (2026-07-31 targeted amendment): managed engine dependency manifest + status. The installed lazy-start state is not a failure: not_started means no start has been demanded in this service lifetime; down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin.",
   "type": "object",
-  "required": ["manifest", "status"],
+  "required": ["contract_version", "manifest", "status"],
   "additionalProperties": false,
   "properties": {
+    "contract_version": { "const": 4 },
     "manifest": {
       "type": "object",
       "required": ["name", "version", "source_sha", "assets"],
@@ -47,13 +48,17 @@
             "port": { "type": "integer" }
           }
         },
-        "health": { "enum": ["ok", "degraded", "down", "not_installed"] },
+        "health": {
+          "enum": ["ok", "degraded", "down", "not_started", "not_installed"],
+          "description": "not_started is installed and intentionally idle until first demand; down is a runtime that was demanded and is no longer available."
+        },
         "last_check": { "type": ["string", "null"], "format": "date-time" }
       }
     }
   },
   "examples": [
     {
+      "contract_version": 4,
       "manifest": {
         "name": "cliproxyapi",
         "version": "v7.2.95",

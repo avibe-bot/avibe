@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from sqlalchemy import select
-
 from config.v2_config import (
     AgentsConfig,
     PlatformsConfig,
@@ -14,18 +12,17 @@ from config.v2_config import (
     UiConfig,
     V2Config,
 )
-from core.vibe_agents import VibeAgentStore
 from storage import (
     media_service,
+    message_deliveries,
     messages_service,
     project_access_service,
     projects_service,
-    resource_access_service,
 )
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import media_object_references, media_objects, messages, scopes
-from storage.workbench_sessions_service import create_session, update_session
+from storage.models import media_object_references, media_objects, scopes
+from storage.workbench_sessions_service import create_session
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_server
 from vibe.authorization import AuthorizationContext
@@ -216,7 +213,9 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
     inbox = _get(client, "/api/inbox").get_json()
     assert [row["session_id"] for row in inbox["sessions"]] == [ids["session_a"]]
     assert set(inbox["unread_by_session"]) == {ids["session_a"]}
-    assert _get(client, f"/api/media/{ids['media_a']}").status_code == 200
+    media_response = _get(client, f"/api/media/{ids['media_a']}")
+    assert media_response.status_code == 200
+    assert media_response.headers["Cache-Control"] == "private, no-store"
     assert _get(client, f"/api/media/{ids['media_b']}").status_code == 404
     show_pages = _get(client, "/api/show-pages").get_json()
     assert show_pages["pages"] == [{"session_id": ids["session_a"]}]
@@ -284,8 +283,10 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
         headers=headers,
         json={},
     )
-    assert allowed_action.status_code == 400
-    assert hidden_action.status_code == 404
+    assert allowed_action.status_code == 403
+    assert allowed_action.get_json()["code"] == "remote_execution_disabled"
+    assert hidden_action.status_code == 403
+    assert hidden_action.get_json()["code"] == "remote_execution_disabled"
 
 
 def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_path) -> None:
@@ -301,17 +302,16 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
             },
         )
         scope_id = project_access_service.project_scope_id(ids["project_a"])
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id=ids["session_a"],
             text="editor-only queued prompt",
         )
-        messages_service.set_draft(
+        message_deliveries.set_draft(
             conn,
-            scope_id=scope_id,
-            session_id=ids["session_a"],
-            text="editor-only draft",
+            ids["session_a"],
+            "editor-only draft",
         )
 
     monkeypatch.setattr(
@@ -371,12 +371,11 @@ def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path
         "publish",
         lambda event_type, data: published.append((event_type, data)),
     )
-    owner = _remote_client(config, role="owner", email="owner@example.com")
-    archive = owner.delete(
+    local = app.test_client()
+    archive = local.delete(
         f"/api/projects/{ids['project_a']}",
-        base_url=REMOTE_ORIGIN,
-        environ_base=REMOTE_PEER,
-        headers=csrf_headers(owner, REMOTE_ORIGIN),
+        base_url="http://localhost",
+        headers=csrf_headers(local, "http://localhost"),
     )
     assert archive.status_code == 200
     assert (
@@ -408,7 +407,8 @@ def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path
         headers=csrf_headers(client, REMOTE_ORIGIN),
         json={},
     )
-    assert response.status_code == 404
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
 
 
 def test_legacy_media_token_uses_all_migrated_session_references(monkeypatch, tmp_path) -> None:
@@ -457,46 +457,29 @@ def test_legacy_media_token_uses_all_migrated_session_references(monkeypatch, tm
     assert _get(beta, f"/api/media/{token}").status_code == 200
 
 
-def test_remote_message_persists_trusted_web_push_authorization_context(
+def test_remote_message_is_blocked_before_persistence_or_dispatch(
     monkeypatch,
     tmp_path,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
     engine = create_sqlite_engine()
-    agent_store = VibeAgentStore()
-    try:
-        agent = agent_store.create(name="project-access-agent", backend="codex")
-    finally:
-        agent_store.close()
-    with engine.begin() as conn:
-        resource_access_service.ensure_resource_policy(
-            conn,
-            resource_kind="agent",
-            resource_id=agent.id,
-            organization_id=None,
-            owner_user_id="user-editor-alice@example.com",
-            access_level="private",
-        )
-        update_session(
-            conn,
-            ids["session_a"],
-            agent_id=agent.id,
-            agent_name=agent.name,
-            agent_backend=agent.backend,
-        )
     client = _remote_client(config, role="editor", email="alice@example.com")
-    published = []
 
-    async def dispatch_async(_payload):
-        return {"status_code": 202, "body": {"ok": True}}
+    with engine.connect() as conn:
+        before_ids = {
+            row["id"]
+            for row in messages_service.list_session_messages(
+                conn,
+                session_id=ids["session_a"],
+                limit=500,
+            )["messages"]
+        }
+
+    async def dispatch_async(payload):
+        raise AssertionError("remote message reached the local controller")
 
     monkeypatch.setattr(internal_client, "dispatch_async", dispatch_async)
-    monkeypatch.setattr(
-        broker,
-        "publish",
-        lambda event_type, data: published.append((event_type, data)),
-    )
     response = client.post(
         f"/api/sessions/{ids['session_a']}/messages",
         base_url=REMOTE_ORIGIN,
@@ -507,52 +490,41 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
             "metadata": {
                 "_web_push_authorization_contexts": [
                     {"user_key": "remote:spoofed", "email": "spoofed@example.com"}
-                ]
+                ],
+                "resource_user_context": {
+                    "sub": "spoofed",
+                    "vibe_instance_role": "owner",
+                    "vibe_instance_access_source": "owner",
+                },
             },
         },
     )
 
-    assert response.status_code == 201
-    payload = response.get_json()
-    assert not any(key.startswith("_web_push_") for key in payload["metadata"])
-    published_message = next(
-        data
-        for event_type, data in published
-        if event_type == "message.new"
-    )
-    assert not any(
-        key.startswith("_web_push_")
-        for key in published_message["metadata"]
-    )
-
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
     with engine.connect() as conn:
-        metadata_json = conn.execute(
-            select(messages.c.metadata_json).where(messages.c.id == payload["id"])
-        ).scalar_one()
-    persisted_metadata = json.loads(metadata_json)
-    assert persisted_metadata["_web_push_user_key"].startswith("remote:")
-    records = persisted_metadata["_web_push_authorization_contexts"]
-    claims_issued_at = records[0].pop("claims_issued_at")
-    assert isinstance(claims_issued_at, int) and claims_issued_at > 0
-    assert records == [
-        {
-            "email": "alice@example.com",
-            "sub": persisted_metadata["_web_push_user_key"].removeprefix("remote:"),
-            "user_key": persisted_metadata["_web_push_user_key"],
-            "vibe_group_ids": [],
-            "vibe_instance_access_source": "owner",
-            "vibe_instance_id": "inst_123",
-            "vibe_instance_role": "editor",
+        after_ids = {
+            row["id"]
+            for row in messages_service.list_session_messages(
+                conn,
+                session_id=ids["session_a"],
+                limit=500,
+            )["messages"]
         }
-    ]
-    transcript = _get(client, f"/api/sessions/{ids['session_a']}/messages").get_json()
-    stored_payload = next(row for row in transcript["messages"] if row["id"] == payload["id"])
-    assert not any(key.startswith("_web_push_") for key in stored_payload["metadata"])
+    assert after_ids == before_ids
 
 
 def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            scopes.update()
+            .where(scopes.c.native_id == ids["project_a"])
+            .values(metadata_json=json.dumps({"host_path_hint": "/private/host"}))
+        )
+    engine.dispose()
 
     viewer = _remote_client(config, role="viewer", email="alice@example.com")
     assert _get(viewer, f"/api/sessions/{ids['session_a']}").status_code == 200
@@ -614,15 +586,28 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     assert _get(organization_member, f"/api/media/{ids['media_a']}").status_code == 404
 
     owner = _remote_client(config, role="owner", email="owner@example.com")
-    assert {row["id"] for row in _get(owner, "/api/projects").get_json()["projects"]} == {
+    owner_projects = _get(owner, "/api/projects").get_json()["projects"]
+    assert {row["id"] for row in owner_projects} == {
         ids["project_a"],
         ids["project_b"],
     }
+    assert all(row["folder_path"] == "" and row["metadata"] == {} for row in owner_projects)
+    owner_project = _get(owner, f"/api/projects/{ids['project_a']}").get_json()
+    assert owner_project["folder_path"] == ""
+    assert owner_project["metadata"] == {}
+    owner_bootstrap = _get(owner, "/api/workbench/projects-bootstrap").get_json()
+    assert all(
+        row["folder_path"] == "" and row["metadata"] == {}
+        for row in owner_bootstrap["projects"]
+    )
     assert _get(owner, f"/api/sessions/{ids['unscoped']}").status_code == 200
 
     local = app.test_client()
     local_projects = local.get("/api/projects", base_url="http://localhost").get_json()["projects"]
     assert {row["id"] for row in local_projects} == {ids["project_a"], ids["project_b"]}
+    local_project_a = next(row for row in local_projects if row["id"] == ids["project_a"])
+    assert local_project_a["folder_path"] == str((tmp_path / "project-a").resolve())
+    assert local_project_a["metadata"] == {"host_path_hint": "/private/host"}
     assert local.get(f"/api/sessions/{ids['unscoped']}", base_url="http://localhost").status_code == 200
 
 

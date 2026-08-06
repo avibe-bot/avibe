@@ -48,6 +48,38 @@ export interface NewSessionState {
   upsertSelectProject: (project: WorkbenchProject) => void;
 }
 
+const normalizeAgentName = (name: string) =>
+  name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^[-_]+|[-_]+$/g, '');
+
+export function isProjectDefaultAgentAvailable(
+  project: WorkbenchProject | null,
+  agents: VibeAgentBrief[],
+): boolean {
+  const name = project?.default_agent?.agent_name;
+  if (!name) return false;
+  const normalizedName = normalizeAgentName(name);
+  return agents.some(
+    (agent) => normalizeAgentName(agent.name) === normalizedName && agent.enabled && !agent.archived,
+  );
+}
+
+export function projectDefaultAgentRoute(
+  project: WorkbenchProject | null,
+  agents: VibeAgentBrief[],
+): AgentRouteSelection {
+  if (!isProjectDefaultAgentAvailable(project, agents)) return {};
+  const def = project?.default_agent;
+  return def
+    ? {
+        agent_name: def.agent_name,
+        agent_id: def.agent_id,
+        agent_variant: def.agent_variant,
+        model: def.model,
+        reasoning_effort: def.reasoning_effort,
+      }
+    : {};
+}
+
 const sortByRecent = (list: WorkbenchProject[]) =>
   list
     .slice()
@@ -174,18 +206,14 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     setUserPick((prev) => (Object.keys(prev).length ? {} : prev));
   }
 
-  // The selected project's default Agent as a route (empty when it has none).
-  const projectDefaultRoute = useMemo<AgentRouteSelection>(() => {
-    const def = target?.default_agent;
-    return def && agents.some((agent) => agent.name === def.agent_name)
-      ? {
-          agent_name: def.agent_name,
-          agent_variant: def.agent_variant,
-          model: def.model,
-          reasoning_effort: def.reasoning_effort,
-        }
-      : {};
-  }, [agents, target?.default_agent]);
+  // The selected project's default Agent as a route. An archived binding stays
+  // on the project for durable history, but the enabled catalog intentionally
+  // excludes it, so a new chat falls back to the live global default.
+  const projectDefaultAvailable = isProjectDefaultAgentAvailable(target, agents);
+  const projectDefaultRoute = useMemo<AgentRouteSelection>(
+    () => projectDefaultAgentRoute(target, agents),
+    [target, agents],
+  );
 
   // The GLOBAL default Agent resolved to a concrete route, looked up from the
   // agents list by name. The picker needs a concrete route to render the model
@@ -243,7 +271,9 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
 
   // Label for the picker's "Default" option: the project default's agent when
   // set, otherwise the global default agent.
-  const effectiveDefaultAgentName = target?.default_agent?.agent_name ?? defaultAgentName;
+  const effectiveDefaultAgentName = projectDefaultAvailable
+    ? target?.default_agent?.agent_name ?? defaultAgentName
+    : defaultAgentName;
 
   const send = useCallback(
     async (text: string): Promise<{ sessionId: string; initialMessage: string } | null> => {

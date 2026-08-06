@@ -49,4 +49,3 @@ the existing hosted Resource Access console, which owns desired ACL revisions.
 - Redaction: published descriptors contain only the shared safe metadata fields.
 - Lifecycle: create-then-delete rename and deletion converge through the next
   full resource-index snapshot.
-

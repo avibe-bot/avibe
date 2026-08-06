@@ -32,6 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
+from vibe.message_types import spec_for
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +48,46 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _resolve_scope_id(conn, context: MessageContext) -> Optional[str]:
+def _scope_identity_for_context(context: MessageContext) -> tuple[str, str, str] | None:
     platform = (context.platform or "").strip()
     is_dm = bool((context.platform_specific or {}).get("is_dm", False))
-    use_user_scope = is_dm and context.channel_id and context.user_id and context.channel_id == context.user_id
+    use_user_scope = bool(
+        is_dm
+        and context.channel_id
+        and context.user_id
+        and context.channel_id == context.user_id
+    )
     scope_type = "user" if use_user_scope else DEFAULT_SCOPE_TYPE
     native_id = ((context.user_id if use_user_scope else context.channel_id) or "").strip()
     if not platform or not native_id:
         return None
+    return platform, scope_type, native_id
+
+
+def scope_id_for_context(context: MessageContext) -> Optional[str]:
+    """Return the stable native conversation identity without writing storage."""
+
+    identity = _scope_identity_for_context(context)
+    if identity is None:
+        return None
+    return settings_service.make_scope_id(*identity)
+
+
+def _agent_message_scope_id(conn, context: MessageContext) -> Optional[str]:
+    """Resolve the same scope used when an accepted agent Message is persisted."""
+
+    if context.platform == "avibe":
+        session_id = (context.platform_specific or {}).get("agent_session_id")
+        session_row = _session_row(conn, session_id) if session_id else None
+        return session_row["scope_id"] if session_row else None
+    return scope_id_for_context(context)
+
+
+def _resolve_scope_id(conn, context: MessageContext) -> Optional[str]:
+    identity = _scope_identity_for_context(context)
+    if identity is None:
+        return None
+    platform, scope_type, native_id = identity
     try:
         return settings_service.upsert_scope(
             conn,
@@ -247,81 +280,16 @@ def _trace_ids_from_context(context: MessageContext) -> tuple[Optional[str], Opt
     return turn_id, run_id
 
 
-def persist_silent_completion_marker(context: MessageContext) -> None:
-    """Persist the invisible ``silent`` terminal marker for a turn that completed
-    NORMALLY but delivered no user-visible message — a ``<silent>``-stripped/empty
-    final reply, or a reply-less bookkeeping turn (common for watch/scheduled runs).
-
-    Written ONCE per turn at the delivery chokepoint
-    (``MessageDispatcher.emit_agent_message``) on the clean-completion path only — NOT
-    for cancel/Stop (which legitimately stays ``interrupted``) nor backend failures
-    (which already emit a visible ``notify``). It exists solely so the activity
-    grouping closes the turn as DONE instead of misreading "activity + no terminal" as
-    interrupted; it is never delivered, or shown as a transcript bubble (see
-    ``messages_service.SILENT_TYPE`` and its allowlist/denylist exclusions). Writes via
-    ``_append_quietly`` directly — bypassing ``persist_agent_message``'s empty-text
-    guard and the ``message.new`` publish (the marker is invisible in the transcript).
-
-    It DOES recompute + publish the inbox row, though: the marker counts as a reply for
-    the inbox awaiting/replied flag, so an open sidebar must clear "awaiting the agent"
-    live instead of staying stale until a reconnect. No web-push (a silent completion is
-    not a notifiable reply). Best-effort: the caller wraps it; a failure must never break
-    turn completion.
-    """
-    if not context.platform:
-        return
-    session_id = (context.platform_specific or {}).get("agent_session_id")
-    suppress_delivery = bool((context.platform_specific or {}).get("suppress_delivery"))
-    engine = get_cached_sqlite_engine()
-    inbox_row = None
-    with engine.begin() as conn:
-        if context.platform == "avibe":
-            session_row = _session_row(conn, session_id) if session_id else None
-            scope_id = session_row["scope_id"] if session_row else None
-        else:
-            session_row = None
-            scope_id = _resolve_scope_id(conn, context)
-        if scope_id is None and session_row is None:
-            return
-        agent_name, _backend = _agent_provenance_from_context(context, session_row)
-        _append_quietly(
-            conn,
-            scope_id=scope_id,
-            session_id=session_id,
-            platform=context.platform,
-            author="agent",
-            source="agent",
-            author_name=agent_name,
-            message_type=messages_service.SILENT_TYPE,
-            text="",
-            metadata=None,
-            native_message_id=None,
-            parent_native_message_id=context.thread_id,
-            content={"kind": "silent"},
-        )
-        # Recompute the session's inbox row so the awaiting/replied flag clears live.
-        # avibe-only (the workbench inbox is avibe-scoped; IM rows aren't shown there).
-        if context.platform == "avibe" and session_id and not suppress_delivery:
-            inbox_row = messages_service.get_inbox_session(conn, session_id)
-    if inbox_row is not None:
-        # Same ``inbox.session.updated`` event a visible reply publishes — but NOT
-        # ``message.new`` (no transcript bubble) and NOT web-push (not a notifiable reply).
-        try:
-            from core.inbox_events import bus
-
-            bus.publish("inbox.session.updated", inbox_row)
-        except Exception:
-            logger.debug("persist_silent_completion_marker: inbox publish failed", exc_info=True)
-
-
 def persist_agent_message(
     context: MessageContext,
     canonical_type: str,
     text: str,
     *,
     quick_replies: Optional[list[str]] = None,
+    result_footer: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
     native_message_id: Optional[str] = None,
+    error_sink: Optional[list] = None,
 ) -> Optional[dict]:
     """Persist one agent output into the workbench ``messages`` store.
 
@@ -412,7 +380,7 @@ def persist_agent_message(
                 # hidden intermediate assistant stream.
                 if (
                     context.platform == "avibe"
-                    and message_type in ("result", "notify", "error")
+                    and spec_for(message_type)["inboxPreview"]
                     and row_session_id
                 ):
                     try:
@@ -430,6 +398,11 @@ def persist_agent_message(
                 # render their own native buttons from the same parse).
                 if quick_replies:
                     content = {**(content or {}), "quick_replies": list(quick_replies)}
+                # Keep the generated duration/token summary as structured content.
+                # IM delivery may still fold it into ``text``, while the Web
+                # transcript can render it beside the timestamp without guessing.
+                if result_footer:
+                    content = {**(content or {}), "result_footer": result_footer}
                 appended_row = _append_quietly(
                     conn,
                     scope_id=scope_id,
@@ -469,7 +442,10 @@ def persist_agent_message(
         # open Chat consumer; publishing it would be dead traffic).
         if context.platform == "avibe" and not suppress_delivery and (
             message_type in messages_service.TRANSCRIPT_TYPES
-            or (message_type == "assistant" and _activity_streaming_enabled())
+            or (
+                spec_for(message_type)["activityRole"] == "activity"
+                and _activity_streaming_enabled()
+            )
         ):
             _publish_session_message(appended_row)
         if inbox_row is not None:
@@ -483,34 +459,92 @@ def persist_agent_message(
             except Exception:
                 logger.debug("web push notification scheduling failed", exc_info=True)
         return appended_row
-    except Exception:
+    except Exception as err:
         logger.exception("persist_agent_message: failure on platform=%s", context.platform)
+        # Surfaced, not raised. A caller that owes a durable receipt needs to know
+        # WHY the row is missing — propagating only ``None`` says a receipt is
+        # absent and nothing about whether the message was delivered. Raising
+        # instead would be caught by the notify branch and discard the message id
+        # already in hand, which is the bug this channel exists to avoid.
+        # Optional so the eleven callers that ignore it are unaffected.
+        if error_sink is not None:
+            error_sink.append(err)
         return None
 
 
-def agent_message_exists(context: MessageContext, native_message_id: str | None) -> bool:
-    """Check a stable output identity before external delivery.
+def persist_silent_terminal(context: MessageContext, *, is_error: bool) -> None:
+    """Record reply-less IM terminal evidence outside the Message transcript.
+
+    Durable Workbench turns settle through ``session_turns``. IM turns do not have
+    that execution owner, so their empty/silent terminal result is retained as an
+    append-only trace event for activity grouping and fork-boundary recovery.
+    """
+
+    session_id = (context.platform_specific or {}).get("agent_session_id")
+    if not context.platform or not session_id:
+        return
+    try:
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as conn:
+            if context.platform == "avibe":
+                session_row = _session_row(conn, session_id)
+                scope_id = session_row["scope_id"] if session_row else None
+            else:
+                session_row = None
+                scope_id = _resolve_scope_id(conn, context)
+            if scope_id is None and session_row is None:
+                return
+            agent_name, backend = _agent_provenance_from_context(context, session_row)
+            turn_id, run_id = _trace_ids_from_context(context)
+            agent_events_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=session_id,
+                platform=context.platform,
+                event_type="silent_terminal",
+                visibility="trace",
+                metadata={
+                    "terminal_outcome": "failed" if is_error else "completed",
+                },
+                agent_name=agent_name,
+                backend=backend,
+                turn_id=turn_id,
+                run_id=run_id,
+            )
+    except Exception:
+        logger.exception(
+            "persist_silent_terminal: failure on platform=%s",
+            context.platform,
+        )
+
+
+def agent_message_exists(
+    context: MessageContext,
+    native_message_id: str | None,
+) -> Optional[dict[str, Any]]:
+    """Load the accepted Message receipt before external delivery.
 
     The database unique constraint remains the final race guard. This early
-    check prevents ordinary callback or backend retries from posting the same
-    durable output to an IM surface twice.
+    read prevents retries from posting the same durable output twice and returns
+    the canonical text, footer, and provenance for local-only settlement.
     """
 
     platform = str(context.platform or "").strip()
     identity = str(native_message_id or "").strip()
     if not platform or not identity:
-        return False
+        return None
     try:
         engine = get_cached_sqlite_engine()
         with engine.begin() as conn:
-            return messages_service.native_message_exists(
+            return messages_service.get_native_message(
                 conn,
                 platform=platform,
+                scope_id=_agent_message_scope_id(conn, context),
                 native_message_id=identity,
             )
     except Exception:
         logger.debug("agent_message_exists: lookup failed open", exc_info=True)
-        return False
+        return None
 
 
 def mirror_harness_inbound(context: MessageContext, text: str) -> None:

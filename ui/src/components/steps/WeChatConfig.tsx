@@ -19,6 +19,7 @@ import { EmbeddedConfigShell, EyebrowBadge, WizardCard } from '../visual';
 import { ProxyUrlField } from '../shared/ProxyUrlField';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { errorMessage } from '@/lib/errorMessage';
 
 interface WeChatConfigProps {
   data: Record<string, any>;
@@ -113,7 +114,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
         activeSessionKeyRef.current = result.session_key;
         startPolling(result.session_key);
       }
-    } catch (err: any) {
+    } catch (err) {
       try {
         await new Promise((resolve) => setTimeout(resolve, 800));
         const retryResult = await api.wechatStartLogin();
@@ -129,9 +130,9 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           activeSessionKeyRef.current = retryResult.session_key;
           startPolling(retryResult.session_key);
         }
-      } catch (retryErr: any) {
+      } catch (retryErr) {
         setLoginState('error');
-        setMessage(retryErr?.message || err?.message || t('wechatConfig.startFailed'));
+        setMessage(errorMessage(retryErr) || errorMessage(err) || t('wechatConfig.startFailed'));
       }
     } finally {
       setStarting(false);
@@ -278,8 +279,8 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
         return;
       }
       startPolling(key);
-    } catch (err: any) {
-      setMessage(err?.message || t('wechatConfig.pollError'));
+    } catch (err) {
+      setMessage(errorMessage(err) || t('wechatConfig.pollError'));
       startPolling(key);
     }
   };

@@ -13,6 +13,16 @@
     "titleUntitled": "复刻"
   },
   "harness": {
+    "promptEcho": {
+      "scheduled": "⏰ 定时任务",
+      "watch": "👀 监听",
+      "webhook": "🔗 Webhook",
+      "hook": "🪝 Hook",
+      "agentRun": "🤖 Agent 运行",
+      "generic": "⚙️ 后台任务",
+      "named": "{label} · {name}",
+      "truncated": "…（已截断）"
+    },
     "watch": {
       "supervisorFailed": "Watch 监控进程失败：{detail}",
       "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。",
@@ -30,6 +40,107 @@
       "messagesLabel": "已合并的 callback 消息：",
       "latestLabel": "后续又触发 {additional} 次后的最新 callback 消息：",
       "burstHint": "这个 callback 来源正在频繁触发。请检查相关 watch/task；如果它在循环触发，请 pause、remove 或 update。"
+    },
+    "agentInitiatedContinuation": "Agent 主动发起的续接",
+    "command": {
+      "workdirMissing": "工作目录不存在：{cwd}",
+      "supervisorExitedDuringStartup": "命令监控进程在启动期间退出。",
+      "workerNotRecorded": "未启动命令：无法记录其监控进程。",
+      "supervisorFailed": "命令监控进程失败：{detail}",
+      "unknownSupervisorFailure": "未知的监控进程错误。",
+      "protocolErrors": {
+        "specTooLarge": "命令配置过大。",
+        "invalidEncoding": "命令配置不是有效的 UTF-8。",
+        "invalidJson": "命令配置不是有效的 JSON。",
+        "unsupportedVersion": "不支持此命令配置版本。",
+        "invalidCommand": "命令无效。"
+      },
+      "timedOut": "命令在 {seconds} 秒后超时。",
+      "exited": "命令退出，状态码 {code}。",
+      "exitedWithDetail": "命令退出，状态码 {code}：{detail}"
+    },
+    "task": {
+      "resultNotRecorded": "无法记录本次运行的结果：任务在运行期间被回收、改绑或删除，其存储状态未发生变化。"
+    },
+    "run": {
+      "interrupted": {
+        "noTerminalResult": "[Avibe Harness] 本次 run 结束时 Agent 没有产出结果。turn 在 Agent 回复前就被释放，因此没有记录任何输出。请检查 Agent 日志；如果这项工作仍需完成，请重新运行。",
+        "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止，因此没有最终结果。Agent 此前已经发出的输出仍会保留在这次 run 上。",
+        "refusedConcurrentTurn": "[Avibe Harness] 本次 run 被跳过：同一 session 已有另一个 turn 正在执行。一个 session 同时只运行一个 turn，请在当前 turn 结束后重新触发。",
+        "backendRefresh": "[Avibe Harness] 本次 run 执行途中，它所用的 Agent 运行时被刷新，因此被中断，通常发生在刚保存 Agent 设置之后。这次 run 本身没有问题，请重新触发。",
+        "restarted": "[Avibe Harness] 本次 run 执行途中服务已关闭，因此被中断。该次执行已被记录，服务重启后不会重放。如果这项工作仍需完成，请重新触发。",
+        "interrupted": "[Avibe Harness] 本次 run 在执行途中被中断。该次执行已被记录，不会重新排队。如果这项工作仍需完成，请重新触发。",
+        "orphaned": "[Avibe Harness] 本次 run 一直标记为 running，但已经没有任何执行在推进它，通常是服务在它执行途中重启导致的。它此前已经发出的输出仍会保留在这次 run 上。如果这项工作仍需完成，请重新运行。",
+        "transportUnavailable": "[Avibe Harness] 本次 run 一直排队等待，因为它对应的聊天平台始终没有重新连接，消息也就无法送达。请在设置中检查该平台连接，然后重新触发。",
+        "queueHoldExpired": "[Avibe Harness] 本次 run 在所属 session 的 turn 队列后面排队过久，始终没有开始执行。请检查该 session 是否有卡住的 turn，然后重新触发这次 run。"
+      },
+      "fallbackResult": {
+        "canceled": "本次 run 在产出结果前被取消，因此没有结果。",
+        "failed": "本次 run 在产出结果前失败，因此没有结果。"
+      },
+      "sendNowGateUnavailable": "本次 send-now run 无法接入：Session turn gate 当前不可用。请等待服务启动完成后重试。",
+      "bindingUnresolvedRetry": "绑定的 Agent 会话 {session} 无法接收请求({attempt}/{threshold})。连续 {threshold} 次出现目标会话不可用后，该定义将自动暂停。请用以下命令重新绑定:vibe task update {id} --session-id <id>。",
+      "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。"
+    },
+    "notice": {
+      "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",
+      "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
+      "commandLine": "命令:{command}",
+      "error": "错误:{error}",
+      "commandExit": "退出码:{exitCode}",
+      "unknownError": "未记录错误信息",
+      "definition": "任务 ID:{id}",
+      "paused": "该任务当前已暂停,恢复前不会再次触发:vibe task resume {id}",
+      "taskFinished": "这个一次性任务已经结束,不会再次触发。",
+      "nextRun": "下次运行时间:{when}",
+      "rerun": "立即重跑:vibe task run {id};查看详情:vibe task show {id}",
+      "watchPaused": "该监视当前已暂停,恢复前不会再次监视:vibe watch resume {id}",
+      "watchRetired": "该监视已经结束,不会再次监视。",
+      "watchShow": "查看详情:vibe watch show {id}",
+      "rebound": "[Avibe Harness] 后台任务「{name}」绑定的 Agent 会话已不存在,已自动重新绑定到新会话并继续运行。",
+      "reboundSessions": "原会话:{previous} → 新会话:{new}",
+      "reboundSettingsPreserved": "已保留原会话的工作目录、Agent 与模型设置。",
+      "reboundSettingsReset": "无法恢复原会话的设置,该任务现在使用当前作用域的默认配置。",
+      "reboundRepin": "如需改绑到其他会话:vibe task update {id} --session-id <session-id>",
+      "show": "查看详情:vibe task show {id}",
+      "definitionDeleted": "该定义已不存在,无法重跑、恢复或改绑,只保留这次运行的记录。",
+      "runInspect": "查看这次运行:vibe runs show {id}",
+      "workspaceSession": "工作区通知",
+      "workspaceSessionProtected": "该会话用于接收 Avibe 的工作区失败通知，无法归档或修改。",
+      "workspaceSessionReadOnly": "该会话只接收 Avibe 的工作区失败通知，不接受发送消息。",
+      "remoteExecutionDisabled": "当前版本的远程访问仅支持查看，不能执行 Agent、Harness、终端或文件操作。请在运行 Avibe 的机器上执行此操作。",
+      "failureClass": "失败类型:{failureClass}",
+      "lastSucceeded": "上次成功时间:{when}",
+      "origin": "创建位置:{origin}",
+      "originLink": "打开创建它的那条消息:{url}",
+      "originChannel": "{platform} 频道 {channel}",
+      "originChannelThread": "{platform} 频道 {channel}(话题 {thread})",
+      "originDirect": "{platform} 上与 {user} 的私聊",
+      "platform": {
+        "slack": "Slack",
+        "discord": "Discord",
+        "telegram": "Telegram",
+        "lark": "飞书/Lark",
+        "wechat": "微信",
+        "avibe": "Avibe 工作台"
+      },
+      "class": {
+        "noTerminalResult": "本轮结束时 Agent 没有返回任何结果",
+        "refusedConcurrentTurn": "所属会话中已有另一轮在执行",
+        "transportUnavailable": "投递目标平台不可达",
+        "queueHoldExpired": "在队列中等待超时",
+        "deliveryTargetMissing": "它要投递的 Agent 会话已不存在"
+      },
+      "reason": {
+        "stopped": "被手动停止",
+        "backendRefresh": "所用的 Agent 运行时被刷新",
+        "interrupted": "正在执行的任务被中断",
+        "evicted": "所属会话被回收",
+        "restarted": "服务重启",
+        "lifetimeTimeout": "所属会话达到生命周期上限",
+        "orphaned": "已无任何执行在推进它",
+        "unknown": "原因在这次运行之外"
+      }
     }
   },
   "common": {
@@ -116,6 +227,9 @@
     "streamTurnInProgress": "⚠️ 这个会话已经有一条回复在生成中，请等它完成后再试。",
     "sessionReset": "检测到会话错误。会话已重置，请重试。",
     "sessionConnectionLost": "与 Claude 的连接已断开，请重试。",
+    "claudeProcessSignal": "{signal}（信号 {number}）",
+    "claudeProcessExitCode": "退出码 {code}",
+    "claudeProcessTerminated": "Claude Code 进程已终止（{reason}）；会话已重置，请重试。",
     "claudeSessionNotFound": "Claude Code 在当前工作目录下找不到历史会话 `{sessionId}`：\n`{path}`\n\nClaude Code 的会话和工作目录相关。通常是恢复会话后切换了工作目录，或本地 Claude Code 会话数据发生变化。请切回原来的工作目录继续该会话，或在当前目录开始一个新的 Claude Code 会话。",
     "sessionGeneric": "发生错误：{error}",
     "resultAttachmentUploadFailed": "附件上传失败。要我改成拆分成多条消息发送吗？",
@@ -125,7 +239,67 @@
     "opencodeQuestionToolDisabled": "OpenCode 发起了交互式提问，但 Avibe 已禁用 OpenCode 的 question 工具。请直接发送一条新消息，告诉我你的答案或下一步方向。",
     "opencodeQuestionToolDisabledRestored": "恢复中的 OpenCode 会话发起了交互式提问，但 Avibe 已禁用 OpenCode 的 question 工具。请直接发送一条新消息，告诉我你的答案或下一步方向。",
     "opencodeEmptyResponse": "OpenCode 已结束，但没有产出模型回复。Provider：{provider}；模型：{model}；推理强度：{variant}。这次运行里 OpenCode 没有暴露服务商错误。",
-    "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}"
+    "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}",
+    "settingsConflict": {
+      "message": "这些设置打开后，Agent 路由已发生变化。",
+      "hint": "请重新加载设置后再次修改。"
+    },
+    "scopeAgentUnavailable": {
+      "message": "Agent `{agent}` 无法用于此路由。",
+      "hint": "请选择一个已启用的 Agent 后重新保存。"
+    },
+    "projectAgentConflict": {
+      "message": "项目设置打开后，该项目的 Agent 已发生变化。",
+      "hint": "请重新加载项目设置后再次修改。"
+    },
+    "projectAgentUnavailable": {
+      "message": "Agent `{agent}` 无法用于此项目。",
+      "hint": "请选择一个已启用的 Agent 后重新保存项目设置。"
+    },
+    "sessionFork": {
+      "agentUnavailable": {
+        "message": "源会话的 Agent 已无法用于创建新的复刻会话。",
+        "hint": "请选择使用相同 backend 的已启用 Agent 作为覆盖项。"
+      }
+    },
+    "sessionArchived": "该会话已归档，无法再修改。",
+    "agentArchive": {
+      "agent_builtin": {
+        "message": "Agent `{agent}` 是内置 Agent，无法删除。",
+        "hint": "内置默认 Agent 由已启用的 Backend 创建，无法删除。"
+      },
+      "agent_already_archived": {
+        "message": "Agent `{agent}` 已归档。",
+        "hint": "已归档 Agent 的内部名称仅供现有持久引用继续使用。"
+      },
+      "agent_no_default_replacement": {
+        "message": "没有其他已启用 Agent 时，无法归档默认 Agent `{agent}`。",
+        "hint": "归档当前默认 Agent 前，请保留另一个已启用 Agent。"
+      }
+    },
+    "agentLifecycle": {
+      "agent_archived_read_only": {
+        "message": "Agent `{agent}` 已归档，无法编辑。",
+        "hint": "已归档 Agent 为只读状态，仅供现有持久引用继续使用。"
+      },
+      "agent_reference_metadata_invalid": {
+        "message": "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。",
+        "hint": "请修复或删除元数据异常的任务或监控，然后重试。"
+      }
+    },
+    "agentNameValidation": {
+      "agent_name_reserved": {
+        "message": "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。",
+        "hint": "请选择不以下划线 `_` 开头的 Agent 名称。"
+      },
+      "agent_name_path_separator": {
+        "message": "Agent 名称不能包含 `/` 或 `\\`。",
+        "hint": "请选择不含路径分隔符的 Agent 名称。"
+      }
+    },
+    "claudeCredentialTypeInvalid": "Claude Code 凭据类型只能选择 API Key 或 Auth Token。",
+    "opencodeBackendError": "OpenCode 错误：{error}",
+    "opencodeActiveTurnTimeout": "OpenCode 在配置的 active-turn 上限内没有产出结果（{seconds} 秒），原生 Turn 已中止。"
   },
   "success": {
     "settingsUpdated": "设置更新成功！",
@@ -315,7 +489,10 @@
       "directMessage": "私信"
     },
     "new": {
-      "started": "已开启新的会话。你下一条消息会从全新对话开始。"
+      "started": "已开启新的会话。你下一条消息会从全新对话开始。",
+      "pausedReason": "绑定的 Agent 会话已被 /new 清除",
+      "pausedTasks": "⏸️ 已暂停 {count} 个绑定到被清理会话的定时任务。用 `vibe task list` → `vibe task update <id> --session-id <new>` 重新指向，再 `vibe task resume <id>`。",
+      "pausedWatches": "⏸️ 已暂停 {count} 个绑定到被清理会话的 watch。用 `vibe watch list` → `vibe watch update <id> --session-id <new>` 重新指向，再 `vibe watch resume <id>`。"
     },
     "clear": {
       "noSessions": "没有要清除的活动会话。\n会话状态已重置。",
@@ -380,7 +557,8 @@
       "timedOut": "{backend} 登录修复已超时，请重新发起 setup 再试一次。",
       "success": "{backend} 已重新登录，可继续使用。",
       "failed": "{backend} 登录修复失败：{detail}",
-      "unknownFailure": "未知登录失败。"
+      "unknownFailure": "未知登录失败。",
+      "apiKeyRecoveryPrompt": "{backend} 拒绝了当前配置的 API Key。请在设置中检查 API Key 和 Base URL，保存后重试。"
     },
     "stop": {
       "noActiveSession": "此频道没有要停止的活动会话。"
@@ -521,7 +699,8 @@
       "upstream_protocol_error": "上游响应不符合预期协议。",
       "upstream_request_invalid": "上游服务拒绝了请求。",
       "upstream_unauthorized": "刷新后上游服务仍拒绝授权。",
-      "upstream_error": "上游服务返回错误。"
+      "upstream_error": "上游服务返回错误。",
+      "invalid_source_order": "来源顺序包含不可用、不适用或重复的来源。"
     },
     "events": {
       "sourceFallback": "来源",
@@ -536,8 +715,31 @@
         "network": "网络暂不可用",
         "recovery": "已恢复",
         "manual": "手动调整",
-        "mapping": "已应用模型映射"
-      }
+        "mapping": "已应用模型映射",
+        "credential_expired": "凭证已过期",
+        "credential_revoked": "凭证已撤销",
+        "balance_exhausted": "余额不足",
+        "account_banned": "账户不可用",
+        "permission_denied": "请求权限被拒绝",
+        "unclassified_error": "来源发生未分类错误",
+        "no_enabled_source": "没有已启用的来源",
+        "no_eligible_source": "没有适用的来源",
+        "model_unsupported": "没有来源支持此模型"
+      },
+      "skip": "{from_source}：{reason}，已跳过",
+      "mapping_applied": "{from_source} -> {model}：已应用模型映射",
+      "channel_switch": "{from_source}：供给通道已切换",
+      "needs_action": "{from_source}：{reason}，需要处理",
+      "supply_interrupted": "{model}：{reason}，模型供给已中断"
+    },
+    "launch": {
+      "retry": "下一回合已自动换线，直接重试即可",
+      "waiting": "模型 {model} 暂时不可用，等待 {source} 于 {retry_at} 自动恢复。",
+      "interrupted": "模型 {model} 当前不可用：{blockers}。请前往 Models 处理。",
+      "native_cli_unavailable": "当前进程无法使用 CLI 登录",
+      "no_enabled_source": "模型 {model} 没有已启用的来源。请前往 Models 配置。",
+      "no_eligible_source": "模型 {model} 没有适用于 {backend} 的来源。请前往 Models 配置。",
+      "model_unsupported": "没有来源支持模型 {model}。请前往 Models 配置。"
     }
   },
   "errors": {
@@ -561,6 +763,13 @@
       "oauth_time_mismatch_body": "Avibe Cloud 已完成登录,但这台机器因为本地时间不同步而拒绝了安全令牌。请校准系统时间后重试。",
       "invalid_oauth_nonce_title": "无法验证此次登录",
       "invalid_oauth_nonce_body": "本次登录未能通过验证,为保护你的账户已中止。请重新登录以继续。"
+    }
+  },
+  "show": {
+    "event": {
+      "acceptanceUnknown": "Show 事件可能仍在处理中，未在本地重复提交。",
+      "dispatchFailed": "Show 事件已记录，但未能投递对应的 Agent turn。",
+      "idConflict": "此 Show 事件 ID 已绑定到不同的事件内容。"
     }
   }
 }

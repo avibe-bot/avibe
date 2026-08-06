@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import fields
 from pathlib import Path
 
-from jsonschema import Draft7Validator, FormatChecker
+import pytest
+from jsonschema import Draft7Validator, FormatChecker, ValidationError
 
 from config.v2_config import (
+    MODEL_HUB_ENABLED_ENV,
+    MODEL_HUB_LEGACY_CREATED_AT,
+    ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubMappingConfig,
@@ -16,6 +21,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
     ModelHubSourceUsageConfig,
     V2Config,
+    is_model_hub_enabled,
 )
 from core.services.settings import default_config
 from vibe import api
@@ -39,27 +45,142 @@ def _canonical(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _json_pointer(document: dict, pointer: str):
+    value = document
+    for token in pointer.lstrip("/").split("/"):
+        token = token.replace("~1", "/").replace("~0", "~")
+        value = value[int(token)] if isinstance(value, list) else value[token]
+    return value
+
+
+def _vocabulary(schema: dict, paths: list[str], *, exclude=()) -> set:
+    values = set()
+    for pointer in paths:
+        node = _json_pointer(schema, pointer)
+        values.update(node["enum"] if "enum" in node else [node["const"]])
+    return values - set(exclude)
+
+
+def _validate_mirror_entry(entry: dict, schemas: dict[str, dict]) -> None:
+    rule = entry["rule"]
+    if rule == "none":
+        assert entry["reason"]
+        return
+    if rule == "equality":
+        normalized = []
+        for item in entry["sets"]:
+            actual = _vocabulary(
+                schemas[item["schema"]],
+                item["paths"],
+                exclude=item.get("exclude", ()),
+            )
+            extras = set(item.get("extras", ()))
+            normalized.append(actual - extras)
+            assert actual == (actual - extras) | extras
+        assert all(values == normalized[0] for values in normalized[1:])
+        return
+    if rule == "mapping":
+        home = _vocabulary(
+            schemas[entry["home"]["schema"]],
+            [entry["home"]["path"]],
+        )
+        targets = entry.get("targets")
+        if targets is None:
+            targets = [{**entry["target"], "mapping": entry["mapping"]}]
+        for item in targets:
+            target = _vocabulary(
+                schemas[item["schema"]],
+                [item["path"]],
+                exclude=item.get("exclude", ()),
+            )
+            mapping = item["mapping"]
+            assert home == set(mapping)
+            assert target == set(mapping.values())
+        return
+    if rule == "partition":
+        home = _vocabulary(
+            schemas[entry["home"]["schema"]],
+            [entry["home"]["path"]],
+        )
+        member = _vocabulary(
+            schemas[entry["member"]["schema"]],
+            [entry["member"]["path"]],
+        )
+        exclusions = set(entry["exclusions"])
+        for item in entry["exclusion_sets"]:
+            exclusions |= _vocabulary(schemas[item["schema"]], [item["path"]])
+        assert not (member & exclusions)
+        assert home == member | exclusions
+        return
+    if rule == "bijection":
+        home = _vocabulary(
+            schemas[entry["home"]["schema"]],
+            [entry["home"]["path"]],
+        )
+        target = set()
+        for item in entry["target_sets"]:
+            target |= _vocabulary(schemas[item["schema"]], item["paths"])
+        assert set(entry["pairs"]) <= home
+        assert len(set(entry["pairs"].values())) == len(entry["pairs"])
+        assert target == set(entry["pairs"].values())
+        return
+    if rule == "projection":
+        home = _vocabulary(
+            schemas[entry["home"]["schema"]],
+            [entry["home"]["path"]],
+            exclude=entry["home"].get("exclude", ()),
+        )
+        for item in entry["targets"]:
+            target = _vocabulary(
+                schemas[item["schema"]],
+                [item["path"]],
+                exclude=item.get("exclude", ()),
+            )
+            assert target == home - set(item["drop_from_home"])
+        return
+    raise AssertionError(f"unknown mirror rule: {rule}")
+
+
+def _mirror_schemas(registry: dict) -> dict[str, dict]:
+    names = {
+        value["schema"]
+        for entry in registry["entries"]
+        for key in ("sets", "target_sets", "targets", "exclusion_sets")
+        for value in entry.get(key, [])
+    }
+    for entry in registry["entries"]:
+        for key in ("home", "target", "member"):
+            if key in entry:
+                names.add(entry[key]["schema"])
+    return {name: _schema(name) for name in names}
+
+
 def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
-    assert Path("core/handlers/model_hub/adapter.py").read_bytes() == (
-        CONTRACTS / "adapter-interface.py"
-    ).read_bytes()
+    assert Path("core/handlers/model_hub/adapter.py").read_bytes() == (CONTRACTS / "adapter-interface.py").read_bytes()
 
     for example in _schema("source.schema.json")["examples"]:
         serialized = ModelHubSourceConfig.from_payload(example).to_payload()
-        assert _canonical(serialized) == _canonical(example)
+        expected = json.loads(json.dumps(example))
+        expected.setdefault("created_at", MODEL_HUB_LEGACY_CREATED_AT)
+        if "usage" in expected:
+            expected["usage"].setdefault("projected_exhaust_at", None)
+        assert _canonical(serialized) == _canonical(expected)
         _assert_valid("source.schema.json", serialized)
 
     for example in _schema("agent-supply.schema.json")["examples"]:
         agent = ModelHubAgentSupplyConfig.from_payload(example)
-        # `current`, `builtin_models` and `standard_vendors` are read-only
-        # endpoint projections (v1.2), not persisted config — reconstruct them
+        # `builtin_models` and `standard_vendors` are read-only endpoint
+        # projections (v1.2), not persisted config — reconstruct them
         # the way `_agent_payload` merges them onto to_payload().
         serialized = {
             **agent.to_payload(),
-            "current": example.get("current"),
             "builtin_models": example.get("builtin_models"),
             "standard_vendors": example.get("standard_vendors"),
         }
+        if "sources" not in example:
+            serialized.pop("sources")
+        else:
+            serialized["sources"]["eligibility"] = example["sources"].get("eligibility")
         assert _canonical(serialized) == _canonical(example)
         _assert_valid("agent-supply.schema.json", serialized)
 
@@ -73,6 +194,330 @@ def test_every_frozen_schema_example_is_valid_and_json_round_trips():
             assert _canonical(json.loads(_canonical(example))) == _canonical(example)
 
 
+def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
+    payload = {
+        "backend": "claude",
+        "mode": "hub",
+        "menu_kind": "fixed",
+        "selected_by_agent": None,
+        "selected_model_id": "claude-opus-4-5",
+        "selected_model_explicit": True,
+        "sources": {
+            "policy": "follow",
+            "order": ["src_anthropic1"],
+            "eligibility": [
+                {
+                    "source_id": "src_anthropic1",
+                    "eligible": True,
+                    "reason_key": None,
+                    "in_current_model_chain": True,
+                    "process_availability_reason": None,
+                }
+            ],
+        },
+        "supply_status": "ok",
+        "mappings": [],
+        "menu": None,
+        "model_supply": [
+            {"model_id": "claude-opus-4-5", "chain_length": 1}
+        ],
+        "builtin_models": ["claude-opus-4-5"],
+        "standard_vendors": None,
+        "named_agents": [],
+    }
+
+    _assert_valid("agent-supply.schema.json", payload)
+
+
+def test_v4_mirror_registry_is_executable_and_complete():
+    registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
+    schemas = _mirror_schemas(registry)
+
+    assert registry["contract_version"] == 4
+    assert [entry["id"] for entry in registry["entries"]] == [
+        "M1",
+        "M2",
+        "M3",
+        "M4",
+        "M5",
+        "M6",
+        "M7",
+        "M8",
+        "N1",
+    ]
+    for entry in registry["entries"]:
+        _validate_mirror_entry(entry, schemas)
+
+
+def test_v4_mirror_registry_mutation_probes_detect_every_comparable_drift():
+    registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
+    schemas = _mirror_schemas(registry)
+
+    for entry in registry["entries"]:
+        if entry["rule"] == "none":
+            continue
+        if entry["rule"] == "bijection":
+            locations = [(location, location["paths"][0]) for location in entry["target_sets"]]
+        elif entry["rule"] == "equality":
+            locations = [(location, pointer) for location in entry["sets"] for pointer in location["paths"][:1]]
+        elif entry["rule"] == "mapping":
+            targets = entry.get("targets")
+            if targets is None:
+                targets = [entry["target"]]
+            locations = [
+                (entry["home"], entry["home"]["path"]),
+                *[(location, location["path"]) for location in targets],
+            ]
+        elif entry["rule"] == "partition":
+            locations = [
+                (entry["home"], entry["home"]["path"]),
+                (entry["member"], entry["member"]["path"]),
+            ]
+        else:
+            locations = [
+                (entry["home"], entry["home"]["path"]),
+                *[(location, location["path"]) for location in entry["targets"]],
+            ]
+
+        for location, pointer in locations:
+            mutated = copy.deepcopy(schemas)
+            node = _json_pointer(mutated[location["schema"]], pointer)
+            if "enum" in node:
+                node["enum"].append(f"mutation_{entry['id'].lower()}")
+            else:
+                assert "const" in node, entry["id"]
+                node["const"] = f"mutation_{entry['id'].lower()}"
+
+            with pytest.raises(AssertionError):
+                _validate_mirror_entry(entry, mutated)
+
+
+def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
+    event_schema = _schema("resolution-event.schema.json")
+    event_validator = Draft7Validator(event_schema)
+    permission_event = next(
+        example
+        for example in event_schema["examples"]
+        if example["reason"] == "permission_denied"
+    )
+    event_validator.validate(permission_event)
+
+    invalid_cooldown = {
+        **permission_event,
+        "kind": "cooldown",
+        "to_source": None,
+    }
+    with pytest.raises(ValidationError):
+        event_validator.validate(invalid_cooldown)
+
+    provenance_schema = _schema("turn-provenance.schema.json")
+    assert provenance_schema["properties"]["contract_version"]["const"] == 4
+    permission_record = next(
+        example
+        for example in provenance_schema["examples"]
+        if any(
+            attempt["reason"] == "permission_denied"
+            for attempt in example["failed_attempts"]
+        )
+    )
+    Draft7Validator(provenance_schema).validate(permission_record)
+
+    registry = json.loads(
+        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
+    )
+    schemas = _mirror_schemas(registry)
+    failed_reasons = _json_pointer(
+        schemas["turn-provenance.schema.json"],
+        "/properties/failed_attempts/items/properties/reason",
+    )["enum"]
+    failed_reasons.remove("permission_denied")
+    with pytest.raises(AssertionError):
+        _validate_mirror_entry(
+            next(entry for entry in registry["entries"] if entry["id"] == "M3"),
+            schemas,
+        )
+
+
+def test_v4_shape_amendments_reject_the_false_states_they_replace():
+    supply_schema = _schema("agent-supply.schema.json")
+    supply_validator = Draft7Validator(supply_schema)
+    base_supply = {
+        "backend": "claude",
+        "mode": "hub",
+        "menu_kind": "fixed",
+        "selected_by_agent": None,
+        "selected_model_id": None,
+        "selected_model_explicit": False,
+        "sources": {"policy": "follow", "order": [], "eligibility": []},
+        "supply_status": None,
+        "mappings": [],
+        "menu": None,
+        "model_supply": [],
+        "named_agents": [],
+        "builtin_models": [],
+        "standard_vendors": None,
+    }
+    supply_validator.validate(base_supply)
+
+    invented = {
+        **base_supply,
+        "selected_model_id": None,
+        "current": {
+            "model_id": "claude-opus-4-6",
+            "source_id": "src_anthkey01",
+            "channel": "hub",
+        },
+    }
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invented)
+
+    invalid_explicitness = {
+        **base_supply,
+        "selected_model_explicit": True,
+    }
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invalid_explicitness)
+
+    invalid_reason = copy.deepcopy(base_supply)
+    invalid_reason["sources"]["eligibility"] = [
+        {
+            "source_id": "src_anthkey01",
+            "eligible": False,
+            "reason_key": "models.eligibility.subscription_wrong_clint",
+        }
+    ]
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invalid_reason)
+
+    signal_supply = copy.deepcopy(base_supply)
+    signal_supply.update(
+        {
+            "selected_model_id": "claude-opus-4-6",
+            "supply_status": "degraded",
+        }
+    )
+    signal_supply["sources"] = {
+        "policy": "custom",
+        "order": ["src_anthkey01"],
+        "eligibility": [
+            {
+                "source_id": "src_claudepro1",
+                "eligible": True,
+                "reason_key": None,
+                "in_current_model_chain": True,
+                "process_availability_reason": "native_cli_unavailable",
+            },
+            {
+                "source_id": "src_anthkey01",
+                "eligible": True,
+                "reason_key": None,
+                "in_current_model_chain": True,
+                "process_availability_reason": None,
+            },
+            {
+                "source_id": "src_otherkey1",
+                "eligible": True,
+                "reason_key": None,
+                "in_current_model_chain": False,
+                "process_availability_reason": None,
+            },
+        ],
+    }
+    supply_validator.validate(signal_supply)
+
+    invalid_availability = copy.deepcopy(signal_supply)
+    invalid_availability["sources"]["eligibility"][0]["process_availability_reason"] = "gateway_down"
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invalid_availability)
+
+    invalid_membership = copy.deepcopy(signal_supply)
+    invalid_membership["sources"]["eligibility"][2]["in_current_model_chain"] = "not_supplying"
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invalid_membership)
+
+    event_validator = Draft7Validator(_schema("resolution-event.schema.json"))
+    source_wide = _schema("resolution-event.schema.json")["examples"][1]
+    event_validator.validate(source_wide)
+    invalid_event = {**source_wide, "agent": "system", "kind": "supply_interrupted"}
+    with pytest.raises(ValidationError):
+        event_validator.validate(invalid_event)
+
+    probe = copy.deepcopy(_schema("probe-result.schema.json")["examples"][0])
+    probe["source_id"] = "direct"
+    with pytest.raises(ValidationError):
+        Draft7Validator(_schema("probe-result.schema.json")).validate(probe)
+
+    canceled = next(
+        example
+        for example in _schema("turn-provenance.schema.json")["examples"]
+        if example["outcome"] == "canceled"
+    )
+    Draft7Validator(_schema("turn-provenance.schema.json")).validate(canceled)
+    invented_failure = copy.deepcopy(canceled)
+    invented_failure["canceled_attempt"]["reason"] = "server_error"
+    with pytest.raises(ValidationError):
+        Draft7Validator(_schema("turn-provenance.schema.json")).validate(invented_failure)
+
+    chain_schema = _schema("agent-chain.schema.json")
+    chain_validator = Draft7Validator(chain_schema)
+    native_alias = next(
+        example
+        for example in chain_schema["examples"]
+        if example["model_id"] == "claude-opus-4-5"
+        and example["chain"]
+        and example["chain"][0]["resolved_model_id"] is not None
+        and example["chain"][0]["via_mapping"] is False
+    )
+    chain_validator.validate(native_alias)
+    invalid_native_alias = copy.deepcopy(native_alias)
+    invalid_native_alias["chain"][0]["resolved_model_id"] = "glm-5.2"
+    with pytest.raises(ValidationError):
+        chain_validator.validate(invalid_native_alias)
+
+    native_unavailable = copy.deepcopy(chain_schema["examples"][-1])
+    chain_validator.validate(native_unavailable)
+
+    unavailable_needs_action = copy.deepcopy(native_unavailable)
+    unavailable_needs_action["chain"][0]["health"] = "needs_action"
+    unavailable_needs_action["chain"][0]["retry_at"] = None
+    chain_validator.validate(unavailable_needs_action)
+
+    unmarked_healthy_unavailable = copy.deepcopy(chain_schema["examples"][-2])
+    unmarked_healthy_unavailable["chain"][0]["reason"] = None
+    with pytest.raises(ValidationError):
+        chain_validator.validate(unmarked_healthy_unavailable)
+
+    mislabeled_waiting = copy.deepcopy(native_unavailable)
+    mislabeled_waiting["supply_state"] = "waiting"
+    with pytest.raises(ValidationError):
+        chain_validator.validate(mislabeled_waiting)
+
+    unavailable_hub = copy.deepcopy(native_unavailable)
+    unavailable_hub["chain"][0]["channel"] = "hub"
+    with pytest.raises(ValidationError):
+        chain_validator.validate(unavailable_hub)
+
+    probe_schema = _schema("probe-result.schema.json")
+    probe_validator = Draft7Validator(probe_schema)
+    native_ready = copy.deepcopy(probe_schema["examples"][-2])
+    probe_validator.validate(native_ready)
+    native_ready["latency_ms"] = 12
+    with pytest.raises(ValidationError):
+        probe_validator.validate(native_ready)
+
+    native_not_ready = copy.deepcopy(probe_schema["examples"][-1])
+    probe_validator.validate(native_not_ready)
+    native_not_ready_without_reason = copy.deepcopy(native_not_ready)
+    native_not_ready_without_reason["error"] = None
+    with pytest.raises(ValidationError):
+        probe_validator.validate(native_not_ready_without_reason)
+
+    timed_native_not_ready = copy.deepcopy(native_not_ready)
+    timed_native_not_ready["latency_ms"] = 12
+    with pytest.raises(ValidationError):
+        probe_validator.validate(timed_native_not_ready)
+
+
 def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     source_example = {
@@ -83,7 +528,6 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     }
     hub_payload = {
         "sources": [source_example],
-        "priority_order": [source_example["id"]],
         "agents": {
             backend: ModelHubAgentSupplyConfig.default(backend, mode="hub").to_payload()
             for backend in ("claude", "codex", "opencode")
@@ -103,6 +547,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     source_usage_fields = {field.name for field in fields(ModelHubSourceUsageConfig)}
     source_model_fields = {field.name for field in fields(ModelHubModelConfig)}
     agent_fields = {field.name for field in fields(ModelHubAgentSupplyConfig)}
+    agent_sources_fields = {field.name for field in fields(ModelHubAgentSourcesConfig)}
     mapping_fields = {field.name for field in fields(ModelHubMappingConfig)}
     menu_fields = {field.name for field in fields(ModelHubMenuConfig)}
 
@@ -114,29 +559,39 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     ):
         serialized_source = serialized_hub["sources"][0]
         assert source_fields == set(serialized_source), label
+        assert serialized_source["last_discovered_at"] == source_example["last_discovered_at"], label
         assert source_state_fields == set(serialized_source["state"]), label
         assert source_usage_fields == set(serialized_source["usage"]), label
         assert source_model_fields == set(serialized_source["models"][0]), label
         assert agent_fields == set(serialized_hub["agents"]["claude"]), label
-        assert mapping_fields == set(
-            ModelHubMappingConfig("builtin", "target", True).to_payload()
-        ), label
+        assert agent_sources_fields == set(serialized_hub["agents"]["claude"]["sources"]), label
+        assert mapping_fields == set(ModelHubMappingConfig("builtin", "target", True).to_payload()), label
         assert menu_fields == set(serialized_hub["agents"]["opencode"]["menu"]), label
 
     stale_hub_payload = json.loads(json.dumps(api_payload["model_hub"]))
-    stale_hub_payload["priority_order"] = []
+    stale_hub_payload["priority_order"] = ["legacy-is-dropped"]
     updated = api.save_config({"show_duration": True, "model_hub": stale_hub_payload})
     assert updated.model_hub.to_payload() == loaded.model_hub.to_payload()
     assert api.config_to_payload(updated)["model_hub"] == api_payload["model_hub"]
 
 
-def test_legacy_config_defaults_direct_while_fresh_config_defaults_hub():
+def test_legacy_and_fresh_configs_both_default_direct():
     payload = api.config_to_payload(default_config(), include_secrets=True)
     payload.pop("model_hub")
     legacy = V2Config.from_payload(payload)
 
     assert {agent.mode for agent in legacy.model_hub.agents.values()} == {"direct"}
-    assert {agent.mode for agent in default_config().model_hub.agents.values()} == {"hub"}
+    assert {agent.mode for agent in default_config().model_hub.agents.values()} == {"direct"}
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+def test_model_hub_release_capability_accepts_explicit_truthy_values(value):
+    assert is_model_hub_enabled({MODEL_HUB_ENABLED_ENV: value}) is True
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "unexpected"])
+def test_model_hub_release_capability_defaults_and_fails_closed(value):
+    assert is_model_hub_enabled({MODEL_HUB_ENABLED_ENV: value}) is False
 
 
 def test_hub_subscription_requires_server_recorded_consent():
@@ -144,7 +599,6 @@ def test_hub_subscription_requires_server_recorded_consent():
     source = {**source, "supply_channel": "hub"}
     payload = {
         "sources": [source],
-        "priority_order": [source["id"]],
         "agents": {},
         "subscription_hub_experimental": True,
     }
@@ -157,6 +611,182 @@ def test_hub_subscription_requires_server_recorded_consent():
         raise AssertionError("hub-held subscription loaded without recorded consent")
 
 
+def test_legacy_global_priority_key_is_dropped_without_validation():
+    payload = ModelHubConfig().to_payload()
+    payload["priority_order"] = {"legacy": "shape-does-not-matter"}
+
+    loaded = ModelHubConfig.from_payload(payload)
+
+    assert "priority_order" not in loaded.to_payload()
+
+
+def test_agent_source_orders_validate_existence_eligibility_and_uniqueness():
+    source = {
+        **_schema("source.schema.json")["examples"][0],
+        "created_at": "2026-07-29T01:00:00Z",
+    }
+    base = ModelHubConfig().to_payload()
+    base["sources"] = [source]
+    base["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+
+    ModelHubConfig.from_payload(base)
+
+    for invalid_order in (
+        [source["id"], source["id"]],
+        ["src_missing001"],
+    ):
+        invalid = json.loads(json.dumps(base))
+        invalid["agents"]["claude"]["sources"]["order"] = invalid_order
+        with pytest.raises(ValueError):
+            ModelHubConfig.from_payload(invalid)
+
+    ineligible = json.loads(json.dumps(base))
+    ineligible["agents"]["codex"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(ineligible)
+
+
+def _ordering_source(
+    source_id: str,
+    *,
+    kind: str,
+    vendor: str,
+    channel: str,
+    created_at: str = MODEL_HUB_LEGACY_CREATED_AT,
+) -> ModelHubSourceConfig:
+    return ModelHubSourceConfig(
+        id=source_id,
+        kind=kind,
+        vendor=vendor,
+        display_name=source_id,
+        protocol="anthropic" if vendor == "anthropic" else "openai_responses",
+        supply_channel=channel,
+        billing="monthly" if kind == "subscription" else "metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[],
+        created_at=created_at,
+        experimental_consent_at=("2026-07-29T02:00:00Z" if kind == "subscription" and channel == "hub" else None),
+    )
+
+
+def test_recommended_order_is_backend_native_then_created_at_and_id():
+    native = _ordering_source(
+        "src_nativeaaa",
+        kind="subscription",
+        vendor="anthropic",
+        channel="native_cli",
+    )
+    hub_subscription = _ordering_source(
+        "src_hubsubaaa",
+        kind="subscription",
+        vendor="anthropic",
+        channel="hub",
+    )
+    wrong_vendor_subscription = _ordering_source(
+        "src_openaisub",
+        kind="subscription",
+        vendor="openai",
+        channel="native_cli",
+    )
+    legacy_b = _ordering_source(
+        "src_legacybbb",
+        kind="api_key",
+        vendor="openai",
+        channel="hub",
+    )
+    legacy_a = _ordering_source(
+        "src_legacyaaa",
+        kind="api_key",
+        vendor="anthropic",
+        channel="hub",
+    )
+    newer = _ordering_source(
+        "src_newer0001",
+        kind="api_key",
+        vendor="custom",
+        channel="hub",
+        created_at="2026-07-29T03:00:00Z",
+    )
+    same_time_b = _ordering_source(
+        "src_tiebbbb1",
+        kind="api_key",
+        vendor="custom",
+        channel="hub",
+        created_at="2026-07-29T04:00:00Z",
+    )
+    same_time_a = _ordering_source(
+        "src_tieaaaa1",
+        kind="api_key",
+        vendor="custom",
+        channel="hub",
+        created_at="2026-07-29T04:00:00Z",
+    )
+    config = ModelHubConfig(
+        sources=[
+            same_time_b,
+            newer,
+            wrong_vendor_subscription,
+            legacy_b,
+            hub_subscription,
+            same_time_a,
+            native,
+            legacy_a,
+        ],
+        subscription_hub_experimental=True,
+    )
+
+    assert config.recommended_source_order("claude") == [
+        native.id,
+        hub_subscription.id,
+        legacy_a.id,
+        legacy_b.id,
+        newer.id,
+        same_time_a.id,
+        same_time_b.id,
+    ]
+    assert config.recommended_source_order("codex") == [
+        wrong_vendor_subscription.id,
+        legacy_a.id,
+        legacy_b.id,
+        newer.id,
+        same_time_a.id,
+        same_time_b.id,
+    ]
+    assert config.recommended_source_order("opencode") == [
+        legacy_a.id,
+        legacy_b.id,
+        newer.id,
+        same_time_a.id,
+        same_time_b.id,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_at", "detail_key"),
+    [
+        ("standby", "2026-07-29T03:00:00Z", None),
+        ("cooldown", None, "models.source.cooldown.network"),
+        ("needs_action", None, "models.source.cooldown.network"),
+        ("error", None, None),
+    ],
+)
+def test_source_state_rejects_invalid_status_correlations(status, retry_at, detail_key):
+    with pytest.raises(ValueError):
+        ModelHubSourceStateConfig.from_payload(
+            {
+                "status": status,
+                "retry_at": retry_at,
+                "detail_key": detail_key,
+            }
+        )
+
+
 def test_source_optional_fields_reject_schema_invalid_values():
     source = _schema("source.schema.json")["examples"][0]
     invalid_sources = []
@@ -167,6 +797,10 @@ def test_source_optional_fields_reject_schema_invalid_values():
 
     invalid = json.loads(json.dumps(source))
     invalid["models"][0]["discovered_at"] = "2026-07-23T03:00:00"
+    invalid_sources.append(invalid)
+
+    invalid = json.loads(json.dumps(source))
+    invalid["last_discovered_at"] = "2026-07-23T03:00:00"
     invalid_sources.append(invalid)
 
     invalid = json.loads(json.dumps(source))

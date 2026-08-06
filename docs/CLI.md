@@ -173,6 +173,12 @@ Start the guided Avibe Cloud remote-access setup.
 vibe remote
 ```
 
+In the conservative Organization release, the remote Workbench remains
+available for Organization management and authorized Project, Session, message,
+and history reads. Agent turns and runtime controls, Harness definition changes and autonomous
+execution, terminal access, and file operations remain trusted-local only; open
+Avibe on the machine to perform those actions.
+
 **Flow:**
 - The CLI explains what remote access does before asking for anything.
 - Open `https://avibe.bot`, sign up or log in, create a new remote-access bot, claim your personal domain, and copy the one-time pairing key.
@@ -252,6 +258,7 @@ Create, inspect, update, run, pause, resume, or remove scheduled tasks.
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # inside an Avibe Agent shell
+vibe task add --name nightly-sync --cron '0 3 * * *' --shell './scripts/sync.sh'   # command task, no Agent turn
 vibe task list
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
@@ -264,11 +271,42 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 - `--create-session`, `--create-session-per-run`, `--same-scope`, and `--scope-id` for Session placement
 - `--cron` and `--at` scheduling
 - `--name`, `--timezone`, and message file support
+- `--shell` / trailing `-- <argv>` for a scheduled command with no Agent turn,
+  with `--on-failure {none,agent}`, a per-run `--timeout` (default 21600
+  seconds, 0 = none), and `--cwd` for the directory the command runs in
 
 When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
 may be omitted. Avibe defaults the task target to the caller Session from
 `AVIBE_SESSION_ID` and reports that default in the command output. Explicit
 `--session-id`, session creation flags, and delivery flags still win.
+
+A pure command task (`--on-failure none`, the default) skips that caller-session
+default and takes no session, scope, or agent flags. Successful runs are silent;
+a failed run records a durable failure notice naming the command and its exit
+code. With `--on-failure agent --message '<instructions>'` the failure instead
+starts one Agent turn carrying the failure report, and that turn replaces the
+notice for the run. `vibe task update` can change a command task's `--shell`,
+argv, `--timeout`, or `--cwd`, but switching a task between message and command
+form, or changing `--on-failure`, is rejected — remove the task and recreate it.
+
+`--cwd` is where the command runs. What else it touches depends on whether the
+definition also *creates* a Session:
+
+- Bound to an existing Session (`--session-id`, or the caller-session default),
+  or to a reusable one already reserved: the flag is the command's alone. The
+  escalation Session keeps its own working directory, which is the case the flag
+  was added for — a command task binds to a Session so `--on-failure agent` has
+  somewhere to land, not to say where it runs.
+- Creating one (`--create-session`, `--create-session-per-run`): the flag places
+  that Session too, so the escalation turn runs where the command does. Pass a
+  scope instead (`--same-scope` / `--scope-id`) and omit `--cwd` if you want the
+  Session to inherit its directory.
+
+Without the flag, a Session-bound command follows that Session's directory —
+read live at fire time, so `/setcwd` on that conversation relocates the job —
+and every other command records the directory you ran `vibe task add` from. For
+a message task `--cwd` still places the Session it creates, and is still refused
+for one that already exists.
 
 `--session-key` remains accepted for older scripts, but new tasks should use
 the Agent Session ID shown in the active Avibe prompt.
@@ -282,10 +320,23 @@ task definition. Use `--sync` only when the terminal should wait for completion.
 vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correction in the current turn.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
+
+With an existing `--session-id`, the default admission is P1: Avibe steers the
+new Run into an active native Turn, starts it immediately when idle, or moves the
+same Delivery to the durable P3 queue after a definitive refusal/not-active
+receipt. It does not interrupt the active Turn.
+
+`--send-now` is valid only with an existing `--session-id`. Avibe persists the
+new Run at P3 first, then promotes the exact FIFO head through P1. With an active
+Turn that head steers the same native Turn; when idle it starts normally. Older
+queued work remains ahead of the new Run. `vibe session send-now` uses the same
+exact-head promotion without adding a message. A stale head is refused rather
+than replaced by the next queued item, and neither form calls Stop.
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
 an existing Session's native backend context instead of starting blank. The new
@@ -342,6 +393,15 @@ vibe watch remove <watch-id>
 include `pagination.next_command` when more rows exist. Successful one-shot
 definitions are hidden by default. Add `--include-finished` to page through
 history. List output is always bounded; there is no unpaginated `--all` mode.
+Task and watch commands use `definition` for one record and `definitions` for
+lists; they do not duplicate those records under command-specific aliases.
+Both list and show read the same Harness projection as the Workbench:
+`lifecycle_state`, `lifecycle_detail`, `next_run_at`, `waiting_since`, and
+`running_since`; watch rows also include `process_alive`. For watches,
+`process_alive: null` means no waiter runtime has ever been observed, while
+`false` means an observed waiter has exited. The older `state` and task
+`last_status` fields remain compatibility-only display fields and do not define
+the lifecycle.
 
 The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,
@@ -469,6 +529,8 @@ vibe doctor
 # Prefer delayed restart when triggered by an agent
 vibe restart --delay-seconds 60
 ```
+
+The Model Hub engine process is named `cli-proxy-api` (hyphenated); `pgrep cliproxyapi` therefore always returns no match.
 
 ## Web UI Controls
 

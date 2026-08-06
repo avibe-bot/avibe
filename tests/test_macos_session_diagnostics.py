@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 from types import SimpleNamespace
 
 from vibe.macos_session_diagnostics import (
@@ -345,17 +346,39 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
     import vibe.sentry_integration
 
     calls: list[str] = []
+    handlers = {}
 
     class FakeMonitor:
         def stop(self) -> None:
             calls.append("diagnostics.stop")
 
+    class FakeRunningLoop:
+        def is_closed(self) -> bool:
+            return False
+
+        def is_running(self) -> bool:
+            return True
+
+        def stop(self) -> None:
+            calls.append("loop.stop")
+
+        def call_soon_threadsafe(self, callback) -> None:
+            calls.append("loop.stop.scheduled")
+
     class FakeController:
+        service_lock_safe_to_release = True
+
         def __init__(self, config) -> None:
             calls.append("controller.init")
+            self._loop = FakeRunningLoop()
 
         def run(self) -> None:
             calls.append("controller.run")
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+            calls.append("controller.after-signal")
+
+        def request_shutdown(self, reason: str) -> None:
+            calls.append(f"controller.shutdown:{reason}")
 
     loaded_config = SimpleNamespace(
         runtime=SimpleNamespace(log_level="INFO", default_cwd="/tmp"),
@@ -378,9 +401,19 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
     monkeypatch.setattr(core.process_diagnostics, "log_process_snapshot", lambda *args, **kwargs: None)
     monkeypatch.setattr(core.controller, "Controller", FakeController)
     monkeypatch.setattr(config.v2_compat, "to_app_config", lambda loaded: loaded)
-    monkeypatch.setattr(service_main.signal, "signal", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        service_main.signal,
+        "signal",
+        lambda signum, handler: handlers.__setitem__(signum, handler),
+    )
 
     service_main.main()
 
     assert calls.index("diagnostics.start") < calls.index("controller.run")
+    assert calls.index("controller.run") < calls.index("controller.shutdown:signal 15")
+    assert calls.index("controller.shutdown:signal 15") < calls.index(
+        "controller.after-signal"
+    )
+    assert "loop.stop.scheduled" not in calls
     assert calls.index("controller.run") < calls.index("diagnostics.stop")
+    assert calls.index("controller.after-signal") < calls.index("lock.release")

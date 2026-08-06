@@ -71,6 +71,13 @@ class CompatRequest:
     def json(self) -> Any:
         return self._json_payload
 
+    async def load_json(self) -> Any:
+        """Parse and cache JSON when a shared request hook needs the body."""
+
+        if self._json_payload is None:
+            self._json_payload = await _read_json_payload(self._request)
+        return self._json_payload
+
     @property
     def host(self) -> str:
         return self._request.headers.get("host", "")

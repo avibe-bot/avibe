@@ -103,8 +103,8 @@ Guidance:
 - An older Show Page with no `src/router.tsx` is a single-page app that renders `src/App.tsx` directly. There, edit `src/App.tsx` (or adopt the router scaffold: add `src/router.tsx` + `src/pages/` and render it from `App.tsx`) — do not just drop files under `src/pages/`, since nothing would route them.
 - Treat `index.html` and `src/main.tsx` as the runtime-owned app shell — you never edit them to add a page, and should not replace them unless you are repairing the shell.
 - Hot reload is available while `/show/<session-id>/` is open. Users will see page changes live. Prefer component-level changes that preserve React state.
-- Built-in UI imports include shadcn-style aliases such as `@/components/ui/button`, `@/components/ui/card`, `@/components/ui/badge`, `@/components/ui/dialog`, `@/components/ui/input`, `@/components/ui/progress`, plus `@avibe/show-ui/theme` for theme presets and CSS variables.
-- Tailwind CSS v4 utility classes are built in and work in any `className`, including to restyle the built-in `@/components/ui/*` components (a utility overrides the component default). `src/styles.css` is the CSS entry and must keep `@import "tailwindcss";` and `@import "@avibe/show-ui/theme.css";` at the top; theme through the `@avibe/show-ui/theme` CSS variables.
+- Built-in UI uses the standard shadcn aliases: import components from paths such as `@/components/ui/button`, `@/components/ui/card`, `@/components/ui/badge`, `@/components/ui/dialog`, `@/components/ui/input`, and `@/components/ui/progress`, and import `cn` from `@/lib/utils`.
+- Tailwind CSS v4 utility classes are built in and work in any `className`, including to restyle the built-in `@/components/ui/*` components (a utility overrides the component default). `src/styles.css` is the CSS entry and must keep `@import "tailwindcss";` and `@import "@avibe/show-ui/theme.css";` at the top. Theme with standard shadcn variables such as `--background`, `--foreground`, `--card`, `--primary`, `--muted`, `--border`, `--ring`, and `--radius`; values are complete CSS colors usable directly through `var(...)`. Override the same variables under `.dark` or `[data-theme="dark"]` for dark mode. Do not use runtime-prefixed private variables.
 - Prefer the built-in UI primitives over hand-rolled controls. They include Show Page motion for changed text, numbers, badges, cards, and progress without extra animation calls.
 - Optional server handlers live under `api/` and run only when requested. Export functions named like HTTP methods, for example `export async function GET(request) { return Response.json({ ok: true }) }`.
 - Design for user understanding, not just for moving text onto a webpage. Choose the visual form that best helps the user inspect, compare, confirm, and continue the discussion.
@@ -288,7 +288,7 @@ Before choosing a command, ask: what outcome is the user trying to secure, what 
 | Agent | Reusable role: backend, model, prompt, description, enabled state | Work needs a stable specialist identity |
 | Session | Continuing context for one Agent work lineage | Work should continue or fork context |
 | Scope | IM surface and routing context: channel, thread, DM, user scope | Delivery, workdir, user/platform context matter |
-| Task | Saved message triggered by time | Time is the trigger |
+| Task | Time trigger: saved Agent message, or a command with no Agent turn | Time is the trigger |
 | Watch | Managed waiter triggered by an external signal | Any condition needs monitoring until it becomes true |
 | Run | Concrete execution record | You need status, output, result, error, or history |
 
@@ -308,14 +308,18 @@ Useful Harness queries include schema discovery, current session lookup, existin
 | Need | Use |
 | --- | --- |
 | Time trigger | `vibe task add` |
+| Scheduled command, no Agent turn | `vibe task add --cron "<expr>" --shell "<cmd>"` |
 | External signal trigger | `vibe watch add` |
 | Independent Agent delegation | `vibe agent run --agent <agent-name>` |
 | Continue a pointed Session | `vibe agent run --session-id ...` |
+| Inspect queued Workbench Session input | `vibe session queue list <session-id>` |
+| Remove one queued Workbench Session input | `vibe session queue remove <session-id> <message-id>` |
+| Promote an existing queued Session head now | `vibe session send-now <session-id>` |
 | Branch from current Session context | `vibe agent run --fork-self ...` |
 | State/history inspection | `vibe data query`, `vibe runs list --current-session`, `vibe runs show` |
 | Recurring specialist workflow | `vibe agent create/update` plus tasks, watches, or runs |
 
-`vibe task add` creates a time-triggered saved Agent message. Tasks created from an Avibe Agent shell continue this conversation by default. Use `--cron "<expr>"` for recurrence or `--at "<ISO-8601>"` for one-off delivery; if `--timezone` is omitted, Avibe uses the local system timezone at creation time. If `--cwd` is omitted for a task-created Session, Avibe follows the caller working directory when available.
+`vibe task add` creates a time-triggered saved Agent message. Tasks created from an Avibe Agent shell continue this conversation by default. Use `--cron "<expr>"` for recurrence or `--at "<ISO-8601>"` for one-off delivery; if `--timezone` is omitted, Avibe uses the local system timezone at creation time. If `--cwd` is omitted for a task-created Session, Avibe follows the caller working directory when available. With `--shell '<cmd>'` or a trailing `-- <argv>` instead of `--message`, the task runs a command with no Agent turn: silent on success, a durable failure notice naming the command and exit code on failure, and `--timeout <seconds>` bounds each run (default 21600, 0 = none). Add `--on-failure agent --message '<instructions>'` to hand a failing run to an Agent instead: one Agent turn carrying the failure report replaces that run's notice. A pure command task takes no session, scope, or agent flags.
 
 `vibe watch add` creates a managed monitor, usually backed by a small script or command, for any observable condition that must be watched until true: product signals, business events, files, logs, CI/reviews/deploys, service health, data freshness, and similar signals. Watches created from an Avibe Agent shell follow up in this conversation by default. If `--cwd` is omitted, Avibe runs the waiter from the caller working directory when available.
 
@@ -324,6 +328,10 @@ Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates
 Use `vibe agent run --fork-self --message ...` when work should branch from this current Session's native backend context without mutating it. Use `--fork-session <source-session-id>` only when branching from a different explicit Session. Forks keep the source Session backend, scope, and cwd by default; `--agent`, `--model`, and `--reasoning-effort` may override the forked Session only when the backend stays the same.
 
 When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings; those properties belong to the Session itself. Use a new Session or a fork when those properties need to differ.
+
+That existing-Session send is a P1 delivery by default: it steers into an active native Turn, starts immediately when idle, and falls back to the durable P3 queue if steering is definitively refused or no longer active. Use `--queue` when the new Run should enter that P3 queue without steering. When coordinating another Session, decide whether its current work should finish or accept a steer based on the dependency, urgency, and cost of disruption; an explicit user request is one signal, not a prerequisite. Use `vibe agent run --session-id <id> --send-now --message ...` to persist the new Run at P3 and then promote the exact FIFO head through P1. If older work is queued, that older head is promoted first; the new message never leapfrogs it. Use `vibe session send-now <id>` for the same exact-head P1 promotion without adding a Message. If a native Turn is active, the promoted head steers that same logical/native Turn; if the Session is idle, it starts as a new Turn. Both forms work for Workbench and IM Sessions. A stale or refused steer remains durably queued and never falls back to Stop; P0 is reserved for explicit content-free Stop.
+
+Coordinating Agents can inspect the same durable Workbench queue the user sees with `vibe session queue list <id>`. If one queued instruction has become obsolete, contradictory, or duplicated, remove that exact row with `vibe session queue remove <id> <message-id>`. Always list first and use the returned stable message id; never guess an id or delete a different row to simulate reordering.
 
 Use `vibe session update --visible|--hidden` (`--visibility foreground|background`) to promote or hide a persisted Session independently of its scope. Use `--scope-id <scopes.id>` to move it to another scope or `--scope-id none` to make it standalone; moving scope never changes its stored workdir.
 
@@ -344,7 +352,7 @@ Rules:
 - `--fork-self` creates a new Agent Session from this current Session's native backend context; use it for alternate paths that need the current context but should not mutate this Session.
 - `--fork-session <id>` creates a new Agent Session from that explicit source Session's native backend context.
 - For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --message ...`.
-- Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the user intends to continue that same existing Session. Async callbacks return to this conversation by default.
+- Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the work should continue that same existing Session. Async callbacks return to this conversation by default.
 - With `--fork-self` or `--fork-session`, pass `--agent`, `--model`, or `--reasoning-effort` only as forked-Session overrides, and only when the requested Agent backend matches the source Session backend.
 - `--sync` changes waiting behavior, not session identity: default async runs in the background and return through callbacks; synchronous runs wait for the result and are still recorded in `vibe runs`.
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.

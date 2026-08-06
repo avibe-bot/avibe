@@ -21,7 +21,7 @@ export interface AnnotationBridge {
   /** Last state reported by the overlay; null until the first state message. */
   state: AnnotationState | null;
   /** Attach to the Show Page iframe so the bridge can target its window. */
-  iframeRef: React.RefObject<HTMLIFrameElement | null>;
+  setIframe: React.RefCallback<HTMLIFrameElement>;
   /** Attach to the iframe `onLoad` to re-sync after a (re)load / re-point. */
   handleIframeLoad: () => void;
   /** `enable` without a mode uses the overlay's remembered mode (§3). */
@@ -56,32 +56,56 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     setState(null);
   }
 
-  useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      // Same-origin iframe only: ignore other origins, and other windows (the
-      // Show Page is same-origin and may talk to the parent for other reasons —
-      // match by both source window and message type).
-      if (event.origin !== window.location.origin) return;
-      const frame = iframeRef.current;
-      if (!frame || event.source !== frame.contentWindow) return;
-      const data = event.data as
-        | { type?: unknown; enabled?: unknown; mode?: unknown; available?: unknown }
-        | null;
-      if (!data || data.type !== 'avibe:annotation:state') return;
-      setState({
-        enabled: data.enabled === true,
-        mode: data.mode === 'screenshot' ? 'screenshot' : 'smart',
-        available: data.available === true,
-      });
-    };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+  const onMessage = useCallback((event: MessageEvent) => {
+    // Same-origin iframe only: ignore other origins, and other windows (the
+    // Show Page is same-origin and may talk to the parent for other reasons —
+    // match by both source window and message type).
+    if (event.origin !== window.location.origin) return;
+    const frame = iframeRef.current;
+    if (!frame || event.source !== frame.contentWindow) return;
+    const data = event.data as
+      | { type?: unknown; enabled?: unknown; mode?: unknown; available?: unknown }
+      | null;
+    if (!data || data.type !== 'avibe:annotation:state') return;
+    setState({
+      enabled: data.enabled === true,
+      mode: data.mode === 'screenshot' ? 'screenshot' : 'smart',
+      available: data.available === true,
+    });
   }, []);
+
+  const listeningRef = useRef(false);
+  const startListening = useCallback(() => {
+    if (listeningRef.current) return;
+    window.addEventListener('message', onMessage);
+    listeningRef.current = true;
+  }, [onMessage]);
+  const stopListening = useCallback(() => {
+    if (!listeningRef.current) return;
+    window.removeEventListener('message', onMessage);
+    listeningRef.current = false;
+  }, [onMessage]);
+
+  // Keep the listener alive even while `src` is null. A restored/cached iframe
+  // can report during its commit, before passive effects run; the callback ref
+  // below attaches synchronously before that frame can finish loading.
+  useEffect(() => {
+    startListening();
+    return stopListening;
+  }, [startListening, stopListening]);
 
   const post = useCallback((message: ControlMessage) => {
     const win = iframeRef.current?.contentWindow;
     if (win) win.postMessage(message, window.location.origin);
   }, []);
+
+  const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
+    (iframe) => {
+      iframeRef.current = iframe;
+      if (iframe) startListening();
+    },
+    [startListening],
+  );
 
   const enable = useCallback(
     (mode?: AnnotationMode) =>
@@ -101,5 +125,5 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
   // listener is already attached, so we also query as a backstop (§3).
   const handleIframeLoad = useCallback(() => post({ type: 'avibe:annotation:query' }), [post]);
 
-  return { state, iframeRef, handleIframeLoad, enable, disable, setMode };
+  return { state, setIframe, handleIframeLoad, enable, disable, setMode };
 }
