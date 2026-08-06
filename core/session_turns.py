@@ -1974,6 +1974,16 @@ class SessionTurnManager:
             {
                 "delivery_id": str(deliveries[0]["id"]),
                 "delivery_ids": [str(row["id"]) for row in deliveries],
+                # Every reaction target this Turn absorbed. Only the first
+                # Delivery hydrates the dispatch context, so without this the
+                # admission receipts of the merged rest are never cleared.
+                "delivery_ack_targets": [
+                    target
+                    for target in (
+                        self._delivery_ack_target(row) for row in deliveries
+                    )
+                    if target
+                ],
                 # Every display snapshot this Turn dispatches, in FIFO order.
                 # ``_hydrate_delivery_context`` set the singular ``display_text`` from
                 # the FIRST Delivery only, while ``_segment_dispatch_text`` sends the
@@ -4401,7 +4411,25 @@ class SessionTurnManager:
             return True
         return False
 
-    def _steer_receipt_context(
+    @staticmethod
+    def _delivery_ack_target(delivery: dict[str, Any]) -> Optional[str]:
+        """Return the message an admission receipt for this Delivery sits on.
+
+        Usually the sender's own message, but a quick-reply callback is
+        dispatched with ``message_id=None`` (to bypass platform event dedup) and
+        reacts on its bot echo instead. That echo id only survives in the
+        durable admission context.
+        """
+
+        admission_context = delivery_store.delivery_admission_context(delivery)
+        if isinstance(admission_context, dict):
+            target = admission_context.get("processing_indicator_message_id")
+            if target:
+                return str(target)
+        payload = delivery_store.delivery_payload(delivery)
+        return str(payload.get("native_message_id") or "").strip() or None
+
+    def _delivery_receipt_context(
         self,
         session_id: str,
         delivery: dict[str, Any],
@@ -4411,39 +4439,35 @@ class SessionTurnManager:
         payload = delivery_store.delivery_payload(delivery)
         platform = str(payload.get("platform") or "")
         native_message_id = str(payload.get("native_message_id") or "").strip()
-        if not platform or platform == "avibe" or not native_message_id:
-            # Nothing to decorate: only an IM input has a native message, and the
-            # Workbench composer is P3 (it never reaches a pending steer).
+        target = self._delivery_ack_target(delivery)
+        if not platform or platform == "avibe" or not target:
+            # Nothing to decorate: only an IM input has a reaction target, and
+            # the Workbench composer is P3 (it never reaches a pending steer).
             return None
         context = self._delivery_context(session_id)
         context.platform = platform
-        context.message_id = native_message_id
-        admission_context = delivery_store.delivery_admission_context(delivery)
-        target = (
-            admission_context.get("processing_indicator_message_id")
-            if isinstance(admission_context, dict)
-            else None
-        )
+        context.message_id = native_message_id or None
         spec = dict(context.platform_specific or {})
-        if target:
-            spec["processing_indicator_message_id"] = str(target)
-        else:
-            spec.pop("processing_indicator_message_id", None)
+        spec["processing_indicator_message_id"] = target
         context.platform_specific = spec
         return context
 
-    async def _report_steered_receipts(
+    async def _report_delivery_receipts(
         self,
         session_id: str,
         deliveries: list[dict[str, Any]],
+        *,
+        state: str,
+        admission: str = "",
     ) -> None:
-        """Upgrade the admission receipt of a steer that settled out of band.
+        """Report the admission outcome of Deliveries settled away from ingress.
 
         The admission call that returned ``pending_steer`` already told the
-        sender its message was queued, but the attempt that actually accepts it
-        runs later in ``_run_pending_steers`` and its result is consumed here,
-        not by the ingress caller — so this is the only place that can report
-        that the message did make it into the running turn.
+        sender its message was queued, but the attempt that resolves it runs
+        later (``_run_pending_steers``, recovery) and its result is consumed
+        there, not by the ingress caller — so this is the only place that can
+        report that the message joined the running turn (✍️), was definitively
+        refused (🤷), or is still unconfirmed (🤔).
         """
 
         indicator = getattr(self.controller, "processing_indicator", None)
@@ -4452,12 +4476,12 @@ class SessionTurnManager:
             return
         for delivery in deliveries or []:
             try:
-                context = self._steer_receipt_context(session_id, delivery)
+                context = self._delivery_receipt_context(session_id, delivery)
                 if context is None:
                     continue
-                await ack(context, state="accepted", admission="steered")
+                await ack(context, state=state, admission=admission)
             except Exception as err:
-                logger.debug("Failed to report steered admission receipt: %s", err)
+                logger.debug("Failed to report admission receipt: %s", err)
 
     async def _run_pending_steers(
         self,
@@ -4512,8 +4536,16 @@ class SessionTurnManager:
                 ),
             )
             result = await self._finish_steer(delivery_id, receipt, context=context)
-            if result.state == "accepted" and result.admission == "steered":
-                await self._report_steered_receipts(session_id, claimed_batch)
+            # Every row of the attempt settles together, so the leader's outcome
+            # is the batch's outcome: accepted upgrades 👌 to ✍️, a definitive
+            # refusal after the Session went inactive retires it to 🤷, and an
+            # unconfirmed receipt reports 🤔.
+            await self._report_delivery_receipts(
+                session_id,
+                claimed_batch,
+                state=result.state,
+                admission=result.admission,
+            )
 
     def _publish_materialized_delivery(self, delivery_id: str) -> None:
         """Publish one accepted immutable Message after its transaction commits."""
@@ -5247,6 +5279,14 @@ class SessionTurnManager:
                 ),
                 context=context,
             )
+            # Recovery re-enters ``deliver`` behind the ingress handler's back,
+            # so the receipt this admission earned has no other reporter.
+            await self._report_delivery_receipts(
+                observation.session_id,
+                [delivery],
+                state=result.state,
+                admission=result.admission,
+            )
             return result.state != "reserved"
         target_turn_id = str(delivery.get("current_target_turn_id") or "")
         if delivery["state"] == "pending_steer" and target_turn_id:
@@ -5610,6 +5650,14 @@ class SessionTurnManager:
                     reservation["id"],
                 )
             else:
+                # Same as the observation path: nothing else reports the
+                # admission outcome of a Delivery revived by recovery.
+                await self._report_delivery_receipts(
+                    target_session,
+                    [reservation],
+                    state=result.state,
+                    admission=result.admission,
+                )
                 if result.state != "reserved":
                     recovered.append(target_session)
         with self._sqlite_engine().connect() as conn:

@@ -188,5 +188,29 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_delivery_ack_reaction.py::ReactionTargetSurvivalTests
+  - id: MESSAGE-DELIVERY-306
+    name: A native-less quick reply reacts on its persisted echo target
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_quick_reply_receipt_uses_its_persisted_echo_target
+  - id: MESSAGE-DELIVERY-307
+    name: A steer refused after archive replaces its queued receipt
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_definitive_steer_refusal_after_archive_reports_the_retired_receipt
+  - id: MESSAGE-DELIVERY-308
+    name: A reservation revived by recovery still reports its admission
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_recovered_reservation_reports_its_admission_receipt
+  - id: MESSAGE-DELIVERY-309
+    name: One Turn clears the receipt of every Delivery merged into it
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_start_clears_every_receipt_merged_into_its_turn
 next_priority:
-  - MESSAGE-DELIVERY-306
+  - MESSAGE-DELIVERY-310

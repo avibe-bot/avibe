@@ -221,6 +221,37 @@ class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
         await svc.promote_reaction_to_running(handle)
         self.assertEqual(im.calls[-1], ("add", "m1", ACK_REACTION_EMOJI))
 
+    async def test_start_clears_every_receipt_merged_into_its_turn(self):
+        # MESSAGE-DELIVERY-309: Deliveries without a native message id (quick
+        # replies) merge into one Turn, but only the first hydrates the dispatch
+        # context. The rest are accepted as part of that Turn and never
+        # dispatched, so nothing else would ever take their receipt down.
+        im = _FakeIM()
+        svc = _svc(im)
+        first = _ctx(message_id=None)
+        first.platform_specific = {"processing_indicator_message_id": "echo-1"}
+        second = _ctx(message_id=None)
+        second.platform_specific = {"processing_indicator_message_id": "echo-2"}
+        await svc.ack_delivery_state(first, state="queued")
+        await svc.ack_delivery_state(second, state="queued")
+
+        dispatch = _ctx(message_id=None)
+        dispatch.platform_specific = {
+            "processing_indicator_message_id": "echo-1",
+            "delivery_ack_targets": ["echo-1", "echo-2"],
+        }
+        await svc.start(dispatch, "claude")
+
+        self.assertEqual(
+            im.calls,
+            [
+                ("add", "echo-1", QUEUED_REACTION_EMOJI),
+                ("add", "echo-2", QUEUED_REACTION_EMOJI),
+                ("remove", "echo-1", QUEUED_REACTION_EMOJI),
+                ("remove", "echo-2", QUEUED_REACTION_EMOJI),
+            ],
+        )
+
     async def test_receipt_is_scoped_to_one_message(self):
         im = _FakeIM()
         svc = _svc(im)

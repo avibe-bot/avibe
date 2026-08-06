@@ -94,10 +94,19 @@ worse than no receipt.
 The reaction target is not always the sender's own message — a quick reply
 reacts on the bot echo it was attached to — and it cannot be rebuilt from the
 Delivery snapshot. The ingress handler stores it in the durable
-`admission_context` (`processing_indicator_message_id`), and both consumers read
-it back: `MessageHandler._restore_reaction_target` when the durable owner
-re-dispatches a hydrated context, and `_steer_receipt_context` when a late steer
-acceptance reports its own receipt.
+`admission_context` (`processing_indicator_message_id`), and every consumer
+reads it back through `_delivery_ack_target`:
+
+- `MessageHandler._restore_reaction_target` when the durable owner re-dispatches
+  a hydrated context;
+- `_delivery_receipt_context` when a Delivery settles away from ingress. A
+  quick-reply callback is dispatched with `message_id=None` (to bypass platform
+  event dedup), so a persisted echo target — not a native message id — is what
+  qualifies it for a receipt;
+- `_hydrate_delivery_batch_context`, which publishes `delivery_ack_targets` for
+  the whole merged batch. Deliveries without a native message id merge into one
+  Turn and only the first hydrates the dispatch context, so `start()` clears
+  every target in the batch, not just its own.
 
 ### 3.3 Platform emoji mappings
 
@@ -113,13 +122,21 @@ keys.
   `_EMOJI_MAP`" warning and returns `False`, so Lark degrades to no receipt for
   those two until the `emoji_type` keys are verified against the Lark table.
 
-### 3.5 Upgrading a receipt when the steer is accepted late
+### 3.5 Reporting outcomes that settle away from ingress
 
-A Delivery that reaches `queued` / `pending_steer` at admission time can still be
-steered into the running turn afterwards. `_run_pending_steers` used to discard
-the `_finish_steer` result, so that 👌 was never upgraded. It now reports
-`accepted` / `steered` for every delivery in the claimed batch, replacing 👌 with
-✍️ on the original message.
+The ingress caller only sees the admission result. Two paths resolve a Delivery
+afterwards and are therefore the only possible reporters of its real outcome:
+
+- `_run_pending_steers` — a Delivery admitted as `pending_steer` can be accepted
+  (👌 → ✍️), definitively refused after the Session went inactive and retired
+  (👌 → 🤷), or left unconfirmed (👌 → 🤔). Every row of an attempt settles
+  together, so the leader's result is reported for the whole claimed batch.
+- recovery — `recover_durable_delivery_state` and `_resume_delivery_observation`
+  re-enter `deliver()` for a reservation committed before the service stopped.
+  The ingress handler is long gone, so recovery reports that result itself.
+
+Both go through `_report_delivery_receipts`, which is best-effort: a failure to
+react is logged and never blocks the Delivery.
 
 ## 4. Known limitations
 
@@ -135,9 +152,9 @@ the `_finish_steer` result, so that 👌 was never upgraded. It now reports
 ## 5. Evidence
 
 - contract/unit: `tests/test_delivery_ack_reaction.py`
-  (MESSAGE-DELIVERY-301, 302, 304, 305) and
-  `tests/test_session_delivery_fsm.py::test_late_steer_acceptance_upgrades_the_queued_admission_receipt`
-  (MESSAGE-DELIVERY-303)
+  (MESSAGE-DELIVERY-301, 302, 304, 305, 309) and
+  `tests/test_session_delivery_fsm.py`
+  (MESSAGE-DELIVERY-303, 306, 307, 308, 309)
 - regression: `tests/test_processing_indicator_reaction.py`,
   `tests/test_session_delivery_fsm.py`, `tests/scenarios/message_delivery/`
 - manual: send a second and third message on Telegram/Slack while a turn runs;

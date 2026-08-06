@@ -9,6 +9,7 @@ details; they should only ask this service to delete or finish an indicator.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -395,12 +396,38 @@ class ProcessingIndicatorService:
             except Exception as err:
                 logger.debug("Failed to remove admission ack reaction: %s", err)
 
+    async def clear_merged_admission_acks(self, context: MessageContext) -> None:
+        """Clear the receipts of every Delivery merged into this one Turn.
+
+        Deliveries without a native message id (quick-reply callbacks) can be
+        merged into a single Turn, but only the FIRST one hydrates the dispatch
+        context. The others are accepted as part of that Turn and never
+        dispatched on their own, so their 👌 would stay up forever unless this
+        Turn clears their reaction targets too.
+        """
+
+        payload = context.platform_specific or {}
+        targets = payload.get("delivery_ack_targets") if isinstance(payload, dict) else None
+        if not isinstance(targets, (list, tuple)) or not targets:
+            return
+        own_target = self._reaction_target_message_id(context)
+        for target in targets:
+            target_id = str(target or "").strip()
+            if not target_id or target_id == own_target:
+                continue
+            merged = copy.copy(context)
+            spec = dict(payload)
+            spec["processing_indicator_message_id"] = target_id
+            merged.platform_specific = spec
+            await self.clear_admission_ack(merged)
+
     async def start(self, context: MessageContext, agent_name: str, *, enabled: bool = True) -> ProcessingIndicatorHandle:
         handle = ProcessingIndicatorHandle(context=context)
         # A queued input carries an admission receipt (👌) that this turn's own
         # indicator now replaces. Platforms that stack reactions would otherwise
         # show both, and the receipt would outlive the wait it described.
         await self.clear_admission_ack(context)
+        await self.clear_merged_admission_acks(context)
         if not enabled:
             return handle
 
