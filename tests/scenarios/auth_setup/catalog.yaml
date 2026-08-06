@@ -177,11 +177,11 @@ scenarios:
     backend: claude
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_oauth_to_api_key_probe_drops_stale_auth_token
   - id: AUTH-SETUP-906
-    name: Codex connection probe uses an app-server Agent turn
+    name: Codex connection probe reuses the persistent app-server with an ephemeral turn
     status: covered
     kind: historical_regression
     layer: scenario
     backend: codex
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_connection_probe_uses_app_server_turn
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_connection_probe_reuses_persistent_app_server
 next_priority:
   - AUTH-SETUP-301

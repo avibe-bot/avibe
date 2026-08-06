@@ -62,6 +62,16 @@ _CODEX_REBINDABLE_SAME_ID_PROVIDERS = _CODEX_MANAGED_PROVIDER_IDS | frozenset(
     (_CODEX_MODEL_HUB_PROVIDER_ID,)
 )
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
+CODEX_CONNECTION_PROBE_DIR = "codex-connection-probe"
+
+
+class _CodexConnectionProbeState:
+    def __init__(self) -> None:
+        self.terminal: asyncio.Future[tuple[str, str]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self.response_text = ""
+        self.turn_id = ""
 
 
 class CodexResumeUnavailableError(RuntimeError):
@@ -120,6 +130,8 @@ class CodexAgent(BaseAgent):
         # base_session_id → (thread_id, effective Git PATH, PATH override persisted)
         self._thread_git_path_configs: Dict[str, tuple[str, str, bool]] = {}
         self._fork_correction_pending_base_sessions: set[str] = set()
+        self._connection_probes: Dict[str, _CodexConnectionProbeState] = {}
+        self._connection_probe_turns: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # BaseAgent interface
@@ -166,6 +178,85 @@ class CodexAgent(BaseAgent):
         if transport is None:
             return lambda: None
         return lambda: self._transport_alive(transport)
+
+    async def probe_connection(self, cwd: str, *, model: str | None = None) -> str:
+        """Run a read-only ephemeral turn on the normal persistent app-server."""
+
+        probe_cwd = paths.get_runtime_dir() / CODEX_CONNECTION_PROBE_DIR
+        probe_cwd.mkdir(parents=True, exist_ok=True)
+
+        transport = self._transports.get(cwd)
+        if transport is None or not transport.is_initialized:
+            transport = await self._get_or_create_transport(cwd)
+        else:
+            self._touch_transport_activity(cwd)
+
+        thread_response = await transport.send_request(
+            "thread/start",
+            {
+                "cwd": str(probe_cwd),
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "ephemeral": True,
+                "developerInstructions": (
+                    "This is a connection probe. Do not use tools. "
+                    "Reply with a short greeting."
+                ),
+            },
+        )
+        thread = thread_response.get("thread")
+        thread_id = thread_response.get("id") or (
+            thread.get("id") if isinstance(thread, dict) else None
+        )
+        if not thread_id:
+            raise RuntimeError("Codex thread/start returned no thread id")
+
+        state = _CodexConnectionProbeState()
+        self._connection_probes[thread_id] = state
+        closed_task: asyncio.Task[None] | None = None
+        try:
+            turn_params: Dict[str, Any] = {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "Hi"}],
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+                "effort": "low",
+            }
+            if isinstance(model, str) and model.strip():
+                turn_params["model"] = model.strip()
+            turn_response = await transport.send_request("turn/start", turn_params)
+            turn = turn_response.get("turn")
+            turn_id = turn_response.get("id") or (
+                turn.get("id") if isinstance(turn, dict) else None
+            )
+            if not turn_id:
+                raise RuntimeError("Codex turn/start returned no turn id")
+            state.turn_id = str(turn_id)
+            self._connection_probe_turns[state.turn_id] = thread_id
+
+            closed_task = asyncio.create_task(transport.wait_closed())
+            done, _ = await asyncio.wait(
+                {state.terminal, closed_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if state.terminal not in done:
+                raise ConnectionError("Codex app-server exited during the connection probe")
+            outcome, result = state.terminal.result()
+            if outcome == "error":
+                raise RuntimeError(result)
+            if not result.strip():
+                raise RuntimeError("Codex Agent turn returned no response")
+            self._touch_transport_activity(cwd)
+            return result
+        finally:
+            self._connection_probes.pop(thread_id, None)
+            if state.turn_id:
+                self._connection_probe_turns.pop(state.turn_id, None)
+            if not state.terminal.done():
+                state.terminal.cancel()
+            if closed_task is not None:
+                closed_task.cancel()
+                await asyncio.gather(closed_task, return_exceptions=True)
 
     async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
         router = getattr(self.controller, "model_hub_runtime", None)
@@ -2287,6 +2378,8 @@ class CodexAgent(BaseAgent):
 
     async def _on_notification(self, method: str, params: Dict[str, Any]) -> None:
         """Route a server notification to the event handler."""
+        if self._handle_connection_probe_notification(method, params):
+            return
         request = self._find_request_for_notification(method, params)
         if not request:
             thread_id = self._extract_thread_id(params)
@@ -2303,6 +2396,65 @@ class CodexAgent(BaseAgent):
             self._touch_transport_activity(request.working_path)
             self._touch_session_activity(request.base_session_id)
         await self._event_handler.handle_notification(method, params, request)
+
+    def _handle_connection_probe_notification(
+        self,
+        method: str,
+        params: Dict[str, Any],
+    ) -> bool:
+        thread_id = self._extract_thread_id(params)
+        turn_id = self._extract_turn_id(params)
+        probe_turns = getattr(self, "_connection_probe_turns", {})
+        if not thread_id and turn_id:
+            thread_id = probe_turns.get(turn_id, "")
+        state = getattr(self, "_connection_probes", {}).get(thread_id)
+        if state is None:
+            return False
+        if turn_id:
+            state.turn_id = turn_id
+            probe_turns[turn_id] = thread_id
+
+        if method == "item/completed":
+            item = params.get("item") if isinstance(params, dict) else None
+            if isinstance(item, dict) and item.get("type") == "agentMessage":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    state.response_text = text
+            return True
+        if method == "error":
+            if params.get("willRetry") is True:
+                return True
+            error = params.get("error") if isinstance(params, dict) else params
+            detail = (
+                error.get("message")
+                if isinstance(error, dict)
+                else str(error or "Codex error")
+            )
+            if not state.terminal.done():
+                state.terminal.set_result(("error", str(detail or "Codex error")))
+            return True
+        if method != "turn/completed":
+            return True
+
+        turn = params.get("turn") if isinstance(params, dict) else None
+        status = turn.get("status") if isinstance(turn, dict) else None
+        if status == "completed":
+            outcome = ("success", state.response_text)
+        elif status == "interrupted":
+            outcome = ("error", "Codex turn was interrupted")
+        elif status == "failed":
+            error = turn.get("error") if isinstance(turn, dict) else None
+            detail = (
+                error.get("message")
+                if isinstance(error, dict)
+                else str(error or "Codex turn failed")
+            )
+            outcome = ("error", str(detail or "Codex turn failed"))
+        else:
+            outcome = ("error", f"Codex turn ended with status: {status or 'unknown'}")
+        if not state.terminal.done():
+            state.terminal.set_result(outcome)
+        return True
 
     async def _on_server_request(
         self,

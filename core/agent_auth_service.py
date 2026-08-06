@@ -55,6 +55,7 @@ OPENCODE_CREDENTIAL_COUNT_RE = re.compile(r"\b(\d+)\s+credential(?:s)?\b", re.IG
 CLAUDE_LOGIN_METHODS = {"claudeai", "console"}
 OPENCODE_DIRECT_SETUP_URLS = {"opencode": "https://opencode.ai/auth"}
 CLAUDE_PROBE_DISCONNECT_TIMEOUT_SECONDS = 3.0
+CLAUDE_PROBE_PROCESS_EXIT_GRACE_SECONDS = 0.2
 
 
 def _pick_probe_response_excerpt(stdout_text: str) -> str:
@@ -2249,15 +2250,15 @@ class AgentAuthService:
 
         started = time.monotonic()
         try:
-            run_probe = (
-                self._run_claude_agent_probe
-                if backend == "claude"
-                else self._run_codex_agent_probe
-            )
-            response_text = await asyncio.wait_for(
-                run_probe(binary=binary, cwd=probe_cwd, model=model),
-                timeout=timeout,
-            )
+            if backend == "claude":
+                probe = self._run_claude_agent_probe(
+                    binary=binary,
+                    cwd=probe_cwd,
+                    model=model,
+                )
+            else:
+                probe = self._run_codex_agent_probe(cwd=probe_cwd, model=model)
+            response_text = await asyncio.wait_for(probe, timeout=timeout)
         except asyncio.TimeoutError:
             return {
                 "ok": False,
@@ -2384,116 +2385,42 @@ class AgentAuthService:
             )
         except asyncio.TimeoutError:
             logger.warning("Claude connection probe did not disconnect within the cleanup timeout")
-            if pid:
-                await _reap_pid_set({pid}, terminate_timeout=2.0, logger=logger)
+        if not pid:
+            return
+
+        transport = getattr(client, "_transport", None)
+        process = getattr(transport, "_process", None)
+        wait = getattr(process, "wait", None)
+        if callable(wait):
+            try:
+                await asyncio.wait_for(
+                    wait(),
+                    timeout=CLAUDE_PROBE_PROCESS_EXIT_GRACE_SECONDS,
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Claude connection probe process wait failed; reaping by pid",
+                    exc_info=True,
+                )
+        await _reap_pid_set({pid}, terminate_timeout=2.0, logger=logger)
 
     async def _run_codex_agent_probe(
         self,
         *,
-        binary: str,
         cwd: str,
         model: str | None,
     ) -> str:
-        """Run an isolated turn through the normal Codex app-server protocol."""
-        from modules.agents.codex.transport import CodexTransport
-
-        backend_cfg = self._resolve_backend_config("codex")
-        transport = CodexTransport(
-            binary=binary,
-            cwd=cwd,
-            extra_args=list(getattr(backend_cfg, "extra_args", None) or []),
-        )
-        terminal: asyncio.Future[tuple[str, str]] = asyncio.get_running_loop().create_future()
-        response_text = ""
-
-        async def on_notification(method: str, params: dict[str, Any]) -> None:
-            nonlocal response_text
-            if method == "item/completed":
-                item = params.get("item") if isinstance(params, dict) else None
-                if isinstance(item, dict) and item.get("type") == "agentMessage":
-                    text = str(item.get("text") or "").strip()
-                    if text:
-                        response_text = text
-                return
-            if method == "error":
-                if params.get("willRetry") is True:
-                    return
-                error = params.get("error") if isinstance(params, dict) else params
-                detail = error.get("message") if isinstance(error, dict) else str(error or "Codex error")
-                if not terminal.done():
-                    terminal.set_result(("error", detail))
-                return
-            if method != "turn/completed":
-                return
-            turn = params.get("turn") if isinstance(params, dict) else None
-            status = turn.get("status") if isinstance(turn, dict) else None
-            if status == "failed":
-                error = turn.get("error") if isinstance(turn, dict) else None
-                detail = error.get("message") if isinstance(error, dict) else str(error or "Codex turn failed")
-                if not terminal.done():
-                    terminal.set_result(("error", detail))
-            elif status == "interrupted":
-                if not terminal.done():
-                    terminal.set_result(("error", "Codex turn was interrupted"))
-            elif status == "completed":
-                if not terminal.done():
-                    terminal.set_result(("success", response_text))
-            elif not terminal.done():
-                terminal.set_result(("error", f"Codex turn ended with status: {status or 'unknown'}"))
-
-        async def on_server_request(
-            _request_id: int | str,
-            _method: str,
-            _params: dict[str, Any],
-        ) -> dict[str, Any]:
-            return {"approved": True}
-
-        transport.on_notification(on_notification)
-        transport.on_server_request(on_server_request)
-        try:
-            await transport.start()
-            governor_from_controller(self.controller).apply_to_pid(
-                transport.pid,
-                label="codex connection probe",
-            )
-            thread_response = await transport.send_request(
-                "thread/start",
-                {
-                    "cwd": cwd,
-                    "approvalPolicy": "never",
-                    "sandbox": "danger-full-access",
-                },
-            )
-            thread = thread_response.get("thread")
-            thread_id = thread_response.get("id") or (
-                thread.get("id") if isinstance(thread, dict) else None
-            )
-            if not thread_id:
-                raise RuntimeError("Codex thread/start returned no thread id")
-            turn_params: dict[str, Any] = {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": "Hi"}],
-                "approvalPolicy": "never",
-                "sandboxPolicy": {"type": "dangerFullAccess"},
-                "effort": "low",
-            }
-            if isinstance(model, str) and model.strip():
-                turn_params["model"] = model.strip()
-            turn_response = await transport.send_request("turn/start", turn_params)
-            turn = turn_response.get("turn")
-            turn_id = turn_response.get("id") or (
-                turn.get("id") if isinstance(turn, dict) else None
-            )
-            if not turn_id:
-                raise RuntimeError("Codex turn/start returned no turn id")
-            outcome, result = await terminal
-            if outcome == "error":
-                raise RuntimeError(result)
-            if not result.strip():
-                raise RuntimeError("Codex Agent turn returned no response")
-            return result
-        finally:
-            await transport.stop()
+        """Run through the controller-owned CodexAgent transport pool."""
+        agent_service = getattr(self.controller, "agent_service", None)
+        agents = getattr(agent_service, "agents", None)
+        agent = agents.get("codex") if isinstance(agents, dict) else None
+        probe = getattr(agent, "probe_connection", None)
+        if not callable(probe):
+            raise RuntimeError("Codex Agent runtime is unavailable")
+        return await probe(cwd, model=model)
 
     async def test_opencode_provider(
         self,

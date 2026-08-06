@@ -356,51 +356,51 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             ["confirm_oauth_is_active", "save_api_key", "test_connection"],
         )
 
-    async def test_codex_connection_probe_uses_app_server_turn(self):
+    async def test_codex_connection_probe_reuses_persistent_app_server(self):
         """Scenario: AUTH-SETUP-906"""
         state_dir = tempfile.TemporaryDirectory()
         self.addCleanup(state_dir.cleanup)
         home = Path(state_dir.name)
         harness = AuthSetupScenarioHarness()
         runner = ScenarioRunner(harness)
-        service = AgentAuthService(_ReloadingV2ConfigController())
         requests = []
 
         class FakeCodexTransport:
-            pid = None
-
-            def __init__(self, **kwargs):
-                harness.transport_init = kwargs
-                self.notification = None
-
-            def on_notification(self, callback):
-                self.notification = callback
-
-            def on_server_request(self, callback):
-                harness.server_request = callback
-
-            async def start(self):
-                harness.transport_started = True
-
-            async def stop(self):
-                harness.transport_stopped = True
+            is_initialized = True
 
             async def send_request(self, method, params):
                 requests.append((method, params))
                 if method == "thread/start":
                     return {"thread": {"id": "thread-probe"}}
-                await self.notification(
+                await agent._on_notification(
                     "item/completed",
                     {
+                        "threadId": "thread-probe",
                         "turnId": "turn-probe",
                         "item": {"type": "agentMessage", "text": "codex-probe-ok"},
                     },
                 )
-                await self.notification(
+                await agent._on_notification(
                     "turn/completed",
-                    {"turn": {"id": "turn-probe", "status": "completed"}},
+                    {
+                        "threadId": "thread-probe",
+                        "turn": {"id": "turn-probe", "status": "completed"},
+                    },
                 )
                 return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(self):
+                await asyncio.Event().wait()
+
+        controller = _ReloadingV2ConfigController()
+        agent = object.__new__(CodexAgent)
+        agent.controller = controller
+        agent._transports = {str(home): FakeCodexTransport()}
+        agent._transport_last_activity = {}
+        agent._connection_probes = {}
+        agent._connection_probe_turns = {}
+        controller.agent_service = SimpleNamespace(agents={"codex": agent})
+        service = AgentAuthService(controller)
 
         async def run_connection_probe(current):
             current.test_result = await probe_backend_auth_async(
@@ -411,7 +411,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {"AVIBE_HOME": str(home / ".avibe")}),
             patch("vibe.api._get_oauth_service", return_value=service),
-            patch("modules.agents.codex.transport.CodexTransport", FakeCodexTransport),
         ):
             config = V2Config(
                 mode="self_host",
@@ -426,18 +425,22 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(harness.test_result["ok"])
         self.assertEqual(harness.test_result["excerpt"], "codex-probe-ok")
-        self.assertTrue(harness.transport_started)
-        self.assertTrue(harness.transport_stopped)
-        self.assertEqual(harness.transport_init["binary"], "codex-probe")
         self.assertEqual(
             requests,
             [
                 (
                     "thread/start",
                     {
-                        "cwd": str(home),
+                        "cwd": str(
+                            (home / ".avibe" / "runtime" / "codex-connection-probe").resolve()
+                        ),
                         "approvalPolicy": "never",
-                        "sandbox": "danger-full-access",
+                        "sandbox": "read-only",
+                        "ephemeral": True,
+                        "developerInstructions": (
+                            "This is a connection probe. Do not use tools. "
+                            "Reply with a short greeting."
+                        ),
                     },
                 ),
                 (
@@ -446,7 +449,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                         "threadId": "thread-probe",
                         "input": [{"type": "text", "text": "Hi"}],
                         "approvalPolicy": "never",
-                        "sandboxPolicy": {"type": "dangerFullAccess"},
+                        "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                         "effort": "low",
                         "model": "gpt-5.4-mini",
                     },

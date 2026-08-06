@@ -56,6 +56,7 @@ class CodexTransport:
         self._notify_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
         self._notify_task: Optional[asyncio.Task[None]] = None
         self._notify_inflight = 0
+        self._closed_event = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -67,6 +68,7 @@ class CodexTransport:
             logger.warning("CodexTransport.start() called but process is already running")
             return
 
+        self._closed_event.clear()
         cmd = (
             [self._binary, "--dangerously-bypass-approvals-and-sandbox"]
             + ["app-server"]
@@ -128,6 +130,7 @@ class CodexTransport:
         self._initialized = False
         proc = self._process
         if not proc or proc.returncode is not None:
+            self._closed_event.set()
             self._cleanup_tasks()
             return
 
@@ -152,6 +155,7 @@ class CodexTransport:
                     pass
 
         self._cleanup_tasks()
+        self._closed_event.set()
         # Fail all pending futures
         for fut in self._pending.values():
             if not fut.done():
@@ -186,6 +190,15 @@ class CodexTransport:
         """Whether an already-read notification can still deliver a terminal."""
 
         return self._notify_inflight > 0 or not self._notify_queue.empty()
+
+    async def wait_closed(self) -> None:
+        """Wait until the app-server exits and already-read notifications drain."""
+
+        await self._closed_event.wait()
+        for _ in range(50):
+            if not self.has_pending_notifications:
+                return
+            await asyncio.sleep(0.01)
 
     @property
     def pid(self) -> Optional[int]:
@@ -297,6 +310,7 @@ class CodexTransport:
             logger.exception("Codex reader loop crashed")
         finally:
             self._initialized = False
+            self._closed_event.set()
             # Process ended — fail pending futures
             for fut in self._pending.values():
                 if not fut.done():

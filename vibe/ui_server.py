@@ -5706,12 +5706,16 @@ def backend_auth_api_key_remove(backend: str):
 @app.route("/api/backend/<backend>/auth/test", methods=["POST"])
 async def backend_auth_test(backend: str):
     """Send an isolated turn through the backend's production Agent transport."""
-    from vibe import api
+    from vibe import internal_client
 
     payload = request.json or {}
     raw_model = payload.get("model")
     model = raw_model.strip() if isinstance(raw_model, str) and raw_model.strip() else None
-    return jsonify(await api.test_backend_auth_async(backend, model=model))
+    try:
+        result = await internal_client.test_backend_auth(backend, model=model)
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout) as exc:
+        return jsonify({"ok": False, "error": "spawn_failed", "detail": str(exc)})
+    return jsonify(result.get("body") or {"ok": False, "error": "test_failed"})
 
 
 @app.route("/api/backend/opencode/providers", methods=["GET"])

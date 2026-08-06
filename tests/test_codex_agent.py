@@ -264,6 +264,132 @@ class CodexAgentNotificationRoutingTests(unittest.TestCase):
         self.assertIsNone(resolved)
 
 
+class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
+    def _agent(self, cwd: str, transport):
+        agent = object.__new__(CodexAgent)
+        agent._transports = {cwd: transport}
+        agent._transport_last_activity = {}
+        agent._connection_probes = {}
+        agent._connection_probe_turns = {}
+        return agent
+
+    async def test_reuses_existing_transport_with_isolated_ephemeral_thread(self):
+        requests = []
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, params):
+                requests.append((method, params))
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                await agent._on_notification(
+                    "item/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turnId": "turn-probe",
+                        "item": {"type": "agentMessage", "text": "hello"},
+                    },
+                )
+                await agent._on_notification(
+                    "turn/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turn": {"id": "turn-probe", "status": "completed"},
+                    },
+                )
+                return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(inner_self):
+                await asyncio.Event().wait()
+
+        transport = _Transport()
+        agent = self._agent(cwd, transport)
+        agent._get_or_create_transport = AsyncMock(
+            side_effect=AssertionError("existing transport should be reused")
+        )
+
+        with patch.object(
+            _MODULE.paths,
+            "get_runtime_dir",
+            return_value=Path(runtime_dir.name),
+        ):
+            result = await agent.probe_connection(cwd, model="gpt-5.4-mini")
+
+        self.assertEqual(result, "hello")
+        agent._get_or_create_transport.assert_not_awaited()
+        self.assertEqual(requests[0][0], "thread/start")
+        self.assertEqual(
+            requests[0][1],
+            {
+                "cwd": str(Path(runtime_dir.name) / "codex-connection-probe"),
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "ephemeral": True,
+                "developerInstructions": (
+                    "This is a connection probe. Do not use tools. "
+                    "Reply with a short greeting."
+                ),
+            },
+        )
+        self.assertEqual(
+            requests[1],
+            (
+                "turn/start",
+                {
+                    "threadId": "thread-probe",
+                    "input": [{"type": "text", "text": "Hi"}],
+                    "approvalPolicy": "never",
+                    "sandboxPolicy": {
+                        "type": "readOnly",
+                        "networkAccess": False,
+                    },
+                    "effort": "low",
+                    "model": "gpt-5.4-mini",
+                },
+            ),
+        )
+        self.assertEqual(agent._connection_probes, {})
+        self.assertEqual(agent._connection_probe_turns, {})
+
+    async def test_transport_exit_settles_probe_without_outer_timeout(self):
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, _params):
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(inner_self):
+                return None
+
+        agent = self._agent(cwd, _Transport())
+
+        with (
+            patch.object(
+                _MODULE.paths,
+                "get_runtime_dir",
+                return_value=Path(runtime_dir.name),
+            ),
+            self.assertRaisesRegex(
+                ConnectionError,
+                "app-server exited during the connection probe",
+            ),
+        ):
+            await agent.probe_connection(cwd)
+
+        self.assertEqual(agent._connection_probes, {})
+        self.assertEqual(agent._connection_probe_turns, {})
+
+
 class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         ownership = SimpleNamespace(

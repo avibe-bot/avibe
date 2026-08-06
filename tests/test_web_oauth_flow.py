@@ -1352,86 +1352,62 @@ def test_claude_probe_timeout_bounds_disconnect_and_reaps_process(
     )
 
 
-def test_test_web_auth_happy_path_returns_excerpt(
+def test_claude_probe_reaps_process_when_disconnect_raises(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Codex probes use app-server thread/turn requests, not ``codex exec``."""
-    captured: dict[str, object] = {"requests": []}
+    class _BrokenClaudeClient:
+        async def disconnect(self):
+            raise RuntimeError("disconnect failed")
 
-    class _FakeTransport:
-        pid = None
+    reap = AsyncMock(return_value=1)
+    monkeypatch.setattr("core.agent_auth_service.get_claude_client_pid", lambda _client: 4321)
+    monkeypatch.setattr("core.agent_auth_service._reap_pid_set", reap)
 
-        def __init__(self, **kwargs):
-            captured["init"] = kwargs
-            self.notification = None
+    _run(service._disconnect_claude_probe_client(_BrokenClaudeClient()))
 
-        def on_notification(self, callback):
-            self.notification = callback
+    reap.assert_awaited_once_with(
+        {4321},
+        terminate_timeout=2.0,
+        logger=ANY,
+    )
 
-        def on_server_request(self, callback):
-            captured["server_request"] = callback
 
-        async def start(self):
-            captured["started"] = True
+def test_claude_probe_does_not_reap_process_that_exited_after_disconnect_error(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process_wait = AsyncMock(return_value=0)
 
-        async def stop(self):
-            captured["stopped"] = True
+    class _BrokenClaudeClient:
+        _transport = SimpleNamespace(_process=SimpleNamespace(wait=process_wait))
 
-        async def send_request(self, method, params):
-            captured["requests"].append((method, params))
-            if method == "thread/start":
-                return {"thread": {"id": "thread-probe"}}
-            assert self.notification is not None
-            await self.notification(
-                "error",
-                {
-                    "turnId": "turn-probe",
-                    "willRetry": True,
-                    "error": {"message": "temporary upstream disconnect"},
-                },
-            )
-            await self.notification(
-                "item/completed",
-                {
-                    "turnId": "turn-probe",
-                    "item": {"type": "agentMessage", "text": "Hello from the model\nmore text"},
-                },
-            )
-            await self.notification(
-                "turn/completed",
-                {"turn": {"id": "turn-probe", "status": "completed"}},
-            )
-            return {"turn": {"id": "turn-probe"}}
+        async def disconnect(self):
+            raise RuntimeError("disconnect failed")
 
-    monkeypatch.setattr("modules.agents.codex.transport.CodexTransport", _FakeTransport)
+    reap = AsyncMock(return_value=1)
+    monkeypatch.setattr("core.agent_auth_service.get_claude_client_pid", lambda _client: 4321)
+    monkeypatch.setattr("core.agent_auth_service._reap_pid_set", reap)
+
+    _run(service._disconnect_claude_probe_client(_BrokenClaudeClient()))
+
+    process_wait.assert_awaited_once_with()
+    reap.assert_not_awaited()
+
+
+def test_test_web_auth_happy_path_returns_excerpt(
+    service: AgentAuthService,
+) -> None:
+    """AgentAuthService delegates Codex probes to the live Agent runtime."""
+    probe = AsyncMock(return_value="Hello from the model\nmore text")
+    service.controller.agent_service = SimpleNamespace(
+        agents={"codex": SimpleNamespace(probe_connection=probe)}
+    )
+
     result = _run(service.test_web_auth("codex", model="gpt-5.4-mini"))
 
     assert result["ok"] is True
     assert result["excerpt"] == "Hello from the model"
     assert isinstance(result["duration_ms"], int)
-    assert captured["started"] is True
-    assert captured["stopped"] is True
-    assert captured["requests"] == [
-        (
-            "thread/start",
-            {
-                "cwd": os.getcwd(),
-                "approvalPolicy": "never",
-                "sandbox": "danger-full-access",
-            },
-        ),
-        (
-            "turn/start",
-            {
-                "threadId": "thread-probe",
-                "input": [{"type": "text", "text": "Hi"}],
-                "approvalPolicy": "never",
-                "sandboxPolicy": {"type": "dangerFullAccess"},
-                "effort": "low",
-                "model": "gpt-5.4-mini",
-            },
-        ),
-    ]
+    probe.assert_awaited_once_with(os.getcwd(), model="gpt-5.4-mini")
 
 
 def test_verify_web_login_claude_forces_oauth_env(
