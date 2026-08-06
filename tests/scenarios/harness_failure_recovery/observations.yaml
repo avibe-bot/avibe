@@ -698,3 +698,41 @@ observations:
       HFR-196 now ties the one sentence shape that went stale -- a spelled-out
       number of cells said to be covered or open -- to the real table, across
       both PR7R test modules, the matrix module and the plan.
+  - id: HFR-OBS-034
+    area: run-terminal-truth
+    summary: >-
+      Round 9 of PR7R's review, and its first finding retracts round 8's. The
+      key-space half survives: the admission gate keys on the composite
+      ``<base>:<working_path>`` while codex's ``_active_turns`` keys on the base
+      session alone, so a working-path change does get two requests past the
+      shared gate. What rounds 6 and 8 both skipped is the code BETWEEN those two
+      facts. ``CodexAgent.handle_message`` holds ``_session_locks[base]`` -- the
+      registry's key space, not the gate's -- across its whole body, and inside it
+      sends ``turn/interrupt`` for any active turn before ``turn/start``. The two
+      turns never overlap, and the turn that goes mute has been interrupted, so
+      ``should_emit_progress`` is correct. The real consequence of the split is
+      narrower: a cwd change converts "queue behind the gate and run after" into
+      "interrupt the running turn and replace it". HFR-195 now drives that on the
+      real method. THE DURABLE RULE: this claim was argued three times -- correct,
+      defective, correct -- and every argument reasoned from the two ENDS of a
+      mechanism without running what sits between them. A claim that keeps
+      flipping is not unlucky; it is a claim whose subject was never driven end to
+      end, and the flip count is the signal to go drive it.
+      Round 9's second finding is the shape round 8 named, applied to the question
+      text rather than to a conclusion: Q2 asks about the exact Turn AND
+      PARTICIPATING RUNS, every probe asserted Turn tokens only, and the verdict
+      was written as though the conjunction had been checked. It had not. The join
+      turns out to be cheap and real -- ``_owned_agent_run_ids`` reads
+      ``accepted_agent_run_ids`` off the emit context and
+      ``_durable_accepted_agent_run_ids`` looks Runs up by that context's
+      ``turn_token``, so Run attribution is DERIVED from Turn attribution -- but
+      cheap to verify is not the same as verified. HFR-197 drives it, including
+      the case that would smear Runs across Turns: claude's reused receiver
+      context replaces the list per Turn rather than merging it.
+      The remaining two findings are guards failing at their own contract.
+      HFR-194 reads the plan's ``- PR7:`` allocation line only, so the document's
+      HEADLINE range went stale at ``HFR-180…187`` while the same commit filed rows
+      through HFR-196. And ``_assert_node_exists`` reused ``_assert_symbol_exists``
+      verbatim, inheriting an exemption written for a different caller: a class
+      leaf is legitimate for a finding OWNER and is not a pytest node id, so
+      ``tests/foo.py::_helper`` resolved green. HFR-198 pins both strictnesses.

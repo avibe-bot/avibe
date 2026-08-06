@@ -1,4 +1,4 @@
-"""HFR-184..HFR-187, HFR-189..HFR-190, HFR-192..HFR-194: the PR7R matrix is closed.
+"""HFR-184..187, HFR-189..190, HFR-192..194, HFR-196, HFR-198: the PR7R matrix is closed.
 
 Same contract as HFR-105 for ``TEARDOWN_SETTLEMENT_MATRIX``: growing a
 dimension fails here until every new cell names a consuming test or a precise
@@ -50,8 +50,11 @@ def _expand() -> list[tuple[str, str, str, str, tuple[str, str]]]:
 _CELLS = _expand()
 
 
-def _assert_symbol_exists(qualified: str) -> None:
+def _assert_symbol_exists(qualified: str) -> ast.AST:
     """Resolve a COMPLETE ``path::Class::symbol`` id, one nesting level at a time.
+
+    Returns the resolved leaf node, so a caller with a stricter contract than
+    "the symbol exists" can check the KIND of what it resolved to.
 
     Matching only the trailing function name and walking the whole module --
     which is what HFR-105 does, and what this guard did first -- accepts an id
@@ -74,6 +77,7 @@ def _assert_symbol_exists(qualified: str) -> None:
     assert source.exists(), f"{qualified}: no module at {module_path}"
 
     scope: list[ast.stmt] = ast.parse(source.read_text(encoding="utf-8")).body
+    match: ast.AST | None = None
     for depth, name in enumerate(parts):
         is_leaf = depth == len(parts) - 1
         # A leaf may be a function; a non-leaf must be a class. A leaf that is
@@ -96,12 +100,30 @@ def _assert_symbol_exists(qualified: str) -> None:
             f"named {name!r} at this level"
         )
         scope = match.body
+    return match
 
 
 def _assert_node_exists(node_id: str) -> None:
-    """A pytest node id: the same resolution, rooted under ``tests/``."""
+    """A pytest node id: the same resolution, plus what makes it a NODE id.
+
+    The shared resolver deliberately accepts a class leaf, because a finding's
+    OWNER may be a type. A pytest node id is a different thing: it has to be
+    something pytest will collect and run. Resolving one with the owner rule
+    left ``tests/foo.py::_helper`` and ``tests/foo.py::SomeClass`` green -- a
+    citation that names a real symbol which no test run ever executes, which is
+    the same failure this whole guard exists to prevent, one level in. So the
+    leaf must be a function pytest collects, and the class-leaf latitude stays
+    where it was justified.
+    """
     assert node_id.split("::")[0].startswith("tests/"), node_id
-    _assert_symbol_exists(node_id)
+    leaf = _assert_symbol_exists(node_id)
+    assert isinstance(leaf, (ast.FunctionDef, ast.AsyncFunctionDef)), (
+        f"{node_id}: a node id must name a test function, not a "
+        f"{type(leaf).__name__.removesuffix('Def').lower()}"
+    )
+    assert leaf.name.startswith("test_"), (
+        f"{node_id}: {leaf.name!r} is not collected by pytest"
+    )
 
 
 def _detail_node(detail: str) -> str:
@@ -497,3 +519,63 @@ def test_no_prose_states_a_q2_cell_count_the_table_disagrees_with() -> None:
                 f"{actual[kind.lower()]}"
             )
     assert checked, "no cell-count claim found at all -- this guard is asserting nothing"
+
+
+def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkeypatch) -> None:
+    """HFR-198: the citation resolver's leaf rule, checked at both strictnesses.
+
+    Round 9's fourth finding, and it is the round-7 lesson again in its own
+    house: a guard's EXEMPTIONS are invisible, and this one had an exemption it
+    never re-justified. ``_assert_symbol_exists`` accepts a class leaf on
+    purpose, because a finding's OWNER may be a type. ``_assert_node_exists``
+    reused it verbatim, so a node id naming a private helper or a bare class
+    resolved happily -- a citation pointing at a real symbol that no test run
+    ever executes, which is exactly the failure mode the resolver was written to
+    prevent, displaced one level.
+
+    Both directions are asserted, because tightening the leaf rule everywhere
+    would have been the easy over-correction and would have broken the owner
+    citations that legitimately name classes.
+    """
+    cited = {
+        detail if kind == "covered" else _detail_node(detail)
+        for *_dims, (kind, detail) in _CELLS
+        if kind in {"covered", "shared", "defect"}
+    }
+    cited.update(
+        node_id for entry in PR7R_QUESTIONS.values() for node_id in entry["evidence"]
+    )
+    cited.update(finding["reproducer"] for finding in PR7R_FINDINGS.values())
+
+    module = tmp_path / "tests" / "sample_module.py"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    module.write_text(
+        "class Owner:\n"
+        "    def method(self): ...\n"
+        "def _helper(): ...\n"
+        "def test_real(): ...\n"
+        "async def test_async_real(): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    rel = Path("tests/sample_module.py")
+
+    # The owner resolver: a class leaf and a method leaf are both legitimate.
+    for owner in (f"{rel}::Owner", f"{rel}::Owner::method", f"{rel}::_helper"):
+        _assert_symbol_exists(owner)
+
+    # The node-id resolver: only a collected test function.
+    for node_id in (f"{rel}::test_real", f"{rel}::test_async_real"):
+        _assert_node_exists(node_id)
+    for rejected in (f"{rel}::Owner", f"{rel}::_helper"):
+        with pytest.raises(AssertionError):
+            _assert_node_exists(rejected)
+
+    # And the real citations still pass under the tightened rule -- the point of
+    # a stricter guard is that the corpus already satisfies it, checked here
+    # rather than left to the parametrized cells so a tightening that quietly
+    # invalidated the corpus would fail in ONE place with the whole list.
+    monkeypatch.undo()
+    assert cited, "no citations to check"
+    for node_id in sorted(cited):
+        _assert_node_exists(node_id)

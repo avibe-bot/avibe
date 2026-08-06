@@ -14,7 +14,7 @@ be about. Where the real subject is out of reach in this unit, the claim is
 narrowed to what is reached and the rest becomes a named probe in the matrix,
 never a green test that reads like coverage.
 
-Scenario ids: HFR-180 .. HFR-183, HFR-188, HFR-191, HFR-195.
+Scenario ids: HFR-180 .. HFR-183, HFR-188, HFR-191, HFR-195, HFR-197.
 """
 
 import ast
@@ -1097,42 +1097,51 @@ def test_one_runtime_key_admits_one_live_turn_at_a_time():
     # assertion this file forbids, and it was reading the wrong function on top
     # of that: the gate never calls it. Driven properly in
     # ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``,
-    # which shows the two key spaces disagreeing and two live turns landing in
-    # one slot.
+    # which shows the two key spaces disagreeing -- and then shows codex's own
+    # inner lock supplying the exclusion the gate stopped supplying.
 
 
 def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
-    """HFR-195 / Q2: two live codex turns share one slot, and the older goes silent.
+    """HFR-195 / Q2: a cwd change splits the gate, and codex's own lock catches it.
 
     This closes the probe the codex cell has been carrying since round four --
-    "whether any state can put two live turns on one base session" -- and it
-    closes it the way that costs the previous round's conclusion. A key
-    collision can.
+    "whether any state can put two live turns on one base session" -- and the
+    answer is no, but not for the reason the shared gate suggested.
 
-    The mechanism is that two identifiers which look like the same thing are
-    not. The admission gate keys on ``BaseAgent.runtime_turn_key``, which is the
-    COMPOSITE session identity ``<base>:<working_path>``; codex's
-    ``_active_turns`` keys on ``request.base_session_id`` ALONE. Same session,
-    two working paths, and the gate sees two keys where the registry sees one
-    slot. Both turns are admitted, the second's ``register_turn`` overwrites the
-    slot, and ``should_emit_progress`` then reports False for a turn that is
-    still running -- the exact-Turn attribution reaches the filter and is
-    discarded there.
+    Two identifiers that look like the same thing are not. The admission gate
+    keys on ``BaseAgent.runtime_turn_key``, the COMPOSITE identity
+    ``<base>:<working_path>``; codex's ``_active_turns`` keys on
+    ``request.base_session_id`` ALONE. Same session, two working paths, and the
+    gate hands out two permits where the registry has one slot. That much is
+    real and is driven in parts (1)-(3) below.
 
-    Round six's error is worth naming because it is a new one rather than a
-    fifth repeat. It was not a lossy projection read as an event stream; it was
-    a correct fact about one key ("the gate holds it for the whole turn")
-    carried across to a DIFFERENT key without checking that the keys are the
-    same. And the assertion that was supposed to check exactly that read a
-    substring out of ``_runtime_turn_key_for_base_session`` -- a function the
-    gate never calls, which computes ``<base>:<cwd>`` for the registry's own
-    bookkeeping. It passed, it looked like a key-space tie, and it was neither.
+    What round eight then inferred from it -- that the second turn silently
+    mutes a first turn which is still running -- is RETRACTED here, and part (4)
+    is what retracts it. ``CodexAgent.handle_message`` wraps its whole body in
+    ``self._session_locks[request.base_session_id]``, which is the registry's
+    key space, not the gate's; and inside that lock it sends ``turn/interrupt``
+    for any active turn before ``turn/start``. So the second request cannot even
+    reach the backend until the first has registered, and when it does reach it
+    the first turn is interrupted first. ``should_emit_progress`` returning
+    False for turn-1 is therefore correct filtering of an interrupted turn, not
+    a discarded live signal.
 
-    So every step below is driven on production objects: the two key spaces are
-    compared by calling them, the concurrency is shown by running the real
-    ``AgentService.handle_message``, and the silencing is shown on the real
-    ``CodexTurnRegistry``.
+    The real consequence of the key split is smaller and different: a cwd change
+    converts "queue behind the gate and run after" into "interrupt the running
+    turn and replace it". That is a behavioural difference worth recording, and
+    it is what part (4) actually observes.
+
+    This claim has now flipped three times -- correct, defective, correct --
+    across rounds six, eight and nine, and every flip was argued from the two
+    ends of a mechanism rather than from the mechanism. Rounds six and eight
+    both reasoned about ``_active_turns`` and about the gate without ever
+    running ``handle_message``, which is the code that sits between them. A
+    claim that keeps flipping is not an unlucky claim; it is a claim whose
+    subject was never driven end to end. So part (4) drives it, on the real
+    method, with only the collaborators it needs to reach the network stubbed.
     """
+    import inspect as _inspect
+
     from modules.agents.base import BaseAgent
     from modules.agents.codex.session import CodexSessionManager
 
@@ -1141,6 +1150,7 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
             context=types.SimpleNamespace(platform_specific={}),
             message="m",
             base_session_id="base-1",
+            session_key="sk",
             working_path=working_path,
             composite_session_id=f"base-1:{working_path}",
         )
@@ -1169,10 +1179,12 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
     assert registry.get_active_turn("base-1") == "turn-1"
     assert registry.should_emit_progress("turn-1") is True
 
-    # (3) Both turns are LIVE at once. Two distinct gate keys means two gates,
-    # so the second request enters the backend while the first is still inside
-    # it -- the state the round-four narrowing said could not occur. Driven on
-    # the real service with the real key function.
+    # (3) THE GATE admits both at once. Two distinct gate keys means two gates,
+    # so the shared admission layer lets the second request through while the
+    # first is still inside the backend. Note the scope: this is a fact about
+    # ``AgentService``, and it is the whole of what the shared layer decides.
+    # Whether two codex TURNS then coexist is decided further in, by part (4) --
+    # rounds six and eight both stopped here and guessed at the rest.
     class _CodexKeyedAgent(_AdmissionAgent):
         name = "codex"
 
@@ -1212,17 +1224,115 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
 
     assert asyncio.run(_drive()) == 2
 
-    # (4) The consequence. The second live turn registers into the same slot and
-    # evicts the first, which is still running -- so its progress is filtered
-    # out. ``should_emit_progress`` is therefore lossy for LIVE turns, and the
-    # round-six claim that it is "correct as written" is retracted.
+    # (4) ...and codex's own lock closes what the gate opened. Driven on the
+    # REAL ``CodexAgent.handle_message``: only the collaborators that would
+    # reach a subprocess or a chat surface are stubbed, and the control flow
+    # under test -- the per-base-session lock, the active-turn lookup, the
+    # interrupt, the ordering of the two -- is production code.
+    #
+    # The stub for ``_start_turn`` is the one substitution that could beg the
+    # question, so it is pinned to the real method: it sends ``turn/start`` and
+    # then registers the turn from the response, which is what the real body
+    # does, asserted below rather than assumed.
+    real_start = _inspect.getsource(CodexAgent._start_turn)
+    assert 'await transport.send_request("turn/start"' in real_start
+    assert "self._turn_registry.finalize_turn_start_response(turn_id, request)" in real_start
+    assert real_start.index('send_request("turn/start"') < real_start.index(
+        "finalize_turn_start_response"
+    ), "the stub below registers after sending; the real one must too"
+
+    async def _drive_handle_message():
+        calls: list[tuple[str, str]] = []
+        first_start_reached = asyncio.Event()
+        release_first_start = asyncio.Event()
+
+        class _Transport:
+            async def send_request(self, method, params):
+                turn = params.get("turnId", "")
+                calls.append((method, turn))
+                if method == "turn/start":
+                    if not first_start_reached.is_set():
+                        first_start_reached.set()
+                        await release_first_start.wait()
+                        return {"id": "turn-1"}
+                    return {"id": "turn-2"}
+                return {}
+
+        transport = _Transport()
+        live = object.__new__(CodexAgent)
+        live.controller = types.SimpleNamespace(model_hub_runtime=None)
+        live._session_locks = {}
+        live._session_mgr = CodexSessionManager()
+        live._session_mgr.set_thread_id("base-1", "thread-1")
+        live._turn_registry = CodexTurnRegistry()
+        live._event_handler = types.SimpleNamespace(
+            clear_pending=lambda turn_id: None,
+            _release_stream_turn=lambda ctx: None,
+        )
+
+        async def _noop_async(*a, **kw):
+            return None
+
+        async def _get_transport(*a, **kw):
+            return transport
+
+        live._get_or_create_transport = _get_transport
+        live._touch_transport_activity = lambda *a, **kw: None
+        live._delete_ack = _noop_async
+        live._refresh_thread_developer_instructions_if_needed = _noop_async
+        live._bind_runtime_agent_session_id = lambda *a, **kw: None
+        live._remove_ack_reaction = _noop_async
+
+        async def _fake_start_turn(_transport, request, thread_id):
+            live._turn_registry.begin_turn_start(request, thread_id)
+            resp = await _transport.send_request(
+                "turn/start", {"threadId": thread_id, "input": request.message}
+            )
+            live._turn_registry.finalize_turn_start_response(resp["id"], request)
+            return thread_id
+
+        live._start_turn = _fake_start_turn
+
+        first = asyncio.create_task(live.handle_message(first_request))
+        await asyncio.wait_for(first_start_reached.wait(), timeout=2)
+
+        second = asyncio.create_task(live.handle_message(second_request))
+        await asyncio.sleep(0.05)
+        # THE RETRACTION. The gate let this second request through (part 3), but
+        # codex's own lock is keyed by base session -- the registry's key space,
+        # not the gate's -- so it has made no backend call at all. There is no
+        # window in which two codex turns are live.
+        blocked = list(calls)
+
+        release_first_start.set()
+        await asyncio.gather(
+            *(asyncio.wait_for(t, timeout=2) for t in (first, second)),
+            return_exceptions=True,
+        )
+        return blocked, calls, live._turn_registry
+
+    blocked, calls, live_registry = asyncio.run(_drive_handle_message())
+    assert blocked == [("turn/start", "")], blocked
+    # And when it is finally admitted, it interrupts turn-1 BEFORE starting
+    # turn-2. So the slot overwrite lands on a turn that has been told to stop.
+    assert calls == [
+        ("turn/start", ""),
+        ("turn/interrupt", "turn-1"),
+        ("turn/start", ""),
+    ], calls
+    assert live_registry.get_active_turn("base-1") == "turn-2"
+    assert live_registry.should_emit_progress("turn-1") is False
+    assert live_registry.should_emit_progress("turn-2") is True
+
+    # The same eviction on the bare registry, for contrast: identical end state,
+    # and it is ONLY the interrupt above that makes it correct rather than lossy.
+    # Round eight asserted this half and called the difference a defect.
     registry.register_turn("turn-2", second_request)
     assert registry.get_active_turn("base-1") == "turn-2"
-    assert registry.get_turn("turn-1") is not None  # turn-1 is not gone, just mute
+    assert registry.get_turn("turn-1") is not None  # still present, just mute
     assert registry.should_emit_progress("turn-1") is False
-    assert registry.should_emit_progress("turn-2") is True
 
-    # (5) And the registry's own derived key cannot name the silenced turn
+    # (5) And the registry's own derived key cannot name the REPLACED turn
     # either, because ``handle_message`` moves the tracked cwd to whatever the
     # latest request carried. Driven on the real session manager, replacing the
     # substring read this probe was written to retire.
@@ -1235,7 +1345,8 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
     assert codex._runtime_turn_key_for_base_session("base-1") == "base-1:/w2"
     # One base session, so ONE derived key -- and it is the newer turn's. Any
     # consumer that enumerates runtime keys to find live turns (a stop, a
-    # timeout sweep) cannot even address the turn that is being silenced.
+    # timeout sweep) cannot even address the turn that was just interrupted,
+    # which matters because an interrupt is a request, not a completion.
     assert codex.runtime_turn_keys_for_session_key("sk") == {"base-1:/w2"}
     assert gate_keys[0] not in codex.runtime_turn_keys_for_session_key("sk")
 
@@ -1245,3 +1356,142 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
         "self._session_mgr.set_cwd(request.base_session_id, request.working_path)"
         in inspect.getsource(CodexAgent.handle_message)
     )
+
+
+def test_participating_run_attribution_is_resolved_per_turn_not_per_session():
+    """HFR-197 / Q2: the "and participating Runs" half of the question.
+
+    Q2 asks which events can be attributed to the exact Turn AND PARTICIPATING
+    RUNS. Every probe before this one answered the first half and none answered
+    the second, and the verdict was written as though the two were one claim.
+    They are not: a Turn token is a token, and a Run id is a row.
+
+    They are, however, joined by a mechanism, and the mechanism is what makes
+    the second half cheap once the first is settled. Emission-time Run
+    attribution has exactly two sources, both on the emit context that all three
+    backends already carry:
+
+      * ``_owned_agent_run_ids`` reads ``accepted_agent_run_ids`` straight off
+        ``context.platform_specific``; and
+      * ``_durable_accepted_agent_run_ids`` reads the ``turn_token`` off the
+        SAME payload and looks the Runs up per Turn in the delivery store.
+
+    So Run attribution is derived from Turn attribution, per emit. That is the
+    claim, and the point of driving it is that a derivation can be exact at one
+    end and lossy at the other -- if the durable read were keyed by session, or
+    if the in-context list survived a Turn change, the Runs would smear across
+    Turns even though the tokens did not.
+    """
+    from core.message_dispatcher import ConsolidatedMessageDispatcher, _owned_agent_run_ids
+    from modules.agents.base import AGENT_TURN_TOKEN
+    from modules.agents.claude_agent import ClaudeAgent
+
+    # (1) The durable read is keyed by the TURN token, and by nothing else.
+    looked_up: list[str] = []
+
+    class _Turns:
+        def accepted_agent_run_ids_for_turn(self, turn_id):
+            looked_up.append(turn_id)
+            return {"tok-a": ["run-a1", "run-a2"], "tok-b": ["run-b1"]}.get(turn_id, [])
+
+    dispatcher = object.__new__(ConsolidatedMessageDispatcher)
+    dispatcher.controller = types.SimpleNamespace(session_turns=_Turns())
+
+    def _ctx(payload):
+        return types.SimpleNamespace(platform_specific=payload)
+
+    read = ConsolidatedMessageDispatcher._durable_accepted_agent_run_ids
+    assert read(dispatcher, _ctx({"turn_token": "tok-a"})) == ["run-a1", "run-a2"]
+    assert read(dispatcher, _ctx({"turn_token": "tok-b"})) == ["run-b1"]
+    assert looked_up == ["tok-a", "tok-b"]
+
+    # Two emits from ONE session but different Turns therefore resolve to
+    # different Run sets -- which is the whole of "participating Runs, exactly".
+    # And with no Turn token there is no Run attribution at all: the derivation
+    # is load-bearing, not a decoration on an answer that holds without it.
+    assert read(dispatcher, _ctx({"turn_token": ""})) == []
+    assert read(dispatcher, _ctx({})) == []
+    assert looked_up == ["tok-a", "tok-b"]  # not even attempted
+
+    # (2) The in-context carrier is replaced per Turn, not merged. Driven on
+    # claude, because claude is the backend whose emit context is REUSED across
+    # turns -- the one place a stale Run id could survive a Turn change.
+    adopt = ClaudeAgent._adopt_pending_turn_token
+    reused = types.SimpleNamespace(
+        platform_specific={AGENT_TURN_TOKEN: "tok-a", "accepted_agent_run_ids": ["run-a1"]}
+    )
+    pending_b = types.SimpleNamespace(
+        context=types.SimpleNamespace(
+            platform_specific={AGENT_TURN_TOKEN: "tok-b", "accepted_agent_run_ids": ["run-b1"]}
+        )
+    )
+    adopt(reused, pending_b)
+    assert reused.platform_specific[AGENT_TURN_TOKEN] == "tok-b"
+    assert reused.platform_specific["accepted_agent_run_ids"] == ["run-b1"]
+
+    # ...and a Turn with NO Runs clears the previous Turn's, rather than
+    # inheriting them. A merge here would attribute turn B's output to turn A's
+    # Run, which is the exact failure the question is asking about.
+    pending_c = types.SimpleNamespace(
+        context=types.SimpleNamespace(platform_specific={AGENT_TURN_TOKEN: "tok-c"})
+    )
+    adopt(reused, pending_c)
+    assert reused.platform_specific[AGENT_TURN_TOKEN] == "tok-c"
+    assert "accepted_agent_run_ids" not in reused.platform_specific
+
+    # The copy is defensive, so mutating the emit context cannot write back into
+    # the pending request's own attribution.
+    adopt(reused, pending_b)
+    reused.platform_specific["accepted_agent_run_ids"].append("run-x")
+    assert pending_b.context.platform_specific["accepted_agent_run_ids"] == ["run-b1"]
+
+    # (3) And the consumer reads that same payload key, so the carrier and the
+    # reader are the same field rather than two fields with one name.
+    assert _owned_agent_run_ids(reused.platform_specific) == ["run-b1", "run-x"]
+    assert _owned_agent_run_ids({}) == []
+
+    # (4) Codex, joined end to end rather than argued. HFR-183 established that
+    # a notification resolves to its own turn's REQUEST; the step that was never
+    # taken is reading the Run ids off what came back. Two turns on one base
+    # session, each carrying its own Runs, resolved by ``turnId``:
+    registry = CodexTurnRegistry()
+    codex_requests = {
+        "turn-1": types.SimpleNamespace(
+            base_session_id="base-1",
+            context=_ctx({AGENT_TURN_TOKEN: "tok-a", "accepted_agent_run_ids": ["run-a1"]}),
+        ),
+        "turn-2": types.SimpleNamespace(
+            base_session_id="base-1",
+            context=_ctx({AGENT_TURN_TOKEN: "tok-b", "accepted_agent_run_ids": ["run-b1"]}),
+        ),
+    }
+    for turn_id, request in codex_requests.items():
+        registry.register_turn(turn_id, request)
+    codex_agent = object.__new__(CodexAgent)
+    codex_agent._turn_registry = registry
+    codex_agent._session_mgr = types.SimpleNamespace(
+        find_base_session_id_for_thread=lambda _thread: "base-1"
+    )
+    resolved_runs = {
+        turn_id: _owned_agent_run_ids(
+            codex_agent._find_request_for_notification(
+                "item/completed", {"turnId": turn_id, "threadId": "thread-1"}
+            ).context.platform_specific
+        )
+        for turn_id in codex_requests
+    }
+    assert resolved_runs == {"turn-1": ["run-a1"], "turn-2": ["run-b1"]}, resolved_runs
+    # ...and the durable side lands the same way, from the token on that same
+    # resolved context rather than from the session.
+    assert [
+        read(dispatcher, codex_requests[t].context) for t in ("turn-1", "turn-2")
+    ] == [["run-a1", "run-a2"], ["run-b1"]]
+
+    # (5) Scope, stated rather than implied. OpenCode is NOT re-driven here: its
+    # emit context is ``request.context`` (HFR-183), so it is the same object
+    # this test already read, and the pointer below is a pointer, not evidence.
+    # What is NOT settled anywhere is whether the delivery store's per-Turn rows
+    # are themselves complete -- a different question, on Q5's boundary.
+    from modules.agents.opencode.poll_loop import OpenCodePollLoop
+
+    assert "request.context" in inspect.getsource(OpenCodePollLoop.run_prompt_poll)
