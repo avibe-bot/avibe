@@ -282,6 +282,43 @@ def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | 
     return None
 
 
+def _resolved_test_flag(
+    node: ast.ClassDef, module_body: list[ast.stmt], seen: frozenset[str] = frozenset()
+) -> bool | None:
+    """``__test__`` as pytest would READ it -- through the bases, not off the body.
+
+    Round 20. ``_test_flag`` reads one class body, and pytest reads an
+    ATTRIBUTE: ``getattr(obj, "__test__", True)`` walks the MRO, so
+    ``class TestChild(Base)`` with ``__test__ = False`` on ``Base`` is not
+    collected and neither of its methods runs. Reading only the child's own
+    body called it collectible, and both readers of this predicate -- the corpus
+    walk that discovers this unit's tests and the resolver that validates a
+    cited node id -- would then advertise those methods as executable coverage.
+    That is the same silent-citation rot the opt-out check was added to stop,
+    one attribute lookup deeper than round 14 looked.
+
+    Only LOCALLY defined bases are followed, in declaration order, which is the
+    same boundary ``_unittest_ancestry`` draws and for the same reason: a base
+    imported from elsewhere cannot be resolved from this AST, and a false
+    rejection is loud while a false acceptance is silent.
+    """
+
+    own = _test_flag(node.body)
+    if own is not None:
+        return own
+    local = {n.name: n for n in module_body if isinstance(n, ast.ClassDef)}
+    for base in node.bases:
+        if not isinstance(base, ast.Name) or base.id in seen:
+            continue
+        parent = local.get(base.id)
+        if parent is None:
+            continue
+        inherited = _resolved_test_flag(parent, module_body, seen | {base.id})
+        if inherited is not None:
+            return inherited
+    return None
+
+
 def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
     """pytest's own default rule, read off the AST: ``Test*`` or a TestCase base.
 
@@ -299,8 +336,11 @@ def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
     with the flag really is collected -- and does NOT excuse it from the
     constructor rule, which refuses ``Test``-named and flag-opted-in classes
     alike.
+
+    Round 20 reads the flag through ``_resolved_test_flag`` rather than off the
+    class body, because pytest reads an attribute and attributes are inherited.
     """
-    flag = _test_flag(node.body)
+    flag = _resolved_test_flag(node, module_body)
     if flag is False:
         return False
     if _unittest_ancestry(node, module_body):
@@ -933,19 +973,204 @@ def test_the_plans_reserved_scenario_range_is_actually_free() -> None:
     reserved = range(int(line.group(3)), int(line.group(4)) + 1)
     assert occupied.stop == reserved.start, (occupied, reserved)
 
-    pr7r_modules = {
-        "tests/test_run_terminal_truth_matrix.py",
-        "tests/test_run_terminal_truth_evidence_probes.py",
-    }
-    ours = {
-        int(row["id"].removeprefix("HFR-"))
-        for row in scenarios
-        if row["test"].split("::")[0] in pr7r_modules
-    }
+    ours = _pr7r_owned_ids(scenarios)
     assert ours, "no catalog row points at a PR7R module"
     assert ours <= set(occupied), sorted(ours - set(occupied))
     taken = {int(row["id"].removeprefix("HFR-")) for row in scenarios}
     assert not (taken & set(reserved)), sorted(taken & set(reserved))
+
+
+#: A span starting at this unit's first id. Matched per LINE, not over the whole
+#: document: the plan also recites the span historically ("the headline range
+#: SAT at HFR-180…187") and hypothetically ("if HFR-180…219 has been taken by
+#: then"), and neither is a claim about what is occupied now.
+_OCCUPIED_RANGE = re.compile(r"`HFR-180…(\d+)`")
+
+#: A line only CLAIMS the current occupation if it says so. Both live
+#: statements and the allocation line carry this word; the historical and
+#: hypothetical recitals do not.
+_OCCUPANCY_CLAIM = re.compile(r"\bincrement\b", re.IGNORECASE)
+
+#: The reserved tail, stated alongside the occupied range in the same two
+#: places. Its low end is a derived fact too: one past the last occupied id.
+_RESERVED_RANGE = re.compile(r"`HFR-(\d+)…219`.{0,20}?\breserved\b")
+
+_PR7R_MODULES = frozenset(
+    {
+        "tests/test_run_terminal_truth_matrix.py",
+        "tests/test_run_terminal_truth_evidence_probes.py",
+    }
+)
+
+
+def _pr7r_owned_ids(scenarios: list[dict]) -> set[int]:
+    """Every scenario number whose catalog row cites a PR7R module."""
+
+    return {
+        int(row["id"].removeprefix("HFR-"))
+        for row in scenarios
+        if row["test"].split("::")[0] in _PR7R_MODULES
+    }
+
+
+def test_every_claim_about_the_occupied_range_agrees_with_the_catalog() -> None:
+    """HFR-209: the plan claims its own id range three times; all three must hold.
+
+    Round 18 found the summary table stale and corrected it. Round 20 found the
+    opening status banner stale in that same commit, in the same words, two
+    dozen lines ABOVE the line round 18 had just fixed -- and the banner is the
+    first thing a follow-up unit reads, so the next author could take an id
+    this unit already owns and file over existing evidence. Scenario ids are
+    stable references; a collision is not a rename away from being repaired.
+
+    Three rounds of the same shape, so the remedy is not a fourth edit. The
+    range is a DERIVED fact -- it is whatever the catalog rows say it is -- and
+    nothing may assert it that this guard does not read. Equality, not "at
+    least": a range wider than the evidence hands the next unit a collision, a
+    narrower one loses evidence, so the only correct value is the exact one.
+    The reserved tail is checked the same way, because it is derived from the
+    same number and drifts with it.
+
+    Only lines CLAIMING current occupancy are read. The plan also recites the
+    span historically -- the headline range once sat at HFR-180 through 187 --
+    and hypothetically, in the note telling a later author what to do if the
+    whole block has been taken. Rewriting history to match today would destroy
+    the record that motivated ``HFR-194``.
+
+    That guard remains the other half and is not duplicated here: it reads the
+    allocation line alone, asking whether occupied abuts reserved and whether
+    reserved is empty. This one asks whether every claim agrees with the
+    catalog. Either passes while the other fails.
+    """
+    yaml = pytest.importorskip("yaml")
+    catalog_path = (
+        Path(__file__).resolve().parent / "scenarios" / "harness_failure_recovery" / "catalog.yaml"
+    )
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    ours = _pr7r_owned_ids(scenarios)
+    assert ours, "no catalog row points at a PR7R module"
+    highest = max(ours)
+
+    claims = [
+        (number, line)
+        for number, line in enumerate(_PLAN.read_text(encoding="utf-8").splitlines(), 1)
+        if _OCCUPANCY_CLAIM.search(line) and _OCCUPIED_RANGE.search(line)
+    ]
+    # Anti-degeneracy. A rewrap that puts the word and the span on different
+    # lines would quietly stop checking one site, which is precisely the
+    # failure mode this guard exists for, so the count is asserted too.
+    assert len(claims) >= 3, (
+        f"only {len(claims)} line(s) claim the occupied range; the banner, the "
+        f"summary table and the allocation line all do, so either a claim was "
+        f"deleted or a rewrap has moved one out of this guard's reach"
+    )
+    stale = [
+        (number, int(value))
+        for number, line in claims
+        for value in _OCCUPIED_RANGE.findall(line)
+        if int(value) != highest
+    ]
+    assert not stale, (
+        f"the catalog gives PR7R ids up to HFR-{highest}, and these lines say "
+        f"otherwise: {stale}. A reader picking the next free id from a stale "
+        f"claim collides with evidence that already exists."
+    )
+
+    tails = [
+        (number, int(value))
+        for number, line in claims
+        for value in _RESERVED_RANGE.findall(line)
+    ]
+    assert tails, "no line states the reserved tail beside the occupied range"
+    detached = [pair for pair in tails if pair[1] != highest + 1]
+    assert not detached, (
+        f"reserved should start at HFR-{highest + 1}, one past the last "
+        f"occupied id, and these lines disagree: {detached}"
+    )
+
+
+#: Modules this capability's catalog already cited without registering, before
+#: PR7R added a rule about it. Written down rather than fixed: they belong to
+#: units that closed long ago, and quietly appending twenty-two entries to a
+#: shared reading list on an evidence-only branch would be a worse change than
+#: the omission. The list is exact in both directions -- nothing new may join
+#: it, and an entry that gets registered must be deleted from it -- so it can
+#: only shrink. Same discipline as ``UNPROVEN_BUDGET``: a number that is wrong
+#: on purpose, in writing, and cannot drift.
+_INDEX_DEBT = frozenset(
+    {
+        "tests/test_agent_steering.py",
+        "tests/test_agent_stop_settlement.py",
+        "tests/test_claude_agent_initiated_turn.py",
+        "tests/test_claude_agent_sessions.py",
+        "tests/test_codex_agent.py",
+        "tests/test_command_handler_user_names.py",
+        "tests/test_controller_dispatch_loop.py",
+        "tests/test_core_services_sessions.py",
+        "tests/test_dispatcher_stream_chunk.py",
+        "tests/test_harness_failure_visibility.py",
+        "tests/test_harness_health_projection.py",
+        "tests/test_inbox_bridge.py",
+        "tests/test_inbox_events.py",
+        "tests/test_message_dispatcher_result_fallback.py",
+        "tests/test_message_dispatcher_scheduled.py",
+        "tests/test_runtime_activation.py",
+        "tests/test_runtime_ownership.py",
+        "tests/test_runtime_recovery.py",
+        "tests/test_runtime_work_supervisor.py",
+        "tests/test_session_activities.py",
+        "tests/test_session_fork.py",
+        "tests/test_ui_server_fastapi.py",
+    }
+)
+
+
+def test_the_capability_index_reaches_every_module_the_catalog_cites() -> None:
+    """HFR-210: the canonical navigation path must reach the cited evidence.
+
+    The catalog is not the entry point. ``tests/scenarios/INDEX.yaml`` is, and
+    it says so in its own first line. Its ``harness_failure_recovery`` entry
+    listed neither of this unit's two modules under ``scenario_tests`` or
+    ``unit_or_contract_tests``, so a reader starting where the repository says
+    to start walked past every HFR-180 and up test while thirty-one catalog
+    rows advertised them as coverage. Coverage nobody can reach fails the way
+    coverage that does not run fails, one directory out.
+
+    Written for the whole capability rather than for PR7R's two files, because
+    a rule that names its own author is the degenerate shape this unit keeps
+    catching itself in. Doing that surfaced twenty-two older modules in the
+    same condition -- a real gap, and not this branch's to close, so it is
+    recorded in ``_INDEX_DEBT`` and pinned exactly rather than waived. What the
+    guard enforces from here is that the gap never grows and that anyone who
+    closes part of it says so.
+    """
+    yaml = pytest.importorskip("yaml")
+    scenarios_dir = Path(__file__).resolve().parent / "scenarios"
+    catalog_path = scenarios_dir / "harness_failure_recovery" / "catalog.yaml"
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+
+    index = yaml.safe_load((scenarios_dir / "INDEX.yaml").read_text(encoding="utf-8"))
+    entries = index["capabilities"] if isinstance(index, dict) else index
+    entry = next(
+        item for item in entries if item.get("id") == "harness_failure_recovery"
+    )
+    listed = set(entry.get("scenario_tests") or []) | set(
+        entry.get("unit_or_contract_tests") or []
+    )
+    cited = {row["test"].split("::")[0] for row in scenarios}
+    missing = cited - listed
+    assert not sorted(missing - _INDEX_DEBT), (
+        f"{sorted(missing - _INDEX_DEBT)} are cited by harness_failure_recovery "
+        f"catalog rows and are not reachable from the capability index, so the "
+        f"repository's own zero-context navigation path omits them"
+    )
+    assert not sorted(_INDEX_DEBT - missing), (
+        f"{sorted(_INDEX_DEBT - missing)} are registered in the index now, or "
+        f"no longer cited; delete them from _INDEX_DEBT in the same commit so "
+        f"the recorded gap stays the real one"
+    )
 
 
 _WORD_COUNTS = {
@@ -1075,6 +1300,21 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "    __test__ = True\n"
         "    def __init__(self): ...\n"
         "    def test_case(self): ...\n"
+        "class MutedBase:\n"
+        "    __test__ = False\n"
+        "class TestInheritedOptOut(MutedBase):\n"
+        "    def test_case(self): ...\n"
+        "class MidBase(MutedBase):\n"
+        "    pass\n"
+        "class TestInheritedTwoDeep(MidBase):\n"
+        "    def test_case(self): ...\n"
+        "class OptedInBase:\n"
+        "    __test__ = True\n"
+        "class InheritedFlagIn(OptedInBase):\n"
+        "    def test_case(self): ...\n"
+        "class TestOverridesBase(MutedBase):\n"
+        "    __test__ = True\n"
+        "    def test_case(self): ...\n"
         "class Owner:\n"
         "    def method(self): ...\n"
         "    def test_case(self): ...\n"
@@ -1182,6 +1422,25 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         ):
             _assert_node_exists(f"{rel}::{opted_out}::test_case")
 
+    # Round 20: the same flag reached through a BASE. pytest reads an
+    # attribute, and attributes are inherited, so ``TestInheritedOptOut`` is
+    # collected by nobody while its name says otherwise -- checked against this
+    # repo's pytest, which collects exactly the two classes asserted positive
+    # below and neither of the two asserted negative. Four cases, because the
+    # narrow fix is wrong three ways: the base may be one hop away or several,
+    # an inherited opt-IN admits a class whose name says nothing, and a child's
+    # own flag outranks whatever it inherited.
+    for node_id in (
+        f"{rel}::InheritedFlagIn::test_case",
+        f"{rel}::TestOverridesBase::test_case",
+    ):
+        _assert_node_exists(node_id)
+    for inherited_out in ("TestInheritedOptOut", "TestInheritedTwoDeep"):
+        with pytest.raises(
+            AssertionError, match=f"pytest does not collect class '{inherited_out}'"
+        ):
+            _assert_node_exists(f"{rel}::{inherited_out}::test_case")
+
     # The same flag on a FUNCTION, which is written one scope out from the
     # function it applies to -- pytest reads an attribute and does not care
     # which statement set it, so the resolver reads the enclosing body.
@@ -1202,12 +1461,16 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "AliasedTests::test_case",
         "Derived::test_case",
         "FlaggedIn::test_case",
+        "InheritedFlagIn::test_case",
+        "TestOverridesBase::test_case",
     }, discovered
     for absent in (
         "Owner::test_case",
         "Helper::test_case",
         "TestOptOut::test_case",
         "OptOutTests::test_case",
+        "TestInheritedOptOut::test_case",
+        "TestInheritedTwoDeep::test_case",
         "TestFlaggedCtor::test_case",
         "test_muted",
     ):

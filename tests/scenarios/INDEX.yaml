@@ -39,6 +39,11 @@ capabilities:
       - tests/test_agent_run_target.py
       - tests/test_watches.py
       - tests/test_cli_watch_command.py
+      # PR7R's evidence modules. The catalog rows for HFR-180…210 cite these
+      # two and nothing else, so a reader following the capability index to the
+      # coverage those rows advertise has to be able to reach them from here.
+      - tests/test_run_terminal_truth_evidence_probes.py
+      - tests/test_run_terminal_truth_matrix.py
   - id: harness_command_task
     name: Scheduled command tasks and their failure visibility
     status: active

@@ -406,8 +406,17 @@ observations:
       outbound dispatcher, so one runtime key admits one live turn at a time
       (driven in HFR-191) and the slot is not lossy for live turns. The filter is
       correct as written. On the attribution question the plan's all-or-nothing
-      rule is therefore SATISFIED and a generic inactivity timeout is no longer
-      blocked by Q2; the per-Turn timestamp is the work that is left.
+      rule is therefore satisfied ON LIVE DISPATCH, and round 20 retracts the
+      unqualified form of that sentence, which said the rule was "SATISFIED and
+      a generic inactivity timeout is no longer blocked by Q2". Round 17 added
+      the live-dispatch qualifier to this observation's OPENING and left its
+      CONCLUSION standing, so the canonical record still cleared the timeout
+      while the final Q2 verdict and HFR-205 hold both opencode cells defective
+      across a restart. All-or-nothing means all: the rule is UNSATISFIED while
+      the restored OpenCode poll loop emits without its Turn identity, and a
+      generic inactivity timeout stays blocked on that. Two pieces of work are
+      left, not one -- the restart remediation, and the per-Turn timestamp that
+      is all the LIVE path still owes.
       This corrects the same observation THREE times, all three the same way: a
       lossy base-session projection was read and a conclusion about the event
       stream was drawn from it -- ``_active_turns[base]`` for codex, then, after
@@ -1333,6 +1342,70 @@ observations:
       Rejected: nothing. The finding was real and in scope; it did not ask for
       a fix to PR7R-F1 or PR7R-F2, which would have been out of scope by the
       plan's own boundary.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
+      and is still deliberately untouched (HFR-OBS-028).
+  - id: HFR-OBS-045
+    area: run-terminal-truth
+    summary: >-
+      Round 20, five findings, all five accepted, nothing rejected. Two new
+      scenario ids, HFR-209 and HFR-210. No verdict move and no budget move --
+      UNPROVEN_BUDGET stays 168 and nothing here changes a cell's proof kind.
+      FINDING ONE, a probe claimed a suspension and proved a source string.
+      HFR-180 justified the window PR7R-F1 needs by matching an ``await`` in
+      ``get_or_create_claude_session`` and calling the yield unconditional. An
+      ``await`` is not a suspension point and an uncontended ``asyncio.Lock``
+      acquires on a fast path that never reaches the event loop, so on a quiet
+      runtime the resolver finishes in one scheduler step and there is no
+      window. Retracted and enrolled. The probe now drives the real method
+      under a live loop in both states: uncontended it must complete within one
+      scheduler step, and with the generation lock held a second turn must
+      still be parked after eight. Both directions, because either alone is
+      satisfied by a method that never runs. CONTENTION opens the window, not
+      the ``await`` -- the finding survives for a better reason than the one it
+      was filed with.
+      FINDING TWO, ``_collectible_class`` read ``__test__`` off the class body
+      and pytest reads an ATTRIBUTE. ``getattr(obj, "__test__", True)`` walks
+      the MRO, so a class inheriting the opt-out is collected by nobody while a
+      citation naming it resolves green, which is the failure HFR-198 exists to
+      prevent displaced one inheritance hop. Resolved through locally defined
+      bases in declaration order, the same boundary ``_unittest_ancestry``
+      draws. Four fixture classes rather than one, because the narrow fix is
+      wrong three further ways: the base may be several hops up, an inherited
+      opt-IN admits a class whose name says nothing, and a child's own flag
+      outranks what it inherited. Checked against this repository's real
+      pytest.
+      FINDING THREE, the plan's opening banner still advertised the old id
+      range -- stale in the same commit, in the same words, two dozen lines
+      above the summary table round 18 had just corrected. Third round for the
+      shape, so HFR-209 makes the range a DERIVED fact instead: every line
+      claiming current occupancy must state exactly the largest id the catalog
+      gives this unit, and the reserved tail must start one past it. Equality
+      both ways, since a range wider than the evidence hands the next unit a
+      collision and a narrower one loses evidence. Historical and hypothetical
+      recitals of the span are excluded on purpose; rewriting those to match
+      today would destroy the record that motivated HFR-194.
+      FINDING FOUR, the capability index reached neither evidence module.
+      INDEX.yaml is the entry point and says so in its own first line, while
+      thirty-one catalog rows advertised coverage a reader following that path
+      could not get to. Both modules registered and HFR-210 written for the
+      whole capability, not for this unit's two files, because a rule that
+      names its own author is the degenerate shape this unit keeps catching
+      itself in. That surfaced twenty-two older modules in the same condition:
+      a real gap, not this branch's to close, pinned exactly in ``_INDEX_DEBT``
+      rather than waived. Nothing may join it and an entry that gets registered
+      must be deleted from it in the same commit, so it can only shrink.
+      FINDING FIVE, this catalog's own record still cleared the inactivity
+      timeout. See HFR-OBS-024, corrected in place.
+      THE DURABLE RULE, a qualifier does not travel. Round 17 narrowed a
+      paragraph's opening and round 18 narrowed a verdict word, and both times
+      the sentence a reader acts on -- the conclusion, the banner -- kept the
+      unqualified form for three more rounds. Findings three, four and five are
+      one shape: a fact restated in a second artefact and corrected only in the
+      first. Two of them became mechanical rules here rather than edits, which
+      is the only move that has converged on this in twenty rounds.
+      Rejected: nothing. None of the five asked for a fix to PR7R-F1 or
+      PR7R-F2, which would have been out of scope by the plan's own boundary.
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
       and is still deliberately untouched (HFR-OBS-028).

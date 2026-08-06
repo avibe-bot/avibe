@@ -2973,6 +2973,42 @@ scenarios:
     # way; the rule is not "never bind a turn", it is "this answer is Run-scoped and has to
     # say so".
     test: tests/test_run_terminal_truth_matrix.py::test_q4s_evidence_binds_a_run_and_never_a_turn
+  - id: HFR-210
+    name: the capability index reaches every module the catalog cites
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Round 20's fourth finding. This catalog is not the entry point -- INDEX.yaml is, and it
+    # says so itself: "Read this file first." Its harness_failure_recovery entry listed
+    # neither PR7R module, so a reader following the repository's own zero-context navigation
+    # path walked past every HFR-180-and-up test while these rows advertised them as
+    # coverage. Coverage nobody can reach fails the same way coverage that does not run
+    # fails, one directory out.
+    # RULE: every module any row here cites must appear under this capability in INDEX.yaml.
+    # Written for the whole capability rather than for PR7R's two files on purpose: a rule
+    # that names its own author is the degenerate shape this unit keeps catching itself in.
+    test: tests/test_run_terminal_truth_matrix.py::test_the_capability_index_reaches_every_module_the_catalog_cites
+  - id: HFR-209
+    name: every claim about the occupied id range agrees with the catalog
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Round 20's third finding, and the third round in a row for the same shape. Round 6 left
+    # the allocation line stale and HFR-194 was written for it; round 18 found the summary
+    # table stale and edited it; round 20 found the opening banner stale in that same commit,
+    # in the same words, two dozen lines above the line round 18 had just corrected. An
+    # edit-per-site does not converge, because the range is restated wherever it is useful.
+    # RULE: the range is DERIVED -- it is whatever the catalog rows give this unit -- so
+    # nothing may claim it that the guard does not read, and the check is equality: too wide
+    # hands the next unit a collision, too narrow loses evidence. The reserved tail is
+    # derived from the same number and checked beside it.
+    # Only lines CLAIMING current occupancy are read. The plan also recites the span
+    # historically and hypothetically, and rewriting those to match today would destroy the
+    # record that motivated HFR-194. Anti-degeneracy: the count of claim sites is asserted,
+    # so a rewrap that hides one from the regex fails rather than passing quietly.
+    test: tests/test_run_terminal_truth_matrix.py::test_every_claim_about_the_occupied_range_agrees_with_the_catalog
   - id: HFR-208
     name: the plan's verdict carries the same scope qualifier as the answer
     status: covered

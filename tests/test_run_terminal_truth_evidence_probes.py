@@ -251,6 +251,18 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     -- and the second turn on a warm session waits on the per-generation async
     lock inside ``get_or_create_claude_session`` before anything stamps it
     active. Both halves are now driven or read off production below.
+
+    Round 20 retracted "the yield is unconditional and unbounded", which round
+    4 wrote and which was a claim about suspension standing on a match against
+    source text. An ``await`` is not a suspension point, and an uncontended
+    ``asyncio.Lock`` acquires without ever yielding, so a quiet runtime runs
+    the whole resolver in one scheduler step and the window does not exist
+    there. What makes it a window is CONTENTION on the generation lock, which
+    is the warm second turn this fixture already describes -- so the real
+    resolver is now run twice under a live event loop, once with the lock free
+    and once with it held, and the two outcomes are asserted. The uncontended
+    case is asserted as FINISHING, not as a wart to be tolerated: it is the
+    half that shows why reading the source could not carry the claim.
     """
     # The race, read off production instead of assumed. ``mark_session_active``
     # is what fills ``claude_active_sessions``; it is called only after
@@ -277,14 +289,60 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
             ast.parse(textwrap.dedent(inspect.getsource(ClaudeAgent.handle_message)))
         )
     )
-    # The yield is unconditional and unbounded: EVERY path through
-    # ``get_or_create_claude_session`` -- warm reuse included -- first acquires
-    # the per-generation async lock, and the retry path additionally waits on
-    # receiver cleanup. So the window is as wide as whatever else holds that
-    # lock, not a few instructions.
+    # Round 20 retracts the sentence that used to stand here, "the yield is
+    # unconditional and unbounded", and review was right about why: it is a
+    # claim about SUSPENSION resting on an assertion about source text. An
+    # uncontended ``asyncio.Lock`` acquires on a fast path that never returns
+    # to the event loop, so on a quiet runtime the awaited call completes in
+    # one step and nothing can interleave with it. The window is the CONTENDED
+    # lock -- which is precisely the warm second-turn state staged above -- and
+    # both halves are now DRIVEN against the real resolver instead of argued.
     resolve_source = inspect.getsource(SessionHandler.get_or_create_claude_session)
     assert "async with self._claude_runtime_generation_lock(composite_key):" in resolve_source
     assert "await self._wait_for_claude_receiver_cleanup(retry.composite_key)" in resolve_source
+
+    async def _drive_generation_lock() -> tuple[bool, bool]:
+        handler = object.__new__(SessionHandler)
+        handler.claude_runtime_generation_locks = {}
+        resolved = object()
+
+        async def _locked(*args, **kwargs):
+            return resolved
+
+        handler._claude_runtime_generation_key = lambda context, subagent: "slack_a:/w"
+        handler._get_or_create_claude_session_locked = _locked
+
+        # Uncontended. One scheduler step is enough for the whole call, which
+        # is the half that makes reading the source insufficient: the ``await``
+        # is there and it does not suspend.
+        free = asyncio.create_task(handler.get_or_create_claude_session(None))
+        await asyncio.sleep(0)
+        uncontended_finished_in_one_step = free.done()
+        assert await free is resolved
+
+        # Contended: the first generation holds the lock, the second turn is
+        # admitted and parks INSIDE session resolution. Eight scheduler steps,
+        # so "not done" is a park and not a slow start.
+        lock = handler._claude_runtime_generation_lock("slack_a:/w")
+        await lock.acquire()
+        second = asyncio.create_task(handler.get_or_create_claude_session(None))
+        for _ in range(8):
+            await asyncio.sleep(0)
+        parked = not second.done()
+        lock.release()
+        assert await second is resolved
+        return uncontended_finished_in_one_step, parked
+
+    uncontended_finished_in_one_step, parked = asyncio.run(_drive_generation_lock())
+    assert uncontended_finished_in_one_step, (
+        "an uncontended acquire suspended after all; if that changes, the "
+        "retraction above is what needs rereading, not this assertion"
+    )
+    assert parked, (
+        "a second turn did not park inside session resolution while the "
+        "generation lock was held, so the window PR7R-F1 depends on is not a "
+        "window and the finding needs rereading"
+    )
 
     # REACHABILITY, which the previous draft left to the reader and review was
     # right to challenge. The state below -- a client registered in

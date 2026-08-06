@@ -917,6 +917,32 @@ RETRACTED_PHRASINGS: Final = (
         "citations for that. Say which SCOPE the recorded fact belongs to; "
         "every Turn-level pre-terminal fact is open.",
     ),
+    # Round 20's other row, and the one that shows why a qualifier added to a
+    # paragraph's OPENING does not travel to its CONCLUSION. Round 17 narrowed
+    # the claim to live dispatch at the top of HFR-OBS-024 and left the closing
+    # sentence clearing the timeout outright, so the canonical record and the
+    # final verdict disagreed for three rounds. Enrolled by its consequence,
+    # not its hedge: what has to stay unsayable is the thing an implementer
+    # would act on.
+    (
+        "no longer blocked by q2",
+        "round 20",
+        "round 8's release of the generic inactivity timeout. All-or-nothing "
+        "means all, and ``HFR-205`` holds both opencode cells defective across "
+        "a restart, so the rule is unsatisfied and the timeout is still "
+        "blocked. Two pieces of work remain, not one: the restart remediation, "
+        "and the per-Turn timestamp the live path owes.",
+    ),
+    (
+        "the yield is unconditional",
+        "round 20",
+        "round 4's account of the window ``PR7R-F1`` needs, asserted by "
+        "matching source text. An ``await`` is not a suspension point and an "
+        "uncontended ``asyncio.Lock`` acquires without yielding, so a quiet "
+        "runtime runs the resolver in one scheduler step. Contention on the "
+        "generation lock is what opens the window, and ``HFR-180`` now drives "
+        "the real resolver both ways under a live loop.",
+    ),
     # Round 19's row, and it is a COUNT rather than a claim about the system.
     # Enrolled all the same: "two ways" is the sentence that told the next
     # reader the enumeration was closed, and closing an enumeration is the
