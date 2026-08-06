@@ -230,11 +230,11 @@ def main() -> int:
     missing = [name for name in REQUIRED_VENDOR_KEYS if not os.environ.get(name)]
     missing_models = [name for name, value in MODELS.items() if not value]
     parsed_base = urllib.parse.urlparse(BASE_URL)
-    loopback = parsed_base.scheme == "http" and parsed_base.hostname in {"127.0.0.1", "localhost", "::1"}
+    loopback = parsed_base.scheme == "http" and parsed_base.hostname == "127.0.0.1"
     if missing or missing_models or not loopback:
         labels = [*missing, *[f"model:{name}" for name in missing_models]]
         if not loopback:
-            labels.append("CPA_BASE_URL must be an http loopback URL")
+            labels.append("CPA_BASE_URL must use http://127.0.0.1")
         print(json.dumps({"ok": False, "blocked": True, "missing": labels}, sort_keys=True))
         return 2
     results = []
