@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under three review rounds
+#### PR7R status (2026-08-06) — first increment, revised under four review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`) and fed by
@@ -1239,8 +1239,10 @@ the lane, not by the backend. **All 168 cells are `unproven`** and name the
 exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
-The budget moved 28 → 78 → 117 → 168 across three adversarial review rounds, and the
-reason is the most useful thing this increment produced. Cells were marked
+The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
+rounds and held at 168 through the fourth, which changed only how two findings
+are demonstrated and one Q2 verdict. Why it moved is the most useful thing this
+increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
 cell rather than about the cell. The first round found fifty such cells, in four
 substitutions, each of which reads as coverage until the cited test's body is
@@ -1316,14 +1318,38 @@ not once. Two second-order lessons from round 3 about the guard itself:
   `tests/test_scheduled_tasks.py` still has the leaf-only weakness and is
   untouched by this unit.
 
-Rounds 2 and 3 also overturned claims in the other direction, both times the
-same way. Q2's blanket "no backend exposes a per-Turn progress signal" was false
-for codex (round 2) and then false for Workbench-lane opencode (round 3), and
-each time it had been reached by reading a lossy base-session projection rather
-than the event stream that feeds it. Loosening a blocker is as much a review
+Rounds 2, 3 and 4 also overturned claims in the other direction, all three times
+the same way. Q2's blanket "no backend exposes a per-Turn progress signal" was
+false for codex (round 2, `_active_turns[base]` read instead of the `item/*`
+notification), then false for Workbench-lane opencode (round 3,
+`_active_requests[base]` instead of `run_prompt_poll`'s `request.context`), then
+false for Workbench-lane claude (round 4, `session_turn_started[composite_key]`
+instead of `_adopt_pending_turn_token`). Loosening a blocker is as much a review
 outcome as tightening a claim; the transferable part is that the check has to be
-made one level up from where the loss happens — and that naming a mistake once
-is not the same as stopping it.
+made one level up from where the loss happens. Making the same error three times
+after naming it twice is the durable lesson here: a remembered mistake is not a
+guard, so the form that survives is a rule — before concluding a backend exposes
+no signal, read the **producer**, not the map the producer writes into.
+
+Round 4 changed no cell counts and hardened both reproducers, in opposite
+directions. The codex one was **under-staged**: its fixture left `_transports`
+empty and `get_thread_id` returning `None`, which is exactly the dead-app-server
+case the teardown exists to clean up, so the probe was staging the absence of the
+interrupt it then reported missing. Giving it a live transport relocated the
+defect (see PR7R-F2). The claude one **over-claimed**: it asserted an ordering and
+left reachability to the reader. Review challenged it on cold-start grounds and
+was right to — an ordering is not a window until the fixture's combination of
+registries is shown to occur. It does occur, warm-idle, and that is now driven
+rather than argued. Review's *prescription* for it — block the real
+session-creation path and observe the registries — was rejected, because it would
+turn an End probe into a session-creation test and would need a live SDK.
+Accepting a finding's gap while rejecting its prescription is a third review
+outcome, distinct from accepting or rejecting whole.
+
+One method note, since an evidence-only unit has no production diff to stash: new
+assertions are counter-checked by **mutating the production fact** and confirming
+the probe fails. That check needs checking too — one round's mutation appended a
+comment that left the asserted substring intact and produced a false pass.
 
 Question verdicts:
 
@@ -1334,9 +1360,11 @@ Question verdicts:
    premature terminal transition in the IM reservation or backend-acceptance
    path would leave them green. The premature-success claim may be closed once
    an IM-lane acceptance-boundary probe exists — not before.
-2. **Q2 — open, and it still blocks the timeout.** Three of six backend/lane
-   cells key a progress event by Turn and then throw the key away; the other
-   three have no key at all. Codex's `item/*` notifications carry a `turnId`,
+2. **Q2 — open, and it still blocks the timeout, but the split is by LANE, not
+   by backend.** Four of six backend/lane cells key a progress event by Turn:
+   all three backends on the durable Workbench lane, plus codex on direct IM
+   because its id rides the notification rather than the context. Codex's
+   `item/*` notifications carry a `turnId`,
    and `_find_request_for_notification` resolves the participating Run's request
    from it through `get_request_for_turn`, a per-turn map — so the attribution
    exists on both codex lanes. It is discarded one step downstream, by
@@ -1348,15 +1376,23 @@ Question verdicts:
    `_process_message` has already read as `logical_turn_id`. That token is
    stamped only by `core/session_turns.py` and the streaming turn dispatch, both
    Workbench owners, so opencode has the signal on the durable lane and not on
-   direct IM. Claude has neither: `mark_session_turn_started` takes a composite
-   key and no turn, and a second Turn in that key overwrites the first's
-   baseline. The plan's rule requires an exact signal for every backend and lane,
-   so a generic inactivity timeout still may not be specified or implemented —
-   but the remaining work now differs per cell: codex (both lanes) and Workbench
-   opencode need an existing attribution carried through to the stamp, claude
-   needs a signal that does not exist, and IM opencode needs a Turn stamped into
-   its context at all. This verdict has been corrected twice, both times because
-   a base-session projection was read in place of the event stream.
+   direct IM. Claude is the same shape once you look past
+   `mark_session_turn_started`, which does take a composite key and no turn:
+   `_adopt_pending_turn_token` copies the FIFO-head pending request's
+   `turn_token` and attribution keys onto the long-lived receiver context before
+   every assistant and tool emit, so a Workbench claude event names its Turn
+   too. The mechanism is weaker than codex's and the difference matters for
+   remediation — codex resolves by an id the event **carries**, claude by **FIFO
+   position** among pending requests, exact only while that ordering holds. The
+   plan's rule requires an exact signal for every backend and lane, so a generic
+   inactivity timeout still may not be specified or implemented — but the
+   remaining work is now small and uniform: the four attributed cells need an
+   existing attribution carried through to the stamp, and the two open ones,
+   **claude and opencode on direct IM, are one fix**, because both fail for the
+   same reason — `turn_token` is stamped only by `core/session_turns.py` and
+   `core/services/dispatch.py`, which are Workbench owners. This verdict has been
+   corrected three times, every time because a base-session projection was read
+   in place of the event stream.
 3. **Q3 — open, split, and narrower than it was.** Established: the *Turn's*
    accepted-run record cannot discriminate between participants — a flat
    `accepted_agent_run_ids` list and one Turn-level `source_kind` stamped by
@@ -1420,7 +1456,17 @@ Reproduced defects, both on the direct-IM / agent-run lane and both owned by
   (including the `getattr`-by-string dispatch in
   `_cleanup_runtime_session_state`, which no call-graph check would see), and
   the marker is produced by running the real `_cleanup_session_locked` with its
-  own `client is not None or receiver_task is not None` guard applied.
+  own `client is not None or receiver_task is not None` guard applied. Round 4
+  added the missing half of that: **reachability**. The staged registry state —
+  a client in `claude_sessions`, the key absent from `claude_active_sessions` —
+  is not a cold start (the client is registered only at the end of session
+  creation) but is the ordinary **warm-idle** state, because `mark_session_idle`
+  discards from `active_sessions` and deliberately keeps the client. The probe
+  now drives that transition instead of asserting it in prose. The window is not
+  a few instructions either: every path through
+  `get_or_create_claude_session`, warm reuse included, first acquires the
+  unconditional `_claude_runtime_generation_lock`, and the retry path
+  additionally awaits `_wait_for_claude_receiver_cleanup`.
 - **PR7R-F2** (`HFR-181`) — on the codex active branch a teardown that succeeds
   after a failed `_stop_active_agent` returns `{ok: True, action: "ended"}`.
   Clearing the stale row is deliberate and stays; the payload carrying no signal
@@ -1428,7 +1474,16 @@ Reproduced defects, both on the direct-IM / agent-run lane and both owned by
   deliberately not claimed: the reproducer builds only the codex session and
   turn registries, so there is no Run row for it to observe. The earlier draft
   said the Run is never settled — inference from the missing interrupt, not
-  evidence.
+  evidence. **Round 4 relocated the defect one frame up, and shrank it.** The
+  signal is not missing from the system: `_end_codex` already computes and
+  returns `interrupted` alongside `process_killed`. It is discarded by
+  `end_running_agent`'s failed-stop branch, which throws the teardown result away
+  for a fresh `{ok: True, action: "ended", backend: "codex"}` literal and copies
+  exactly one field back out. That `process_killed` survives while `interrupted`
+  does not is the tell — a field the caller forgot, not information it never had
+  — so the remediation is forwarding an existing value, not new plumbing. The
+  reproducer now runs a **live** transport twice, with `turn/interrupt` raising
+  and succeeding, and shows the two payloads byte-identical to the caller.
 
 Both are characterization tests: they assert current behavior, so the
 implementation PR that fixes them must flip them. Neither is fixed here. Their
@@ -1454,9 +1509,9 @@ ordering is by how many cells one harness closes:
 4. **Per-backend** overrides for codex and opencode wherever step 2 or 3 shows
    the answer differs: the pending-output and local-settlement rows are
    Claude-only in production today, which is also what Q4 turns on.
-5. The **three remaining Q2 exact-signal probes** in
-   `EXACT_TURN_PROGRESS_SIGNALS` — claude on both lanes and opencode on direct
-   IM — plus the Q3 admission drive through
+5. The **two remaining Q2 exact-signal probes** in
+   `EXACT_TURN_PROGRESS_SIGNALS` — claude and opencode on direct IM, which are
+   one change, not two — plus the Q3 admission drive through
    `_hydrate_delivery_batch_context`, whether the cancellation site joins
    `agent_runs`/`run_definitions`, and Q4's terminal-result latch probe.
 

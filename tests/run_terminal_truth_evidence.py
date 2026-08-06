@@ -657,16 +657,33 @@ UNPROVEN_BUDGET: Final = 168
 #: Turn and its participating Runs. A backend/lane with no exact signal blocks a
 #: generic inactivity timeout, and session-wide activity is never a substitute.
 EXACT_TURN_PROGRESS_SIGNALS: Final = {
-    ("claude", "durable_workbench"): unproven(
-        "``mark_session_turn_started`` stamps ``session_turn_started`` and "
-        "``session_last_activity`` per COMPOSITE KEY, not per Turn, and the SDK "
-        "exposes no query/result correlation id (see the comment above "
-        "``_wait_for_activity_output``). Probe: run two overlapping Runs in one "
-        "composite key and assert whether any emitted event names the exact Turn."
-    ),
+    # Claude was read the same wrong way as codex and opencode, one round later
+    # again -- three for three. ``mark_session_turn_started`` really is stamped
+    # per composite key, and the SDK really has no query/result correlation id,
+    # but neither is the event stream. The receiver is long-lived and its
+    # captured context carries an OLDER turn's tokens, so before any
+    # assistant/tool emit ``_adopt_pending_turn_token`` copies the FIFO-matched
+    # pending ``AgentRequest``'s ``turn_token`` (and the runtime turn key/token,
+    # and the Run attribution keys) onto that context. The emit therefore names
+    # the Turn it belongs to. Avibe supplies the correlation the SDK does not.
+    #
+    # "Exact" here is a FIFO position, not an id the event carries: the head of
+    # ``_pending_requests[composite_key]`` is taken to be the turn producing the
+    # event. That is a weaker mechanism than codex's ``turnId`` and it is still
+    # an exact-Turn attribution under per-key serialization -- and it is what
+    # the remediation has to build on, which is why the distinction is recorded
+    # rather than smoothed over.
+    ("claude", "durable_workbench"): covered(_Q2_SIGNALS),
+    # ...and it needs a ``turn_token`` to copy. Same lane split as opencode, for
+    # the same reason: only ``core/session_turns.py`` and the streaming turn
+    # dispatch stamp one. On a plain IM context ``_adopt_pending_turn_token``
+    # finds no token, and the attribution keys it can still copy are Run
+    # provenance, not a Turn identifier.
     ("claude", "direct_im"): unproven(
-        "same session-wide stamp as the Workbench lane; the IM lane additionally "
-        "has no durable Turn row to attribute against. Same probe."
+        "the adopt path runs on this lane too, but nothing stamps a "
+        "``turn_token`` into an IM context for it to copy, so the emit carries "
+        "no Turn identifier. Probe: drive an IM-scoped claude turn and assert "
+        "whether any emitted event names a Turn at all."
     ),
     # Codex is the exception, and the first draft of this table got it wrong by
     # reading only the base-session projection. The app-server's ``item/*`` and
@@ -738,31 +755,41 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "Three of six cells can, and the same reading error produced both "
-            "corrections. The original blanket 'no backend exposes one' was "
-            "reached by reading each backend's base-session PROJECTION -- "
+            "Four of six cells can, and the ANSWER SPLITS BY LANE, not by "
+            "backend -- which is the finding, and which took three corrections "
+            "to see because the same reading error was made three times. Each "
+            "time, a backend's base-session PROJECTION was read -- "
             "``_active_turns[base]`` for codex, ``_active_requests[base]`` for "
-            "opencode -- and concluding from a lossy liveness map that the "
-            "event stream carried nothing. It does. Codex's ``item/*`` "
-            "notifications carry a ``turnId`` and "
+            "opencode, ``session_turn_started[composite_key]`` for claude -- "
+            "and a conclusion about the EVENT STREAM was drawn from a lossy "
+            "liveness map. All three event streams carry a Turn. Codex's "
+            "``item/*`` notifications carry a ``turnId`` and "
             "``_find_request_for_notification`` resolves the participating "
-            "Run's request from it, on both lanes. OpenCode's poll loop is "
-            "handed the exact ``AgentRequest`` and emits every tool call and "
-            "assistant message with ``request.context``, whose ``turn_token`` "
-            "``_process_message`` has already read as ``logical_turn_id`` -- "
-            "but only on the Workbench lane, because nothing stamps a "
-            "``turn_token`` onto a plain IM context. Claude has none on either "
-            "lane: ``mark_session_turn_started`` takes a composite key and no "
-            "Turn. So the attribution EXISTS for codex on both lanes and for "
-            "opencode on the Workbench lane, and in every one of those three it "
-            "is discarded downstream -- codex at ``should_emit_progress``, "
-            "which gates on the single ``_active_turns[base]`` slot, and both "
-            "at a per-session activity timestamp. The plan's rule still bites: "
-            "an exact signal is required for EVERY backend and lane before a "
-            "generic inactivity timeout, and three cells still have none. What "
-            "changed is the shape of the work -- for two backends the "
-            "attribution must be carried through to the stamp, not invented. "
-            "See ``EXACT_TURN_PROGRESS_SIGNALS`` for the three remaining cells."
+            "Run's request from it. OpenCode's poll loop is handed the exact "
+            "``AgentRequest`` and emits with ``request.context``, whose "
+            "``turn_token`` ``_process_message`` has already read as "
+            "``logical_turn_id``. Claude's long-lived receiver adopts the "
+            "FIFO-matched pending request's ``turn_token`` onto the emit "
+            "context before any assistant/tool output, so Avibe supplies the "
+            "correlation the SDK lacks. What the two remaining cells have in "
+            "common is the LANE: ``turn_token`` is stamped only by "
+            "``core/session_turns.py`` and the streaming turn dispatch, both "
+            "Workbench owners, so claude and opencode have nothing to copy or "
+            "forward on direct IM. Codex is unaffected because its id rides the "
+            "notification rather than the context. In every one of the four "
+            "covered cells the attribution is then DISCARDED -- codex at "
+            "``should_emit_progress``, which gates on the single "
+            "``_active_turns[base]`` slot, and all of them at a per-session "
+            "activity timestamp. The plan's rule still bites: an exact signal "
+            "is required for EVERY backend and lane, so a generic inactivity "
+            "timeout is still blocked. What changed is the shape of the work -- "
+            "four cells need an existing attribution carried through to the "
+            "stamp, and the two IM cells need a Turn stamped into the context "
+            "at all, which is one fix and not two. Note also that claude's "
+            "attribution is a FIFO POSITION rather than an id the event "
+            "carries: exact under per-key serialization, weaker than codex's, "
+            "and the remediation has to build on it as it is. "
+            "See ``EXACT_TURN_PROGRESS_SIGNALS`` for the two remaining cells."
         ),
         "evidence": (_Q2_SIGNALS,),
     },
@@ -927,8 +954,17 @@ PR7R_FINDINGS: Final = {
             "``test_end_active_codex_clears_stale_row_even_when_stop_fails``), "
             "but the response is byte-identical to a stop that really settled "
             "the turn: the un-interrupted turn's mappings are cleared and no "
-            "caller can tell that the interrupt never happened. The teardown "
-            "may stay; the result must carry the failed stop. WHAT THE RUN "
+            "caller can tell that the interrupt never happened. LOCATED "
+            "PRECISELY IN ROUND 4: the signal is not missing from the system. "
+            "``_end_codex`` computes and returns ``interrupted``; the "
+            "failed-stop branch of ``end_running_agent`` writes a fresh literal "
+            "and copies only ``process_killed`` out of the teardown result, so "
+            "``interrupted`` is produced and then dropped by the frame that "
+            "reports. The reproducer drives a LIVE transport twice -- interrupt "
+            "raising and interrupt succeeding -- and gets byte-identical "
+            "payloads; an earlier draft left ``_transports`` empty, which "
+            "staged the deliberate stale-row case instead of the defect. The "
+            "teardown may stay; the result must carry the failed stop. WHAT THE RUN "
             "RECEIVES IS DELIBERATELY NOT CLAIMED HERE -- the reproducer builds "
             "only the codex session and turn registries, so no Run row exists "
             "for it to observe. An earlier draft asserted the Run 'is never "

@@ -200,6 +200,17 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     production. And the teardown marker used to be stamped by the probe itself
     after a structural check of the LAST hop only; the four hops in between,
     one of which dispatches by a getattr on a string name, were a comment.
+
+    Round 4 answered the reachability challenge the ordering check left open:
+    an ordering is not a window unless the fixture's combination of registries
+    can actually occur. Review argued it cannot, on the grounds that
+    ``claude_sessions`` is populated only at the end of session creation, so a
+    cold start has no client for End to tear down. That is right about a COLD
+    start and it is not this state. The state staged here is warm-idle --
+    ``mark_session_idle`` drops the key from the live set and keeps the client
+    -- and the second turn on a warm session waits on the per-generation async
+    lock inside ``get_or_create_claude_session`` before anything stamps it
+    active. Both halves are now driven or read off production below.
     """
     # The race, read off production instead of assumed. ``mark_session_active``
     # is what fills ``claude_active_sessions``; it is called only after
@@ -225,6 +236,39 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
         for node in ast.walk(
             ast.parse(textwrap.dedent(inspect.getsource(ClaudeAgent.handle_message)))
         )
+    )
+    # The yield is unconditional and unbounded: EVERY path through
+    # ``get_or_create_claude_session`` -- warm reuse included -- first acquires
+    # the per-generation async lock, and the retry path additionally waits on
+    # receiver cleanup. So the window is as wide as whatever else holds that
+    # lock, not a few instructions.
+    resolve_source = inspect.getsource(SessionHandler.get_or_create_claude_session)
+    assert "async with self._claude_runtime_generation_lock(composite_key):" in resolve_source
+    assert "await self._wait_for_claude_receiver_cleanup(retry.composite_key)" in resolve_source
+
+    # REACHABILITY, which the previous draft left to the reader and review was
+    # right to challenge. The state below -- a client registered in
+    # ``claude_sessions`` while its key is absent from ``claude_active_sessions``
+    # -- is not a fresh-startup state: ``_get_or_create_claude_session_locked``
+    # registers the client only once connection completes, so during a COLD
+    # start there is nothing for ``_end_claude`` to tear down and the defect
+    # cannot fire. It is the ordinary WARM-IDLE state. ``mark_session_idle``
+    # discards the key from the live set and deliberately keeps the client --
+    # it even touches activity on the strength of the client still being there.
+    # A second turn arriving on that warm session is admitted, waits on the
+    # generation lock, and is invisible to ``_resolve_live_state`` the whole
+    # time. Driven, not asserted in prose.
+    warm = object.__new__(SessionHandler)
+    warm.active_sessions = set()
+    warm.session_turn_started = {}
+    warm.session_last_activity = {}
+    warm.claude_sessions = {"slack_a:/w": object()}
+    warm.mark_session_active("slack_a:/w")
+    assert "slack_a:/w" in warm.active_sessions
+    warm.mark_session_idle("slack_a:/w")
+    assert "slack_a:/w" not in warm.active_sessions
+    assert "slack_a:/w" in warm.claude_sessions, (
+        "the warm-idle state the fixture below stages is exactly this one"
     )
 
     session_handler = _RealTeardownMarking()
@@ -321,42 +365,41 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
 # ----- HFR-181: PR7R-F2 ----------------------------------------------------
 
 
-def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
-    """HFR-181 / PR7R-F2: a failed codex stop is reported as a clean end.
+def _codex_end_controller(*, interrupt_raises: bool, cleared: dict, sent: list):
+    """A codex End fixture with a LIVE transport and a live thread + turn.
 
-    Clearing a stale-active codex row whose app-server died is deliberate --
-    ``test_end_active_codex_clears_stale_row_even_when_stop_fails`` owns that
-    behavior and it should stay. What this probe records is the part nobody
-    owns: the value returned to the caller is synthesized fresh and is
-    byte-identical to a stop that really settled the turn. The turn's session
-    and turn-registry mappings are cleared and the Web/API caller is told
-    ``ok: True, action: "ended"``.
-
-    The teardown is not the defect. The missing signal is.
-
-    Scope, narrowed after review: this builds only the codex session and turn
-    registries, so there is no Run row here and the probe claims nothing about
-    the Run's terminal state. An earlier draft said the Run "is never settled";
-    that was inferred from the missing interrupt, not observed, and inference
-    dressed as evidence is the one thing this unit exists to stop. The IM
-    lane's ``user_stop`` cells carry the probe that would settle it.
+    Round 4's correction, and it is the whole point of the probe. The previous
+    fixture left ``_transports`` empty and ``get_thread_id`` returning ``None``,
+    which is precisely the stale-row case ``_end_codex`` is DESIGNED to clean up
+    -- an app-server that already died, with nothing left to interrupt. Staging
+    that and then complaining the payload reports no interrupt was staging the
+    absence of the thing being measured. There is a live transport here.
     """
-    cleared = {}
+
+    class _Transport:
+        async def send_request(self, method, params):
+            sent.append((method, params))
+            if interrupt_raises:
+                raise RuntimeError("app-server refused turn/interrupt")
+            return {"ok": True}
+
+        async def stop(self):
+            cleared["transport_stopped"] = True
+
     session_mgr = types.SimpleNamespace(
         get_cwd=lambda b: "/w",
-        get_thread_id=lambda b: None,
+        get_thread_id=lambda b: "thread-1",  # live thread
         clear=lambda b: cleared.__setitem__("session_mgr", b),
         sessions_for_cwd=lambda cwd: [],
     )
     turn_registry = types.SimpleNamespace(
-        # The registry still holds the turn: it was never interrupted.
-        get_active_turn=lambda b: "turn-that-outlived-its-transport",
+        get_active_turn=lambda b: "turn-1",  # live turn
         clear_session=lambda b: cleared.__setitem__("turn_registry", b),
     )
     codex = types.SimpleNamespace(
         _session_mgr=session_mgr,
         _turn_registry=turn_registry,
-        _transports={},
+        _transports={"/w": _Transport()},
         _transport_last_activity={},
         _runtime_turn_key_for_base_session=lambda b: f"{b}:/w",
     )
@@ -369,27 +412,92 @@ def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
         session_turns=types.SimpleNamespace(is_in_flight=lambda sid: False, cancel=_AsyncFlag()),
         command_handler=types.SimpleNamespace(handle_stop=handle_stop),
     )
+    return controller, handle_stop
 
-    result = asyncio.run(
-        running_agents.end_running_agent(
-            controller,
-            backend="codex",
-            state="active",
-            session_id="ses-im",
-            base_session_id="b1",
+
+def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
+    """HFR-181 / PR7R-F2: End discards the interrupt outcome it already has.
+
+    Clearing a stale-active codex row whose app-server died is deliberate --
+    ``test_end_active_codex_clears_stale_row_even_when_stop_fails`` owns that
+    behavior and it should stay. This probe is about a live turn, and round 4
+    located the defect a level more precisely than the first filing did.
+
+    ``_end_codex`` DOES compute and return ``interrupted``. The loss happens one
+    frame up: on the failed-stop branch ``end_running_agent`` writes
+    ``{"ok": True, "action": "ended", "backend": "codex"}`` as a fresh literal
+    and copies only ``process_killed`` out of the teardown result. So the
+    signal is not missing from the system -- it is produced, and then dropped
+    by the caller that is supposed to report it.
+
+    The demonstration is two runs against the SAME live-transport fixture whose
+    only difference is whether ``turn/interrupt`` succeeds. One leaves the
+    backend turn genuinely running, the other genuinely interrupts it, and both
+    return a byte-identical payload. A caller cannot distinguish them, which is
+    what makes this a reporting defect rather than a teardown one.
+
+    Scope: this builds only the codex session/turn registries and a transport,
+    so there is no Run row and the probe claims nothing about the Run's terminal
+    state. An earlier draft said the Run "is never settled"; that was inferred
+    from the missing interrupt, not observed. The IM lane's ``user_stop`` cells
+    carry the probe that would settle it.
+    """
+    payloads = []
+    for interrupt_raises in (True, False):
+        cleared: dict = {}
+        sent: list = []
+        controller, handle_stop = _codex_end_controller(
+            interrupt_raises=interrupt_raises, cleared=cleared, sent=sent
         )
+        result = asyncio.run(
+            running_agents.end_running_agent(
+                controller,
+                backend="codex",
+                state="active",
+                session_id="ses-im",
+                base_session_id="b1",
+            )
+        )
+        assert handle_stop.called is True  # it ran, and it returned False
+        # The live transport WAS asked to interrupt the live turn, so the two
+        # runs differ in the one fact the caller cares about.
+        assert sent == [
+            ("turn/interrupt", {"threadId": "thread-1", "turnId": "turn-1"})
+        ], sent
+        assert cleared["session_mgr"] == "b1"
+        assert cleared["turn_registry"] == "b1"
+        payloads.append(result)
+
+    not_interrupted, interrupted = payloads
+    # Current master's answer: identical. No ``stop_failed``, no ``interrupted``,
+    # no ``settled`` -- and, critically, no difference between a turn still
+    # running on the backend and one that was actually stopped.
+    assert not_interrupted == {
+        "ok": True,
+        "action": "ended",
+        "backend": "codex",
+        # This was THIS cwd's last session, so the shared app-server was stopped.
+        "process_killed": True,
+    }
+    assert interrupted == not_interrupted, (
+        "a real interrupt and a failed one are byte-identical to the caller"
     )
+    assert "stop_failed" not in not_interrupted
+    assert "interrupted" not in not_interrupted
+    # ``process_killed`` is the tell. The failed-stop branch copies exactly one
+    # field out of the teardown result and leaves ``interrupted`` behind, so
+    # this is a field the caller forgot rather than information it never had.
+    assert "process_killed" in not_interrupted
 
-    assert handle_stop.called is True  # it ran, and it returned False
-    assert cleared == {"session_mgr": "b1", "turn_registry": "b1"}
-
-    # Current master's answer. The turn was NOT interrupted, yet nothing in the
-    # payload says so -- no ``stop_failed``, no ``interrupted: False``, no
-    # ``settled``. A fix must add that signal here. What happened to any Run
-    # bound to this turn is outside what this probe can see.
-    assert result == {"ok": True, "action": "ended", "backend": "codex"}
-    assert "stop_failed" not in result
-    assert "interrupted" not in result
+    # The signal exists one frame down and is dropped by the frame above. Both
+    # halves asserted, because a fix belongs in the second one and a probe that
+    # only showed the absence would not say where.
+    end_codex_source = inspect.getsource(running_agents._end_codex)
+    assert '"interrupted": interrupted,' in end_codex_source
+    assert (
+        'result = dict(stop_result) if stop_ok else {"ok": True, "action": "ended", "backend": "codex"}'
+        in inspect.getsource(running_agents.end_running_agent)
+    ), "the discard site moved; PR7R-F2 needs relocating"
 
 
 # ----- HFR-182: Q3 merge cardinality ---------------------------------------
@@ -479,39 +587,46 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
 
 
 def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
-    """HFR-183 / Q2: codex and workbench opencode have the signal; claude does not.
+    """HFR-183 / Q2: the durable Workbench lane has the signal; direct IM mostly does not.
 
     The plan forbids a generic inactivity timeout unless every backend and lane
     has an exact-Turn progress signal, and states that session-wide activity is
     never an acceptable substitute.
 
-    This probe has now corrected itself twice, both times the same way, and the
-    pattern is the finding. Two drafts ago it read
-    ``EXACT_TURN_PROGRESS_SIGNALS`` back to itself. One draft ago it exercised
-    three real structures but looked only at each backend's base-session
-    PROJECTION -- ``_active_turns[base]`` for codex -- and concluded from a
-    lossy liveness map that no exact signal existed anywhere; codex's did, one
-    level up, in the notification. Round 3 caught the identical mistake still
-    standing for opencode: ``_active_requests[base]`` is also a liveness map,
-    and the poll loop it indexes is handed the exact ``AgentRequest`` and emits
-    every tool call and assistant message with ``request.context`` -- whose
-    ``turn_token`` ``_process_message`` has already read as
-    ``logical_turn_id``. Reading a projection to decide what an event stream
-    carries is a mistake that survived being named once, so it is asserted
-    against here rather than only described.
+    This probe has now corrected itself three times, ALWAYS THE SAME WAY, and
+    that pattern is worth more than the verdict. Draft 1 read
+    ``EXACT_TURN_PROGRESS_SIGNALS`` back to itself. Draft 2 exercised three real
+    structures but looked only at each backend's base-session PROJECTION and
+    concluded from a lossy liveness map that no exact signal existed anywhere;
+    codex's did, one level up, in the notification. Draft 3 fixed codex and left
+    the identical mistake standing for opencode -- ``_active_requests[base]`` is
+    also a liveness map, and the poll loop it indexes emits with
+    ``request.context``. Draft 4 fixed opencode and left it standing for claude:
+    ``session_turn_started[composite_key]`` is a projection too, and claude's
+    long-lived receiver adopts the FIFO-matched pending request's ``turn_token``
+    onto the emit context before any assistant/tool output. Three backends,
+    three identical misreadings, each caught only after the previous one was
+    named. So the probe now checks the projection AND the event stream for every
+    backend, and says which is which.
 
     "The attribution is discarded" and "the attribution does not exist" call
     for different fixes, which is what makes the distinction load-bearing.
 
-    Lanes matter for exactly one cell. Claude's key is a composite key and
-    codex's ``turnId`` rides the notification, so neither varies. OpenCode's
-    token, though, is stamped into the context by ``SessionTurnManager`` and by
-    the streaming turn dispatch -- both Workbench owners. A plain IM context
-    gets none, so ``logical_turn_id`` is empty there and the emit has no Turn
-    to name.
+    With all three read the same way the answer splits by LANE, not by backend.
+    ``turn_token`` is stamped into a context only by ``SessionTurnManager`` and
+    by the streaming turn dispatch, both Workbench owners -- so claude has
+    nothing to adopt and opencode nothing to forward on direct IM. Codex is the
+    exception because its ``turnId`` rides the notification rather than the
+    context. Four cells covered, two open, and the two are one fix.
+
+    Claude's attribution is a FIFO POSITION, not an id the event carries: the
+    head of ``_pending_requests[composite_key]`` is taken to be the turn
+    producing the event. Exact under per-key serialization, weaker than codex's,
+    and asserted as such rather than smoothed into "claude has a turn id too".
     """
-    # Claude. The progress baseline is stamped per COMPOSITE KEY, and the
-    # method has no parameter that could carry a Turn.
+    # Claude, part one -- the PROJECTION, which is all the first three drafts of
+    # this probe looked at. The progress baseline is stamped per COMPOSITE KEY,
+    # and the method has no parameter that could carry a Turn.
     params = list(
         inspect.signature(SessionHandler.mark_session_turn_started).parameters
     )
@@ -527,6 +642,63 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     handler.mark_session_turn_started("slack_a:/w")
     assert list(handler.session_turn_started) == ["slack_a:/w"]
     assert handler.session_turn_started["slack_a:/w"] >= first_baseline
+
+    # Claude, part two -- the EVENT STREAM, which is a different object, and
+    # which says the opposite. Claude's receiver is long-lived, so the context
+    # it captured belongs to an OLDER turn; before any assistant/tool emit,
+    # ``_adopt_pending_turn_token`` copies the FIFO-matched pending request's
+    # Turn identity onto it. Driven on the real static method with a stale
+    # receiver context and a pending request from a different Turn.
+    from modules.agents.claude_agent import ClaudeAgent
+
+    stale_receiver_context = types.SimpleNamespace(
+        platform_specific={
+            "turn_token": "wb-turn-1",
+            "agent_runtime_turn_token": "rt-1",
+            "accepted_agent_run_ids": ["run-1"],
+        }
+    )
+    live_turn_request = types.SimpleNamespace(
+        context=types.SimpleNamespace(
+            platform_specific={
+                "turn_token": "wb-turn-2",
+                "agent_runtime_turn_token": "rt-2",
+                "accepted_agent_run_ids": ["run-2"],
+            }
+        )
+    )
+    ClaudeAgent._adopt_pending_turn_token(stale_receiver_context, live_turn_request)
+    assert stale_receiver_context.platform_specific["turn_token"] == "wb-turn-2"
+    assert stale_receiver_context.platform_specific["agent_runtime_turn_token"] == "rt-2"
+    assert stale_receiver_context.platform_specific["accepted_agent_run_ids"] == ["run-2"]
+
+    # ...and it is reached from the progress path, not only from the terminal
+    # one. The toolcall/assistant branch of ``_receive_messages`` reads the FIFO
+    # head and adopts from it -- ``tests/test_claude_agent_sessions.py``'s
+    # ``test_toolcall_emit_adopts_current_pending_turn_token`` drives that whole
+    # branch end to end and asserts the emitted toolcall carries the pending
+    # turn's token, so this probe pins the read rather than restaging it.
+    receive_source = inspect.getsource(ClaudeAgent._receive_messages)
+    assert "pending_requests = self._pending_requests.get(composite_key) or []" in receive_source
+    assert "self._adopt_pending_turn_token(context, pending_request)" in receive_source
+
+    # The mechanism is a FIFO POSITION, not an id the event carries. Recorded
+    # because it is weaker than codex's ``turnId`` and the remediation differs:
+    # the head of the pending list is TAKEN to be the turn producing the event.
+    assert (
+        "requests = self._pending_requests.get(composite_key)"
+        in inspect.getsource(ClaudeAgent._pop_pending_request)
+    )
+
+    # And it needs a ``turn_token`` to copy: with none in the source context and
+    # no attribution keys on either side, the adopt is a no-op, which is exactly
+    # the direct-IM lane.
+    im_receiver_context = types.SimpleNamespace(platform_specific={})
+    ClaudeAgent._adopt_pending_turn_token(
+        im_receiver_context,
+        types.SimpleNamespace(context=types.SimpleNamespace(platform_specific={})),
+    )
+    assert im_receiver_context.platform_specific == {}
 
     # Codex. Two distinct Runs accepted into one base session.
     registry = CodexTurnRegistry()
@@ -637,8 +809,12 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     assert set(EXACT_TURN_PROGRESS_SIGNALS) == {
         (backend, lane) for backend in BACKENDS for lane in LANES
     }
-    attributed = {("codex", "direct_im"), ("codex", "durable_workbench"),
-                  ("opencode", "durable_workbench")}
+    # The split is by LANE, not by backend: everything on the durable Workbench
+    # lane is attributed, and only codex is on direct IM (its id rides the
+    # notification instead of the context).
+    attributed = {("codex", "direct_im")} | {
+        (backend, "durable_workbench") for backend in BACKENDS
+    }
     for cell, (kind, reason) in EXACT_TURN_PROGRESS_SIGNALS.items():
         if cell in attributed:
             assert kind == "covered", cell

@@ -312,21 +312,52 @@ observations:
       the reproducers characterize End's behaviour and explicitly disclaim the Run
       half those cells are about, and ``defect`` is excluded from
       ``UNPROVEN_BUDGET``, so the classification was hiding eight cells behind a
-      vocabulary word.
+      vocabulary word. Round 4 hardened both reproducers again, and for (2) it
+      MOVED the defect. On (1), review challenged the fixture as unreachable --
+      ``claude_sessions`` is populated only at the very end of session creation,
+      so a cold start has no client for End to tear down. That is correct about a
+      cold start and it is not this state: the state staged is warm-idle, and
+      ``mark_session_idle`` discards the key from ``active_sessions`` while
+      deliberately KEEPING the client, which the probe now drives rather than
+      asserts in prose. The window is not a few instructions either -- every path
+      through ``get_or_create_claude_session``, warm reuse included, first
+      acquires the unconditional ``_claude_runtime_generation_lock``, and the
+      retry path additionally awaits receiver cleanup. On (2), the missing signal
+      is not missing from the system: ``_end_codex`` already computes and RETURNS
+      ``interrupted`` alongside ``process_killed``. The loss is one frame up, in
+      ``end_running_agent``'s failed-stop branch, which discards the teardown
+      result for a fresh ``{ok: True, action: "ended", backend: "codex"}`` literal
+      and copies exactly one field back out. ``process_killed`` surviving while
+      ``interrupted`` does not is the tell: this is a field the caller forgot, not
+      information it never had, which makes the remediation a one-line forward
+      rather than new plumbing. The reproducer had also been staging the absence
+      of the thing it measured -- an empty ``_transports`` and a ``None`` thread
+      id are the deliberate stale-row case ``_end_codex`` exists to clean up -- so
+      it now runs a LIVE transport twice, once with ``turn/interrupt`` raising and
+      once with it succeeding, and shows the two payloads byte-identical.
   - id: HFR-OBS-024
     date: 2026-08-06
     source: PR7R current-master evidence matrix (HFR-183, HFR-184)
     result: confirmed
     detail: >-
-      Three of six backend/lane cells expose a per-Turn progress signal and then
-      discard it; the other three expose none. Codex's ``item/*`` notifications carry a
+      Four of six backend/lane cells expose a per-Turn progress signal, and the
+      split is by LANE, not by backend: all three backends are attributed on the
+      durable Workbench lane, and on direct IM only codex is, because its id rides
+      the notification instead of the context. Codex's ``item/*`` notifications carry a
       ``turnId`` and ``_find_request_for_notification`` resolves the participating
       Run's request from that id through a per-turn map, so the event IS attributable
       to an exact Turn -- but ``should_emit_progress`` then gates on the single
       ``_active_turns[base]`` slot and the activity timestamp is stamped per session,
       so the attribution is thrown away one step downstream. Claude stamps
       ``session_turn_started`` / ``session_last_activity`` per composite key and the
-      SDK has no query/result correlation id. OpenCode's ``_active_requests`` is
+      SDK has no query/result correlation id -- but that projection is not the
+      event stream either: ``_adopt_pending_turn_token`` copies the FIFO-head
+      pending request's ``turn_token`` and attribution keys onto the long-lived
+      receiver context before every assistant and tool emit, so a Workbench claude
+      event does name its Turn. The mechanism is weaker than codex's and the
+      difference matters for remediation: codex resolves by an id the event
+      CARRIES, claude by FIFO POSITION among pending requests, which is exact only
+      while that ordering holds. OpenCode's ``_active_requests`` is
       likewise one asyncio task per base session -- but that projection is not the
       event stream: ``run_prompt_poll`` is handed the exact ``AgentRequest`` and
       every progress emit in it passes ``request.context``, whose ``turn_token``
@@ -336,12 +367,20 @@ observations:
       on direct IM. The plan's rule requires an exact signal for EVERY backend and
       lane, so a generic inactivity timeout is still blocked on evidence and no
       implementation PR may be opened for one yet -- but the shape of the remaining
-      work now differs per cell: codex and workbench opencode need an existing
-      attribution carried through to the stamp, claude needs a signal that does not
-      exist, and IM opencode needs a Turn stamped into its context at all.
-      This corrects the same observation TWICE, both times the same way: a lossy
-      base-session projection was read and a conclusion about the event stream was
-      drawn from it -- first for codex, then, after that was named, for opencode.
+      work now differs per cell: the four attributed cells need an existing
+      attribution carried through to the stamp, and the two open ones -- claude and
+      opencode on direct IM -- are the SAME fix, because both fail for the same
+      reason, that ``turn_token`` is stamped only by ``core/session_turns.py`` and
+      ``core/services/dispatch.py``, which are Workbench owners. Two cells, one
+      change: stamp a Turn identifier into an IM-scoped context.
+      This corrects the same observation THREE times, all three the same way: a
+      lossy base-session projection was read and a conclusion about the event
+      stream was drawn from it -- ``_active_turns[base]`` for codex, then, after
+      that was named, ``_active_requests[base]`` for opencode, then, after THAT was
+      named, ``session_turn_started[composite_key]`` for claude. Naming a mistake
+      is not the same as being immune to it; the durable form of the lesson is a
+      rule, not a memory -- before concluding a backend has no signal, read the
+      producer, not the map the producer writes into.
       Separately, a Turn's accepted-run
       record cannot discriminate between its participants: it holds a flat
       ``accepted_agent_run_ids`` list and one Turn-level ``source_kind`` stamped by
@@ -456,3 +495,31 @@ observations:
       existence, so a renamed owner stayed green. ``tests/test_scheduled_tasks.py``'s
       ``_assert_node_exists`` (HFR-105) still has the leaf-only weakness this unit
       fixed, and is untouched.
+  - id: HFR-OBS-029
+    date: 2026-08-06
+    source: fourth adversarial review of the PR7R matrix (PR #1212)
+    result: confirmed
+    detail: >-
+      A reproducer can be wrong about its own subject in two directions, and the
+      fourth review found one of each. Under-staging: the codex End fixture left
+      ``_transports`` empty and ``get_thread_id`` returning ``None``, which is
+      precisely the dead-app-server case the teardown is DESIGNED to clean up, so
+      the probe was staging the absence of the interrupt it then complained was
+      missing. Giving it a live transport did not just fix the fixture, it moved
+      the defect: ``_end_codex`` returns ``interrupted`` already, and the discard
+      is ``end_running_agent``'s failed-stop literal one frame up. Over-claiming:
+      the claude End probe asserted an ordering and left REACHABILITY to the
+      reader, which review challenged on cold-start grounds and was right to --
+      an ordering is not a window until the fixture's combination of registries is
+      shown to occur. It does occur, in the warm-idle state, and that is now
+      driven off ``mark_session_idle`` rather than argued. The review also asked
+      for a probe that blocks the real session-creation path and observes the
+      registries; that was rejected, because it would make the probe a test of
+      session creation rather than of End and would need a live SDK. Accepting a
+      finding's GAP while rejecting its PRESCRIPTION is a distinct outcome from
+      accepting or rejecting it whole, and worth recording as one. Cross-cutting
+      lesson from four rounds: an evidence unit has no production diff to stash,
+      so the counter-check that keeps its assertions honest is to mutate the
+      PRODUCTION fact and confirm the probe fails -- and that check must itself be
+      checked, since one round's mutation was a no-op comment that left the
+      asserted substring intact and produced a false pass.
