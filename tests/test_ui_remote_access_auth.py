@@ -1584,7 +1584,7 @@ def test_remote_show_page_icon_upload_is_blocked_before_filesystem_access(
         ("/api/models/runtime/status", False),
         ("/api/models/agents", False),
         ("/api/backend/codex/runtime", True),
-        ("/api/backend/codex/auth", False),
+            ("/api/backend/codex/auth", True),
     ],
 )
 def test_remote_model_and_backend_reads_follow_execution_safety_policy(path, local_only):

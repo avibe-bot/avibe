@@ -100,6 +100,9 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
 
   const selectOrganization = useCallback(async (organizationId: string) => {
     const generation = ++operationGeneration.current;
+    setSelectedOrganizationId(organizationId);
+    setDetail(null);
+    sessionStorage.setItem(SELECTED_ORG_KEY, organizationId);
     try {
       await loadOrganizationAtGeneration(organizationId, generation);
     } catch (error) {

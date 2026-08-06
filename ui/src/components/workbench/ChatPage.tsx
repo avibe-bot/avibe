@@ -193,7 +193,7 @@ export const ChatPage: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const [sessionCanChat, setSessionCanChat] = useState(false);
   const canChat = capabilities.can_chat && sessionCanChat;
-  const canManageShowPage = capabilities.can_manage_instance;
+  const canManageShowPage = capabilities.can_manage_instance && capabilities.can_use_system;
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).

@@ -306,6 +306,7 @@ export const AppShell: React.FC = () => {
     ['/agents', '/harness', '/apps/library'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
+  const localSystemPath = location.pathname.startsWith('/admin/settings/service');
   const resourceUseDenied =
     (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
     (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
@@ -314,6 +315,7 @@ export const AppShell: React.FC = () => {
   const terminalOnlyPath = location.pathname.startsWith('/apps/terminal');
   if (
     (ownerOnlyPath && !capabilities.can_manage_instance) ||
+    (localSystemPath && !capabilities.can_use_system) ||
     resourceUseDenied ||
     (fileOnlyPath && !capabilities.can_use_files) ||
     (terminalOnlyPath && !capabilities.can_use_terminal)
