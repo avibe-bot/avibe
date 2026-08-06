@@ -28,11 +28,12 @@ type ShowPagePayload = ShowPageLinkInfo & {
   title?: string | null;
 };
 
-// Share affordance shown only while the Show Page is open (the in-chat view).
-// A popover with authenticated audience controls, an independent anonymous
-// public-link switch, and link actions for the current serving route.
+// Share affordance for the current session's Show Page. Resource managers may
+// open the audience controls without receiving access to the page content;
+// public-link and link actions render only when the caller can use the page.
 export const ShowPageShareControl: React.FC<{
   sessionId: string;
+  initialAccess?: ShowPageAccess | null;
   // Lets the chat view re-point the iframe at the route that now serves the
   // page when visibility flips (private↔public swap the serving route).
   onPayloadChange?: (payload: ShowPageLinkInfo) => void;
@@ -40,7 +41,7 @@ export const ShowPageShareControl: React.FC<{
   // inert while it is open so an outside tap there falls through to the parent
   // document and Radix can dismiss (a tap inside an iframe never reaches us).
   onOpenChange?: (open: boolean) => void;
-}> = ({ sessionId, onPayloadChange, onOpenChange }) => {
+}> = ({ sessionId, initialAccess = null, onPayloadChange, onOpenChange }) => {
   const { t } = useTranslation();
   const api = useApi();
   const dock = useDock();
@@ -48,7 +49,7 @@ export const ShowPageShareControl: React.FC<{
   const inventoryPage = pages.find((page) => page.session_id === sessionId);
   const [open, setOpen] = useState(false);
   const [localPayload, setLocalPayload] = useState<ShowPagePayload | null>(null);
-  const payload = useMemo<ShowPagePayload | null>(() => {
+  const candidatePayload = useMemo<ShowPagePayload | null>(() => {
     const local = localPayload?.session_id === sessionId ? localPayload : null;
     if (!inventoryPage) return local;
     if (!local) return inventoryPage as ShowPagePayload;
@@ -69,7 +70,8 @@ export const ShowPageShareControl: React.FC<{
   }, [inventoryPage, localPayload, sessionId]);
   const [loading, setLoading] = useState(false);
   const [accessLoading, setAccessLoading] = useState(false);
-  const [access, setAccess] = useState<ShowPageAccess | null>(null);
+  const [access, setAccess] = useState<ShowPageAccess | null>(initialAccess);
+  const payload = access?.can_use === false ? null : candidatePayload;
   const [accessError, setAccessError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -104,9 +106,9 @@ export const ShowPageShareControl: React.FC<{
   useEffect(() => () => onOpenChange?.(false), [onOpenChange]);
 
   useEffect(() => {
-    setAccess(null);
+    setAccess(initialAccess);
     setAccessError(false);
-  }, [sessionId]);
+  }, [initialAccess, sessionId]);
 
   const offline = payload?.visibility === 'offline' || payload?.offline === true;
   const isPublic = payload?.visibility === 'public';
@@ -129,19 +131,24 @@ export const ShowPageShareControl: React.FC<{
   // refreshing so reopening doesn't flash a spinner.
   const refresh = () => {
     const seq = ++reqSeq.current;
-    setLoading(!payload);
+    const canLoadPayload = access?.can_use !== false;
+    setLoading(canLoadPayload && !payload);
     setAccessLoading(!access);
     setAccessError(false);
     void (async () => {
-      try {
-        const res: ShowPagePayload = await api.ensureShowPage(sessionId);
-        if (seq !== reqSeq.current) return;
-        applyPayload(res);
-        if (!inventoryPage) reload();
-      } catch {
-        // An archived Show Page cannot be ensured, but its applied access
-        // metadata is still useful and is loaded below.
-      } finally {
+      if (canLoadPayload) {
+        try {
+          const res: ShowPagePayload = await api.ensureShowPage(sessionId);
+          if (seq !== reqSeq.current) return;
+          applyPayload(res);
+          if (!inventoryPage) reload();
+        } catch {
+          // An archived Show Page cannot be ensured, but its applied access
+          // metadata is still useful and is loaded below.
+        } finally {
+          setLoading(false);
+        }
+      } else {
         setLoading(false);
       }
 
@@ -228,14 +235,14 @@ export const ShowPageShareControl: React.FC<{
       <PopoverContent align="end" className="w-80 space-y-3">
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
 
-        {loading ? (
+        {loading && !access ? (
           <div className="flex items-center gap-2 py-2 text-sm text-muted">
             <Loader2 className="size-4 animate-spin" />
             {t('common.loading')}
           </div>
-        ) : !payload ? (
+        ) : !payload && !access ? (
           <p className="py-1 text-sm text-muted">{t('chat.showPage.loadError')}</p>
-        ) : (
+        ) : payload ? (
           <>
             {offline ? (
               <p className="py-1 text-sm text-muted">{t('chat.showPage.offlineNote')}</p>
@@ -291,19 +298,24 @@ export const ShowPageShareControl: React.FC<{
               </div>
             )}
 
-            <div className="border-t border-border pt-3">
-              <ShowPageWorkspaceAccessControl
-                access={access}
-                active={open}
-                sessionId={sessionId}
-              />
-              {accessError ? (
-                <p className="mt-2 text-[11px] leading-snug text-destructive">
-                  {t('chat.showPage.accessLoadError')}
-                </p>
-              ) : null}
-            </div>
+          </>
+        ) : null}
 
+        <div className="border-t border-border pt-3">
+          <ShowPageWorkspaceAccessControl
+            access={access}
+            active={open}
+            sessionId={sessionId}
+          />
+          {accessError ? (
+            <p className="mt-2 text-[11px] leading-snug text-destructive">
+              {t('chat.showPage.accessLoadError')}
+            </p>
+          ) : null}
+        </div>
+
+        {payload ? (
+          <>
             <div className="border-t border-border pt-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
@@ -389,7 +401,7 @@ export const ShowPageShareControl: React.FC<{
               </div>
             ) : null}
           </>
-        )}
+        ) : null}
 
         {/* Pin to Dock — records the session's Show Page as a Dock app. Deliberately
             OUTSIDE the visibility branches: pinning is independent of public/private

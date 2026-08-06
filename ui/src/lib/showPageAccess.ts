@@ -9,10 +9,21 @@ export type ShowPageAccess = {
   group_ids: string[];
   policy_revision: number | null;
   last_applied_control_plane_revision: number | null;
+  can_use: boolean;
   can_manage: boolean;
   can_publish_public: boolean;
   public_link_enabled: boolean;
 };
+
+export function showPageHeaderAccess(
+  canManageInstance: boolean,
+  access: ShowPageAccess | null,
+): { canOpen: boolean; canManage: boolean } {
+  return {
+    canOpen: canManageInstance || access?.can_use === true,
+    canManage: canManageInstance || access?.can_manage === true,
+  };
+}
 
 export type ShowPageAccessPatch = {
   access_level: ResourceAccessLevel;

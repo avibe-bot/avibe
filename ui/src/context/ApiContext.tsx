@@ -412,6 +412,7 @@ export type ApiContextType = {
   removeUser: (userId: string, platform?: string) => Promise<any>;
   getShowPages: () => Promise<any>;
   getShowPageAccess: (sessionId: string) => Promise<ShowPageAccess>;
+  probeShowPageAccess: (sessionId: string) => Promise<ShowPageAccess | null>;
   getWebPushStatus: (payload?: WebPushStatusPayload) => Promise<WebPushStatus>;
   getWebPushVapidPublicKey: () => Promise<{ ok: boolean; public_key: string }>;
   subscribeWebPush: (
@@ -2543,6 +2544,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deleteJson(platform ? `/api/users/${encodeURIComponent(userId)}?platform=${encodeURIComponent(platform)}` : `/api/users/${encodeURIComponent(userId)}`),
     getShowPages: () => getJson('/api/show-pages'),
     getShowPageAccess: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
+    probeShowPageAccess: async (sessionId) => {
+      const payload = await getJson(
+        `/api/show-pages/${encodeURIComponent(sessionId)}/access`,
+        { handleError: false },
+      );
+      return payload?.ok === true ? payload as ShowPageAccess : null;
+    },
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),

@@ -272,8 +272,68 @@ def test_remote_show_page_owner_can_control_sharing_without_instance_owner_role(
         store.close()
 
 
+def test_remote_show_page_owner_mutations_reach_resource_acl_as_viewer(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    store = ShowPageStore()
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    with store.engine.begin() as connection:
+        project = projects_service.create_project(connection, str(project_path))
+        session = sessions_service.create_session(
+            connection,
+            scope_id=project["scope_id"],
+            agent_backend="codex",
+        )
+        session_id = session["id"]
+    store.ensure(session_id)
+    with store.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="show_page",
+            resource_id=session_id,
+            organization_id="org-1",
+            owner_user_id="owner-1",
+            access_level="private",
+        )
+    store.close()
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(config, subject="owner-1", groups=[], instance_role="viewer"),
+        domain="alex.avibe.bot",
+    )
+    request_options = {
+        "headers": csrf_headers(client, "https://alex.avibe.bot"),
+        "base_url": "https://alex.avibe.bot",
+        "environ_base": _remote_peer(),
+    }
+
+    published = client.post(
+        f"/api/show-pages/{session_id}/visibility",
+        json={"visibility": "public"},
+        **request_options,
+    )
+    rotated = client.post(
+        f"/api/show-pages/{session_id}/rotate-share",
+        json={},
+        **request_options,
+    )
+    customized = client.post(
+        f"/api/show-pages/{session_id}/share-id",
+        json={"share_id": "viewer-owner-link"},
+        **request_options,
+    )
+
+    assert published.status_code == 200
+    assert rotated.status_code == 200
+    assert customized.status_code == 200
+    assert customized.get_json()["share_id"] == "viewer-owner-link"
+
+
 def test_organization_admin_can_read_show_page_access_metadata_without_use_access(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
     admin = _organization_context(
@@ -287,6 +347,8 @@ def test_organization_admin_can_read_show_page_access_metadata_without_use_acces
     payload = api.get_show_page_access("ses-scope")
 
     assert payload["access_level"] == "scope"
+    assert payload["instance_id"] is None
+    assert payload["can_use"] is False
     assert payload["can_manage"] is True
     assert payload["can_publish_public"] is False
 
@@ -333,6 +395,7 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
         "group_ids": [],
         "policy_revision": None,
         "last_applied_control_plane_revision": None,
+        "can_use": True,
         "can_manage": True,
         "can_publish_public": True,
         "public_link_enabled": False,
@@ -356,6 +419,13 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
             )
     finally:
         store.close()
+    local_organization = app.test_client().get(
+        "/api/show-pages/ses-organization/access",
+        base_url="http://127.0.0.1:15131",
+    )
+    assert local_organization.status_code == 200
+    assert local_organization.get_json()["instance_id"] == "inst_123"
+
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -377,6 +447,7 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
         "group_ids": ["group-engineering"],
         "policy_revision": 4,
         "last_applied_control_plane_revision": 4,
+        "can_use": True,
         "can_manage": True,
         "can_publish_public": True,
         "public_link_enabled": False,

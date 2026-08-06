@@ -12,6 +12,7 @@ import base64
 import hashlib
 import http.client
 import json
+import re
 import secrets
 import threading
 import time
@@ -144,7 +145,11 @@ def cloud_is_configured(config: V2Config | None) -> bool:
 def validate_next_path(value: object) -> str:
     path = str(value or "/admin/organization/overview")
     parsed = urllib.parse.urlsplit(path)
-    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/admin/organization"):
+    is_organization_path = parsed.path == "/admin/organization" or parsed.path.startswith(
+        "/admin/organization/"
+    )
+    is_workbench_chat = re.fullmatch(r"/chat/[^/]+", parsed.path) is not None
+    if parsed.scheme or parsed.netloc or not (is_organization_path or is_workbench_chat):
         return "/admin/organization/overview"
     return urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
 

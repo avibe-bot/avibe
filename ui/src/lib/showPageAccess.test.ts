@@ -4,6 +4,7 @@ import { isRevisionConflict, OrganizationApiError } from '@/features/organizatio
 import {
   buildShowPageAccessPatch,
   canChangeShowPagePublicLink,
+  showPageHeaderAccess,
   showPageAudienceLabelKey,
   showPageAudienceLevels,
   showPageSyncPresentation,
@@ -19,6 +20,7 @@ const access = (overrides: Partial<ShowPageAccess> = {}): ShowPageAccess => ({
   group_ids: [],
   policy_revision: 4,
   last_applied_control_plane_revision: 4,
+  can_use: true,
   can_manage: true,
   can_publish_public: true,
   public_link_enabled: false,
@@ -63,6 +65,19 @@ describe('Show Page access policy helpers', () => {
     expect(canChangeShowPagePublicLink(manager, false)).toBe(true);
     expect(canChangeShowPagePublicLink(manager, true)).toBe(false);
     expect(canChangeShowPagePublicLink(access(), true)).toBe(true);
+  });
+
+  it('separates page use from page-specific access management in the chat header', () => {
+    expect(showPageHeaderAccess(false, access({ can_use: true, can_manage: false }))).toEqual({
+      canOpen: true,
+      canManage: false,
+    });
+    expect(showPageHeaderAccess(false, access({ can_use: false, can_manage: true }))).toEqual({
+      canOpen: false,
+      canManage: true,
+    });
+    expect(showPageHeaderAccess(false, null)).toEqual({ canOpen: false, canManage: false });
+    expect(showPageHeaderAccess(true, null)).toEqual({ canOpen: true, canManage: true });
   });
 
   it('distinguishes pending, offline, and error sync states', () => {

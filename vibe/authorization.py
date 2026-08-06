@@ -283,6 +283,15 @@ _VIEWER_HTTP_RULES = tuple(
     )
 )
 
+_VIEWER_HTTP_MUTATION_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("POST", r"^/api/show-pages/[^/]+/visibility$"),
+        ("POST", r"^/api/show-pages/[^/]+/rotate-share$"),
+        ("POST", r"^/api/show-pages/[^/]+/share-id$"),
+    )
+)
+
 _EDITOR_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
@@ -328,6 +337,12 @@ def required_instance_role(method: str, path: str) -> str | None:
         return "viewer" if normalized_method in {"GET", "HEAD", "OPTIONS"} else "editor"
     if not path.startswith("/api/"):
         return None
+    # These routes enforce Show Page ownership and Organization authority in
+    # the resource service. The HTTP gate only admits an authenticated viewer
+    # so page-specific authorization can make the final decision.
+    for rule_method, pattern in _VIEWER_HTTP_MUTATION_RULES:
+        if normalized_method == rule_method and pattern.fullmatch(path):
+            return "viewer"
     for rule_method, pattern in _EDITOR_HTTP_RULES:
         if normalized_method == rule_method and pattern.fullmatch(path):
             return "editor"

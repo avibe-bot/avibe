@@ -85,6 +85,25 @@ def _grant(browser_id: str = "browser-1", *, subject: str = "user-1") -> cloud_m
     )
 
 
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        ("/chat/session-1?tab=show-page", "/chat/session-1?tab=show-page"),
+        ("/admin/organization/members?tab=access", "/admin/organization/members?tab=access"),
+        ("https://example.com/chat/session-1", "/admin/organization/overview"),
+        ("//example.com/chat/session-1", "/admin/organization/overview"),
+        ("/admin/organization-impersonation", "/admin/organization/overview"),
+        ("/chat/session-1/extra", "/admin/organization/overview"),
+        ("/api/show-pages/session-1/access", "/admin/organization/overview"),
+    ],
+)
+def test_management_return_path_allows_only_supported_same_origin_workflows(
+    candidate: str,
+    expected: str,
+) -> None:
+    assert cloud_management.validate_next_path(candidate) == expected
+
+
 def test_local_start_uses_https_handoff_and_never_exposes_token(monkeypatch, tmp_path) -> None:
     _save_config(monkeypatch, tmp_path)
     captured: dict[str, object] = {}

@@ -245,7 +245,7 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
             },
         )
 
-    def test_subject_mismatch_can_reenter_with_clean_return_path(self):
+    def test_subject_mismatch_can_reenter_with_workbench_return_path(self):
         """Scenario: AUTH-SETUP-310"""
         client = self.harness.remote_client()
         client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
@@ -268,7 +268,7 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
             mismatch.headers["location"],
         )
 
-        clean_next = "/admin/organization/overview"
+        clean_next = "/chat/session-1?tab=show-page"
         with patch.object(
             cloud_management,
             "begin_authorization",

@@ -1270,10 +1270,13 @@ def get_show_page_access(session_id: str) -> dict:
         store.close()
 
     organization_id = policy.get("organization_id") if policy else None
+    instance_id = context.instance_id
+    if context.is_trusted_local and organization_id and not instance_id:
+        instance_id = V2Config.load().remote_access.vibe_cloud.instance_id or None
     return {
         "ok": True,
         "mode": "organization" if organization_id else "personal",
-        "instance_id": context.instance_id,
+        "instance_id": instance_id,
         "organization_id": organization_id,
         "access_level": policy.get("access_level", "private") if policy else "private",
         "group_ids": list(policy.get("group_ids") or []) if policy else [],
@@ -1281,6 +1284,7 @@ def get_show_page_access(session_id: str) -> dict:
         "last_applied_control_plane_revision": (
             policy.get("last_applied_control_plane_revision") if policy else None
         ),
+        "can_use": can_use,
         "can_manage": can_manage,
         "can_publish_public": can_publish_public,
         "public_link_enabled": page.visibility == "public",

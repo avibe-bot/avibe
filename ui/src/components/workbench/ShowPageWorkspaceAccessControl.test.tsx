@@ -17,6 +17,7 @@ const access = (overrides: Partial<ShowPageAccess> = {}): ShowPageAccess => ({
   group_ids: [],
   policy_revision: 4,
   last_applied_control_plane_revision: 4,
+  can_use: true,
   can_manage: true,
   can_publish_public: true,
   public_link_enabled: false,
