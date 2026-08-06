@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import uuid
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
@@ -10,6 +10,7 @@ from core.message_dispatcher import ActivityOutputDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
     MessageOutput,
+    contained_teardown_output_for,
     stop_output_for,
     terminal_output_for,
     terminal_turn_output,
@@ -266,6 +267,19 @@ class ClaudeAgent(BaseAgent):
                         preserve_pending_request_state=True,
                     )
                 if not handled:
+                    # Third and last emit site that can be holding a claimed
+                    # Activity batch. The request is in the FIFO from the moment
+                    # it is queued, so a background Activity that completes while
+                    # ``client.query`` is in flight attaches its batch here; the
+                    # auth branch above already requeues for exactly that reason.
+                    # Both receiver paths hand the batch back before their
+                    # terminal emit, unconditionally -- do the same rather than
+                    # only for a contained teardown, because the non-contained
+                    # release is no better: it terminalizes those Runs from this
+                    # empty error body. Requeueing resets the request output to
+                    # the plain terminal shape, so the emit below carries no
+                    # provenance it can no longer honour.
+                    self._requeue_request_activity(request)
                     contained = await self.session_handler.handle_session_error(
                         runtime_session_key, context, e, client=client
                     )
@@ -300,14 +314,11 @@ class ClaudeAgent(BaseAgent):
                             )
                     # No async receiver result is coming. Auth recovery settles its
                     # own failure; otherwise do that here without another bubble.
-                    await self.controller.emit_agent_message(
+                    await self._emit_no_result_settlement(
                         context,
-                        "result",
-                        "",
-                        is_error=True,
-                        level="silent",
-                        output=terminal_output_for(request),
-                        terminal_error=diagnostic,
+                        request,
+                        diagnostic,
+                        contained=contained is True,
                     )
             finally:
                 self._release_service_runtime_turn(context)
@@ -330,6 +341,64 @@ class ClaudeAgent(BaseAgent):
         except Exception:
             logger.debug("claude: teardown classification failed", exc_info=True)
             return False
+
+    async def _emit_no_result_settlement(
+        self,
+        context: MessageContext,
+        request: Any,
+        diagnostic: Optional[str],
+        *,
+        contained: bool,
+    ) -> None:
+        """Settle a turn whose backend produced no terminal result.
+
+        Three call sites reach this state -- a failed direct query, a receiver that
+        hit EOF, and a receiver exception -- and all three must settle the turn
+        through the one outbound chokepoint, because nothing else will.
+
+        ``contained`` is #1202's classification: the service killed this Claude
+        process itself. That branch is the whole point of the split. Emitting the
+        ordinary shape for it recorded a FAILED Turn and an ``agent_runs`` row
+        terminalized from an empty body -- provenance that contradicts the
+        classification the caller already made, and which #1202 only hid the bubble
+        for. ``contained_teardown_output_for`` routes the release through the
+        settlement lane instead, where the run lands ``failed`` with
+        ``interrupt_reason=backend_refresh``: still terminal, still visible to
+        anything reading the reason, but no longer indistinguishable from a backend
+        that actually broke.
+
+        What does NOT change is ``is_error``. Inside the dispatcher's silent branch
+        it feeds four things -- the collapsed status bubble's footer word, the
+        durable Turn outcome, the IM silent-terminal trace, and (when no durable
+        Turn owns the session) the sidebar status projection -- and for all four
+        "no terminal result was produced" remains true no matter who killed the
+        process. Clearing it would collapse the bubble to a green ``done`` for a
+        turn that answered nothing.
+
+        The three that must NOT read that as a backend fault are told so by the
+        settlement, which outranks the flag: ``NON_COMPLETING_TURN_SETTLEMENTS``
+        for the two Turn-outcome surfaces, and the same map's membership for the
+        sidebar, which has no dot between ``idle`` and ``failed`` to spend on it.
+
+        The one thing suppressed is ``terminal_error``: with the flag set and no
+        diagnostic, the bubble reads ``stopped`` (an intentional silent end) rather
+        than ``failed``, which is exactly what this is. The settlement supplies the
+        machine-readable cause; the footer only has to stop claiming success.
+        """
+
+        await self.controller.emit_agent_message(
+            context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+            output=(
+                contained_teardown_output_for(request)
+                if contained
+                else terminal_output_for(request)
+            ),
+            terminal_error=None if contained else diagnostic,
+        )
 
     def _release_service_runtime_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "agent_service", None)
@@ -1931,6 +2000,13 @@ class ClaudeAgent(BaseAgent):
         client = self.claude_sessions.get(composite_key)
         returncode = get_claude_client_returncode(client)
         auth_handled = False
+        # Only the ``handle_session_error`` branch below can classify this EOF as a
+        # teardown the service performed itself. Every other way out of the branch
+        # tree -- no returncode, no handler, auth recovery -- has no classification
+        # to offer, and the settlement at the bottom is shared by all of them, so
+        # the default has to be "not contained": an unclassified EOF is a real
+        # failure and must keep saying so.
+        contained = False
         if returncode is not None:
             eof_error = RuntimeError(terminal_error)
             error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
@@ -1968,13 +2044,16 @@ class ClaudeAgent(BaseAgent):
                 self._requeue_request_activity(pending_request)
                 handle_session_error = getattr(self.session_handler, "handle_session_error", None)
                 if callable(handle_session_error):
-                    contained = await handle_session_error(
-                        composite_key, context, eof_error, client=client
+                    contained = (
+                        await handle_session_error(
+                            composite_key, context, eof_error, client=client
+                        )
+                        is True
                     )
                     # A teardown the service performed itself is already
                     # explained in the log; do not leave a durable failure row
                     # for the web Chat to render.
-                    if contained is not True:
+                    if not contained:
                         try:
                             from core.message_mirror import persist_agent_message
 
@@ -2018,14 +2097,11 @@ class ClaudeAgent(BaseAgent):
                 preserve_pending_request_state=True,
             )
         try:
-            await self.controller.emit_agent_message(
+            await self._emit_no_result_settlement(
                 context,
-                "result",
-                "",
-                is_error=True,
-                level="silent",
-                output=terminal_output_for(pending_request),
-                terminal_error=diagnostic,
+                pending_request,
+                diagnostic,
+                contained=contained,
             )
         finally:
             self._release_service_runtime_turn(context)
@@ -2079,6 +2155,18 @@ class ClaudeAgent(BaseAgent):
                 await self._clear_pending_reactions(composite_key, context)
                 self._mark_session_idle_if_no_pending_requests(composite_key)
             else:
+                # Give a claimed Activity batch back to the Registry BEFORE the
+                # terminal emit, exactly as ``_handle_receiver_eof`` does. This
+                # path only ever peeked at the FIFO head, so a request carrying
+                # an ``activity_completion_output`` still owned that batch and
+                # its ``run_ids`` when the receiver died. Emitting on it either
+                # terminalizes those Runs from an empty body or -- once the
+                # settlement stops completing the Run -- skips them entirely and
+                # discards the claim with them. Requeueing resets the request's
+                # output to the plain terminal shape, so the release below
+                # carries no provenance it can no longer honour and the batch
+                # stays deliverable by whoever claims it next.
+                self._requeue_request_activity(pending_request)
                 contained = await self.session_handler.handle_session_error(
                     composite_key,
                     context,
@@ -2109,14 +2197,11 @@ class ClaudeAgent(BaseAgent):
                             "claude: failed to persist terminal receiver-error row",
                             exc_info=True,
                         )
-                await self.controller.emit_agent_message(
+                await self._emit_no_result_settlement(
                     context,
-                    "result",
-                    "",
-                    is_error=True,
-                    level="silent",
-                    output=terminal_output_for(pending_request),
-                    terminal_error=diagnostic,
+                    pending_request,
+                    diagnostic,
+                    contained=contained is True,
                 )
             self._release_service_runtime_turn(context)
 

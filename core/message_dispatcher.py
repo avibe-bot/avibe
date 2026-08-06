@@ -36,6 +36,7 @@ from core.message_output import (
 )
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
@@ -228,7 +229,16 @@ async def _stream_chunk(
         # terminal STATUS is still first-writer-wins in the store, so a result whose row
         # write already landed keeps its ``succeeded`` — this only stops the reason from
         # silently disagreeing with what the user was told.
-        if sink.get("settled_by") != SETTLED_BY_STOPPED:
+        #
+        # A contained backend teardown is the same case for the same reason: the
+        # service retired the runtime itself and the release already named that as
+        # the settlement, so a straggler result must not relabel an infrastructure
+        # interruption as a healthy terminal result. Only these two are protected --
+        # NOT all of ``SETTLEMENTS_WITHOUT_RESULT`` -- because
+        # ``SETTLED_BY_NO_TERMINAL_RESULT`` is the pessimistic default a fallback
+        # releaser writes, and upgrading THAT when a real result lands is the whole
+        # point of this line.
+        if sink.get("settled_by") not in (SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_REFRESH):
             sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
         done = sink.get("done_event")
         if done is not None:
@@ -1921,6 +1931,7 @@ class ConsolidatedMessageDispatcher:
                 manager.on_terminal_result(
                     context,
                     is_error=is_error,
+                    settled_by=self._turn_release_settlement(output_semantics),
                     terminal_evidence={
                         "result_text": self._fold_footer(terminal_body, result_footer),
                         "terminal_error": terminal_error,
@@ -1954,13 +1965,28 @@ class ConsolidatedMessageDispatcher:
                         "Activity output batch recovery is incomplete",
                         delivered=False,
                     )
+                # This row is the IM turn's ONLY terminal boundary — an IM turn has
+                # no durable execution owner, and ``list_turn_groups`` /
+                # ``_latest_source_message_anchor`` both close a turn on it. So a
+                # settlement that ends a turn without a result must still write one;
+                # skipping it leaves the turn logically open, which renders as a
+                # still-running activity card long after the runtime is gone. Only
+                # ``stopped`` is exempt, and only because the stop path reports the
+                # boundary itself. Passing the settlement lets the row say
+                # ``canceled`` where ``is_error`` alone would have said ``failed`` —
+                # a contained backend teardown gets a boundary that is honest about
+                # being an interruption rather than a backend fault.
                 if (
                     mutates_turn_lifecycle
                     and context.platform != "avibe"
                     and self._turn_release_settlement(output_semantics)
                     != SETTLED_BY_STOPPED
                 ):
-                    persist_silent_terminal(context, is_error=is_error)
+                    persist_silent_terminal(
+                        context,
+                        is_error=is_error,
+                        settled_by=self._turn_release_settlement(output_semantics),
+                    )
                 if canonical_type == "result" and output_semantics.settles_run:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may

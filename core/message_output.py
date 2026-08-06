@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
-from core.run_settlement import SETTLED_BY_STOPPED
+from core.run_settlement import SETTLED_BY_BACKEND_REFRESH, SETTLED_BY_STOPPED
 
 # Every trigger kind whose dispatch created an ``agent_runs`` row. Scheduled
 # tasks, watches, webhooks, hooks and recovered Activities are all Harness runs
@@ -176,4 +176,44 @@ def stop_output_for(request: Any) -> MessageOutput:
         completes_turn=True,
         completes_run=False,
         settled_by=SETTLED_BY_STOPPED,
+    )
+
+
+def contained_teardown_output_for(request: Any) -> MessageOutput:
+    """A service-initiated backend teardown's terminal result: infrastructure, not fault.
+
+    The service killed this backend runtime itself -- idle eviction, duplicate reap,
+    a rolling ``agents.*`` reconciliation. #1202 taught the Claude paths to recognize
+    that signal and stop reporting it as a user-visible backend error or a Model Hub
+    source-health failure. It did not change what the emit that follows still says:
+    an ordinary ``result`` whose only lifecycle authority is the terminal-turn
+    default, so the dispatcher terminalized an ``agent_runs`` row from an empty body
+    and the durable Turn read ``failed`` -- indistinguishable from a backend that
+    actually broke, while the bubble said nothing at all.
+
+    Same shape as ``stop_output_for``, different reason. ``completes_run=False``
+    keeps the empty body out of ``_record_agent_run_terminal_result``, and
+    ``settled_by`` routes the release through the settlement lane instead, where
+    ``SETTLEMENT_TERMINAL_STATUS`` already maps ``backend_refresh`` to ``failed``
+    with ``interrupt_reason=backend_refresh``. That preserves invariant 2 of
+    ``docs/plans/harness-run-reliability.md`` -- an infrastructure interruption is
+    ``failed`` with a STRUCTURED cause, never silently swallowed -- while making the
+    cause distinguishable from a backend that actually broke.
+
+    ``backend_refresh`` rather than ``interrupted`` because it already names this
+    exact boundary: a live Agent runtime retired inside an otherwise healthy
+    service. The same name also drives the TURN-level surfaces through
+    ``NON_COMPLETING_TURN_SETTLEMENTS``, which record it as ``canceled`` -- the word
+    ``release_for_backend_refresh`` already uses when it retires a live Turn
+    directly, so one teardown reads the same however it reached the row.
+
+    Nothing here is Claude-specific. Any backend whose cleanup can classify its own
+    teardown gets the same semantics by emitting through this factory.
+    """
+
+    return replace(
+        terminal_output_for(request),
+        completes_turn=True,
+        completes_run=False,
+        settled_by=SETTLED_BY_BACKEND_REFRESH,
     )

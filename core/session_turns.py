@@ -31,6 +31,7 @@ from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USE
 from core.message_context import resolve_turn_sink_key
 from core.native_dispatch_phase import backend_dispatch_attempted
 from core.run_settlement import (
+    NON_COMPLETING_TURN_SETTLEMENTS,
     SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
@@ -4258,9 +4259,17 @@ class SessionTurnManager:
                     interruption == SETTLED_BY_STOPPED
                     and not cancel_defers_queue_resume
                 )
+                # Same map as every other Turn-outcome surface. This branch used
+                # to hardcode ``stopped``, so a rolling refresh landed ``failed``
+                # here while ``release_for_backend_refresh`` -- the very caller
+                # that cancelled this runner -- wrote ``canceled`` for the durable
+                # Turns it reached directly. One teardown, two outcomes, decided
+                # by which writer won the race. ``restarted`` is absent from the
+                # map and still falls through to ``failed``: a service shutdown
+                # is not a cancellation.
                 result = self._terminalize_durable_turn(
                     turn_id,
-                    "canceled" if interruption == SETTLED_BY_STOPPED else "failed",
+                    NON_COMPLETING_TURN_SETTLEMENTS.get(interruption, "failed"),
                     settled_by=interruption,
                     evidence_kind=(
                         "service_shutdown"
@@ -6902,10 +6911,30 @@ class SessionTurnManager:
 
     @staticmethod
     def _durable_terminal_outcome(*, is_error: bool, settled_by: str | None) -> str:
+        """Map a release to the durable Turn outcome. The settlement wins.
+
+        A named settlement in ``SETTLEMENTS_WITHOUT_RESULT`` says the Turn ended
+        WITHOUT the backend producing a terminal result, so ``completed`` is never
+        truthful for one -- yet only ``stopped`` used to be excluded, which left
+        ``backend_refresh`` recording a retired runtime as a completed Turn. That is
+        the same event ``release_for_backend_refresh`` writes as ``canceled``
+        (``failed`` for a start it could not resolve), so the two paths for one
+        service-initiated teardown disagreed depending on which reached the row
+        first.
+
+        ``canceled`` rather than ``failed`` because the Turn was retired, not broken;
+        the RUN still settles ``failed`` with ``interrupt_reason=backend_refresh``
+        through ``SETTLEMENT_TERMINAL_STATUS``, so invariant 2 of
+        ``docs/plans/harness-run-reliability.md`` keeps its structured cause.
+        ``restarted`` is deliberately absent -- its call site already forces
+        ``failed`` before reaching here, and a service shutdown is not a cancellation.
+        """
+
+        non_completing = NON_COMPLETING_TURN_SETTLEMENTS.get(settled_by or "")
+        if non_completing is not None:
+            return non_completing
         if is_error:
             return "failed"
-        if settled_by == SETTLED_BY_STOPPED:
-            return "canceled"
         return "completed"
 
     def _finish_durable_terminal_result(
@@ -6953,9 +6982,16 @@ class SessionTurnManager:
         context: "MessageContext",
         *,
         is_error: bool,
+        settled_by: str | None = None,
         terminal_evidence: dict[str, Any] | None = None,
     ) -> None:
-        """OUTBOUND turn chokepoint for the active terminal ``result``."""
+        """OUTBOUND turn chokepoint for the active terminal ``result``.
+
+        ``settled_by`` is the release's named settlement, latched alongside
+        ``is_error`` so the post-delivery boundary can tell a Turn that ended
+        WITHOUT a result on purpose from a backend that broke. Optional because a
+        release may not name one; absent, the flag decides as before.
+        """
         if self.controller is None:
             return
         if not self.is_active_emit(context):
@@ -6986,6 +7022,7 @@ class SessionTurnManager:
             "session_id": session_id,
             "logical_turn_id": logical_turn_id,
             "is_error": is_error,
+            "settled_by": settled_by or None,
             "terminal_evidence": dict(terminal_evidence or {}),
         }
         context.platform_specific = payload
@@ -7004,6 +7041,7 @@ class SessionTurnManager:
         session_id = str(latch.get("session_id") or "")
         logical_turn_id = str(latch.get("logical_turn_id") or "")
         is_error = bool(latch.get("is_error"))
+        latched_settlement = str(latch.get("settled_by") or "")
         if not session_id:
             return
         durable_turn_exists = False
@@ -7019,9 +7057,23 @@ class SessionTurnManager:
                     exc_info=True,
                 )
         if not durable_turn_exists:
+            # No durable Turn row owns this session's outcome (IM, CLI, legacy),
+            # so this projection IS the session's terminal state. ``is_error``
+            # alone would call every result-less release a failure -- including a
+            # release whose settlement says the Turn was ended on purpose. A
+            # service-initiated backend teardown is the case that matters: the
+            # flag is honestly ``True`` (nothing answered) while the settlement
+            # says infrastructure, not fault, and the sidebar has no third dot to
+            # say so. ``idle`` is what the stop path already projects for the
+            # other member of that map, so one deliberate non-completion no
+            # longer reads two different ways depending on which one it was.
             self.controller.set_agent_status(
                 session_id,
-                "failed" if is_error else "idle",
+                (
+                    "failed"
+                    if is_error and latched_settlement not in NON_COMPLETING_TURN_SETTLEMENTS
+                    else "idle"
+                ),
             )
             return
         current = self.in_flight.get(session_id)

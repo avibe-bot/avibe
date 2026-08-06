@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -13,6 +13,8 @@ from core.native_dispatch_phase import (
     backend_dispatch_attempted,
     set_dispatch_phase,
 )
+from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
+from core.session_activities import SessionActivity, activity_completion_output
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
@@ -1832,6 +1834,371 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent.record_model_hub_native_failure.assert_not_awaited()
         # The exact client whose returncode was read, not a fresh lookup.
         self.assertEqual(probed, [client])
+
+    # --- contained teardown settlement (#1204) -------------------------------
+    #
+    # #1202 stopped a service-initiated teardown from being REPORTED as a backend
+    # failure. The emit that follows still described it as one: an ordinary silent
+    # ``result`` carrying only the terminal-turn default, so an ``agent_runs`` row
+    # was terminalized from an empty body and the durable Turn read ``failed``.
+    # These assert the settlement now matches the classification on all three paths
+    # that can reach it, and — the point of the negative controls — that an ordinary
+    # backend failure is untouched.
+
+    def assert_contained_settlement(self, emitter):
+        """The terminal emit routed a contained teardown through the settlement lane."""
+
+        call = emitter.await_args
+        self.assertEqual(call.args[1:3], ("result", ""))
+        self.assertEqual(call.kwargs["level"], "silent")
+        output = call.kwargs["output"]
+        self.assertEqual(output.settled_by, SETTLED_BY_BACKEND_REFRESH)
+        # ``settles_run`` False keeps the empty body out of
+        # ``_record_agent_run_terminal_result``; the settlement lane owns the row.
+        self.assertFalse(output.settles_run)
+        self.assertTrue(output.completes_turn)
+        # No terminal result was produced, and that stays true whoever killed the
+        # process: clearing the flag would collapse the status bubble to a green
+        # ``done`` for a turn that answered nothing.
+        self.assertTrue(call.kwargs["is_error"])
+        # Suppressing the DIAGNOSTIC is what separates this from a real failure —
+        # the dispatcher reads the pair as an intentional silent end (``stopped``)
+        # rather than a fault, and the settlement carries the machine-readable cause.
+        self.assertIsNone(call.kwargs["terminal_error"])
+
+    def assert_uncontained_settlement(self, emitter, diagnostic_fragment):
+        """An ordinary backend failure still settles as one."""
+
+        call = emitter.await_args
+        self.assertEqual(call.args[1:3], ("result", ""))
+        self.assertTrue(call.kwargs["is_error"])
+        self.assertIn(diagnostic_fragment, call.kwargs["terminal_error"])
+        self.assertIsNone(call.kwargs["output"].settled_by)
+        self.assertTrue(call.kwargs["output"].settles_run)
+
+    def _eof_agent(self, composite_key, *, contained, returncode=-9):
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-turn",
+                    "agent_runtime_turn_token": "eof-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(return_value=contained),
+            claude_teardown_is_intentional=lambda *_a, **_k: contained,
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: f"Claude process terminated: {returncode}",
+        )
+        controller.claude_sessions[composite_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=returncode)),
+        )
+        controller.receiver_tasks[composite_key] = asyncio.current_task()
+        return controller, agent, pending_request
+
+    async def test_receiver_eof_contained_teardown_settles_as_backend_refresh(self):
+        key = "session-eof-settle:/tmp/work"
+        controller, agent, request = self._eof_agent(key, contained=True)
+
+        await agent._handle_receiver_eof(key, request.context)
+
+        self.assert_contained_settlement(controller.emit_agent_message)
+
+    async def test_receiver_eof_real_failure_still_settles_as_a_backend_failure(self):
+        """The negative control: only a CLASSIFIED teardown gets the new semantics."""
+
+        key = "session-eof-real:/tmp/work"
+        controller, agent, request = self._eof_agent(key, contained=False, returncode=-6)
+
+        with patch("core.message_mirror.persist_agent_message"):
+            await agent._handle_receiver_eof(key, request.context)
+
+        self.assert_uncontained_settlement(controller.emit_agent_message, "-6")
+
+    async def test_receiver_eof_without_a_returncode_settles_as_a_backend_failure(self):
+        """A live process that merely stopped talking was never classified at all.
+
+        This is the branch that skips ``handle_session_error`` entirely, so
+        ``contained`` is only ever its initial value. If that default were True the
+        most common EOF — no returncode, no explanation — would silently become an
+        infrastructure interruption.
+        """
+
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        key = "session-eof-alive:/tmp/work"
+        request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-turn",
+                    "agent_runtime_turn_token": "eof-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[key] = [request]
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler = SimpleNamespace(cleanup_session=AsyncMock())
+        controller.claude_sessions[key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
+        )
+        controller.receiver_tasks[key] = asyncio.current_task()
+
+        await agent._handle_receiver_eof(key, request.context)
+
+        self.assert_uncontained_settlement(
+            controller.emit_agent_message,
+            "Claude receiver ended without a terminal result",
+        )
+
+    def _receiver_exception_agent(self, composite_key, *, contained):
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "exc-turn",
+                    "agent_runtime_turn_token": "exc-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[composite_key] = [request]
+        agent._clear_pending_reactions = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(return_value=contained),
+            claude_teardown_is_intentional=lambda *_a, **_k: contained,
+            mark_session_idle=lambda _key: None,
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: "Claude process terminated: SIGTERM",
+        )
+        controller.claude_sessions[composite_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-15)),
+        )
+        return controller, agent, request
+
+    async def test_receiver_exception_contained_teardown_settles_as_backend_refresh(self):
+        key = "session-exc-settle:/tmp/work"
+        controller, agent, request = self._receiver_exception_agent(key, contained=True)
+
+        await agent._handle_receiver_exception(
+            key, request.context, RuntimeError("Cannot write to terminated process (exit code: -15)")
+        )
+
+        self.assert_contained_settlement(controller.emit_agent_message)
+
+    async def test_receiver_exception_real_failure_still_settles_as_a_backend_failure(self):
+        key = "session-exc-real:/tmp/work"
+        controller, agent, request = self._receiver_exception_agent(key, contained=False)
+
+        with patch("core.message_mirror.persist_agent_message"):
+            await agent._handle_receiver_exception(
+                key, request.context, RuntimeError("boom")
+            )
+
+        self.assert_uncontained_settlement(controller.emit_agent_message, "SIGTERM")
+
+    async def test_receiver_exception_requeues_a_claimed_activity_batch(self):
+        """A dying receiver must not take an Activity claim down with it.
+
+        The EOF path already requeues before its terminal emit; this one only
+        peeked at the FIFO head, so the request still owned the batch and the
+        ``run_ids`` on its ``activity_completion_output``. With the contained
+        settlement declining to complete the Run, emitting on that output would
+        skip those Runs AND drop the claim -- the batch would be neither
+        delivered nor redeliverable. Requeueing restores it and strips the
+        provenance the release can no longer honour.
+        """
+
+        key = "session-exc-activity:/tmp/work"
+        controller, agent, request = self._receiver_exception_agent(key, contained=True)
+        activity = SessionActivity(
+            id="activity-1",
+            backend="claude",
+            runtime_key=key,
+            session_id="ses-1",
+            kind="background_task",
+            status="completed",
+            run_id="run-1",
+        )
+        request.output_activities = [activity]
+        request.output = activity_completion_output(
+            activity,
+            activities=[activity],
+            detached=False,
+            completes_turn=True,
+        )
+        registry = SimpleNamespace(requeue_completed_outputs=Mock())
+        agent._activity_registry = lambda: registry
+
+        await agent._handle_receiver_exception(
+            key,
+            request.context,
+            RuntimeError("Cannot write to terminated process (exit code: -15)"),
+        )
+
+        registry.requeue_completed_outputs.assert_called_once_with([activity])
+        self.assertEqual(request.output_activities, [])
+        self.assert_contained_settlement(controller.emit_agent_message)
+        released = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(released.activity_ids, ())
+        self.assertIsNone(released.activity_batch_id)
+        self.assertEqual(released.run_ids, ())
+
+    async def test_direct_query_contained_teardown_settles_as_backend_refresh(self):
+        """The third path: the query itself fails, no receiver ever runs."""
+
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        runtime_key = "wechat_o9:reviewer:/tmp/work"
+        client = SimpleNamespace(
+            query=AsyncMock(
+                side_effect=RuntimeError("Cannot write to terminated process (exit code: -9)")
+            ),
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+            _vibe_runtime_base_session_id="wechat_o9:reviewer",
+            _vibe_runtime_session_key=runtime_key,
+        )
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(return_value=client),
+            mark_session_active=lambda _key: None,
+            mark_session_idle=lambda _key: None,
+            handle_session_error=AsyncMock(return_value=True),
+            claude_teardown_is_intentional=lambda *_a, **_k: True,
+            cleanup_session=AsyncMock(),
+            capture_session_id=lambda *_: None,
+        )
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        agent._prepare_message_with_files = lambda request: request.message
+        agent._delete_ack = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="hello",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id="wechat_o9:/tmp/work",
+            session_key="wechat-user",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+
+        with patch("core.message_mirror.persist_agent_message") as persist:
+            await agent.handle_message(request)
+
+        agent.record_model_hub_native_failure.assert_not_awaited()
+        persist.assert_not_called()
+        self.assert_contained_settlement(controller.emit_agent_message)
+
+    async def test_direct_query_requeues_a_claimed_activity_batch(self):
+        """The same claim leak on the path where no receiver ever runs.
+
+        The request joins the FIFO before ``client.query`` is awaited, so a
+        background Activity that finishes while the query is in flight attaches
+        its batch to exactly this request -- the race the auth branch above
+        already requeues for. If the query then fails into a contained teardown,
+        the release declines to complete the Run and drops the claim with it.
+        Requeue like both receiver paths do.
+        """
+
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        runtime_key = "wechat_o9:activity:/tmp/work"
+        activity = SessionActivity(
+            id="activity-2",
+            backend="claude",
+            runtime_key=runtime_key,
+            session_id="ses-2",
+            kind="background_task",
+            status="completed",
+            run_id="run-2",
+        )
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="hello",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id="wechat_o9:/tmp/work",
+            session_key="wechat-user",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+
+        async def _query_after_activity_lands(*_args, **_kwargs):
+            # The batch attaches to the queued request mid-query, then the
+            # transport turns out to be gone.
+            request.output_activities = [activity]
+            request.output = activity_completion_output(
+                activity,
+                activities=[activity],
+                detached=False,
+                completes_turn=True,
+            )
+            raise RuntimeError("Cannot write to terminated process (exit code: -9)")
+
+        client = SimpleNamespace(
+            query=AsyncMock(side_effect=_query_after_activity_lands),
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+            _vibe_runtime_base_session_id="wechat_o9:activity",
+            _vibe_runtime_session_key=runtime_key,
+        )
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(return_value=client),
+            mark_session_active=lambda _key: None,
+            mark_session_idle=lambda _key: None,
+            handle_session_error=AsyncMock(return_value=True),
+            claude_teardown_is_intentional=lambda *_a, **_k: True,
+            cleanup_session=AsyncMock(),
+            capture_session_id=lambda *_: None,
+        )
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        agent._prepare_message_with_files = lambda req: req.message
+        agent._delete_ack = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        registry = SimpleNamespace(
+            requeue_completed_outputs=Mock(),
+            has_active=lambda *_a, **_k: False,
+            has_completed_output=lambda *_a, **_k: False,
+        )
+        agent._activity_registry = lambda: registry
+
+        with patch("core.message_mirror.persist_agent_message"):
+            await agent.handle_message(request)
+
+        registry.requeue_completed_outputs.assert_called_once_with([activity])
+        self.assertEqual(request.output_activities, [])
+        self.assert_contained_settlement(controller.emit_agent_message)
+        released = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(released.activity_ids, ())
+        self.assertIsNone(released.activity_batch_id)
+        self.assertEqual(released.run_ids, ())
 
     async def test_receiver_eof_terminated_auth_adopts_turn_before_recovery(self):
         controller = _StubController()

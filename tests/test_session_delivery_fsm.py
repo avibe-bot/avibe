@@ -19,6 +19,8 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_RESTARTED,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
@@ -4548,6 +4550,53 @@ def test_canceled_shutdown_runner_preserves_deferred_queue(
 
     assert released["defer_queue_resume"] is True
     assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+
+
+@pytest.mark.parametrize(
+    ("settled_by", "expected_outcome"),
+    [
+        (SETTLED_BY_BACKEND_REFRESH, "canceled"),
+        (SETTLED_BY_RESTARTED, "failed"),
+        (SETTLED_BY_NO_TERMINAL_RESULT, "failed"),
+    ],
+)
+def test_cancelled_runner_release_writes_the_settlement_outcome(
+    managers,
+    settled_by: str,
+    expected_outcome: str,
+) -> None:
+    """The cancellation branch reads the shared Turn-outcome map.
+
+    ``release_for_backend_refresh`` cancels this runner AND terminalizes the
+    durable Turns it can reach directly as ``canceled``. When the branch
+    hardcoded ``stopped`` as the only non-failure, one rolling refresh landed two
+    different outcomes depending on which writer won. ``restarted`` stays
+    ``failed`` -- a service shutdown is not a cancellation -- as does the
+    pessimistic default a releaser writes when it can name nothing.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+
+    released = manager._reconcile_durable_runner_release(
+        turn_id,
+        cancelled=True,
+        failed=False,
+        prewrite_refused=False,
+        definitive_prewrite_exit=False,
+        settled_by=settled_by,
+        terminal_is_error=True,
+        cancel_defers_queue_resume=True,
+    )
+
+    assert released["changed"] is True
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["terminal_outcome"] == expected_outcome
+    # Only a user stop releases the queue here; a refresh still defers it to the
+    # post-refresh generation, so the outcome word must not move that lever.
+    assert released["defer_queue_resume"] is True
 
 
 def test_ambiguous_start_failure_defers_runner_queue_resume(managers) -> None:
