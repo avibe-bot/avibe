@@ -947,7 +947,28 @@ class MessageHandler(BaseHandler):
             from core.inbox_events import bus
 
             bus.publish("queue.updated", {"session_id": session_id})
+        # This is the only place that knows an input's admission outcome: a
+        # Delivery that did not start its own turn returns here and the caller
+        # stops, so without a receipt the user sees nothing at all for every
+        # message sent while a turn is running.
+        await self._ack_delivery_admission(context, result)
         return True
+
+    async def _ack_delivery_admission(self, context: MessageContext, result: Any) -> None:
+        """Report one admission outcome back to the sender, best effort."""
+
+        indicator = getattr(self.controller, "processing_indicator", None)
+        ack = getattr(indicator, "ack_delivery_state", None)
+        if not callable(ack):
+            return
+        try:
+            await ack(
+                context,
+                state=str(getattr(result, "state", "") or ""),
+                admission=str(getattr(result, "admission", "") or ""),
+            )
+        except Exception as err:
+            logger.debug("Failed to acknowledge delivery admission: %s", err)
 
     @staticmethod
     def _cleanup_unowned_attachment_paths(paths: List[str]) -> None:

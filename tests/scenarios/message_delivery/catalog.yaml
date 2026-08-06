@@ -158,6 +158,17 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_im_p1_materializes_only_after_exact_native_acceptance
+  - id: MESSAGE-DELIVERY-301
+    name: Mid-turn IM input reports its admission outcome to the sender
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::AdmissionAckTests
+  - id: MESSAGE-DELIVERY-302
+    name: A queued admission receipt is replaced by the running turn indicator
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_start_clears_the_queued_receipt_before_the_turn_indicator
 next_priority:
-  - MESSAGE-DELIVERY-301
-  - MESSAGE-DELIVERY-302
+  - MESSAGE-DELIVERY-303

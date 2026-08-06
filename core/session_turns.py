@@ -466,6 +466,12 @@ class DeliveryResult:
     state: str
     turn_id: str | None = None
     reason: str | None = None
+    # How this input reached its Turn. ``accepted`` alone cannot tell a Delivery
+    # that STARTED its own Turn from one that was STEERED into a Turn already
+    # running: both settle as ``accepted``. Surfaces that report the admission
+    # back to the user need that distinction, because a started Turn already
+    # owns its own processing indicator while a steered input has none.
+    admission: Literal["", "started", "steered"] = ""
 
 
 @dataclass(frozen=True)
@@ -1534,11 +1540,16 @@ class SessionTurnManager:
             or attempted_turn_id
             or ""
         ).strip()
+        state = str(delivery["state"])
         return DeliveryResult(
             delivery_id,
             str(delivery.get("message_id") or "").strip() or None,
-            str(delivery["state"]),
+            state,
             turn_id or None,
+            # Every caller reaches here right after dispatching a Turn this
+            # Delivery participates in, so an owned state means this input
+            # started the work rather than joining a Turn already running.
+            admission="started" if state in {"claimed", "accepted"} else "",
         )
 
     @classmethod
@@ -2824,6 +2835,7 @@ class SessionTurnManager:
                 str((saved or {}).get("message_id") or delivery_id),
                 "accepted",
                 target_turn_id or None,
+                admission="steered",
             )
         if should_drain:
             await self.drain_delivery_queue(session_id)
