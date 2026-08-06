@@ -111,12 +111,15 @@ def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
             assert text not in body, f"{path} still contains {text!r}"
 
 
-def test_use_avibe_skill_is_narrow_and_has_no_session_lifecycle_protocol() -> None:
+def test_use_avibe_skill_keeps_its_broad_scope_without_a_session_lifecycle_protocol() -> None:
     for path in ("skills/use-avibe/SKILL.md", "skills/use-vibe-remote/SKILL.md"):
         body = _read(path)
 
-        assert "Use this skill only when the task directly changes an installed Avibe instance" in body
-        assert "Do not activate it for Avibe source development" in body
+        assert "configure, repair, explain, or operate a local Avibe installation" in body
+        assert "managed background watch with `vibe watch`" in body
+        assert "scheduled task with `vibe task`" in body
+        assert "check or apply Avibe updates" in body
+        assert "inspect logs, run doctor, check service status" in body
 
         for text in (
             "every user turn",
