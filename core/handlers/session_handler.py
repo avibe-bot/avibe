@@ -179,21 +179,31 @@ class SessionHandler(BaseHandler):
         self.session_turn_started.pop(composite_key, None)
         self.claude_system_prompts.pop(composite_key, None)
 
-    def _live_claude_client_pids(self) -> set[int]:
-        """Claude CLI pids owned by clients that are still registered.
+    def _live_claude_client_pids(self) -> tuple[set[int], bool]:
+        """Claude CLI pids owned by registered clients, and whether that set is whole.
 
         The duplicate reaper matches on the native ``--resume`` id, which is
         reused across reconnects and therefore cannot distinguish a leaked
         generation from a live client for the same session. Membership in
         ``claude_sessions`` is the authoritative ownership signal, so these
         pids are never eligible for a duplicate reap.
+
+        A registered client whose pid cannot be resolved is still an owner — it
+        just cannot be named — so the second element reports whether every
+        owner is accounted for. ``reap_orphaned_claude_sessions`` already draws
+        this distinction with ``owner_set_complete``; without it a partial set
+        reads as the whole ownership picture and a live replacement resuming
+        this native id can be selected by the process-table scan.
         """
         pids: set[int] = set()
+        complete = True
         for client in list(self.claude_sessions.values()):
             pid = get_claude_client_pid(client)
             if pid:
                 pids.add(pid)
-        return pids
+            else:
+                complete = False
+        return pids, complete
 
     def _mark_claude_teardown_intentional(self, composite_key: str, client) -> None:
         """Record that this generation is being torn down by the service."""
@@ -214,6 +224,13 @@ class SessionHandler(BaseHandler):
 
         A fresh client must never inherit the previous generation's teardown
         marker, otherwise its own failures would be silently swallowed.
+
+        The key-level record is therefore the *replacement's* view, not the
+        torn-down generation's: an in-flight query from the old generation can
+        still reach ``handle_session_error`` after this runs. That case is
+        carried by the per-client ``_vibe_intentional_teardown`` attribute
+        instead, which is why callers pass the exact client whose failure they
+        observed rather than letting the handler re-read ``claude_sessions``.
         """
         if composite_key:
             self.claude_intentional_teardowns.pop(composite_key, None)
@@ -242,6 +259,29 @@ class SessionHandler(BaseHandler):
         if returncode is not None:
             return returncode in CLAUDE_TEARDOWN_RETURNCODES
         return bool(CLAUDE_TEARDOWN_EXIT_PATTERN.search(str(error)))
+
+    def claude_teardown_is_intentional(
+        self,
+        composite_key: str,
+        error: Exception,
+        *,
+        client=None,
+    ) -> bool:
+        """Public probe: is this failure a teardown the service performed itself?
+
+        Callers need the answer *before* they record backend-health evidence.
+        ``record_model_hub_native_failure`` converts the pending attempt into a
+        failed one, so classifying only afterwards lets operational cleanup
+        settle a Model Hub source as unhealthy for a process nobody reported a
+        fault in.
+        """
+        resolved = client if client is not None else self.claude_sessions.get(composite_key)
+        return self._is_intentional_teardown_signal(
+            composite_key,
+            error,
+            get_claude_client_returncode(resolved),
+            resolved,
+        )
 
     async def _wait_for_claude_session_idle(self, composite_key: str) -> None:
         while composite_key in self.active_sessions:
@@ -1896,7 +1936,8 @@ class SessionHandler(BaseHandler):
         ``connect()`` and registration that client owns a live subprocess that
         ``claude_sessions`` cannot yet report, and ``keep_pid`` is ``None`` on
         every cleanup that does not run from the receiver task — so the reap is
-        deferred rather than run against an incomplete owner set. The periodic
+        deferred rather than run against an incomplete owner set. The same
+        applies when a registered client's pid cannot be resolved. The periodic
         orphan reaper, which reconciles against the persisted ownership
         registry, remains the backstop for anything left behind.
         """
@@ -1910,10 +1951,17 @@ class SessionHandler(BaseHandler):
                 len(creates_in_flight),
             )
             return
+        owned_pids, owner_set_complete = self._live_claude_client_pids()
+        if not owner_set_complete:
+            logger.info(
+                "Deferring duplicate Claude reap for session %s: a registered client's pid is unresolved",
+                composite_key,
+            )
+            return
         await reap_duplicate_claude_resume_processes(
             native_session_id,
             keep_pid=keep_pid,
-            exclude_pids=self._live_claude_client_pids(),
+            exclude_pids=owned_pids,
             cli_path=self._get_claude_cli_path_override(),
             logger=logger,
         )
@@ -2414,12 +2462,21 @@ class SessionHandler(BaseHandler):
         composite_key: str,
         context: MessageContext,
         error: Exception,
+        *,
+        client=None,
     ) -> bool:
         """Handle session-related errors.
 
         Returns ``True`` when the failure was contained (already explained to
         the user, or deliberately silenced), so callers can skip persisting a
         durable failure notification for it.
+
+        ``client`` is the exact client whose failure the caller observed. It
+        matters when a replacement has already registered under the same
+        composite key: the torn-down client was popped from ``claude_sessions``
+        and only it carries the teardown marker, so re-reading the map here
+        would classify a delayed old-generation ``-9`` against the healthy
+        replacement and report it as a genuine failure.
         """
         error_msg = str(error)
 
@@ -2442,7 +2499,8 @@ class SessionHandler(BaseHandler):
             )
             return False
 
-        client = self.claude_sessions.get(composite_key)
+        if client is None:
+            client = self.claude_sessions.get(composite_key)
         returncode = get_claude_client_returncode(client)
         if self._is_intentional_teardown_signal(composite_key, error, returncode, client):
             # The service killed this process itself (idle eviction, duplicate

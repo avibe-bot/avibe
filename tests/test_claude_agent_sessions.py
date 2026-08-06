@@ -1719,7 +1719,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._remove_ack_reaction = AsyncMock()
         agent.session_handler = SimpleNamespace(
             handle_session_error=AsyncMock(
-                side_effect=lambda *_args: settlement_order.append("handle")
+                side_effect=lambda *_args, **_kwargs: settlement_order.append("handle")
             ),
             cleanup_session=AsyncMock(),
             claude_error_diagnostic=lambda _key, _error: "Claude process terminated: SIGABRT",
@@ -1784,6 +1784,54 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         agent.session_handler.handle_session_error.assert_awaited_once()
         persist.assert_not_called()
+
+    async def test_contained_teardown_records_no_model_hub_failure(self):
+        """Operational cleanup is not evidence about a Model Hub source.
+
+        ``record_model_hub_native_failure`` converts the pending attempt into a
+        failed one — ``unclassified_error`` for ``-9`` — and the silent result
+        can then settle that provenance as exhausted. Classifying the teardown
+        only after the recording has already run corrupts source health for a
+        process the service killed itself, so the probe has to come first.
+        """
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        composite_key = "session-eof-teardown:/tmp/work"
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-turn",
+                    "agent_runtime_turn_token": "eof-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        probed: list[object] = []
+
+        def _is_intentional(_key, _error, *, client=None):
+            probed.append(client)
+            return True
+
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(return_value=True),
+            claude_teardown_is_intentional=_is_intentional,
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: "Command failed with exit code -9",
+        )
+        client = SimpleNamespace(_transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)))
+        controller.claude_sessions[composite_key] = client
+        controller.receiver_tasks[composite_key] = asyncio.current_task()
+
+        await agent._handle_receiver_eof(composite_key, pending_request.context)
+
+        agent.record_model_hub_native_failure.assert_not_awaited()
+        # The exact client whose returncode was read, not a fresh lookup.
+        self.assertEqual(probed, [client])
 
     async def test_receiver_eof_terminated_auth_adopts_turn_before_recovery(self):
         controller = _StubController()

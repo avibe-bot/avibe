@@ -615,3 +615,65 @@ def test_reported_session_errors_are_not_marked_contained() -> None:
 
     assert contained is False
     assert len(controller.im_client.sent_messages) == 1
+
+
+def test_old_generation_teardown_is_contained_after_a_replacement_registers() -> None:
+    """The caller's own client decides, not whatever now holds the key.
+
+    A query from the torn-down generation can reach the handler after a
+    replacement has registered and cleared the key record. The old client was
+    already popped from ``claude_sessions``, so re-reading the map here would
+    classify the delayed ``-9`` against the healthy replacement and report a
+    deliberate teardown as a genuine backend failure.
+    """
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    torn_down = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        _vibe_intentional_teardown=True,
+    )
+    replacement = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
+    )
+    controller.claude_sessions[composite_key] = replacement
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._clear_claude_teardown_intent(composite_key)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    contained = asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code -9"),
+            client=torn_down,
+        )
+    )
+
+    assert contained is True
+    assert controller.im_client.sent_messages == []
+
+
+def test_claude_teardown_is_intentional_probes_the_callers_client() -> None:
+    """The public probe answers before any backend-health evidence is recorded."""
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    torn_down = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        _vibe_intentional_teardown=True,
+    )
+    healthy = SimpleNamespace(_transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)))
+    controller.claude_sessions[composite_key] = healthy
+    error = RuntimeError("Command failed with exit code -9")
+
+    assert handler.claude_teardown_is_intentional(composite_key, error, client=torn_down) is True
+    assert handler.claude_teardown_is_intentional(composite_key, error, client=healthy) is False
+    # No client named and nothing marked: an ordinary failure, not a teardown.
+    assert handler.claude_teardown_is_intentional(composite_key, error) is False

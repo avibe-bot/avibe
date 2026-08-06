@@ -232,7 +232,15 @@ class ClaudeAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
             diagnostic = self._claude_error_diagnostic(runtime_session_key, e)
-            await self.record_model_hub_native_failure(context, diagnostic)
+            # Classify BEFORE recording: ``record_model_hub_native_failure``
+            # turns the pending native/hub attempt into a failed one, so a
+            # process the service killed on purpose would settle that source's
+            # provenance as exhausted with no backend fault behind it.
+            intentional_teardown = self._teardown_is_intentional(
+                runtime_session_key, e, client=client
+            )
+            if not intentional_teardown:
+                await self.record_model_hub_native_failure(context, diagnostic)
             # Clean up the specific reaction for this request (not FIFO)
             await self._remove_specific_pending_reaction(runtime_session_key, context, request)
             self._remove_pending_request(runtime_session_key, request)
@@ -259,7 +267,7 @@ class ClaudeAgent(BaseAgent):
                     )
                 if not handled:
                     contained = await self.session_handler.handle_session_error(
-                        runtime_session_key, context, e
+                        runtime_session_key, context, e, client=client
                     )
                     # ``handle_session_error`` sends through the IM client, which doesn't
                     # write to ``messages``, and the web Chat renders only durable
@@ -305,6 +313,23 @@ class ClaudeAgent(BaseAgent):
                 self._release_service_runtime_turn(context)
         finally:
             await self._delete_ack(context, request)
+
+    def _teardown_is_intentional(self, composite_key: str, error: Exception, *, client=None) -> bool:
+        """Did the service kill this Claude process itself?
+
+        The session handler owns the classification; this only reaches it.
+        Duck-typed like the other handler calls here, and failure-closed: an
+        unknown answer must record the failure rather than silently drop
+        backend-health evidence.
+        """
+        probe = getattr(self.session_handler, "claude_teardown_is_intentional", None)
+        if not callable(probe):
+            return False
+        try:
+            return probe(composite_key, error, client=client) is True
+        except Exception:
+            logger.debug("claude: teardown classification failed", exc_info=True)
+            return False
 
     def _release_service_runtime_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "agent_service", None)
@@ -1911,7 +1936,11 @@ class ClaudeAgent(BaseAgent):
             error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
             diagnostic = self._claude_error_diagnostic(composite_key, eof_error)
             failure_context = getattr(pending_request, "context", context)
-            await self.record_model_hub_native_failure(failure_context, diagnostic)
+            intentional_teardown = self._teardown_is_intentional(
+                composite_key, eof_error, client=client
+            )
+            if not intentional_teardown:
+                await self.record_model_hub_native_failure(failure_context, diagnostic)
             auth_handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                 context,
                 "claude",
@@ -1939,7 +1968,9 @@ class ClaudeAgent(BaseAgent):
                 self._requeue_request_activity(pending_request)
                 handle_session_error = getattr(self.session_handler, "handle_session_error", None)
                 if callable(handle_session_error):
-                    contained = await handle_session_error(composite_key, context, eof_error)
+                    contained = await handle_session_error(
+                        composite_key, context, eof_error, client=client
+                    )
                     # A teardown the service performed itself is already
                     # explained in the log; do not leave a durable failure row
                     # for the web Chat to render.
@@ -2019,7 +2050,15 @@ class ClaudeAgent(BaseAgent):
             diagnostic = self._claude_error_diagnostic(composite_key, error)
             error_notify = self._format_error_notify(error, composite_key=composite_key)
             failure_context = getattr(pending_request, "context", context)
-            await self.record_model_hub_native_failure(failure_context, diagnostic)
+            # Read the client once and reuse it for both the health gate and the
+            # handler, so a replacement registering in between cannot make the
+            # two disagree about which generation actually failed.
+            errored_client = self.claude_sessions.get(composite_key)
+            intentional_teardown = self._teardown_is_intentional(
+                composite_key, error, client=errored_client
+            )
+            if not intentional_teardown:
+                await self.record_model_hub_native_failure(failure_context, diagnostic)
             handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                 context,
                 "claude",
@@ -2044,6 +2083,7 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     context,
                     error,
+                    client=errored_client,
                 )
                 # A teardown the service performed itself is contained: no IM
                 # message and no durable failure row on any surface.
