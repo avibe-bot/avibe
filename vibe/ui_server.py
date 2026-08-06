@@ -4683,6 +4683,18 @@ def show_pages_list_get():
 
     payload = api.list_show_pages()
     context = getattr(g, "authorization_context", None)
+    remote_request = bool(
+        getattr(g, "remote_session_payload", None) is not None
+        or _is_remote_access_request(_load_remote_access_config())
+    )
+    if remote_request or (context is not None and context.is_remote):
+        payload = {
+            **payload,
+            "pages": [
+                {key: value for key, value in page.items() if key != "path"}
+                for page in payload.get("pages", [])
+            ],
+        }
     if context is not None and not context.is_instance_owner:
         engine = _projects_engine()
         with engine.connect() as conn:
