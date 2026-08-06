@@ -141,11 +141,11 @@ scenarios:
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_unresolved_p1_fence_blocks_later_but_not_older_fifo
   - id: MESSAGE-DELIVERY-102
-    name: Queue hold blocks autonomous backlog but not a new idle admission
+    name: Stop terminalization immediately resumes the oldest queued segment
     status: covered
     kind: lifecycle
     layer: contract
-    test: tests/test_session_delivery_fsm.py::test_held_old_backlog_does_not_block_new_idle_p3
+    test: tests/test_session_delivery_fsm.py::test_stop_terminalization_resumes_oldest_queued_segment
   - id: MESSAGE-DELIVERY-201
     name: Every approved producer class maps to one explicit delivery priority
     status: covered

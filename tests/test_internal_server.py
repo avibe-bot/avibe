@@ -1707,7 +1707,7 @@ def test_startup_recovered_annotation_retries_reserved_dispatch_text(
     assert transcript[0]["content"]["annotation"]["quote"] == "Quarterly summary"
 
 
-def test_idle_show_admission_starts_itself_without_releasing_held_backlog(
+def test_idle_show_p1_admission_starts_before_recovery_drain(
     monkeypatch,
     tmp_path,
 ):
@@ -1741,9 +1741,8 @@ def test_idle_show_admission_starts_itself_without_releasing_held_backlog(
             conn,
             scope_id=scope_id,
             session_id=session["id"],
-            text="older stopped message",
+            text="older queued message",
         )
-        assert message_deliveries.set_queue_hold(conn, session["id"], held=True)
     store = ShowSessionEventStore()
     try:
         annotation = store.append(
@@ -1783,12 +1782,6 @@ def test_idle_show_admission_starts_itself_without_releasing_held_backlog(
     ):
         runs.append((sid, text, source))
         _bind_test_native_start(engine, context)
-        manager._terminalize_durable_turn(
-            logical_turn_id,
-            "completed",
-            settled_by=SETTLED_BY_TERMINAL_RESULT,
-            evidence_kind="test_terminal",
-        )
 
     manager._run = capture_run
     transport = httpx.ASGITransport(app=app)
@@ -2184,10 +2177,8 @@ def test_async_dispatch_flushes_one_compatible_queue_segment_on_turn_end(monkeyp
     assert transcript["messages"][1]["metadata"]["_web_push_user_key"] == "remote:user-a"
 
 
-def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
-    """A user Stop interrupts the turn but must NOT flush the queue — the user
-    asked to keep queued messages on stop ('不清空队列'). The queued rows survive
-    the cancellation; only a natural turn end (or send-now) runs them."""
+def test_cancel_resumes_the_oldest_queued_segment(monkeypatch, tmp_path):
+    """Once Stop makes the Session idle, its queued work starts immediately."""
     from core.services import sessions as sessions_service
     from storage import messages_service
     from storage.db import create_sqlite_engine
@@ -2214,11 +2205,16 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
     session_id = session["id"]
 
     started = asyncio.Event()
+    seen: list[str] = []
 
     async def long_handler(ctx, text):
         _bind_test_native_start(engine, ctx)
-        started.set()
-        await asyncio.sleep(5)  # held until the test cancels it
+        seen.append(text)
+        if text == "first":
+            started.set()
+            await asyncio.sleep(5)  # held until the test cancels it
+        else:
+            controller.mark_turn_complete(ctx)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
     controller = _build_controller_double(handler=long_handler)
@@ -2240,8 +2236,8 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
             with engine.begin() as conn:
                 message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=session_id, text="q1")
             await client.post(f"/internal/cancel/{session_id}")
-            for _ in range(200):
-                if session_id not in app.state.in_flight_dispatches:
+            for _ in range(300):
+                if seen == ["first", "q1"] and session_id not in app.state.in_flight_dispatches:
                     break
                 await asyncio.sleep(0.02)
 
@@ -2249,8 +2245,9 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
     with engine.connect() as conn:
         queued = message_deliveries.list_queued(conn, session_id)
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
-    assert [q["text"] for q in queued] == ["q1"], "Stop must keep the queue intact"
-    assert [row["text"] for row in transcript["messages"]] == ["first"]
+    assert seen == ["first", "q1"]
+    assert queued == []
+    assert [row["text"] for row in transcript["messages"]] == ["first", "q1"]
 
 
 def test_turn_state_reflects_in_flight():
@@ -2884,7 +2881,6 @@ def test_stop_during_backend_drain_keeps_existing_queue_parked(tmp_path, monkeyp
     assert result["status"] == "cancel_requested"
     assert held is True
     with engine.connect() as conn:
-        assert message_deliveries.queue_is_held(conn, session_id) is True
         assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == ["queued"]
     assert manager._deferred_restart_sessions == {"codex": {session_id}}
 
@@ -3462,7 +3458,6 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt_and_drain_fif
     assert seen == ["original work", "first correction", "second correction"]
     with engine.connect() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
-        assert message_deliveries.queue_is_held(conn, session_id) is False
     for request, expected_status in zip(
         requests,
         ("waiting_terminal", "queued"),
@@ -3620,7 +3615,6 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
             session_id=session_id,
             text="older queued input",
         )
-        assert message_deliveries.set_queue_hold(conn, session_id, held=True)
 
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -3677,7 +3671,6 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
         assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
             "older queued input"
         ]
-        assert message_deliveries.queue_is_held(conn, session_id)
     controller.command_handler.handle_stop.assert_not_awaited()
 
 
@@ -3917,7 +3910,6 @@ def test_idle_send_now_releases_hold_and_starts_the_exact_head(
             session_id=session_id,
             text="retry me later",
         )
-        assert message_deliveries.set_queue_hold(conn, session_id, held=True)
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -3954,7 +3946,6 @@ def test_idle_send_now_releases_hold_and_starts_the_exact_head(
     }
     with engine.connect() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
-        assert not message_deliveries.queue_is_held(conn, session_id)
         assert messages_service.get_message(conn, queued["id"], session_id=session_id)
 
 

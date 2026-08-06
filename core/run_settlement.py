@@ -293,7 +293,7 @@ _HFR_102_CAS = (
 )
 _HFR_103 = (
     "tests/test_scheduled_tasks.py::"
-    "test_service_teardown_terminalizes_transferred_durable_turn_without_draining_held_queue"
+    "test_service_teardown_terminalizes_transferred_turn_without_starting_queued_work"
 )
 _HFR_104 = (
     "tests/test_scheduled_tasks.py::"
