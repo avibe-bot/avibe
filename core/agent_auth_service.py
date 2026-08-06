@@ -916,7 +916,10 @@ class AgentAuthService:
         through the outbound chokepoint with a silent terminal failure. No-op
         off-workbench (the outbound resolves no session id).
         """
-        if not classify_auth_error(backend, error_text):
+        auth_text = "\n".join(
+            text for text in (error_text, terminal_error) if str(text or "").strip()
+        )
+        if not classify_auth_error(backend, auth_text):
             return False
 
         backend_config = self._resolve_backend_config(backend)

@@ -42,6 +42,48 @@ def get_claude_client_pid(client: object | None) -> int | None:
     return pid if isinstance(pid, int) and pid > 0 else None
 
 
+def get_claude_client_returncode(client: object | None) -> int | None:
+    """Return the Claude CLI exit code once its subprocess has terminated."""
+    transport = getattr(client, "_transport", None)
+    process = getattr(transport, "_process", None)
+    returncode = getattr(process, "returncode", None)
+    if isinstance(returncode, bool) or not isinstance(returncode, int):
+        return None
+    return returncode
+
+
+def claude_process_exit_reason(returncode: int) -> str:
+    """Format a subprocess exit code for logs and user-facing diagnostics."""
+    if returncode < 0:
+        signal_number = -returncode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"signal {signal_number}"
+        return f"{signal_name} (signal {signal_number})"
+    return f"exit code {returncode}"
+
+
+def claude_process_exit_reason_i18n(returncode: int) -> tuple[str, dict[str, str | int]]:
+    """Return the i18n key and values for a user-facing exit reason."""
+    if returncode < 0:
+        signal_number = -returncode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"SIG{signal_number}"
+        return "error.claudeProcessSignal", {"signal": signal_name, "number": signal_number}
+    return "error.claudeProcessExitCode", {"code": returncode}
+
+
+def get_claude_client_stderr_tail(client: object | None) -> str:
+    """Return the stderr ring buffer captured for a Claude SDK client."""
+    lines = getattr(client, "_vibe_stderr_lines", None)
+    if not isinstance(lines, (list, tuple)):
+        return ""
+    return "\n".join(str(line).strip() for line in lines if str(line).strip())
+
+
 def _process_start_time(pid: int) -> float | None:
     try:
         result = subprocess.run(

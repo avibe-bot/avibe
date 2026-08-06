@@ -3,7 +3,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SessionPinAction } from './SessionPinAction';
-import { sessionRowActionPaddingClass } from './sessionRowLayout';
+import {
+  SESSION_ROW_ACTION_BUTTON_CLASS,
+  SESSION_ROW_MENU_POSITION_CLASS,
+  SESSION_ROW_PIN_POSITION_CLASS,
+  sessionRowActionPaddingClass,
+} from './sessionRowLayout';
 
 const renderAction = (pinned: boolean, pending = false) =>
   renderToStaticMarkup(
@@ -35,11 +40,15 @@ describe('SessionPinAction', () => {
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the pin control beside the session action menu', () => {
+  it('uses the compact rounded rail geometry shared with the session action menu', () => {
     const html = renderAction(false);
 
-    expect(html).toContain('absolute inset-y-0 right-9 flex items-center');
-    expect(html).toContain('grid size-6');
+    expect(html).toContain('absolute inset-y-0 flex items-center right-5');
+    expect(html).toContain('grid shrink-0 place-items-center');
+    expect(html).toContain('size-5 rounded-md');
+    expect(SESSION_ROW_ACTION_BUTTON_CLASS).toBe('size-5 rounded-md');
+    expect(SESSION_ROW_PIN_POSITION_CLASS).toBe('right-5');
+    expect(SESSION_ROW_MENU_POSITION_CLASS).toBe('right-0');
   });
 
   it('reveals an unpinned action on row hover, keyboard focus, and coarse pointers', () => {
@@ -75,13 +84,13 @@ describe('sessionRowActionPaddingClass', () => {
     const className = sessionRowActionPaddingClass(false, false);
 
     expect(className).toContain('pr-2.5');
-    expect(className).toContain('hover:pr-16');
-    expect(className).toContain('focus-within:pr-16');
-    expect(className).toContain('pointer-coarse:pr-16');
+    expect(className).toContain('hover:pr-11');
+    expect(className).toContain('focus-within:pr-11');
+    expect(className).toContain('pointer-coarse:pr-11');
   });
 
   it('reserves the rail while the menu is open or the pin stays visible', () => {
-    expect(sessionRowActionPaddingClass(true, false)).toBe('pr-16');
-    expect(sessionRowActionPaddingClass(false, true)).toBe('pr-16');
+    expect(sessionRowActionPaddingClass(true, false)).toBe('pr-11');
+    expect(sessionRowActionPaddingClass(false, true)).toBe('pr-11');
   });
 });

@@ -289,6 +289,9 @@
     "streamTurnInProgress": "⚠️ 这个会话已经有一条回复在生成中，请等它完成后再试。",
     "sessionReset": "检测到会话错误。会话已重置，请重试。",
     "sessionConnectionLost": "与 Claude 的连接已断开，请重试。",
+    "claudeProcessSignal": "{signal}（信号 {number}）",
+    "claudeProcessExitCode": "退出码 {code}",
+    "claudeProcessTerminated": "Claude Code 进程已终止（{reason}）；会话已重置，请重试。",
     "claudeCredentialTypeInvalid": "Claude Code 凭据类型只能选择 API Key 或 Auth Token。",
     "claudeSessionNotFound": "Claude Code 在当前工作目录下找不到历史会话 `{sessionId}`：\n`{path}`\n\nClaude Code 的会话和工作目录相关。通常是恢复会话后切换了工作目录，或本地 Claude Code 会话数据发生变化。请切回原来的工作目录继续该会话，或在当前目录开始一个新的 Claude Code 会话。",
     "sessionGeneric": "发生错误：{error}",
@@ -300,7 +303,8 @@
     "opencodeQuestionToolDisabledRestored": "恢复中的 OpenCode 会话发起了交互式提问，但 Avibe 已禁用 OpenCode 的 question 工具。请直接发送一条新消息，告诉我你的答案或下一步方向。",
     "opencodeEmptyResponse": "OpenCode 已结束，但没有产出模型回复。Provider：{provider}；模型：{model}；推理强度：{variant}。这次运行里 OpenCode 没有暴露服务商错误。",
     "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}",
-    "opencodeBackendError": "OpenCode 错误：{error}"
+    "opencodeBackendError": "OpenCode 错误：{error}",
+    "opencodeActiveTurnTimeout": "OpenCode 在配置的 active-turn 上限内没有产出结果（{seconds} 秒），原生 Turn 已中止。"
   },
   "success": {
     "settingsUpdated": "设置更新成功！",

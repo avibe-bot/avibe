@@ -199,6 +199,22 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertIn("/setup codex", persisted_text)  # actionable without a button
         self.assertNotIn("button", persisted_text.lower())  # no dangling button reference
 
+    async def test_maybe_emit_auth_recovery_message_classifies_terminal_diagnostic(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with patch("core.message_mirror.persist_agent_message"):
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "claude",
+                "❌ Claude Code 进程已终止；会话已重置，请重试。",
+                terminal_error="Cannot write to terminated process after OAuth login failed",
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(len(controller.im_client.sent_button_messages), 1)
+
     async def test_maybe_emit_auth_recovery_message_settles_turn_for_auth_error(self):
         # An AUTH error is handled here (reset button + persisted notify). The
         # recovery message is a button row, not a result, so this settles the

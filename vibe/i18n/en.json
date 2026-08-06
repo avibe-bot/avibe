@@ -289,6 +289,9 @@
     "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
     "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
     "sessionConnectionLost": "Connection to Claude was lost. Please try your message again.",
+    "claudeProcessSignal": "{signal} (signal {number})",
+    "claudeProcessExitCode": "exit code {code}",
+    "claudeProcessTerminated": "Claude Code process terminated ({reason}); the session was reset. Please try your message again.",
     "claudeCredentialTypeInvalid": "Choose either API key or auth token for the Claude Code credential.",
     "claudeSessionNotFound": "Claude Code could not find the historical session `{sessionId}` in the current working directory:\n`{path}`\n\nClaude Code sessions are scoped to a working directory. This usually means the conversation was resumed after switching workdirs, or the local Claude Code session data changed. Switch back to the original working directory to continue that session, or start a new Claude Code session from the current directory.",
     "sessionGeneric": "An error occurred: {error}",
@@ -300,7 +303,8 @@
     "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
     "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
-    "opencodeBackendError": "OpenCode error: {error}"
+    "opencodeBackendError": "OpenCode error: {error}",
+    "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted."
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",

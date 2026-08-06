@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -404,3 +405,44 @@ def test_claude_sdk_buffer_error_cleans_up_broken_session() -> None:
     assert len(controller.im_client.sent_messages) == 1
     _, message = controller.im_client.sent_messages[0]
     assert message == "ERR:Connection to Claude was lost. Please try your message again."
+
+
+def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> None:
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    controller.claude_sessions[composite_key] = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
+        _vibe_stderr_lines=["fatal: Claude CLI aborted", "transport closed"],
+    )
+    cleanup_calls = []
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+        cleanup_calls.append((key, current_receiver_task))
+
+    handler.cleanup_session = _cleanup_session
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Cannot write to terminated process (exit code: -6)"),
+        )
+    )
+
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0][0] == composite_key
+    assert cleanup_calls[0][1] is not None
+    _, message = controller.im_client.sent_messages[0]
+    assert message == (
+        "ERR:Claude Code process terminated (SIGABRT (signal 6)); "
+        "the session was reset. Please try your message again."
+    )
+    diagnostic = handler.claude_error_diagnostic(
+        composite_key,
+        RuntimeError("Cannot write to terminated process (exit code: -6)"),
+    )
+    assert "Claude process terminated: SIGABRT (signal 6)" in diagnostic
+    assert "Claude stderr tail:\nfatal: Claude CLI aborted\ntransport closed" in diagnostic

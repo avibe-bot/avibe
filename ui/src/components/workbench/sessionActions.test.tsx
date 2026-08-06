@@ -9,7 +9,7 @@ import {
   SessionActionsTrigger,
   type SessionActionDescriptor,
 } from './sessionActions';
-import { mobileChatSessionActions } from './chatSessionActions';
+import { mobileChatSessionActions, mobileSessionActions } from './chatSessionActions';
 
 const row = (over: Partial<SessionActionDescriptor> & Pick<SessionActionDescriptor, 'id' | 'group' | 'label'>) =>
   ({ icon: Pin, onSelect: () => undefined, ...over }) as SessionActionDescriptor;
@@ -66,20 +66,26 @@ describe('SessionActionMenu', () => {
   });
 
   // ── Codex review (sessionActions.tsx:93) ────────────────────────────────────
-  // A natively ``disabled`` button cannot be focused, so the only place the reason
-  // lived — the ``title`` tooltip — was unreachable by keyboard AND by touch. The
-  // row stays focusable via aria-disabled and states the reason on screen.
-  it('keeps an unforkable session’s fork row focusable and explains it on screen', () => {
+  // A natively ``disabled`` button cannot be focused, so the row uses aria-disabled.
+  // Its reason stays out of the resting menu and appears through a hover/focus/tap
+  // disclosure that also supplies the accessible description.
+  it('keeps an unforkable fork row gray and discloses its reason without resting menu copy', () => {
     const reason = 'This session has no native agent session to fork yet.';
     const html = renderMenu([
       row({ id: 'fork', group: 'continue', label: 'Fork session', icon: GitFork, disabled: true, title: reason }),
     ]);
 
     expect(html).toContain('aria-disabled="true"');
-    expect(html).not.toContain('disabled=""'); // focusable, so the reason is reachable
-    expect(html).toContain(`title="${reason}"`);
-    // Visible text, not only the tooltip: touch pointers never get a tooltip.
-    expect(html).toContain(`>${reason}</span>`);
+    expect(html).not.toContain('disabled=""');
+    expect(html).toContain('aria-describedby=');
+    expect(html).toContain('role="tooltip"');
+    expect(html).toContain('opacity-0');
+    expect(html).toContain('group-hover/action:opacity-100');
+    expect(html).toContain('group-focus-within/action:opacity-100');
+    expect(html).not.toContain(`title="${reason}"`);
+    expect(html).not.toContain('class="sr-only"');
+    expect(html).toContain('cursor-not-allowed text-muted');
+    expect(html).not.toContain('text-[10.5px] leading-tight text-muted');
     expect(html).toContain('Fork session');
   });
 
@@ -135,6 +141,9 @@ describe('SessionActionsTrigger', () => {
   it('hides the row variant until hover, keyboard focus, a coarse pointer, or an open menu', () => {
     const closed = renderToStaticMarkup(<SessionActionsTrigger label="Session actions" open={false} />);
 
+    expect(closed).toContain('size-5');
+    expect(closed).toContain('rounded-md');
+    expect(closed).not.toContain('rounded-lg');
     expect(closed).toContain('opacity-0');
     expect(closed).toContain('group-hover/sess:opacity-100');
     expect(closed).toContain('group-focus-within/sess:opacity-100');
@@ -151,15 +160,13 @@ describe('SessionActionsTrigger', () => {
 });
 
 describe('MobileChatSessionActionMenu', () => {
-  it('removes rename from the Chat surface while preserving the remaining descriptors', () => {
+  it('removes rename and the archive shortcut hint from the mobile Chat surface', () => {
     const actions = fullMenu();
+    const visibleActions = mobileChatSessionActions(actions);
 
-    expect(mobileChatSessionActions(actions).map((action) => action.id)).toEqual([
-      'pin',
-      'fork',
-      'hide',
-      'archive',
-    ]);
+    expect(visibleActions.map((action) => action.id)).toEqual(['pin', 'fork', 'hide', 'archive']);
+    expect(visibleActions.find((action) => action.id === 'archive')?.hint).toBeUndefined();
+    expect(actions.find((action) => action.id === 'archive')?.hint).toBe('⇧⌘D');
   });
 
   it('renders the chat trigger only below the desktop breakpoint', () => {
@@ -173,5 +180,17 @@ describe('MobileChatSessionActionMenu', () => {
 
   it('withdraws the trigger when the surface offers no actions', () => {
     expect(renderToStaticMarkup(<MobileChatSessionActionMenu actions={[]} label="Session actions" />)).toBe('');
+  });
+});
+
+describe('mobileSessionActions', () => {
+  it('removes only the archive shortcut hint from mobile session menus', () => {
+    const actions = fullMenu();
+    const visibleActions = mobileSessionActions(actions);
+
+    expect(visibleActions.map((action) => action.id)).toEqual(actions.map((action) => action.id));
+    expect(visibleActions.find((action) => action.id === 'archive')?.hint).toBeUndefined();
+    expect(visibleActions.find((action) => action.id === 'fork')).toBe(actions.find((action) => action.id === 'fork'));
+    expect(actions.find((action) => action.id === 'archive')?.hint).toBe('⇧⌘D');
   });
 });

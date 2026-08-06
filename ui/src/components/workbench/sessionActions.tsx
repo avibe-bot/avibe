@@ -7,6 +7,7 @@ import type { LucideIcon } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { mobileChatSessionActions } from './chatSessionActions';
+import { SESSION_ROW_ACTION_BUTTON_CLASS } from './sessionRowLayout';
 
 // Presentation half of the shared session action menu: the ⋯ trigger and the menu
 // body, used by the desktop sidebar row, the mobile projects row and the chat
@@ -25,8 +26,7 @@ export interface SessionActionDescriptor {
   label: string;
   /** Keyboard hint badge (e.g. ``⇧⌘D``), right-aligned in the menu row. */
   hint?: string;
-  /** Why this action is unavailable. Rendered as VISIBLE text under the label (a
-   *  touch user never sees a ``title`` tooltip) as well as the native tooltip. */
+  /** Why this action is unavailable. Exposed through the disabled row's disclosure tooltip. */
   title?: string;
   disabled?: boolean;
   /** A write is in flight: the icon becomes a spinner and the row stops accepting clicks. */
@@ -65,7 +65,8 @@ export const SessionActionsTrigger = React.forwardRef<HTMLButtonElement, Session
         'shrink-0 text-muted transition hover:text-foreground',
         variant === 'row'
           ? [
-              'size-6 opacity-0 group-hover/sess:opacity-100 group-focus-within/sess:opacity-100 pointer-coarse:opacity-100',
+              SESSION_ROW_ACTION_BUTTON_CLASS,
+              'opacity-0 group-hover/sess:opacity-100 group-focus-within/sess:opacity-100 pointer-coarse:opacity-100',
               open && 'opacity-100',
             ]
           : 'size-7',
@@ -101,6 +102,8 @@ export const SessionActionMenu: React.FC<{
   label?: string;
 }> = ({ actions, onAction, label }) => {
   const itemsRef = useRef<Array<HTMLButtonElement | null>>([]);
+  const menuId = React.useId();
+  const [disclosedReasonId, setDisclosedReasonId] = useState<SessionActionId | null>(null);
 
   const focusItem = (index: number) => itemsRef.current[index]?.focus();
   const moveFocus = (from: number, delta: number) => {
@@ -116,19 +119,30 @@ export const SessionActionMenu: React.FC<{
         const newGroup =
           previous != null && GROUP_ORDER.indexOf(previous.group) !== GROUP_ORDER.indexOf(action.group);
         const reason = action.disabled ? action.title : undefined;
+        const reasonId = reason ? `${menuId}-${action.id}-reason` : undefined;
         return (
-          <div key={action.id} className={clsx(newGroup && 'mt-1 border-t border-border pt-1')}>
+          <div
+            key={action.id}
+            className={clsx('group/action relative', newGroup && 'mt-1 border-t border-border pt-1')}
+          >
             <button
               ref={(node) => {
                 itemsRef.current[index] = node;
               }}
               type="button"
               aria-disabled={action.disabled || undefined}
-              title={action.title}
+              aria-describedby={reasonId}
               onClick={() => {
-                if (action.disabled) return;
+                if (action.disabled) {
+                  if (reason) setDisclosedReasonId((current) => (current === action.id ? null : action.id));
+                  return;
+                }
+                setDisclosedReasonId(null);
                 onAction?.(action.id);
                 action.onSelect();
+              }}
+              onBlur={() => {
+                setDisclosedReasonId((current) => (current === action.id ? null : current));
               }}
               onKeyDown={(event) => {
                 if (event.key === 'ArrowDown') {
@@ -163,16 +177,27 @@ export const SessionActionMenu: React.FC<{
                   aria-hidden="true"
                 />
               )}
-              <span className="flex flex-1 flex-col gap-0.5 overflow-hidden">
-                <span className="truncate">{action.label}</span>
-                {reason && <span className="text-[10.5px] leading-tight text-muted">{reason}</span>}
-              </span>
+              <span className="flex-1 truncate">{action.label}</span>
               {action.hint && (
                 <span className="shrink-0 font-mono text-[10px] text-muted" aria-hidden="true">
                   {action.hint}
                 </span>
               )}
             </button>
+            {reason && (
+              <span
+                id={reasonId}
+                role="tooltip"
+                className={clsx(
+                  'pointer-events-none absolute left-0 right-0 top-full z-50 mt-1 rounded-md bg-foreground px-2 py-1.5 text-[11px] leading-tight text-background shadow-md transition-opacity',
+                  disclosedReasonId === action.id
+                    ? 'opacity-100'
+                    : 'opacity-0 group-hover/action:opacity-100 group-focus-within/action:opacity-100',
+                )}
+              >
+                {reason}
+              </span>
+            )}
           </div>
         );
       })}
@@ -201,7 +226,7 @@ export const SessionActionMenuContent: React.FC<{
   return (
     <PopoverContent
       align={align}
-      className={clsx('w-[196px] p-1', className)}
+      className={clsx('w-[176px] p-1', className)}
       onCloseAutoFocus={(event) => {
         if (!transferredFocus.current) return;
         transferredFocus.current = false;
