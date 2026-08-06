@@ -490,7 +490,7 @@ def main() -> int:
     viewer_login = (
         get_authenticated_login(token) if args.pr is not None and not args.include_self_comments else None
     )
-    if token is not None and args.pr is not None and not args.include_self_comments and viewer_login is None:
+    if args.pr is not None and not args.include_self_comments and viewer_login is None:
         print(
             "Unable to resolve the authenticated GitHub viewer identity; "
             "use a token that can read /user or pass --include-self-comments explicitly.",
