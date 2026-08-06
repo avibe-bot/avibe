@@ -360,9 +360,11 @@ observations:
       Codex's ``item/*`` notifications carry a
       ``turnId`` and ``_find_request_for_notification`` resolves the participating
       Run's request from that id through a per-turn map, so the event IS attributable
-      to an exact Turn -- but ``should_emit_progress`` then gates on the single
-      ``_active_turns[base]`` slot and the activity timestamp is stamped per session,
-      so the attribution is thrown away one step downstream. Claude stamps
+      to an exact Turn. Round 8 added, and round 9 RETRACTED, the claim that
+      ``should_emit_progress`` then gates on the single ``_active_turns[base]`` slot
+      and so the attribution is thrown away one step downstream; what survives of it
+      is only the per-session activity timestamp, and the reasoning is at the end of
+      this observation rather than here. Claude stamps
       ``session_turn_started`` / ``session_last_activity`` per composite key and the
       SDK has no query/result correlation id -- but that projection is not the
       event stream either: ``_adopt_pending_turn_token`` copies the FIFO-head
@@ -926,3 +928,55 @@ observations:
       ``tests/test_scheduled_tasks.py`` has the leaf-only and container
       weaknesses of the round-10 and round-12 fixes both, still deliberately
       untouched (HFR-OBS-028).
+
+  - id: HFR-OBS-038
+    area: run-terminal-truth
+    summary: >-
+      Round 13, three findings, all three accepted, and all three are the
+      previous two rounds' own fixes read one step further. No new scenario id
+      and no budget move: the guards that changed are HFR-198, HFR-193 and
+      HFR-201, and each already owned a row.
+      Finding one: round 12 taught ``_collectible_class`` about constructors and
+      left its TestCase rule matching a NAME -- any base whose trailing
+      attribute ended in "TestCase". ``class Helper(FakeTestCase)`` therefore
+      passed on both readers, so a catalog row citing a test inside it would
+      have been discovered by the corpus walk and accepted by the citation check
+      while pytest ran nothing. The base is now RESOLVED: an exact unittest name
+      reached through the module's own imports (alias included), or a base
+      defined in the same module followed transitively. Two positive fixtures
+      keep the fix off the easy over-correction -- ``AliasedTests`` inherits
+      through ``from unittest import IsolatedAsyncioTestCase as Base``, whose
+      name contains no "TestCase" at all, and ``Derived`` inherits through an
+      intermediate the old docstring admitted it could not follow. Resolving the
+      base needs the module's imports and its sibling classes, so
+      ``_assert_symbol_exists`` now hands back the module body with the chain.
+      THE DURABLE RULE: a rule about what another system does with a class is
+      about the class's ANCESTRY or its collector, never about how the name is
+      spelled -- and a "conservative approximation" that matches a suffix is not
+      conservative, it is permissive in the direction nobody checked.
+      Finding two is round 12's catalog-duplicate finding one document over, and
+      it landed on the guard that exists to stop exactly this. HFR-193 parsed
+      §7's verdict block with ``dict(re.findall(...))``, which keeps the LAST
+      pair for a repeated key: a stale ``Q2 - open`` line left standing above the
+      current ``Q2 - answered`` line disappears into the mapping, the key-set and
+      verdict checks both pass, and the plan goes on handing the next
+      implementation unit two contradictory instructions. The parse is now
+      ``_stated_plan_verdicts``, which raises on a repeat, and the fixtures prove
+      it on synthetic text so the regression does not require corrupting the real
+      plan. THE DURABLE RULE, second round running: any ``dict(...)`` or
+      ``set(...)`` built over a key that is supposed to be unique silently
+      accepts a duplicate, and a guard whose PARSE de-duplicates is not checking
+      the document it reports on.
+      Finding three is the retraction ledger's coverage gap rather than its
+      rule. HFR-OBS-024 still stated, as current fact, that
+      ``should_emit_progress`` gates on the ``_active_turns[base]`` slot "so the
+      attribution is thrown away one step downstream", while the end of the SAME
+      observation says that claim was narrowed and the filter is correct as
+      written -- a reader derives the opposite Q2 contract depending on where
+      they stop. Both remedies applied: the sentence is rewritten as an explicit
+      round-8-added, round-9-retracted historical claim, and the phrasing is a
+      new ``RETRACTED_PHRASINGS`` row so HFR-201 enforces it corpus-wide from
+      here on. THE DURABLE RULE: making the retractions data fixed the
+      enforcement, not the enrolment -- a ledger only holds what someone
+      remembered to put in it, so every accepted retraction finding has to end
+      with a row, not just an edit.

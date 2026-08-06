@@ -99,14 +99,18 @@ def _expand() -> list[tuple[str, str, str, str, tuple[str, str]]]:
 _CELLS = _expand()
 
 
-def _assert_symbol_exists(qualified: str) -> list[ast.AST]:
+def _assert_symbol_exists(qualified: str) -> tuple[list[ast.stmt], list[ast.AST]]:
     """Resolve a COMPLETE ``path::Class::symbol`` id, one nesting level at a time.
 
-    Returns the whole resolved CHAIN, innermost last, so a caller with a
-    stricter contract than "the symbol exists" can check the kind of what it
-    resolved to -- and, since round 10, the kinds it resolved THROUGH. Returning
-    only the leaf was the same displacement one more level out: the leaf rule
-    got tightened and the classes on the way to it stayed unexamined.
+    Returns the module's own top-level body and the whole resolved CHAIN,
+    innermost last, so a caller with a stricter contract than "the symbol
+    exists" can check the kind of what it resolved to -- and, since round 10,
+    the kinds it resolved THROUGH. Returning only the leaf was the same
+    displacement one more level out: the leaf rule got tightened and the classes
+    on the way to it stayed unexamined. The module body comes back with it
+    because collectibility is not a property of the class node alone: round 13
+    made a TestCase base something to RESOLVE, and resolving it needs the
+    module's imports and its sibling classes.
 
     Matching only the trailing function name and walking the whole module --
     which is what HFR-105 does, and what this guard did first -- accepts an id
@@ -128,7 +132,8 @@ def _assert_symbol_exists(qualified: str) -> list[ast.AST]:
     source = Path(module_path)
     assert source.exists(), f"{qualified}: no module at {module_path}"
 
-    scope: list[ast.stmt] = ast.parse(source.read_text(encoding="utf-8")).body
+    module_body: list[ast.stmt] = ast.parse(source.read_text(encoding="utf-8")).body
+    scope: list[ast.stmt] = module_body
     chain: list[ast.AST] = []
     for depth, name in enumerate(parts):
         is_leaf = depth == len(parts) - 1
@@ -153,30 +158,103 @@ def _assert_symbol_exists(qualified: str) -> list[ast.AST]:
         )
         chain.append(match)
         scope = match.body
-    return chain
+    return module_body, chain
 
 
-def _collectible_class(node: ast.ClassDef) -> bool:
+#: The unittest base classes pytest's own plugin claims. Spelled out rather
+#: than suffix-matched, for the reason in ``_unittest_ancestry``.
+_UNITTEST_BASES = frozenset(
+    {"TestCase", "IsolatedAsyncioTestCase", "FunctionTestCase"}
+)
+
+
+def _root_name(node: ast.expr) -> str:
+    """The leftmost identifier of a dotted expression, or ``""``."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _unittest_names(module_body: list[ast.stmt]) -> tuple[frozenset[str], frozenset[str]]:
+    """Names bound in this module to a unittest TestCase, and to unittest itself.
+
+    Import-aware because the alternative is name-shaped guessing, which is what
+    round 13 caught. ``from unittest import IsolatedAsyncioTestCase as Base``
+    binds a collectible base under a name with no "TestCase" in it, and
+    ``class FakeTestCase`` binds a non-collectible one under a name that has it;
+    only the import statement distinguishes them.
+    """
+    direct: set[str] = set()
+    packages: set[str] = set()
+    for node in module_body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "unittest" or alias.name.startswith("unittest."):
+                    packages.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] != "unittest":
+                continue
+            for alias in node.names:
+                if alias.name in _UNITTEST_BASES:
+                    direct.add(alias.asname or alias.name)
+                else:
+                    packages.add(alias.asname or alias.name)
+    return frozenset(direct), frozenset(packages)
+
+
+def _unittest_ancestry(
+    node: ast.ClassDef, module_body: list[ast.stmt], seen: frozenset[str] = frozenset()
+) -> bool:
+    """Does this class REALLY inherit a unittest TestCase, resolved in this module?
+
+    Round 13's finding, and it is round 12's own fix read one step too
+    literally. The rule was "a base whose trailing attribute name ends in
+    ``TestCase``", which is a claim about spelling, not about ancestry:
+    ``class Helper(FakeTestCase)`` passed it while pytest collects nothing from
+    ``Helper``, and because BOTH readers of this predicate go through it, a
+    catalog row naming a test inside such a class was discovered by the corpus
+    walk and accepted by the citation check while never running.
+
+    So the base is resolved instead of matched. An exact unittest name reached
+    through the module's own imports counts -- ``unittest.TestCase``,
+    ``from unittest import IsolatedAsyncioTestCase``, either under an alias --
+    and a base defined in this module is followed transitively, which is the
+    intermediate-base case the old docstring said it could not do. Anything the
+    module does not define and did not import from unittest is NOT collectible
+    here: a false rejection is loud and one line to fix, a false acceptance is
+    the silent citation rot this resolver exists to stop.
+    """
+    direct, packages = _unittest_names(module_body)
+    local = {n.name: n for n in module_body if isinstance(n, ast.ClassDef)}
+    for base in node.bases:
+        if isinstance(base, ast.Attribute):
+            if base.attr in _UNITTEST_BASES and _root_name(base) in packages:
+                return True
+        elif isinstance(base, ast.Name):
+            if base.id in direct:
+                return True
+            parent = local.get(base.id)
+            if (
+                parent is not None
+                and base.id not in seen
+                and _unittest_ancestry(parent, module_body, seen | {base.id})
+            ):
+                return True
+    return False
+
+
+def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
     """pytest's own default rule, read off the AST: ``Test*`` or a TestCase base.
 
     With no ``python_classes`` override in this repo, pytest collects a class
     only if its name starts with ``Test`` or the unittest plugin claims it as a
-    ``TestCase`` subclass. Bases are matched on their trailing attribute name
-    ending in ``TestCase``, which is what covers ``IsolatedAsyncioTestCase`` --
-    the base both class-qualified citations in this corpus actually use.
-
-    The approximation is deliberately conservative: a class inheriting
-    collectibility through an intermediate base named something else fails this
-    check and has to be spelled out. A false rejection is loud and one line to
-    fix; a false acceptance is the silent citation rot this resolver exists to
-    stop.
+    ``TestCase`` subclass. The second half is decided by ``_unittest_ancestry``,
+    which resolves the base rather than reading its name.
     """
-    for base in node.bases:
-        tail = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
-        if tail.endswith("TestCase"):
-            # The unittest plugin claims these, constructor and all: TestCase
-            # itself defines ``__init__``, so the rule below cannot apply here.
-            return True
+    if _unittest_ancestry(node, module_body):
+        # The unittest plugin claims these, constructor and all: TestCase
+        # itself defines ``__init__``, so the rule below cannot apply here.
+        return True
     if not node.name.startswith("Test"):
         return False
     # Round 12, verified against this repo's pytest rather than reasoned: a
@@ -194,7 +272,9 @@ def _collectible_class(node: ast.ClassDef) -> bool:
 
 
 def _collected_tests(
-    body: list[ast.stmt], prefix: tuple[str, ...] = ()
+    body: list[ast.stmt],
+    prefix: tuple[str, ...] = (),
+    module_body: list[ast.stmt] | None = None,
 ) -> list[tuple[str, ast.stmt]]:
     """Every test callable pytest would collect from ``body``, named as pytest names it.
 
@@ -213,11 +293,18 @@ def _collected_tests(
     one place with every reader going through it; two readers and one predicate
     is the shape that produced both bugs.
     """
+    # Round 13: the top-level call IS the module, and nested calls carry it
+    # down, because resolving a base to unittest needs the module's imports and
+    # its sibling class definitions -- neither of which is visible from a class
+    # body.
+    module = body if module_body is None else module_body
     found: list[tuple[str, ast.stmt]] = []
     for node in body:
         if isinstance(node, ast.ClassDef):
-            if _collectible_class(node):
-                found.extend(_collected_tests(node.body, prefix + (node.name,)))
+            if _collectible_class(node, module):
+                found.extend(
+                    _collected_tests(node.body, prefix + (node.name,), module)
+                )
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name.startswith("test_"):
                 found.append(("::".join(prefix + (node.name,)), node))
@@ -244,11 +331,15 @@ def _assert_node_exists(node_id: str) -> None:
     every non-leaf component is checked against pytest's collection rule.
     """
     assert node_id.split("::")[0].startswith("tests/"), node_id
-    *containers, leaf = _assert_symbol_exists(node_id)
+    module_body, chain = _assert_symbol_exists(node_id)
+    *containers, leaf = chain
     for container in containers:
-        assert isinstance(container, ast.ClassDef) and _collectible_class(container), (
+        assert isinstance(container, ast.ClassDef) and _collectible_class(
+            container, module_body
+        ), (
             f"{node_id}: pytest does not collect class {container.name!r} "
-            f"(not Test*-named, no TestCase base), so nothing inside it runs"
+            f"(not Test*-named, no resolved unittest TestCase base), so nothing "
+            f"inside it runs"
         )
     assert isinstance(leaf, (ast.FunctionDef, ast.AsyncFunctionDef)), (
         f"{node_id}: a node id must name a test function, not a "
@@ -598,6 +689,39 @@ def test_one_scenario_id_names_exactly_one_catalog_row() -> None:
 
 _PLAN = Path(__file__).resolve().parents[1] / "docs" / "plans" / "harness-run-reliability.md"
 
+_PLAN_VERDICT = re.compile(
+    r"^\d+\. \*\*(Q\d) [—-] (answered|open|blocked)\b", re.MULTILINE
+)
+
+
+def _stated_plan_verdicts(text: str) -> dict[str, str]:
+    """The plan's numbered verdict block, refusing to collapse a duplicate.
+
+    Round 13, and the same defect as round 12's catalog finding one document
+    over: ``dict(re.findall(...))`` keeps the LAST pair for a repeated key, so a
+    stale ``Q2 — open`` line left above the current ``Q2 — answered`` line
+    vanishes into the mapping. The key-set check and the verdict check then both
+    pass while §7 still hands the next implementation unit two contradictory
+    instructions -- which is precisely the drift HFR-193 was written to stop, so
+    the guard would have been reporting agreement about a document that
+    disagrees with itself.
+
+    Raising rather than asserting keeps the rule callable on synthetic text, so
+    the regression test does not have to corrupt the real plan to prove the
+    guard bites.
+    """
+    pairs = _PLAN_VERDICT.findall(text)
+    stated: dict[str, str] = {}
+    for question, verdict in pairs:
+        if question in stated:
+            raise ValueError(
+                f"{question}: the plan states its verdict more than once "
+                f"({stated[question]!r} then {verdict!r}); a reader greps and "
+                f"stops at the first one"
+            )
+        stated[question] = verdict
+    return stated
+
 
 def test_the_plan_states_the_same_question_verdicts_as_the_matrix() -> None:
     """HFR-193: the plan's verdict list and ``PR7R_QUESTIONS`` cannot disagree.
@@ -613,11 +737,19 @@ def test_the_plan_states_the_same_question_verdicts_as_the_matrix() -> None:
     Only the verdict WORD is tied. The prose either side of it is where the
     reasoning lives and is deliberately not machine-checked; what must not drift
     is the one token an implementer greps for.
+
+    Round 13 adds the duplicate rule (see ``_stated_plan_verdicts``): one
+    question may state its verdict once. The fixtures below are checked before
+    the real plan, because a guard whose parse silently de-duplicates is not
+    checking the document it reports on.
     """
+    good = "1. **Q1 — open.** x\n2. **Q2 — answered.** y\n"
+    assert _stated_plan_verdicts(good) == {"Q1": "open", "Q2": "answered"}
+    with pytest.raises(ValueError, match="Q2: the plan states its verdict more"):
+        _stated_plan_verdicts(good + "3. **Q2 — open.** the stale copy\n")
+
     text = _PLAN.read_text(encoding="utf-8")
-    stated = dict(
-        re.findall(r"^\d+\. \*\*(Q\d) [—-] (answered|open|blocked)\b", text, re.MULTILINE)
-    )
+    stated = _stated_plan_verdicts(text)
     assert set(stated) == set(PR7R_QUESTIONS), stated
     for key, verdict in stated.items():
         assert verdict == PR7R_QUESTIONS[key]["verdict"], (
@@ -766,6 +898,17 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     module.parent.mkdir(parents=True, exist_ok=True)
     module.write_text(
         "import unittest\n"
+        "from unittest import IsolatedAsyncioTestCase as Base\n"
+        "class FakeTestCase:\n"
+        "    pass\n"
+        "class Helper(FakeTestCase):\n"
+        "    def test_case(self): ...\n"
+        "class AliasedTests(Base):\n"
+        "    async def test_case(self): ...\n"
+        "class Intermediate(unittest.TestCase):\n"
+        "    pass\n"
+        "class Derived(Intermediate):\n"
+        "    def test_case(self): ...\n"
         "class Owner:\n"
         "    def method(self): ...\n"
         "    def test_case(self): ...\n"
@@ -794,7 +937,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     # and it stays indifferent to whether the container is collectible -- an
     # owner is a place to change code, not a thing pytest runs.
     for owner in (f"{rel}::Owner", f"{rel}::Owner::method", f"{rel}::_helper"):
-        assert _assert_symbol_exists(owner), owner
+        assert _assert_symbol_exists(owner)[1], owner
 
     # The node-id resolver: only a collected test function, under a collected
     # class if it is nested at all.
@@ -837,6 +980,22 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         ):
             _assert_node_exists(f"{rel}::{rejected_class}::test_case")
 
+    # Round 13 turns the TestCase base from a SPELLING into an ancestry. The old
+    # rule accepted any base whose trailing name ended in "TestCase", so
+    # ``Helper(FakeTestCase)`` -- a plain class inheriting a plain class -- was
+    # collectible on both readers, and a catalog row citing a test inside it
+    # would have been discovered by the walk and accepted by the citation check
+    # while pytest ran nothing. The fixture pins both directions of the
+    # resolution, because tightening it to the literal names ``TestCase`` /
+    # ``IsolatedAsyncioTestCase`` would have been the easy over-correction:
+    # ``AliasedTests`` reaches the real base through an import alias with no
+    # "TestCase" in its name, and ``Derived`` reaches it through an
+    # intermediate the old docstring admitted it could not follow.
+    for node_id in (f"{rel}::AliasedTests::test_case", f"{rel}::Derived::test_case"):
+        _assert_node_exists(node_id)
+    with pytest.raises(AssertionError, match="pytest does not collect class 'Helper'"):
+        _assert_node_exists(f"{rel}::Helper::test_case")
+
     discovered = {suffix for suffix, _node in _collected_tests(ast.parse(
         module.read_text(encoding="utf-8")
     ).body)}
@@ -846,8 +1005,11 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "TestGood::test_case",
         "OwnerTests::test_case",
         "CtorTests::test_case",
+        "AliasedTests::test_case",
+        "Derived::test_case",
     }, discovered
     assert "Owner::test_case" not in discovered
+    assert "Helper::test_case" not in discovered
 
     # And the real citations still pass under the tightened rule -- the point of
     # a stricter guard is that the corpus already satisfies it, checked here

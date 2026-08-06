@@ -720,6 +720,17 @@ RETRACTED_PHRASINGS: Final = (
         "the window exists and is harmless because both of its arrivals are "
         "handled, not because it is closed.",
     ),
+    (
+        "attribution is thrown away",
+        "round 9",
+        "``should_emit_progress`` does NOT discard codex's exact-Turn signal. "
+        "It reads the single ``_active_turns[base]`` slot, and the runtime gate "
+        "is held across the whole backend call, so one runtime key admits one "
+        "live turn at a time and the filter is correct as written. The only "
+        "real loss downstream is the activity timestamp, which is stamped per "
+        "SESSION on every backend -- say that, and do not generalise it into "
+        "the attribution being discarded.",
+    ),
 )
 
 #: Words that mark a retraction in prose. A retracted phrasing may appear within

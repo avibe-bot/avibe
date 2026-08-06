@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under twelve review rounds
+#### PR7R status (2026-08-06) — first increment, revised under thirteen review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
@@ -1242,11 +1242,12 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through twelve changed how the
-findings are demonstrated, two question verdicts, and thirteen degenerate guards
+rounds and has held at 168 since; rounds four through thirteen changed how the
+findings are demonstrated, two question verdicts, and fifteen degenerate guards
 (three of them in round ten, two more in round eleven that were in this unit's
-own new code, and two in round twelve that were round eleven's fixes — the
-newest guard is now reliably the likeliest defect).
+own new code, two in round twelve that were round eleven's fixes, and two in
+round thirteen that were round twelve's — the newest guard is now reliably the
+likeliest defect).
 Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
@@ -1668,6 +1669,44 @@ Turn: empty attribution rather than wrong attribution, outside both lanes — wh
 are Session-scoped by their own definitions — and asserted as an empty result
 rather than left implied. Nothing this round touches a matrix cell, so the budget
 stays at 168.
+
+Round 13 — three findings, all three accepted, and all three are the previous two
+rounds' own fixes read one step further. No new scenario id and no budget move:
+the guards that changed are `HFR-198`, `HFR-193` and `HFR-201`, each of which
+already owns a row. The first: round 12 taught `_collectible_class` about
+constructors and left its TestCase rule matching a **name** — any base whose
+trailing attribute ended in `TestCase` — so `class Helper(FakeTestCase)` passed on
+both readers and a row citing a test inside it would have been discovered by the
+corpus walk and accepted by the citation check while pytest ran nothing. The base
+is now resolved: an exact unittest name reached through the module's own imports,
+alias included, or a base defined in the same module followed transitively. Two
+positive fixtures keep it off the easy over-correction — `AliasedTests` inherits
+through `from unittest import IsolatedAsyncioTestCase as Base`, a name with no
+"TestCase" in it, and `Derived` inherits through an intermediate the old docstring
+admitted it could not follow. **A rule about what pytest does with a class is
+about ancestry, never about spelling; a "conservative approximation" that matches
+a suffix is permissive in the direction nobody checked.**
+
+The second is round 12's catalog-duplicate finding one document over, and it
+landed on the guard written to stop exactly this drift. `HFR-193` parsed §7's
+verdict block with `dict(re.findall(...))`, which keeps the last pair for a
+repeated key — a stale `Q2 — open` line left standing above the current
+`Q2 — answered` line vanishes into the mapping, both checks pass, and the plan goes
+on handing the next unit two contradictory instructions. The parse is now
+`_stated_plan_verdicts`, which raises on a repeat, with fixtures on synthetic text
+so the regression does not require corrupting the real plan. **A guard whose parse
+de-duplicates is not checking the document it reports on.**
+
+The third is the retraction ledger's *enrolment* rather than its rule.
+`HFR-OBS-024` still stated as current fact that `should_emit_progress` gates on the
+`_active_turns[base]` slot so the attribution is thrown away downstream, while the
+end of the same observation says that claim was narrowed and the filter is correct
+— a reader derives the opposite Q2 contract depending on where they stop. Both
+remedies applied: the sentence is rewritten as an explicitly historical
+round-8-added, round-9-retracted claim, and the phrasing is a new
+`RETRACTED_PHRASINGS` row so `HFR-201` enforces it corpus-wide. **Making the
+retractions data fixed the enforcement, not the enrolment — a ledger only holds
+what someone remembered to put in it.**
 
 Question verdicts:
 
