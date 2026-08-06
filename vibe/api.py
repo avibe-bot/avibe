@@ -8899,11 +8899,11 @@ def test_backend_auth(backend: str, model: Optional[str] = None) -> dict:
 
 
 async def test_backend_auth_async(backend: str, model: Optional[str] = None) -> dict:
-    """Send a single-token ``Hi`` probe through the backend CLI.
+    """Send a ``Hi`` probe through the backend's production Agent transport.
 
-    ``model`` lets the caller override the CLI's configured default —
-    important for Codex users whose ``config.toml`` selects a slow
-    reasoning model, where even "Hi" can blow past the test timeout.
+    Claude uses the Agent SDK and Codex uses app-server, matching normal
+    Avibe turns rather than a separate single-shot CLI mode. ``model`` lets
+    the caller select the model used by that isolated turn.
     """
     backend = (backend or "").strip().lower()
     if not supports_web_oauth(backend):

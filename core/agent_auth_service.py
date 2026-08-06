@@ -23,6 +23,7 @@ from modules.claude_sdk_compat import (
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_AUTH_OWNER,
     AVIBE_CLAUDE_PROCESS_OWNER_ENV,
+    _reap_pid_set,
     get_claude_client_pid,
     register_claude_owned_process,
 )
@@ -53,10 +54,11 @@ OPENCODE_API_KEY_PROMPT_RE = re.compile(r"enteryourapikey", re.IGNORECASE)
 OPENCODE_CREDENTIAL_COUNT_RE = re.compile(r"\b(\d+)\s+credential(?:s)?\b", re.IGNORECASE)
 CLAUDE_LOGIN_METHODS = {"claudeai", "console"}
 OPENCODE_DIRECT_SETUP_URLS = {"opencode": "https://opencode.ai/auth"}
+CLAUDE_PROBE_DISCONNECT_TIMEOUT_SECONDS = 3.0
 
 
 def _pick_probe_response_excerpt(stdout_text: str) -> str:
-    """Return the first content-bearing line from Codex/Claude probe stdout.
+    """Return the first content-bearing line from a backend probe response.
 
     The CLIs emit decorations the user doesn't care about: warnings
     (``warning:``, ``ERROR:``, bubblewrap notices), session
@@ -110,7 +112,7 @@ def _classify_test_failure(
     *,
     auth_mode: str | None = None,
 ) -> str:
-    """Map a backend CLI's failure output to a specific UI error code.
+    """Map a backend runtime's failure output to a specific UI error code.
 
     The Settings → Backends "Test connection" panel routes the returned
     ``error`` string into an i18n key (``settings.backends.testFailure*``),
@@ -491,17 +493,11 @@ class AgentAuthService:
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
         return cli_path or backend
 
-    def _resolve_claude_probe_cwd(self) -> str:
-        """Return the cwd that a Settings Claude probe should execute in.
-
-        Plain ``claude -p`` loads project hooks, MCP config, and CLAUDE.md from
-        the process cwd. Use the same default runtime cwd as live Agent turns so
-        the Settings test reflects the actual Claude runtime instead of the UI
-        server launch directory.
-        """
+    def _resolve_backend_probe_cwd(self, backend: str) -> str:
+        """Return the default runtime cwd for an isolated backend Agent probe."""
         config = getattr(getattr(self, "controller", None), "config", None)
         candidates = (
-            getattr(self._resolve_backend_config("claude"), "cwd", None),
+            getattr(self._resolve_backend_config(backend), "cwd", None),
             getattr(getattr(config, "runtime", None), "default_cwd", None),
         )
         for raw in candidates:
@@ -511,7 +507,7 @@ class AgentAuthService:
                     os.makedirs(path, exist_ok=True)
                     return path
                 except OSError as exc:
-                    logger.warning("Failed to prepare Claude Settings probe cwd=%s: %s", path, exc)
+                    logger.warning("Failed to prepare %s Settings probe cwd=%s: %s", backend, path, exc)
         return os.getcwd()
 
     def _build_claude_full_subprocess_env(self, *, force_oauth: bool = False) -> dict[str, str]:
@@ -2229,45 +2225,19 @@ class AgentAuthService:
         timeout: float = 45.0,
         model: str | None = None,
     ) -> dict[str, Any]:
-        """Send a 1-token probe ("Hi") through the backend CLI.
+        """Send ``Hi`` through the backend's production Agent transport.
 
-        Validates both the credentials and the endpoint (when ``base_url``
-        is configured) by running ``claude --print "Hi"`` /
-        ``codex exec "Hi"``. Returns elapsed milliseconds + a short
-        response excerpt on success; surfaces stderr on failure.
-
-        ``model`` overrides the CLI's configured default — useful for
-        users whose ``config.toml`` selects a slow reasoning model
-        (e.g. ``gpt-5.4`` with ``model_reasoning_effort=xhigh``) where
-        even "Hi" can take minutes to round-trip. The frontend's Test
-        panel exposes a small select pre-filled from the routing
-        catalog so the user can probe a specific model.
+        Claude uses the Agent SDK stream and Codex uses app-server JSON-RPC,
+        matching normal Avibe turns. OpenCode keeps its provider-scoped probe
+        because it already uses the live ``opencode serve`` session API.
         """
-        # remove_web_auth and test_web_auth are claude / codex specific
-        # (single-backend subprocess invocations). OpenCode uses the
-        # per-provider DELETE / dedicated probe endpoints elsewhere.
         if backend not in {"claude", "codex"}:
             return {"ok": False, "error": "unsupported_backend"}
 
         binary = self._get_cli_binary(backend)
-        prompt = "Hi"
-        probe_cwd = None
+        probe_cwd = self._resolve_backend_probe_cwd(backend)
         auth_mode = None
         if backend == "claude":
-            probe_cwd = self._resolve_claude_probe_cwd()
-            # ``-p`` switches Claude Code into non-interactive print mode
-            # and exits after the first complete reply. Deliberately do
-            # not pass ``--bare`` here: recent Claude Code builds document
-            # that bare mode skips OAuth/keychain reads and only accepts
-            # API-key auth. This Settings probe should answer the user's
-            # real question: whether the current Avibe Claude setup can
-            # run an Agent turn. It follows the normal print-mode launch
-            # path used by live Claude sessions.
-            cmd = [binary]
-            cmd.append("-p")
-            if isinstance(model, str) and model.strip():
-                cmd.extend(["--model", model.strip()])
-            cmd.append(prompt)
             backend_cfg = self._resolve_backend_config("claude")
             auth_mode = getattr(backend_cfg, "auth_mode", None)
             auth_mode_set = bool(getattr(backend_cfg, "auth_mode_set", False))
@@ -2276,124 +2246,254 @@ class AgentAuthService:
                     await self._clear_claude_settings_env_for_oauth()
                 except Exception as err:  # noqa: BLE001
                     return {"ok": False, "error": "settings_cleanup_failed", "detail": str(err)}
-            try:
-                env_override = self._build_claude_full_subprocess_env()
-            except Exception as err:  # noqa: BLE001
-                if auth_mode == "oauth" and auth_mode_set:
-                    return {"ok": False, "error": "spawn_failed", "detail": str(err)}
-                env_override = dict(os.environ)
-        else:
-            # Codex single-shot mode. ``--skip-git-repo-check`` bypasses
-            # Codex's per-project trust gate. We also force
-            # ``model_reasoning_effort=low`` so a config.toml that
-            # selects ``xhigh`` reasoning (deep thinking + 30 s+ for any
-            # prompt) doesn't blow past our 45 s test timeout — the
-            # probe is "auth + endpoint reachable", not "exercise the
-            # reasoning chain". ``-c key=value`` overrides config.toml
-            # entries per invocation.
-            #
-            # NOT ``minimal``: OpenAI's Responses API rejects ``minimal``
-            # reasoning when ``image_gen`` / ``web_search`` tools are
-            # attached (which Codex auto-attaches for chat models with
-            # no override flag to disable). The 400 reads ``"The
-            # following tools cannot be used with reasoning.effort
-            # 'minimal'"``. ``low`` is described in the model catalog
-            # as "Fast responses with lighter reasoning" — still fast
-            # enough for a probe, compatible with all tool sets.
-            cmd = [
-                binary,
-                "exec",
-                "--skip-git-repo-check",
-                "-c",
-                "model_reasoning_effort=low",
-            ]
-            if isinstance(model, str) and model.strip():
-                cmd.extend(["-c", f"model={model.strip()}"])
-            cmd.append(prompt)
-            env_override = dict(os.environ)
 
         started = time.monotonic()
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                # Close stdin explicitly — Codex's ``exec`` mode reads a
-                # second prompt from stdin when the parent's stdin is
-                # open (e.g. ``codex exec "Hi" < /dev/null`` works fine,
-                # but inheriting an open stdin makes it block forever).
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env_override,
-                cwd=probe_cwd,
+            run_probe = (
+                self._run_claude_agent_probe
+                if backend == "claude"
+                else self._run_codex_agent_probe
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                # Drain whatever the CLI managed to emit before we kill it
-                # so we can still classify the failure. Codex in particular
-                # retries 401 / network errors several times before exit;
-                # the killed-mid-retry case loses the real error code if we
-                # just report ``timed_out``. Read with a tight wait so the
-                # kill path stays fast.
-                process.kill()
-                partial_stdout = b""
-                partial_stderr = b""
-                try:
-                    partial_stdout, partial_stderr = await asyncio.wait_for(
-                        process.communicate(), timeout=3.0
-                    )
-                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                    pass
-                stdout_partial = (partial_stdout or b"").decode("utf-8", errors="replace").strip()
-                stderr_partial = (partial_stderr or b"").decode("utf-8", errors="replace").strip()
-                classified = _classify_test_failure(
-                    stdout_partial,
-                    stderr_partial,
-                    auth_mode=auth_mode,
-                )
-                result = {
-                    "ok": False,
-                    "error": classified if classified != "cli_failed" else "timed_out",
-                    "duration_ms": int((time.monotonic() - started) * 1000),
-                }
-                if stderr_partial or stdout_partial:
-                    result["detail"] = (stderr_partial or stdout_partial)[:600]
-                return result
+            response_text = await asyncio.wait_for(
+                run_probe(binary=binary, cwd=probe_cwd, model=model),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "error": "timed_out",
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            }
         except FileNotFoundError:
             return {"ok": False, "error": "cli_not_found", "detail": binary}
         except Exception as err:  # noqa: BLE001
-            return {"ok": False, "error": "spawn_failed", "detail": str(err)}
-
-        duration_ms = int((time.monotonic() - started) * 1000)
-        stdout_text = (stdout or b"").decode("utf-8", errors="replace").strip()
-        stderr_text = (stderr or b"").decode("utf-8", errors="replace").strip()
-
-        if process.returncode != 0:
-            classified = _classify_test_failure(
-                stdout_text,
-                stderr_text,
-                auth_mode=auth_mode,
-            )
+            detail = str(err).strip()
+            if "no such file or directory" in detail.lower() or "claude code not found" in detail.lower():
+                error = "cli_not_found"
+            else:
+                error = _classify_test_failure("", detail, auth_mode=auth_mode)
             return {
                 "ok": False,
-                "error": classified,
-                "exit_code": process.returncode,
-                "detail": (stderr_text or stdout_text)[:600],
-                "duration_ms": duration_ms,
+                "error": error,
+                "detail": detail[:600],
+                "duration_ms": int((time.monotonic() - started) * 1000),
             }
 
-        # Pick the model's actual response out of chatty CLI output.
-        # Codex in particular prepends a session header, a "codex"
-        # label line, "tokens used" footer, ``Reconnecting...`` retry
-        # warnings, and bubblewrap notices — the first non-blank line
-        # would always be a warning or label. Skip known non-content
-        # lines and take the first remaining one as the excerpt.
-        excerpt = _pick_probe_response_excerpt(stdout_text)
         return {
             "ok": True,
-            "duration_ms": duration_ms,
-            "excerpt": excerpt,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "excerpt": _pick_probe_response_excerpt(response_text),
         }
+
+    async def _run_claude_agent_probe(
+        self,
+        *,
+        binary: str,
+        cwd: str,
+        model: str | None,
+    ) -> str:
+        """Run an isolated turn through the same Claude Agent SDK transport."""
+        from modules.agents.model_hub import claude_setting_sources_for_launch
+        from vibe.claude_config import build_claude_subprocess_env
+
+        stderr_lines: list[str] = []
+
+        def capture_stderr(line: str) -> None:
+            text = (line or "").strip()
+            if text:
+                stderr_lines.append(text)
+                del stderr_lines[:-40]
+
+        claude_env = build_claude_subprocess_env(self._resolve_backend_config("claude"))
+        claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_AUTH_OWNER
+        option_kwargs: dict[str, Any] = {
+            "permission_mode": "bypassPermissions",
+            "cwd": cwd,
+            "setting_sources": claude_setting_sources_for_launch(None),
+            "sandbox": {"enabled": False},
+            "tools": [],
+            "max_turns": 1,
+            "env": claude_env,
+            "stderr": capture_stderr,
+            "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
+        }
+        if binary and binary != "claude":
+            option_kwargs["cli_path"] = os.path.expanduser(binary)
+        if isinstance(model, str) and model.strip():
+            option_kwargs["extra_args"] = {"model": model.strip()}
+
+        client = ClaudeSDKClient(options=ClaudeAgentOptions(**option_kwargs))
+        assistant_text = ""
+        assistant_error = ""
+        terminal_text = ""
+        try:
+            await client.connect()
+            register_claude_owned_process(client, owner=AVIBE_CLAUDE_AUTH_OWNER)
+            governor_from_controller(self.controller).apply_to_pid(
+                get_claude_client_pid(client),
+                label="claude connection probe",
+            )
+            await client.query("Hi")
+            async for message in client.receive_response():
+                content = getattr(message, "content", None)
+                if isinstance(content, list):
+                    text_parts = [
+                        str(getattr(block, "text", "")).strip()
+                        for block in content
+                        if str(getattr(block, "text", "")).strip()
+                    ]
+                    if text_parts:
+                        assistant_text = "\n".join(text_parts)
+                message_error = getattr(message, "error", None)
+                if message_error:
+                    assistant_error = str(message_error)
+                if hasattr(message, "is_error"):
+                    result_text = str(getattr(message, "result", "") or "").strip()
+                    if bool(getattr(message, "is_error", False)):
+                        errors = getattr(message, "errors", None)
+                        detail_parts = [result_text, assistant_error]
+                        if isinstance(errors, list):
+                            detail_parts.extend(str(item) for item in errors if item)
+                        detail = "; ".join(part for part in detail_parts if part)
+                        raise RuntimeError(detail or "Claude Agent turn failed")
+                    if result_text:
+                        terminal_text = result_text
+            if terminal_text:
+                return terminal_text
+            if assistant_error:
+                raise RuntimeError(assistant_error)
+            if assistant_text:
+                return assistant_text
+            raise RuntimeError("Claude Agent turn returned no response")
+        except Exception as err:
+            detail = str(err).strip()
+            stderr = "\n".join(stderr_lines).strip()
+            if stderr and stderr not in detail:
+                raise RuntimeError(f"{detail}\n{stderr}".strip()) from err
+            raise
+        finally:
+            await self._disconnect_claude_probe_client(client)
+
+    async def _disconnect_claude_probe_client(self, client: ClaudeSDKClient) -> None:
+        """Bound probe cleanup so a wedged SDK disconnect cannot defeat its timeout."""
+        pid = get_claude_client_pid(client)
+        try:
+            await asyncio.wait_for(
+                self._disconnect_claude_client(client),
+                timeout=CLAUDE_PROBE_DISCONNECT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Claude connection probe did not disconnect within the cleanup timeout")
+            if pid:
+                await _reap_pid_set({pid}, terminate_timeout=2.0, logger=logger)
+
+    async def _run_codex_agent_probe(
+        self,
+        *,
+        binary: str,
+        cwd: str,
+        model: str | None,
+    ) -> str:
+        """Run an isolated turn through the normal Codex app-server protocol."""
+        from modules.agents.codex.transport import CodexTransport
+
+        backend_cfg = self._resolve_backend_config("codex")
+        transport = CodexTransport(
+            binary=binary,
+            cwd=cwd,
+            extra_args=list(getattr(backend_cfg, "extra_args", None) or []),
+        )
+        terminal: asyncio.Future[tuple[str, str]] = asyncio.get_running_loop().create_future()
+        response_text = ""
+
+        async def on_notification(method: str, params: dict[str, Any]) -> None:
+            nonlocal response_text
+            if method == "item/completed":
+                item = params.get("item") if isinstance(params, dict) else None
+                if isinstance(item, dict) and item.get("type") == "agentMessage":
+                    text = str(item.get("text") or "").strip()
+                    if text:
+                        response_text = text
+                return
+            if method == "error":
+                if params.get("willRetry") is True:
+                    return
+                error = params.get("error") if isinstance(params, dict) else params
+                detail = error.get("message") if isinstance(error, dict) else str(error or "Codex error")
+                if not terminal.done():
+                    terminal.set_result(("error", detail))
+                return
+            if method != "turn/completed":
+                return
+            turn = params.get("turn") if isinstance(params, dict) else None
+            status = turn.get("status") if isinstance(turn, dict) else None
+            if status == "failed":
+                error = turn.get("error") if isinstance(turn, dict) else None
+                detail = error.get("message") if isinstance(error, dict) else str(error or "Codex turn failed")
+                if not terminal.done():
+                    terminal.set_result(("error", detail))
+            elif status == "interrupted":
+                if not terminal.done():
+                    terminal.set_result(("error", "Codex turn was interrupted"))
+            elif status == "completed":
+                if not terminal.done():
+                    terminal.set_result(("success", response_text))
+            elif not terminal.done():
+                terminal.set_result(("error", f"Codex turn ended with status: {status or 'unknown'}"))
+
+        async def on_server_request(
+            _request_id: int | str,
+            _method: str,
+            _params: dict[str, Any],
+        ) -> dict[str, Any]:
+            return {"approved": True}
+
+        transport.on_notification(on_notification)
+        transport.on_server_request(on_server_request)
+        try:
+            await transport.start()
+            governor_from_controller(self.controller).apply_to_pid(
+                transport.pid,
+                label="codex connection probe",
+            )
+            thread_response = await transport.send_request(
+                "thread/start",
+                {
+                    "cwd": cwd,
+                    "approvalPolicy": "never",
+                    "sandbox": "danger-full-access",
+                },
+            )
+            thread = thread_response.get("thread")
+            thread_id = thread_response.get("id") or (
+                thread.get("id") if isinstance(thread, dict) else None
+            )
+            if not thread_id:
+                raise RuntimeError("Codex thread/start returned no thread id")
+            turn_params: dict[str, Any] = {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "Hi"}],
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"},
+                "effort": "low",
+            }
+            if isinstance(model, str) and model.strip():
+                turn_params["model"] = model.strip()
+            turn_response = await transport.send_request("turn/start", turn_params)
+            turn = turn_response.get("turn")
+            turn_id = turn_response.get("id") or (
+                turn.get("id") if isinstance(turn, dict) else None
+            )
+            if not turn_id:
+                raise RuntimeError("Codex turn/start returned no turn id")
+            outcome, result = await terminal
+            if outcome == "error":
+                raise RuntimeError(result)
+            if not result.strip():
+                raise RuntimeError("Codex Agent turn returned no response")
+            return result
+        finally:
+            await transport.stop()
 
     async def test_opencode_provider(
         self,

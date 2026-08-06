@@ -16,7 +16,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
@@ -1318,34 +1318,120 @@ def test_test_web_auth_rejects_unsupported_backend(service: AgentAuthService) ->
 def test_test_web_auth_surfaces_cli_not_found(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _spawn(*_args, **_kwargs):
-        raise FileNotFoundError("no such cli")
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(
+        service,
+        "_run_codex_agent_probe",
+        AsyncMock(side_effect=FileNotFoundError("no such cli")),
+    )
     result = _run(service.test_web_auth("codex"))
     assert result["ok"] is False
     assert result["error"] == "cli_not_found"
 
 
+def test_claude_probe_timeout_bounds_disconnect_and_reaps_process(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _WedgedClaudeClient:
+        async def disconnect(self):
+            await asyncio.Event().wait()
+
+    reap = AsyncMock(return_value=1)
+    monkeypatch.setattr(
+        "core.agent_auth_service.CLAUDE_PROBE_DISCONNECT_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr("core.agent_auth_service.get_claude_client_pid", lambda _client: 4321)
+    monkeypatch.setattr("core.agent_auth_service._reap_pid_set", reap)
+
+    _run(service._disconnect_claude_probe_client(_WedgedClaudeClient()))
+
+    reap.assert_awaited_once_with(
+        {4321},
+        terminate_timeout=2.0,
+        logger=ANY,
+    )
+
+
 def test_test_web_auth_happy_path_returns_excerpt(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A passing probe surfaces the first non-blank stdout line + duration."""
+    """Codex probes use app-server thread/turn requests, not ``codex exec``."""
+    captured: dict[str, object] = {"requests": []}
 
-    class _FakeProcess:
-        returncode = 0
+    class _FakeTransport:
+        pid = None
 
-        async def communicate(self):
-            return (b"\nHello from the model\nmore text", b"")
+        def __init__(self, **kwargs):
+            captured["init"] = kwargs
+            self.notification = None
 
-    async def _spawn(*_args, **_kwargs):
-        return _FakeProcess()
+        def on_notification(self, callback):
+            self.notification = callback
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
-    result = _run(service.test_web_auth("codex"))
+        def on_server_request(self, callback):
+            captured["server_request"] = callback
+
+        async def start(self):
+            captured["started"] = True
+
+        async def stop(self):
+            captured["stopped"] = True
+
+        async def send_request(self, method, params):
+            captured["requests"].append((method, params))
+            if method == "thread/start":
+                return {"thread": {"id": "thread-probe"}}
+            assert self.notification is not None
+            await self.notification(
+                "error",
+                {
+                    "turnId": "turn-probe",
+                    "willRetry": True,
+                    "error": {"message": "temporary upstream disconnect"},
+                },
+            )
+            await self.notification(
+                "item/completed",
+                {
+                    "turnId": "turn-probe",
+                    "item": {"type": "agentMessage", "text": "Hello from the model\nmore text"},
+                },
+            )
+            await self.notification(
+                "turn/completed",
+                {"turn": {"id": "turn-probe", "status": "completed"}},
+            )
+            return {"turn": {"id": "turn-probe"}}
+
+    monkeypatch.setattr("modules.agents.codex.transport.CodexTransport", _FakeTransport)
+    result = _run(service.test_web_auth("codex", model="gpt-5.4-mini"))
+
     assert result["ok"] is True
     assert result["excerpt"] == "Hello from the model"
     assert isinstance(result["duration_ms"], int)
+    assert captured["started"] is True
+    assert captured["stopped"] is True
+    assert captured["requests"] == [
+        (
+            "thread/start",
+            {
+                "cwd": os.getcwd(),
+                "approvalPolicy": "never",
+                "sandbox": "danger-full-access",
+            },
+        ),
+        (
+            "turn/start",
+            {
+                "threadId": "thread-probe",
+                "input": [{"type": "text", "text": "Hi"}],
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"},
+                "effort": "low",
+                "model": "gpt-5.4-mini",
+            },
+        ),
+    ]
 
 
 def test_verify_web_login_claude_forces_oauth_env(
@@ -1424,38 +1510,52 @@ def test_verify_web_login_claude_forces_oauth_env(
 def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Settings Test button runs a real Claude subprocess; when OAuth is
-    explicitly selected it must use the same env cleanup as live sessions.
-    """
+    """The Claude probe uses the SDK with the same filtered launch env."""
 
     captured: dict = {}
 
-    class _FakeProcess:
-        returncode = 0
+    class _FakeClaudeClient:
+        def __init__(self, *, options):
+            captured["options"] = options
 
-        async def communicate(self):
-            return (b"Hello from Claude", b"")
+        async def connect(self):
+            captured["connected"] = True
 
-    async def _spawn(*args, **kwargs):
-        captured["args"] = args
-        captured["env"] = kwargs.get("env") or {}
-        return _FakeProcess()
+        async def query(self, text):
+            captured["query"] = text
+
+        async def receive_response(self):
+            yield SimpleNamespace(
+                is_error=False,
+                result="Hello from Claude",
+                content=[],
+                error=None,
+            )
+
+        async def disconnect(self):
+            captured["disconnected"] = True
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale-shell")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "bearer-stale-shell")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://stale-relay.example")
     monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
     monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr("core.agent_auth_service.ClaudeSDKClient", _FakeClaudeClient)
 
     result = _run(service.test_web_auth("claude"))
 
     assert result["ok"] is True
-    assert captured["args"][:2] == ("/usr/bin/echo", "-p")
-    assert "--bare" not in captured["args"]
-    assert "ANTHROPIC_API_KEY" not in captured["env"]
-    assert "ANTHROPIC_AUTH_TOKEN" not in captured["env"]
-    assert "ANTHROPIC_BASE_URL" not in captured["env"]
+    options = captured["options"]
+    assert options.cli_path == "/usr/bin/echo"
+    assert options.permission_mode == "bypassPermissions"
+    assert options.setting_sources == ["user", "project", "local"]
+    assert options.tools == []
+    assert options.env["ANTHROPIC_API_KEY"] == ""
+    assert options.env["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert options.env["ANTHROPIC_BASE_URL"] == ""
+    assert captured["query"] == "Hi"
+    assert captured["connected"] is True
+    assert captured["disconnected"] is True
 
 
 def test_test_web_auth_claude_runs_in_runtime_cwd(
@@ -1463,116 +1563,90 @@ def test_test_web_auth_claude_runs_in_runtime_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Plain Claude print mode reads project config from cwd; the Settings
-    probe must use the same runtime cwd as live Agent turns.
-    """
+    """The isolated SDK probe uses the same default cwd as live Agent turns."""
 
     runtime_cwd = tmp_path / "agent-workdir"
-    captured: dict = {}
 
     class _Runtime:
         default_cwd = str(runtime_cwd)
 
-    class _FakeProcess:
-        returncode = 0
-
-        async def communicate(self):
-            return (b"Hello from Claude", b"")
-
-    async def _spawn(*_args, **kwargs):
-        captured["cwd"] = kwargs.get("cwd")
-        return _FakeProcess()
-
+    probe = AsyncMock(return_value="Hello from Claude")
     monkeypatch.setattr(_Config, "runtime", _Runtime(), raising=False)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(service, "_run_claude_agent_probe", probe)
 
     result = _run(service.test_web_auth("claude"))
 
     assert result["ok"] is True
-    assert captured["cwd"] == str(runtime_cwd)
+    probe.assert_awaited_once_with(
+        binary="/usr/bin/echo",
+        cwd=str(runtime_cwd),
+        model=None,
+    )
     assert runtime_cwd.is_dir()
 
 
 def test_test_web_auth_claude_oauth_reports_settings_cleanup_failure(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _spawn(*_args, **_kwargs):
-        raise AssertionError("Claude probe must not spawn when cleanup fails")
-
     def fail_cleanup(**_kwargs):
         raise OSError("settings locked")
 
+    probe = AsyncMock(side_effect=AssertionError("Claude probe must not start"))
     monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
     monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
     monkeypatch.setattr("vibe.claude_config.apply_claude_auth", fail_cleanup)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(service, "_run_claude_agent_probe", probe)
 
     result = _run(service.test_web_auth("claude"))
 
     assert result["ok"] is False
     assert result["error"] == "settings_cleanup_failed"
     assert "Failed to clear Claude Code settings env" in result["detail"]
+    probe.assert_not_awaited()
 
 
 def test_test_web_auth_failure_surfaces_stderr(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class _FakeProcess:
-        returncode = 7
-
-        async def communicate(self):
-            return (b"", b"Authentication failed: no credentials configured")
-
-    async def _spawn(*_args, **_kwargs):
-        return _FakeProcess()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(
+        service,
+        "_run_claude_agent_probe",
+        AsyncMock(side_effect=RuntimeError("Authentication failed: no credentials configured")),
+    )
     result = _run(service.test_web_auth("claude"))
     assert result["ok"] is False
     # The classifier turns "Authentication failed" stderr into the
     # specific ``invalid_credentials`` code so the UI can render the
     # actionable "Replace your API key or re-authenticate" sentence.
     assert result["error"] == "invalid_credentials"
-    assert result["exit_code"] == 7
     assert "Authentication failed" in (result.get("detail") or "")
 
 
 def test_test_web_auth_not_logged_in_has_specific_error_code(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class _FakeProcess:
-        returncode = 1
-
-        async def communicate(self):
-            return (b"Not logged in \xc2\xb7 Please run /login", b"")
-
-    async def _spawn(*_args, **_kwargs):
-        return _FakeProcess()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(
+        service,
+        "_run_claude_agent_probe",
+        AsyncMock(side_effect=RuntimeError("Not logged in · Please run /login")),
+    )
     monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
 
     result = _run(service.test_web_auth("claude"))
 
     assert result["ok"] is False
     assert result["error"] == "not_logged_in"
-    assert result["exit_code"] == 1
     assert "Not logged in" in (result.get("detail") or "")
 
 
 def test_test_web_auth_api_key_mode_does_not_prompt_for_oauth_login(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class _FakeProcess:
-        returncode = 1
-
-        async def communicate(self):
-            return (b"Not logged in \xc2\xb7 Please run /login", b"")
-
-    async def _spawn(*_args, **_kwargs):
-        return _FakeProcess()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setattr(
+        service,
+        "_run_claude_agent_probe",
+        AsyncMock(side_effect=RuntimeError("Not logged in · Please run /login")),
+    )
     monkeypatch.setattr(_Backend, "auth_mode", "api_key", raising=False)
     monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
 
@@ -1580,4 +1654,3 @@ def test_test_web_auth_api_key_mode_does_not_prompt_for_oauth_login(
 
     assert result["ok"] is False
     assert result["error"] == "invalid_credentials"
-    assert result["exit_code"] == 1

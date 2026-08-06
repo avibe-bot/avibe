@@ -5705,7 +5705,7 @@ def backend_auth_api_key_remove(backend: str):
 
 @app.route("/api/backend/<backend>/auth/test", methods=["POST"])
 async def backend_auth_test(backend: str):
-    """Send a single-token probe through the backend CLI to verify auth."""
+    """Send an isolated turn through the backend's production Agent transport."""
     from vibe import api
 
     payload = request.json or {}

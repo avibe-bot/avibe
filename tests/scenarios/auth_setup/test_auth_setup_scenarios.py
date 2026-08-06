@@ -222,26 +222,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             ),
             encoding="utf-8",
         )
-        probe_cli = home / "claude-probe"
-        probe_cli.write_text(
-            f"""#!{sys.executable}
-import os
-import sys
-
-expected = (
-    sys.argv[1:] == ["-p", "Hi"]
-    and os.environ.get("ANTHROPIC_API_KEY") == "relay-api-key"
-    and "ANTHROPIC_AUTH_TOKEN" not in os.environ
-    and os.environ.get("ANTHROPIC_BASE_URL") == "https://ai.coinsummer.com"
-)
-if not expected:
-    print("unexpected Claude probe environment")
-    raise SystemExit(7)
-print("relay-probe-ok")
-""",
-            encoding="utf-8",
-        )
-        probe_cli.chmod(0o755)
 
         harness = AuthSetupScenarioHarness()
         runner = ScenarioRunner(harness)
@@ -274,6 +254,27 @@ print("relay-probe-ok")
         async def run_connection_probe(current):
             current.test_result = await probe_backend_auth_async("claude")
 
+        class FakeClaudeSDKClient:
+            def __init__(self, *, options):
+                harness.probe_options = options
+
+            async def connect(self):
+                return None
+
+            async def query(self, text):
+                harness.probe_query = text
+
+            async def receive_response(self):
+                yield SimpleNamespace(
+                    is_error=False,
+                    result="relay-probe-ok",
+                    content=[],
+                    error=None,
+                )
+
+            async def disconnect(self):
+                return None
+
         with (
             patch.dict(
                 os.environ,
@@ -292,6 +293,7 @@ print("relay-probe-ok")
             ),
             patch("vibe.api.restart_backend", side_effect=restart_backend),
             patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
+            patch("core.agent_auth_service.ClaudeSDKClient", FakeClaudeSDKClient),
         ):
             config = V2Config(
                 mode="self_host",
@@ -302,7 +304,7 @@ print("relay-probe-ok")
             )
             config.agents.claude.auth_mode = "oauth"
             config.agents.claude.auth_mode_set = True
-            config.agents.claude.cli_path = str(probe_cli)
+            config.agents.claude.cli_path = "claude-probe"
             config.save()
 
             await runner.run(
@@ -328,6 +330,17 @@ print("relay-probe-ok")
         )
         self.assertTrue(harness.test_result["ok"])
         self.assertEqual(harness.test_result["excerpt"], "relay-probe-ok")
+        self.assertEqual(harness.probe_query, "Hi")
+        self.assertEqual(harness.probe_options.cli_path, "claude-probe")
+        self.assertEqual(
+            harness.probe_options.env["ANTHROPIC_API_KEY"],
+            "relay-api-key",
+        )
+        self.assertEqual(harness.probe_options.env["ANTHROPIC_AUTH_TOKEN"], "")
+        self.assertEqual(
+            harness.probe_options.env["ANTHROPIC_BASE_URL"],
+            "https://ai.coinsummer.com",
+        )
         self.assertEqual(cleanup_calls, [service])
         self.assertEqual(
             restart_calls,
@@ -342,6 +355,105 @@ print("relay-probe-ok")
             runner,
             ["confirm_oauth_is_active", "save_api_key", "test_connection"],
         )
+
+    async def test_codex_connection_probe_uses_app_server_turn(self):
+        """Scenario: AUTH-SETUP-906"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        home = Path(state_dir.name)
+        harness = AuthSetupScenarioHarness()
+        runner = ScenarioRunner(harness)
+        service = AgentAuthService(_ReloadingV2ConfigController())
+        requests = []
+
+        class FakeCodexTransport:
+            pid = None
+
+            def __init__(self, **kwargs):
+                harness.transport_init = kwargs
+                self.notification = None
+
+            def on_notification(self, callback):
+                self.notification = callback
+
+            def on_server_request(self, callback):
+                harness.server_request = callback
+
+            async def start(self):
+                harness.transport_started = True
+
+            async def stop(self):
+                harness.transport_stopped = True
+
+            async def send_request(self, method, params):
+                requests.append((method, params))
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                await self.notification(
+                    "item/completed",
+                    {
+                        "turnId": "turn-probe",
+                        "item": {"type": "agentMessage", "text": "codex-probe-ok"},
+                    },
+                )
+                await self.notification(
+                    "turn/completed",
+                    {"turn": {"id": "turn-probe", "status": "completed"}},
+                )
+                return {"turn": {"id": "turn-probe"}}
+
+        async def run_connection_probe(current):
+            current.test_result = await probe_backend_auth_async(
+                "codex",
+                model="gpt-5.4-mini",
+            )
+
+        with (
+            patch.dict(os.environ, {"AVIBE_HOME": str(home / ".avibe")}),
+            patch("vibe.api._get_oauth_service", return_value=service),
+            patch("modules.agents.codex.transport.CodexTransport", FakeCodexTransport),
+        ):
+            config = V2Config(
+                mode="self_host",
+                version="v2",
+                slack=SlackConfig(bot_token=""),
+                runtime=RuntimeConfig(default_cwd=str(home)),
+                agents=AgentsConfig(),
+            )
+            config.agents.codex.cli_path = "codex-probe"
+            config.save()
+            await runner.run(ScenarioStep("test_connection", run_connection_probe))
+
+        self.assertTrue(harness.test_result["ok"])
+        self.assertEqual(harness.test_result["excerpt"], "codex-probe-ok")
+        self.assertTrue(harness.transport_started)
+        self.assertTrue(harness.transport_stopped)
+        self.assertEqual(harness.transport_init["binary"], "codex-probe")
+        self.assertEqual(
+            requests,
+            [
+                (
+                    "thread/start",
+                    {
+                        "cwd": str(home),
+                        "approvalPolicy": "never",
+                        "sandbox": "danger-full-access",
+                    },
+                ),
+                (
+                    "turn/start",
+                    {
+                        "threadId": "thread-probe",
+                        "input": [{"type": "text", "text": "Hi"}],
+                        "approvalPolicy": "never",
+                        "sandboxPolicy": {"type": "dangerFullAccess"},
+                        "effort": "low",
+                        "model": "gpt-5.4-mini",
+                    },
+                ),
+            ],
+        )
+        ScenarioExpect.step_history(runner, ["test_connection"])
 
     async def test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch(self):
         """Scenario: AUTH-SETUP-903"""
