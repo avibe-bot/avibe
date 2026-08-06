@@ -1,13 +1,15 @@
 ---
 name: use-avibe
 slug: use-avibe
-description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state.
-version: 0.5.0
+description: Use only for direct, state-changing maintenance of an installed Avibe instance through its Web UI API, especially persistent configuration, routing, credentials, and remote-access connectivity.
+version: 0.5.1
 ---
 
 # Use Avibe
 
-Use this skill when the user asks you to configure, repair, explain, or operate a local Avibe installation.
+Use this skill only when the task directly changes an installed Avibe instance's persistent configuration or runtime connectivity through the Web UI API. Its main purpose is to prevent destructive replacement of configuration, scope, user, credential, or remote-access state.
+
+Do not activate it for Avibe source development, issue or PR work, code review, regression verification, ordinary `vibe agent` / `vibe task` / `vibe watch` / `vibe runs` commands, status checks, or general product questions.
 
 Typical requests include:
 
@@ -18,12 +20,6 @@ Typical requests include:
 - show or hide intermediate message types
 - configure an outbound proxy (`proxy_url`) for an IM platform that cannot reach its API directly
 - pair, start, stop, or inspect Avibe Cloud remote Web UI access
-- create, update, inspect, pause, resume, or remove a managed background watch with `vibe watch`
-- create, inspect, run, pause, resume, or remove a scheduled task with `vibe task`
-- run a one-shot Agent job with `vibe agent run`, including async background runs
-- inspect or cancel concrete Agent Run records with `vibe runs`
-- check or apply Avibe updates (`vibe check-update`, `vibe upgrade`)
-- inspect logs, run doctor, check service status, or explain where Avibe stores state
 - decide whether a requested change belongs in Avibe config or in the host backend's own config
 
 Follow this skill as an operations playbook for agents, not as end-user marketing copy.

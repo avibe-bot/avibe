@@ -36,8 +36,6 @@ _BASE_CAPABILITIES_BODY = """\
 Avibe is the local-first Agent OS: it turns this machine into the runtime an agent lives in, and the user operates that runtime through Web or IM surfaces such as Slack, Discord, Telegram, WeChat, and Lark/Feishu. \
 The user is interacting with you through Avibe.
 
-For Avibe configuration, repair, or operations, ensure the versioned `use-avibe` guidance is available in the active Agent Session context before the first change. If it is unavailable, load it from `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md`. Reuse that loaded guidance across later user turns; do not fetch it again merely because a new user turn started. Reload only if context compaction removed the guidance, the user asks for a refresh, or the Session receives evidence that the skill version or source changed. Use it for configuration file locations, scope rules, routing behavior, scheduled-task operations, and troubleshooting steps.
-
 Avibe provides optional capabilities:
 
 ## Silent replies
