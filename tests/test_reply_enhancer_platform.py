@@ -99,8 +99,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
-        self.assertNotIn("use-avibe", prompt)
-        self.assertNotIn("skills/use-avibe/SKILL.md", prompt)
+        self.assertIn(
+            "When directly changing an installed Avibe instance's persistent configuration "
+            "or runtime connectivity through its Web UI API, consult the `use-avibe` playbook",
+            prompt,
+        )
+        self.assertIn("skills/use-avibe/SKILL.md", prompt)
+        self.assertNotIn("new user turn", prompt)
+        self.assertNotIn("active Agent Session context", prompt)
         self.assertNotIn("context compaction removed the guidance", prompt)
         self.assertIn("## Send files", prompt)
         self.assertIn("Avibe provides optional capabilities:", prompt)

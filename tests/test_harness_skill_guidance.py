@@ -112,19 +112,20 @@ def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
 
 
 def test_use_avibe_skill_is_narrow_and_has_no_session_lifecycle_protocol() -> None:
-    body = _read("skills/use-avibe/SKILL.md")
+    for path in ("skills/use-avibe/SKILL.md", "skills/use-vibe-remote/SKILL.md"):
+        body = _read(path)
 
-    assert "Use this skill only when the task directly changes an installed Avibe instance" in body
-    assert "Do not activate it for Avibe source development" in body
+        assert "Use this skill only when the task directly changes an installed Avibe instance" in body
+        assert "Do not activate it for Avibe source development" in body
 
-    for text in (
-        "every user turn",
-        "each user turn",
-        "new user turn",
-        "context compaction",
-        "active Agent Session context",
-    ):
-        assert text not in body
+        for text in (
+            "every user turn",
+            "each user turn",
+            "new user turn",
+            "context compaction",
+            "active Agent Session context",
+        ):
+            assert text not in body
 
 
 def test_background_watch_skill_defaults_to_current_session() -> None:
