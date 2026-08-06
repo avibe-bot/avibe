@@ -637,7 +637,7 @@ They are descriptions of the acceptance probe, not claims that the failure was
 observed.
 
 1. **Messages -> Responses.** POST `/v1/messages` with two tools, a system
-   marker, `thinking: {type: enabled, budget_tokens: 64}`, and `stream: true`.
+   marker, `thinking: {type: enabled, budget_tokens: 1024}`, and `stream: true`.
    Reassemble tool-call deltas, send one `tool_result`, and require a final
    answer. No-go on a missing/changed call id, invalid JSON arguments, a lost
    system marker, an unterminated SSE stream, or an unreported reasoning-field
@@ -669,14 +669,17 @@ NO-GO even if CPA returns HTTP 200. This probe was not run in M0.
 ### 17. Fixture and rerun contract
 
 `docs/plans/fixtures/cpa-agentic-fidelity/` contains the standard-library-only
-`probe.py` runner and its run instructions. It has seven cases covering both
+`probe.py` runner and its run instructions. It has eight cases covering both
 directions of both pairs, single and parallel tools, tool-result round trips,
-streaming, system text, and thinking/reasoning parameters. It fails closed before any
-network request when `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is absent, and it
-never logs request/response bodies or environment values. Its JSON output only
-reports transport and stream-termination shape; the semantic invariants in the
-matrix remain the reviewer's redacted acceptance record, so a 2xx response is
-never treated as a fidelity pass by itself.
+streaming, system text, and thinking/reasoning parameters. Every case makes a
+second request from the first response's observed tool-call ids and complete
+assistant continuation; fabricated ids are never used. The runner parses
+non-stream and SSE responses into a redacted semantic projection and exits
+non-zero when names, arguments, ids, reasoning presence, stream termination,
+tool-result correlation, or final markers do not satisfy the matrix. It fails
+closed before any network request when either vendor key, the gateway token,
+or a source-qualified model is absent, and it never logs request/response
+bodies or environment values.
 
 The runner is intentionally not an Avibe integration test: the CPA process must
 be obtained through `vibe/model_hub_runtime/` and bound to `127.0.0.1`, while
