@@ -567,3 +567,51 @@ def test_client_teardown_marker_suppresses_signal_error_without_key_record() -> 
     )
 
     assert controller.im_client.sent_messages == []
+
+
+def test_teardown_containment_matches_colon_delimited_exit_code() -> None:
+    """The SDK reports write failures as ``(exit code: -9)``.
+
+    Once cleanup has popped the client there is no returncode to read, so the
+    message text is the only signal and both SDK spellings must match.
+    """
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._mark_claude_teardown_intentional(composite_key, None)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    contained = asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Cannot write to terminated process (exit code: -9)"),
+        )
+    )
+
+    assert contained is True
+    assert controller.im_client.sent_messages == []
+
+
+def test_reported_session_errors_are_not_marked_contained() -> None:
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    contained = asyncio.run(
+        handler.handle_session_error(
+            "slack_C123:/tmp/workdir",
+            context,
+            RuntimeError("boom"),
+        )
+    )
+
+    assert contained is False
+    assert len(controller.im_client.sent_messages) == 1

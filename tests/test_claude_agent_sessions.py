@@ -1745,6 +1745,46 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("SIGABRT", terminal_call.kwargs["terminal_error"])
         self.assertFalse(agent._pending_requests.get(composite_key))
 
+    async def test_receiver_eof_contained_teardown_skips_durable_failure_row(self):
+        """A contained teardown must stay silent on every surface.
+
+        ``handle_session_error`` only suppresses the IM send; the durable
+        ``notify`` row is what the web Chat renders, so a contained failure has
+        to skip that too or the containment is surface-specific.
+        """
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        composite_key = "session-eof-contained:/tmp/work"
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-turn",
+                    "agent_runtime_turn_token": "eof-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(return_value=True),
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: "Command failed with exit code -9",
+        )
+        controller.claude_sessions[composite_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        )
+        controller.receiver_tasks[composite_key] = asyncio.current_task()
+
+        with patch("core.message_mirror.persist_agent_message") as persist:
+            await agent._handle_receiver_eof(composite_key, pending_request.context)
+
+        agent.session_handler.handle_session_error.assert_awaited_once()
+        persist.assert_not_called()
+
     async def test_receiver_eof_terminated_auth_adopts_turn_before_recovery(self):
         controller = _StubController()
         controller._get_session_key = lambda context: "telegram::user::U1"

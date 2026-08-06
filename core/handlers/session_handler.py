@@ -57,9 +57,12 @@ logger = logging.getLogger(__name__)
 
 # A Claude CLI process the service terminated on purpose surfaces as SIGTERM
 # (-15) or the SIGKILL escalation (-9). The SDK may report it as a returncode
-# or only as text on the transport error, so both shapes are recognized.
+# or only as text on the transport error, so both shapes are recognized. The
+# text arrives in two shapes: the SDK transport reader raises "Command failed
+# with exit code -9", while write failures raise "Cannot write to terminated
+# process (exit code: -9)".
 CLAUDE_TEARDOWN_RETURNCODES = frozenset({-9, -15})
-CLAUDE_TEARDOWN_EXIT_PATTERN = re.compile(r"exit code (-9|-15)\b")
+CLAUDE_TEARDOWN_EXIT_PATTERN = re.compile(r"exit code:?\s*(-9|-15)\b")
 # Teardown intent is dropped as soon as a new client takes the key; this bound
 # only limits how long a stale record can survive when that never happens.
 CLAUDE_INTENTIONAL_TEARDOWN_TTL_SECONDS = 120.0
@@ -1873,13 +1876,47 @@ class SessionHandler(BaseHandler):
             # owner set is re-read here rather than before it: by now another
             # client may legitimately own a process resuming the same native
             # session id, and it must not be reaped as a duplicate.
-            await reap_duplicate_claude_resume_processes(
+            await self._reap_duplicate_resume_processes(
+                composite_key,
                 native_session_id,
                 keep_pid=keep_pid if cleanup_from_receiver else None,
-                exclude_pids=self._live_claude_client_pids(),
-                cli_path=self._get_claude_cli_path_override(),
-                logger=logger,
             )
+
+    async def _reap_duplicate_resume_processes(
+        self,
+        composite_key: str,
+        native_session_id: Optional[str],
+        *,
+        keep_pid: Optional[int],
+    ) -> None:
+        """Reap leftover processes for one native session id, ownership-first.
+
+        Generation locks are per composite key, so another key can be starting
+        a client for the same native session id right now. Between
+        ``connect()`` and registration that client owns a live subprocess that
+        ``claude_sessions`` cannot yet report, and ``keep_pid`` is ``None`` on
+        every cleanup that does not run from the receiver task — so the reap is
+        deferred rather than run against an incomplete owner set. The periodic
+        orphan reaper, which reconciles against the persisted ownership
+        registry, remains the backstop for anything left behind.
+        """
+        if not native_session_id:
+            return
+        creates_in_flight = [key for key in self.claude_session_creates if key != composite_key]
+        if creates_in_flight:
+            logger.info(
+                "Deferring duplicate Claude reap for session %s: %d client create(s) in flight",
+                composite_key,
+                len(creates_in_flight),
+            )
+            return
+        await reap_duplicate_claude_resume_processes(
+            native_session_id,
+            keep_pid=keep_pid,
+            exclude_pids=self._live_claude_client_pids(),
+            cli_path=self._get_claude_cli_path_override(),
+            logger=logger,
+        )
 
     async def _disconnect_client(self, client, composite_key: str) -> None:
         try:
@@ -2372,8 +2409,18 @@ class SessionHandler(BaseHandler):
             exclude_pids=exclude_pids,
         )
 
-    async def handle_session_error(self, composite_key: str, context: MessageContext, error: Exception):
-        """Handle session-related errors"""
+    async def handle_session_error(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        error: Exception,
+    ) -> bool:
+        """Handle session-related errors.
+
+        Returns ``True`` when the failure was contained (already explained to
+        the user, or deliberately silenced), so callers can skip persisting a
+        durable failure notification for it.
+        """
         error_msg = str(error)
 
         # Check for specific error types
@@ -2393,7 +2440,7 @@ class SessionHandler(BaseHandler):
                     )
                 ),
             )
-            return
+            return False
 
         client = self.claude_sessions.get(composite_key)
         returncode = get_claude_client_returncode(client)
@@ -2407,7 +2454,7 @@ class SessionHandler(BaseHandler):
                 error_msg,
             )
             await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
-            return
+            return True
         if returncode is not None:
             reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
             reason = self._t(reason_key, **reason_values)
@@ -2425,7 +2472,7 @@ class SessionHandler(BaseHandler):
                     self._t("error.claudeProcessTerminated", reason=reason)
                 ),
             )
-            return
+            return False
         if "read() called while another coroutine" in error_msg:
             logger.error(f"Session {composite_key} has concurrent read error - cleaning up")
             await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
@@ -2458,6 +2505,7 @@ class SessionHandler(BaseHandler):
                 context,
                 self._get_formatter(context).format_error(self._t("error.sessionGeneric", error=error_msg)),
             )
+        return False
 
     def claude_error_diagnostic(self, composite_key: str, error: Exception) -> str:
         """Add process state and captured stderr to a Claude failure diagnostic."""

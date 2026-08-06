@@ -2629,6 +2629,56 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
     assert captured["exclude_pids"] == set()
 
 
+def test_cleanup_defers_duplicate_reap_while_a_client_create_is_in_flight(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An in-flight create owns a subprocess that is not yet registered.
+
+    Generation locks are per composite key, so another key can be inside
+    ``connect()`` for the same native resume id. Its pid cannot appear in
+    ``claude_sessions`` yet, so the reap must be deferred instead of running
+    against a knowingly incomplete owner set.
+    """
+    captured: dict[str, Any] = {"reap_calls": 0}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(*args, **kwargs):
+        captured["reap_calls"] += 1
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(client, "_vibe_native_session_id", "native-session-1")
+    handler.claude_session_creates["slack_C999:other"] = object()
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert captured["reap_calls"] == 0
+    assert client.disconnects == 1
+
+
 def test_evict_idle_sessions_protects_pids_of_other_live_sessions(monkeypatch, tmp_path: Path) -> None:
     """The duplicate reap must never target a still-registered client's pid.
 
