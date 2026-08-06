@@ -432,15 +432,15 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/backend/(?:(?:codex)/auth|[^/]+/auth/oauth/status/[^/]+)$",
+            r"^/api/backend/[^/]+/auth/oauth/status/[^/]+$",
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/(?:opencode/permission-status|remote-access/status)$",
+            r"^/api/remote-access/status$",
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/harness/(?:counts|tasks|watches)$",
+            r"^/api/harness/counts$",
         ),
         (frozenset({"GET", "HEAD"}), r"^/api/users$"),
     )
