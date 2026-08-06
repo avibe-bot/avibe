@@ -28,7 +28,7 @@ MODELS = {protocol: os.environ.get(env_name, "") for protocol, env_name in MODEL
 SYSTEM_MARKER = "CPA_SYSTEM_MARKER_731"
 USER_PROMPT = (
     "Call the requested tools for Shanghai. After tool results are returned, "
-    f"reply with a concise sentence containing {SYSTEM_MARKER}, WEATHER_OK, and TIME_OK."
+    "reply with a concise sentence containing the system marker and each returned output marker."
 )
 THINKING_BUDGET = 1024
 MAX_TOKENS = 1280
