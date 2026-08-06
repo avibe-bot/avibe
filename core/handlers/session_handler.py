@@ -667,6 +667,35 @@ class SessionHandler(BaseHandler):
             cleared = self.sessions.clear_session_base(resolved_source_key, source_base_session_id)
         return bool(changed or cleared)
 
+    @staticmethod
+    def _is_reserved_session_anchor(context: MessageContext, base_session_id: str) -> bool:
+        """True when this anchor names a reserved, durable Agent Session row.
+
+        ``clear_source`` is decided upstream by ``_build_delivery_alias_strategy`` from
+        ``session_target.thread_id is None``. That is a proxy for "this is a throwaway
+        channel-level anchor that the delivered message should replace". A durable
+        ``--create-session`` definition anchor satisfies the same proxy:
+        ``thread_id_from_session_anchor`` splits the anchor at ``:``, so
+        ``<platform>_<channel_id>:definition_<uuid>`` reduces to ``<platform>_<channel_id>``
+        and the derived thread id equals the channel id, which the function reports as
+        ``None``. The proxy therefore cannot tell a provisional anchor from a durable one.
+
+        The clear is a HARD delete of the ``agent_sessions`` row, while the definition keeps
+        its now-dangling ``run_definitions.session_id``. Every later fire then dies at
+        dispatch with ``agent session id not found``, silently, at ``last_status=failed``
+        with no result text, and the definition never recovers on its own.
+
+        Decide from the same authority ``get_base_session_id`` used to mint the anchor: a
+        context bound to a reserved Agent Session row is never provisional. Reading the
+        reserved row keeps this a fact check rather than a second anchor-format parser that
+        would drift from the minting side in ``_session_anchor_with_suffix``.
+        """
+        reserved = resolve_context_agent_session_target(context)
+        if not reserved:
+            return False
+        reserved_anchor = str(reserved.get("session_anchor") or "").strip()
+        return bool(reserved_anchor) and reserved_anchor == str(base_session_id or "").strip()
+
     def finalize_scheduled_delivery(self, context: MessageContext, sent_message_id: Optional[str]) -> None:
         payload = context.platform_specific or {}
         if payload.get("turn_source") != "scheduled":
@@ -688,7 +717,9 @@ class SessionHandler(BaseHandler):
             return
 
         target_session_key = strategy.get("session_key") or self._get_session_key(context)
-        clear_source = bool(strategy.get("clear_source", False))
+        clear_source = bool(strategy.get("clear_source", False)) and not self._is_reserved_session_anchor(
+            context, source_base_session_id
+        )
         self.alias_session_base(
             context,
             source_base_session_id=source_base_session_id,
