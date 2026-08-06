@@ -272,3 +272,55 @@ observations:
       the failed terminal result is the existing release action for Avibe's per-Session
       runtime gate and durable Run. Timeout must perform them in that order and must
       not fall through to the empty successful-result path.
+  - id: HFR-OBS-023
+    date: 2026-08-06
+    source: PR7R current-master evidence matrix (HFR-180..HFR-186)
+    result: confirmed
+    detail: >-
+      Two End-path defects, both on the direct-IM / agent-run lane where there is no
+      Workbench turn projection to fall back on. (1) ``_resolve_live_state`` reads
+      ``claude_active_sessions``, which ``handle_message`` stamps only AFTER
+      ``get_or_create_claude_session`` returns; a Run accepted while that call is in
+      flight reads ``idle``, End takes the idle branch into ``_end_claude``, the
+      canonical stop never runs, and the intentional-teardown path settles the Run as
+      ``backend_refresh`` -> ``failed`` where invariant 2 requires ``stopped`` ->
+      ``canceled``. (2) On the codex active branch a teardown that succeeds after a
+      FAILED ``_stop_active_agent`` synthesizes ``{ok: True, action: "ended"}``.
+      Clearing the stale row is deliberate and should stay, but the payload is
+      byte-identical to a stop that really settled the turn: the un-interrupted
+      turn's mappings are cleared, its Run is never settled, and no caller can tell.
+      The teardown is not the defect; the missing signal is.
+  - id: HFR-OBS-024
+    date: 2026-08-06
+    source: PR7R current-master evidence matrix (HFR-183, HFR-184)
+    result: confirmed
+    detail: >-
+      No backend exposes a per-Turn progress signal on either lane. Claude stamps
+      ``session_turn_started`` / ``session_last_activity`` per composite key and the
+      SDK has no query/result correlation id; codex holds one active turn id per base
+      session; opencode holds one asyncio task per base session. All three are
+      session-wide, which the plan explicitly rules out as a substitute -- so a
+      generic inactivity timeout is blocked on evidence, not on design taste, and no
+      implementation PR may be opened for one yet. Separately, the Turn merge key is
+      the Session anchor alone: ``_attach_accepted_agent_runs`` matches on
+      ``session_id`` plus the logical turn id and records no per-participant source
+      or deadline, so a scheduler cron Run and a manual CLI Run coalesce into one
+      Turn. Cancellation is Turn-level, so per-Run timeout policy stays unspecifiable
+      until that cardinality is made explicit.
+  - id: HFR-OBS-025
+    date: 2026-08-06
+    source: PR7R current-master evidence matrix (Q1, Q4, Q5)
+    result: refuted
+    detail: >-
+      Three of the plan's five questions close in master's favour and should not
+      receive code. Q1: Delivery reservation, ownership transfer and backend dispatch
+      acceptance all leave the Run nonterminal on both lanes -- the old
+      premature-success claim is closed by regression evidence, not by another
+      terminal writer. Q4: four durable facts already prove natural completion has
+      started (terminal-result latch, durable pending-output fact, accepted Message
+      receipt, ``activity_local_settlement_only`` marker) and must outrank any later
+      inactivity decision. Q5: ``health`` / ``consecutive_failures`` /
+      ``recent_failures`` are derived per read by ``_health_from_verdicts`` over a
+      bounded window of terminal verdicts rather than stored counters, and
+      ``last_run_at`` / ``last_error`` are written in the same CAS-guarded terminal
+      transition that settles the Run -- so no health cursor is needed.

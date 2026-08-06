@@ -3,8 +3,9 @@
 Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
 PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
 PR4 (#1173) are complete. Only PR7R remains as the next unit, and it is
-evidence-only. PR4's conditional transport-attempt delta (PR4B) opens only if a
-current-master reproducer proves a missing durable fact.**
+evidence-only; its first increment is in flight (`HFR-180…186`, see §7). PR4's
+conditional transport-attempt delta (PR4B) opens only if a current-master
+reproducer proves a missing durable fact.**
 
 This is the execution plan, not the investigation log. The original detailed
 diagnosis and its review history remain available in Git before `fe821905`.
@@ -23,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R**, evidence-only; `HFR-180…219` reserved and unoccupied as of 2026-08-06 |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…186`, `HFR-187…219` still reserved. Q1/Q4/Q5 close in master's favour; Q2 blocks the inactivity timeout; Q3 open; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1226,6 +1227,66 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
+#### PR7R status (2026-08-06) — first increment
+
+The matrix is `tests/run_terminal_truth_evidence.py`, closed by
+`tests/test_run_terminal_truth_matrix.py` (`HFR-184…186`) and fed by
+`tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`). It expands
+to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
+(lane, trigger, outcome) with a `per_backend` override wherever the backend
+demonstrably changes the answer, because the durable owner chain is chosen by
+the lane, not by the backend. 140 cells carry a consuming test, 28 are
+`unproven` and name the exact probe that would close them; `UNPROVEN_BUDGET`
+pins that number so a gap cannot widen silently.
+
+Question verdicts:
+
+1. **Q1 — answered, close the claim.** Delivery reservation, ownership transfer
+   and backend dispatch acceptance all leave the Run nonterminal on both lanes.
+   The premature-success claim is closed by regression evidence. Do not add
+   another terminal writer.
+2. **Q2 — blocked, and it blocks the timeout.** No backend exposes a per-Turn
+   progress signal on either lane: Claude stamps activity per composite key with
+   no SDK correlation id, codex holds one active turn id per base session,
+   opencode one asyncio task per base session. All three are session-wide, which
+   the plan rules out. A generic inactivity timeout may not be specified or
+   implemented until at least one exact signal exists for all six cells.
+3. **Q3 — open.** The Turn merge key is the Session anchor alone, so a scheduler
+   cron Run and a manual CLI Run coalesce into one Turn with no per-participant
+   source or deadline recorded. Cancellation is Turn-level, so per-Run policy
+   stays unspecifiable until this cardinality is made explicit.
+4. **Q4 — answered.** Four durable pre-terminal facts exist and must outrank a
+   later inactivity decision: the terminal-result latch, a durable
+   pending-output fact, an accepted Message receipt, and the
+   `activity_local_settlement_only` marker.
+5. **Q5 — answered, no health cursor needed.** `health`,
+   `consecutive_failures` and `recent_failures` are derived per read by
+   `_health_from_verdicts` over a bounded window of terminal verdicts rather
+   than stored counters; `last_run_at` and `last_error` are written in the same
+   CAS-guarded terminal transition that settles the Run.
+
+Reproduced defects, both on the direct-IM / agent-run lane and both owned by
+`core/services/running_agents.py`:
+
+- **PR7R-F1** (`HFR-180`) — `_resolve_live_state` reads
+  `claude_active_sessions`, which `handle_message` stamps only after
+  `get_or_create_claude_session` returns. A Run accepted while that call is in
+  flight reads `idle`, End takes the idle branch, the canonical stop never runs,
+  and the Run settles as `backend_refresh` → `failed` where invariant 2 requires
+  `stopped` → `canceled`.
+- **PR7R-F2** (`HFR-181`) — on the codex active branch a teardown that succeeds
+  after a failed `_stop_active_agent` returns `{ok: True, action: "ended"}`.
+  Clearing the stale row is deliberate and stays; the payload carrying no signal
+  that the turn was never interrupted and its Run never settled does not.
+
+Both are characterization tests: they assert current behavior, so the
+implementation PR that fixes them must flip them. Neither is fixed here.
+
+Remaining PR7R work, in the order it closes the most cells: the direct-IM
+`resultless_termination` and `terminal_persistence_failure` probes (24 of the
+28 unproven cells), the opencode End live-state probe (the other 4), and the
+six Q2 exact-signal probes in `EXACT_TURN_PROGRESS_SIGNALS`.
+
 ### After PR7R — close the claim or review the contract
 
 PR7R does not authorize implementation. If its executable evidence disproves an
@@ -1316,7 +1377,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…219` — reserved and still unoccupied; usable by PR7R
+- PR7: `HFR-180…186` — occupied by PR7R's first increment; `HFR-187…219` still
+  reserved for the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is
 now `HFR-435`, allocated by unrelated capabilities above this plan's reserved

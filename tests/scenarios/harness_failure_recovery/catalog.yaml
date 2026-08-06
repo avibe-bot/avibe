@@ -2715,6 +2715,55 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_watches.py::test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop
+  - id: HFR-180
+    name: End settles an unmarked Claude turn as a backend refresh instead of a stop
+    status: covered
+    kind: failure
+    layer: contract
+    backend: claude
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_end_live_state_race_settles_an_unmarked_claude_turn_as_a_refresh
+  - id: HFR-181
+    name: codex End reports ok/ended when the canonical stop never interrupted
+    status: covered
+    kind: failure
+    layer: contract
+    backend: codex
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted
+  - id: HFR-182
+    name: the Turn merge key admits Runs with different source semantics
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_the_turn_merge_key_admits_runs_with_different_source_semantics
+  - id: HFR-183
+    name: no backend exposes a per-Turn progress signal on either lane
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_no_backend_exposes_a_per_turn_progress_signal_on_either_lane
+  - id: HFR-184
+    name: every run terminal truth cell is proven or named as a gap
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_every_run_terminal_truth_cell_is_proven_or_named_as_a_gap
+  - id: HFR-185
+    name: the unproven cell count matches the checked-in budget
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_the_unproven_count_matches_the_checked_in_budget
+  - id: HFR-186
+    name: every PR7R question and finding names a real consuming test
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_every_question_and_finding_names_a_real_consuming_test
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
