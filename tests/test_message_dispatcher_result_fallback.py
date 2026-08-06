@@ -9,8 +9,13 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
-from core.message_output import MessageOutput, stop_output_for
+from core.message_output import (
+    MessageOutput,
+    contained_teardown_output_for,
+    stop_output_for,
+)
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
@@ -475,6 +480,41 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(SETTLED_BY_STOPPED, SETTLEMENTS_WITHOUT_RESULT)
         self.assertEqual(SETTLEMENT_TERMINAL_STATUS[SETTLED_BY_STOPPED], "canceled")
         dispatcher._record_agent_run_terminal_result.assert_not_called()
+        persist.assert_not_called()
+
+    async def test_contained_teardown_release_names_backend_refresh_and_records_no_run_terminal(
+        self,
+    ):
+        """#1204: a teardown the service performed itself is an infrastructure
+        interruption, not a backend result.
+
+        #1202 stopped these from being SHOWN as backend errors; the emit that
+        followed still described one — an ``is_error=True`` silent result, which the
+        dispatcher turned into a failed Turn, ``failed`` IM silent-terminal evidence,
+        and an ``agent_runs`` row terminalized from an empty body. Same fix shape as
+        the stop above: name the settlement so the lanes reach the writer that maps
+        ``backend_refresh`` to ``failed`` with a structured cause (invariant 2 of
+        ``docs/plans/harness-run-reliability.md``), and claim no run terminal so the
+        empty body never becomes the result.
+        """
+        controller = self._terminal_lifecycle_controller()
+
+        with mock.patch("core.message_dispatcher.persist_silent_terminal") as persist:
+            dispatcher, context = await self._emit_silent_terminal(
+                controller,
+                completes_run=False,
+                output=contained_teardown_output_for(None),
+            )
+
+        controller.mark_turn_complete.assert_called_once_with(
+            context,
+            settled_by=SETTLED_BY_BACKEND_REFRESH,
+        )
+        self.assertIn(SETTLED_BY_BACKEND_REFRESH, SETTLEMENTS_WITHOUT_RESULT)
+        # Still terminal, still failed — the cause is what changed, not the outcome.
+        self.assertEqual(SETTLEMENT_TERMINAL_STATUS[SETTLED_BY_BACKEND_REFRESH], "failed")
+        dispatcher._record_agent_run_terminal_result.assert_not_called()
+        # No silent-terminal trace: the empty body is a release, not backend evidence.
         persist.assert_not_called()
 
     async def test_slack_result_uses_native_markdown_sender_when_available(self):

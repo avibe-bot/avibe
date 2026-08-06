@@ -36,9 +36,11 @@ from core.message_output import (
 )
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
+    SETTLEMENTS_WITHOUT_RESULT,
 )
 from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
@@ -228,7 +230,16 @@ async def _stream_chunk(
         # terminal STATUS is still first-writer-wins in the store, so a result whose row
         # write already landed keeps its ``succeeded`` — this only stops the reason from
         # silently disagreeing with what the user was told.
-        if sink.get("settled_by") != SETTLED_BY_STOPPED:
+        #
+        # A contained backend teardown is the same case for the same reason: the
+        # service retired the runtime itself and the release already named that as
+        # the settlement, so a straggler result must not relabel an infrastructure
+        # interruption as a healthy terminal result. Only these two are protected --
+        # NOT all of ``SETTLEMENTS_WITHOUT_RESULT`` -- because
+        # ``SETTLED_BY_NO_TERMINAL_RESULT`` is the pessimistic default a fallback
+        # releaser writes, and upgrading THAT when a real result lands is the whole
+        # point of this line.
+        if sink.get("settled_by") not in (SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_REFRESH):
             sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
         done = sink.get("done_event")
         if done is not None:
@@ -1954,11 +1965,24 @@ class ConsolidatedMessageDispatcher:
                         "Activity output batch recovery is incomplete",
                         delivered=False,
                     )
+                # IM silent-terminal evidence describes what the BACKEND produced,
+                # which is why an output that names its own settlement is excluded:
+                # its empty body is a release, not a result, and stamping the trace
+                # ``failed``/``completed`` from it asserts a backend outcome that
+                # never happened. This tests the whole ``SETTLEMENTS_WITHOUT_RESULT``
+                # set rather than ``stopped`` alone so a teardown reason added later
+                # inherits the exclusion instead of having to rediscover this line --
+                # a contained backend teardown (``contained_teardown_output_for``) is
+                # the second member and was writing ``terminal_outcome=failed`` for a
+                # runtime the service retired on purpose. Only an explicitly named
+                # settlement can reach here; ``_turn_release_settlement`` derives
+                # ``terminal_result`` / ``turn_only_result`` for everything else, and
+                # neither is in the set.
                 if (
                     mutates_turn_lifecycle
                     and context.platform != "avibe"
                     and self._turn_release_settlement(output_semantics)
-                    != SETTLED_BY_STOPPED
+                    not in SETTLEMENTS_WITHOUT_RESULT
                 ):
                     persist_silent_terminal(context, is_error=is_error)
                 if canonical_type == "result" and output_semantics.settles_run:
