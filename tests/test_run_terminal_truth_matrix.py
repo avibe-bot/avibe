@@ -28,6 +28,8 @@ from tests.run_terminal_truth_evidence import (
     RUN_TERMINAL_TRUTH_MATRIX,
     TRIGGERS,
     UNPROVEN_BUDGET,
+    _TRIGGER_OVERRIDES,
+    _validate_trigger_overrides,
 )
 
 _PROOF_KINDS = {"covered", "shared", "N/A", "defect", "unproven"}
@@ -829,6 +831,77 @@ def test_the_plan_states_the_same_question_verdicts_as_the_matrix() -> None:
         )
 
 
+_PLAN_BULLET = re.compile(r"^\d+\. \*\*(Q\d) [—-] ", re.MULTILINE)
+
+#: Scope qualifiers an answer can carry. Each one is a phrase that RESTRICTS
+#: what the verdict word claims, which is exactly the part HFR-193 leaves
+#: unchecked: it ties the token an implementer greps for and says so.
+#: A verdict word is equally true of "and here is what is settled about a Run"
+#: and "and here is what is settled about a Turn", so the word alone cannot
+#: keep the two documents from meaning different things.
+_SCOPE_QUALIFIERS = ("run-scoped", "live dispatch", "claude only")
+
+
+def _plan_verdict_bullets(text: str) -> dict[str, str]:
+    """Each question's verdict bullet from the numbered block, flattened."""
+
+    marks = list(_PLAN_BULLET.finditer(text))
+    bullets: dict[str, str] = {}
+    for index, match in enumerate(marks):
+        end = marks[index + 1].start() if index + 1 < len(marks) else len(text)
+        bullets[match.group(1)] = _flatten(text[match.start() : end]).lower()
+    return bullets
+
+
+def test_the_plans_verdict_carries_the_same_scope_as_the_answer() -> None:
+    """HFR-208: a scope the answer states, the plan's verdict must state too.
+
+    Round 18's second finding. Round 17 narrowed Q4 to Run scope in
+    ``PR7R_QUESTIONS`` and left the plan's canonical verdict framing Q4 as
+    "whether a pre-terminal fact is durably recorded" while still calling two
+    facts established -- so the document a follow-up unit reads as the contract
+    said the Turn-level question was half answered. HFR-193 could not see it:
+    the verdict WORD agreed on both sides and the disagreement was entirely in
+    the qualifier.
+
+    This is the ledger's complement rather than a duplicate of it. The ledger
+    forbids the retracted WORDING from reappearing; nothing made the correct
+    scope appear, and a document can be free of every banned phrase by saying
+    nothing. Here the answer is the source and the plan must carry what it
+    states, so narrowing an answer in one artefact cannot leave the other
+    silently broader.
+    """
+    fixture = (
+        "1. **Q1 — open.** it is run-scoped here\n"
+        "2. **Q2 — open.** nothing qualified\n"
+    )
+    assert set(_plan_verdict_bullets(fixture)) == {"Q1", "Q2"}
+    assert "run-scoped" in _plan_verdict_bullets(fixture)["Q1"]
+    assert "run-scoped" not in _plan_verdict_bullets(fixture)["Q2"]
+
+    start, end = _pr7r_plan_span(_PLAN)
+    span = "\n".join(_PLAN.read_text(encoding="utf-8").splitlines()[start:end])
+    bullets = _plan_verdict_bullets(span)
+    assert set(bullets) == set(PR7R_QUESTIONS), sorted(bullets)
+
+    checked = 0
+    for key, question in PR7R_QUESTIONS.items():
+        answer = _flatten(question["answer"]).lower()
+        for qualifier in _SCOPE_QUALIFIERS:
+            if qualifier not in answer:
+                continue
+            checked += 1
+            assert qualifier in bullets[key], (
+                f"{key}: the answer restricts itself to {qualifier!r} and the "
+                f"plan's verdict bullet does not, so the plan claims the "
+                f"broader thing in the document a follow-up unit treats as "
+                f"the contract"
+            )
+    # Anti-degeneracy: a vocabulary no answer uses would make this pass on any
+    # plan at all, which is the shape this unit keeps finding in its own guards.
+    assert checked >= 2, "no scope qualifier was exercised; the guard is inert"
+
+
 def test_the_plans_reserved_scenario_range_is_actually_free() -> None:
     """HFR-194: a reserved id block may not contain ids the catalog already owns.
 
@@ -1217,6 +1290,65 @@ def test_a_mistyped_matrix_key_is_an_error_not_a_silent_fallback():
     # And the checked-in matrix satisfies it, which is what makes the guard a
     # statement about this corpus rather than about a fixture.
     _validate_matrix(RUN_TERMINAL_TRUTH_MATRIX)
+
+
+def test_a_mistyped_trigger_override_key_is_an_error_not_a_silent_fallback():
+    """HFR-207: the same rule as HFR-200, at the level HFR-200 cannot see.
+
+    HFR-200 whitelists what is INSIDE a cell. It is handed
+    ``RUN_TERMINAL_TRUTH_MATRIX``, and by then ``_build_matrix`` has already
+    read ``_TRIGGER_OVERRIDES`` with ``.get((lane, trigger), {})``. An override
+    filed under a misspelled trigger is therefore dropped BEFORE the object
+    HFR-200 inspects is built, and what HFR-200 sees is a lane default that is
+    correct in every way except that it is not the evidence someone wrote.
+
+    Round 11's docstring said the hole "exists one level up" and then fixed the
+    level it was standing on. That is the finding, and it is this unit's own
+    recurring one: a rule stated generally and enforced at the single site
+    under review. The first half of this test proves the gap is real rather
+    than asserting it -- the old guard accepts the corrupted input -- before
+    the second half shows the new one rejects it.
+    """
+    typo = {("direct_im", "scheduler_att"): {"success": {"shared": ("unproven", "x")}}}
+
+    # The gap, demonstrated: expansion drops it, and HFR-200's guard is happy
+    # with the result, because the result no longer contains the mistake.
+    assert ("direct_im", "scheduler_att") not in RUN_TERMINAL_TRUTH_MATRIX
+    _validate_matrix(
+        {
+            (lane, trigger): _lane_rows_probe()
+            for lane in LANES
+            for trigger in TRIGGERS
+        }
+    )
+
+    with pytest.raises(ValueError, match=r"'scheduler_att' is not in TRIGGERS"):
+        _validate_trigger_overrides(typo)
+
+    with pytest.raises(ValueError, match=r"'durable_wokbench' is not in LANES"):
+        _validate_trigger_overrides(
+            {("durable_wokbench", "watch"): {"success": {"shared": ("unproven", "x")}}}
+        )
+
+    with pytest.raises(ValueError, match=r"outcome\(s\) \['sucess'\]"):
+        _validate_trigger_overrides(
+            {("direct_im", "watch"): {"sucess": {"shared": ("unproven", "x")}}}
+        )
+
+    with pytest.raises(ValueError, match="is not a \\(lane, trigger\\) pair"):
+        _validate_trigger_overrides({"direct_im": {}})
+
+    # And the checked-in overrides satisfy it. Non-empty, or this would pass on
+    # a dict that had been emptied out -- the degenerate shape this unit keeps
+    # finding, which a guard over a whitelist is especially prone to.
+    assert _TRIGGER_OVERRIDES
+    _validate_trigger_overrides(_TRIGGER_OVERRIDES)
+
+
+def _lane_rows_probe() -> dict:
+    """A minimal well-formed row set, so HFR-207 can feed HFR-200 real input."""
+
+    return {outcome: {"shared": ("unproven", "probe")} for outcome in OUTCOMES}
 
 
 _LEDGER_LITERALS = frozenset(

@@ -2965,6 +2965,42 @@ scenarios:
     # way; the rule is not "never bind a turn", it is "this answer is Run-scoped and has to
     # say so".
     test: tests/test_run_terminal_truth_matrix.py::test_q4s_evidence_binds_a_run_and_never_a_turn
+  - id: HFR-208
+    name: the plan's verdict carries the same scope qualifier as the answer
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Round 18's second finding. Round 17 narrowed Q4 to Run scope in the evidence module
+    # and left the plan's canonical verdict framing Q4 as whether a fact is durably
+    # recorded while still calling two facts established, so the contract document said the
+    # Turn-level question was half answered. HFR-193 could not catch it: the verdict WORD
+    # agreed on both sides and the whole disagreement lived in the qualifier.
+    # RULE: a scope phrase the answer states -- run-scoped, live dispatch, Claude only --
+    # must appear in the plan's verdict bullet for that question. The complement of the
+    # retraction ledger, not a duplicate: the ledger stops a banned wording reappearing, and
+    # a document satisfies it perfectly by saying nothing. This makes the correct scope
+    # APPEAR. Anti-degeneracy: the test fails if no answer exercises the vocabulary at all.
+    test: tests/test_run_terminal_truth_matrix.py::test_the_plans_verdict_carries_the_same_scope_as_the_answer
+  - id: HFR-207
+    name: a mistyped trigger-override key is an error, not a silent fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Round 18's third finding, and it is HFR-200's rule at the level HFR-200 cannot
+    # reach. _build_matrix reads _TRIGGER_OVERRIDES with .get((lane, trigger), {}), so an
+    # override filed under a misspelled trigger is dropped BEFORE the matrix exists.
+    # _validate_matrix is then handed a perfectly well-formed lane default and passes: the
+    # product is still 3 x 2 x 4 x 7, UNPROVEN_BUDGET does not move, every cell still names
+    # a probe, and the evidence someone wrote for that trigger is simply gone.
+    # RULE: validate the override dict at its own level, against LANES, TRIGGERS and
+    # OUTCOMES, before anything consumes it. Round 11's docstring had already written that
+    # the hole "exists one level up" and then fixed only the level it was standing on --
+    # a rule stated generally and enforced at the site under review, which is this unit's
+    # most repeated defect. The test proves the gap before closing it: it first shows the
+    # OLD guard accepting the corrupted input.
+    test: tests/test_run_terminal_truth_matrix.py::test_a_mistyped_trigger_override_key_is_an_error_not_a_silent_fallback
   - id: HFR-205
     name: a restored OpenCode poll loop emits without its Turn identity
     # ``covered`` here means the scenario has a test, which is what every other row
@@ -2989,8 +3025,12 @@ scenarios:
     # logical_turn_id into the SAME snapshot dict under the native steering key and the
     # restore path reads it back to steer, so the identity survives the restart and is
     # discarded one call later. Restored additional_steer_targets carrying context=None is
-    # production admitting the same thing. One line at the rebuild, not a persistence
-    # change.
+    # production admitting the same thing. Round 18 retracted the sentence that used to
+    # close this note, "One line at the rebuild, not a persistence change", as true of the
+    # Turn and false of the Runs: the probe asserts run-1 is nowhere in the snapshot, so
+    # the Run half comes from a durable read keyed on the recovered Turn
+    # (accepted_agent_run_ids_for_turn) and reaches only participants with an accepted
+    # Delivery. Two remediations, the second of unestablished reach.
     # This is a CHARACTERIZATION test: it asserts the current wrong behaviour. It is not a
     # PR7R-F1/F2 reproducer and adds no writer, no status and no cursor to this unit.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_a_restored_opencode_poll_loop_emits_without_its_turn_identity

@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…203`, `HFR-204…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 answered — every backend/lane keys a progress event by Turn and per-emit Run attribution is derived from that Turn, so the inactivity timeout is no longer blocked on attribution; the one residual is the per-session activity timestamp; Q1/Q3/Q4/Q5 open, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…208`, `HFR-209…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 open — every backend/lane keys a progress event by Turn on LIVE dispatch, but OpenCode's restart path rebuilds its emit context and drops the Turn and the accepted Runs, so those two cells are `defect`; the live residual is the per-session activity timestamp. Q1/Q3/Q4/Q5 open, Q4 Run-scoped and Claude-only, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,11 +1227,11 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under seventeen review rounds
+#### PR7R status (2026-08-06) — first increment, revised under eighteen review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
-`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…204`, `HFR-206`) and fed by
+`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…204`, `HFR-206…208`) and fed by
 `tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
 `HFR-191`, `HFR-195`, `HFR-197`, `HFR-199`, `HFR-205`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
@@ -1242,7 +1242,7 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through seventeen changed how the
+rounds and has held at 168 since; rounds four through eighteen changed how the
 findings are demonstrated, three question verdicts, and twenty degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
@@ -1847,8 +1847,19 @@ update.
    the rebuild is handed, under the native steering key, and the restore path
    reads it back to steer; restored `additional_steer_targets` are built with
    `context=None`, which is production admitting the same thing in its own
-   words. The Turn survives the restart and is thrown away one call later, so
-   remediation is one line at the rebuild rather than a persistence change.
+   words. The Turn survives the restart and is thrown away one call later.
+   Round 18 retracted round 17's "one line at the rebuild rather than a
+   persistence change" as a size claim standing in for a completeness claim,
+   true of the Turn and false of the Runs. `HFR-205` asserts `"run-1" not in repr(snapshot)` — the accepted-run
+   list is not in the payload at all, so there is nothing for a rebuild to read
+   back, and the remediation splits in two. The Turn half is the rebuild reading
+   the steering key it is already handed. The Run half is a *durable read*:
+   `SessionTurnManager.accepted_agent_run_ids_for_turn` resolves participants
+   from the `message_deliveries` rows accepted against that Turn, so once the
+   Turn id is recovered the Runs are one query away — **for Runs that have an
+   accepted Delivery row**. A participant with no such row is not recoverable
+   that way, and PR7R has not established whether the restored OpenCode loop
+   ever has one, so the extent of the Run half is itself open.
    `HFR-205` is a characterization test asserting the current wrong behaviour;
    it is not a `PR7R-F1`/`PR7R-F2` reproducer and adds no writer, status or
    cursor to this unit. The kinds-to-verdict tie then moved Q2 to `open` on its
@@ -1899,6 +1910,64 @@ so and was read as a caveat instead of as the defect. Round 16's lesson was that
 enrolling a retraction means sweeping for the claim's subject. Round 17's is one
 step earlier: **when an answer explains why its evidence does not quite match
 its question, that is not a scope note, it is the finding.**
+
+Round 18 — three findings, all three accepted, none rejected; two new scenarios
+(`HFR-207`, `HFR-208`), no verdict word moved, and **no budget move**. All three
+landed on round 17's own output, which by now is the expected shape of a round
+rather than a remark about one.
+
+1. **A size claim was standing in for a completeness claim.** Round 17 closed
+   its Q2 finding by saying the remediation was "one line at the rebuild rather
+   than a persistence change"; that is retracted. It holds for the Turn, whose
+   identity the snapshot already carries under the native steering key, and
+   fails for the Runs, because the snapshot carries no run id in any form — the
+   round's own characterization test asserts exactly that. The sweep then found
+   that the Run half is not a persistence change either, for a different reason:
+   `accepted_agent_run_ids_for_turn` resolves participants from the Deliveries
+   accepted against a recovered Turn, so once the Turn id is back the Runs are
+   one durable read away. The reach of that read is the new open question. A
+   participant with no accepted Delivery row is outside the answer, and whether
+   the restored OpenCode loop ever has one is not established here. Seven corpus
+   sites carried the retracted claim in two different wordings, and both are
+   enrolled separately, because a phrase ledger matches text and not meaning.
+
+2. **The plan's canonical Q4 verdict still framed the question so that
+   Run-scoped evidence answered it.** Round 17 retracted the conflation in the
+   answer and enrolled one wording of it; the plan bullet said the same thing in
+   its own words and was left standing — the seventh instance of the class round
+   16 named. Two things changed. The bullet now states the scope, and the plan's
+   wording is enrolled beside the answer's. Because a ledger can only forbid a
+   phrasing and never require the right one to appear, `HFR-208` is its
+   complement: when an answer restricts itself with a scope qualifier, the
+   plan's verdict bullet for that question must carry the same qualifier. The
+   word-level tie that predates it cannot see this class at all, since both
+   documents agree on the verdict word and disagree only about what the word is
+   a verdict on.
+
+3. **A validator fixed the level it was standing on and left the level above
+   it.** The matrix expansion reads its per-trigger overrides with a defaulting
+   lookup, so an override filed under a mistyped lane or trigger is dropped
+   before the matrix exists: every cell stays well-formed, the budget does not
+   move, and the evidence someone wrote under that key is simply gone. Round
+   11's validator whitelists cell keys, but it walks the *built* matrix and so
+   structurally cannot see this — its own docstring says the hole exists one
+   level up. `HFR-207` closes it, and it demonstrates the gap before asserting
+   the fix: the first half hands the corrupted input to the old validator and
+   shows it accepting, the second half shows the new one raising on the key that
+   is actually wrong, naming the lane, the trigger and the outcome separately.
+
+Also fixed, cited by nobody: the summary table near the top of this document
+carried a stale scenario range and a stale Q2 verdict. It sits *outside* the
+span the prose guards read — that span begins at this status section — so
+nothing mechanical reaches it, which is worth knowing before a later round
+trusts it.
+
+**The durable lesson is that all three findings are one move.** Each is a
+correct fix that stopped at the edge of the artefact in front of it: a
+retraction enrolled in the answer but not swept into the plan, a validator
+written at the level it happened to be reading, a claim verified for one of its
+two halves. The habit that catches this is asking, after every fix, *which other
+artefact states the same thing, and which level does this rule really live at.*
 
 Question verdicts:
 
@@ -1973,9 +2042,15 @@ Question verdicts:
    persisted: `_process_message` writes `logical_turn_id` into the very dict the
    rebuild is handed, under the native steering key, and the restore path reads
    it back to steer. `additional_steer_targets` building restored targets with
-   `context=None` is production saying the same thing. Remediation is one line
-   at the rebuild, and it is a second timeout item on top of the per-session
-   timestamp: `HFR-205` drives it.
+   `context=None` is production saying the same thing. Round 18 retracted the
+   sentence that used to close this bullet — "Remediation is one line at the
+   rebuild" — because the halves need different fixes: the Turn comes back from
+   the steering key the rebuild is already handed, while the Runs are not in the
+   snapshot at all and come back only from a durable read
+   (`accepted_agent_run_ids_for_turn`, over the Deliveries accepted against that
+   Turn), which reaches a participant only if it has such a Delivery row. It is
+   a second timeout item on top of the per-session timestamp: `HFR-205` drives
+   it.
 3. **Q3 — open, split, and narrower than it was.** Established: the *Turn's*
    accepted-run record cannot discriminate between participants — a flat
    `accepted_agent_run_ids` list and one Turn-level `source_kind` that a later
@@ -1993,8 +2068,18 @@ Question verdicts:
    coalesce. `_attach_accepted_agent_runs` is downstream of that decision; the
    owner is `SessionTurnManager._hydrate_delivery_batch_context`, which folds a
    Delivery batch into one context.
-4. **Q4 — open, Claude only, and two of the four facts are unproven.** Four
-   pre-terminal facts are named and two are established, both for Claude: the
+4. **Q4 — open, Claude only, RUN-scoped, and two of the four facts are
+   unproven.** Every Turn-level pre-terminal fact remains **open**, and that
+   is the load-bearing word in this bullet: what is established is established
+   about a *Run*. Every activity the answer cites registers with a `run_id`,
+   none passes a `turn_id`, and none sets `completes_turn` — `HFR-206` reads
+   the citations for exactly that and fails if one starts binding a Turn. Round
+   18 retracted this bullet's closing sentence, "Q4 asks whether a pre-terminal
+   fact is durably recorded", which framed the question so that Run-level
+   evidence answered it. A follow-up implementing this verdict may not treat
+   Turn-level pre-terminal evidence as proven. Four
+   pre-terminal facts are named and two are established, both for Claude and
+   both at Run scope: the
    durable pending-output Activity batch and the `activity_local_settlement_only`
    marker. The terminal-result latch and the accepted Message receipt are not:
    no cited node invokes `SessionTurnManager.on_terminal_result` or reads
@@ -2006,9 +2091,11 @@ Question verdicts:
    proven pre-terminal evidence at all — the stronger form of Q2's gap, since an
    inactivity decision on those backends would have nothing to outrank it.
    Q4 calling two facts *established* while every matrix cell is `unproven` is
-   not a contradiction: Q4 asks whether a pre-terminal fact is durably recorded,
-   a cell asks whether a Run admitted through a given trigger reaches a given
-   terminal outcome, and a test may settle one and not the other.
+   not a contradiction, and round 18 corrected how this bullet used to explain
+   why: Q4 asks whether one named pre-terminal fact is durably recorded **for a
+   Run**, a cell asks whether a Run admitted through a given trigger reaches a
+   given terminal outcome, and a test may settle one and not the other. Neither
+   of them settles the Turn.
 5. **Q5 — open, and it splits.** `health`, `consecutive_failures` and
    `recent_failures` are answered: derived per read by
    `SQLiteBackgroundTaskStore._classify_health` over the bounded verdict window
@@ -2218,8 +2305,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…206` — occupied by PR7R's first increment (`HFR-188…206` were
-  taken by its round-6 through round-17 reviews); `HFR-207…219` still reserved for
+- PR7: `HFR-180…208` — occupied by PR7R's first increment (`HFR-188…208` were
+  taken by its round-6 through round-18 reviews); `HFR-209…219` still reserved for
   the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is

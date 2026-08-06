@@ -629,7 +629,50 @@ _TRIGGER_OVERRIDES: Final = {
 }
 
 
+def _validate_trigger_overrides(overrides: dict) -> None:
+    """Every override key must name a cell the expansion will actually read.
+
+    Round 18, and it is round 11's rule at the one level round 11 could not
+    reach. ``_validate_matrix`` whitelists cell keys and ``per_backend``
+    backends, but it walks the BUILT matrix, and ``_build_matrix`` reads this
+    dict with ``.get((lane, trigger), {})`` -- so an override filed under
+    ``("direct_im", "scheduler_att")`` is dropped before the matrix exists and
+    the validator downstream sees a perfectly well-formed lane default. All
+    168 cells stay green, ``UNPROVEN_BUDGET`` does not move, and the evidence
+    someone wrote for that trigger is simply gone. A silent fallback is not
+    safer for being one dictionary further out.
+
+    The outcome keys are checked here too. A misspelled one would eventually
+    surface as ``set(rows) != set(OUTCOMES)`` in HFR-184, but that is a shape
+    failure on a cell nobody named; this raises on the key that is wrong.
+    """
+
+    for key, rows in overrides.items():
+        if not (isinstance(key, tuple) and len(key) == 2):
+            raise ValueError(f"override key {key!r} is not a (lane, trigger) pair")
+        lane, trigger = key
+        if lane not in LANES:
+            raise ValueError(
+                f"override {key!r}: {lane!r} is not in LANES {sorted(LANES)}; "
+                f"the expansion would never look this key up and the proofs "
+                f"under it would be written and never read"
+            )
+        if trigger not in TRIGGERS:
+            raise ValueError(
+                f"override {key!r}: {trigger!r} is not in TRIGGERS "
+                f"{sorted(TRIGGERS)}; the expansion would never look this key "
+                f"up and the proofs under it would be written and never read"
+            )
+        unknown = set(rows) - set(OUTCOMES)
+        if unknown:
+            raise ValueError(
+                f"override {key!r}: outcome(s) {sorted(unknown)} are not in "
+                f"OUTCOMES {sorted(OUTCOMES)}"
+            )
+
+
 def _build_matrix() -> dict:
+    _validate_trigger_overrides(_TRIGGER_OVERRIDES)
     matrix: dict = {}
     for lane in LANES:
         base = _DURABLE_BY_OUTCOME if lane == "durable_workbench" else _IM_BY_OUTCOME
@@ -834,6 +877,46 @@ RETRACTED_PHRASINGS: Final = (
         "the lock and what becomes of the interrupted turn's late events. Say "
         "what the consumer does with an INTERRUPTED turn.",
     ),
+    # Round 18, and the three rows below are one retraction each of round 17's
+    # own two overclaims. Both are the same species: a true statement about one
+    # half of a two-part subject, written as the statement about the subject.
+    # "One line" was true of the Turn; the Runs are not in the snapshot at all.
+    # The Q4 row below retracts "Q4 asks whether a pre-terminal fact is durably
+    # recorded", which was true of a Run and framed the question so that
+    # Run-level evidence closed it.
+    #
+    # The Q4 row is also the seventh instance of the class round 16 named: the
+    # ledger catches restatements, not paraphrases. Round 17 DID enrol its Q4
+    # retraction, as "pre-terminal evidence a turn carries", and the plan's
+    # canonical verdict was carrying the same claim in different words the
+    # whole time. Grep the SUBJECT, not the sentence under review.
+    (
+        "one line at the rebuild",
+        "round 18",
+        "true of the Turn only. ``HFR-205`` asserts the snapshot carries no "
+        "run id in any form, so the Run half has nothing to read back at the "
+        "rebuild: it comes from a durable read keyed on the recovered Turn, "
+        "``accepted_agent_run_ids_for_turn``, and only for participants "
+        "carrying an accepted Delivery. Two remediations, and the reach of the "
+        "second is not established.",
+    ),
+    (
+        "a one-line remediation",
+        "round 18",
+        "the same round-17 claim in its other wording, in the matrix comment "
+        "and the probe docstring. Enrolled separately because a phrase ledger "
+        "matches text, not meaning, and one row would have left the other "
+        "copy standing.",
+    ),
+    (
+        "q4 asks whether a pre-terminal fact is durably recorded",
+        "round 18",
+        "the plan's canonical verdict, framing Q4 so that Run-scoped evidence "
+        "answers it. Every activity Q4 cites registers a ``run_id``, passes no "
+        "``turn_id`` and sets no ``completes_turn`` -- ``HFR-206`` reads the "
+        "citations for that. Say which SCOPE the recorded fact belongs to; "
+        "every Turn-level pre-terminal fact is open.",
+    ),
     (
         "discarded live signal, not correct filtering",
         "round 9",
@@ -995,10 +1078,18 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # identity IS persisted. ``_process_message`` writes ``logical_turn_id``
     # into the very dict handed to the rebuild, under the steering snapshot
     # key, and the restore path reads it back for steering. So the Turn
-    # survives the restart and is discarded at the rebuild -- a one-line
-    # remediation on a path that already holds the value, not "persist more".
+    # survives the restart and is discarded at the rebuild.
     # ``additional_steer_targets`` builds its restored targets with
     # ``context=None``, which is production's own admission of the same thing.
+    #
+    # Round 18 retracted what this comment said next -- "a one-line remediation
+    # on a path that already holds the value" -- as a claim about the Turn
+    # doing duty for a claim about the cell, which fails on Runs too. The
+    # snapshot holds the Turn and holds no run id at all (``HFR-205`` asserts
+    # the absence), so the Runs come back only from a durable read keyed on the
+    # recovered Turn, ``accepted_agent_run_ids_for_turn``, and only for
+    # participants carrying an accepted Delivery row. Two remediations, and the
+    # reach of the second one is not established here.
     ("opencode", "durable_workbench"): defect(
         "HFR-205: restart discards the persisted Turn id at handle rebuild -- "
         + _Q2_RESTORED
@@ -1218,8 +1309,16 @@ PR7R_QUESTIONS: Final = {
             "to steer. The Turn survives the restart and is thrown away one "
             "call later. ``additional_steer_targets`` constructing its "
             "restored targets with ``context=None`` is production stating the "
-            "same thing in its own words. Remediation is one line at the "
-            "rebuild, not a persistence change. "
+            "same thing in its own words. Round 18 retracted the sentence "
+            "that used to sit here, \"Remediation is one line at the rebuild, "
+            "not a persistence change\": it is true of the Turn and false of "
+            "the Runs, which ``HFR-205`` shows are not in the snapshot in any "
+            "form. The Turn half is the rebuild reading the steering key it is "
+            "already handed. The Run half is a durable read -- "
+            "``accepted_agent_run_ids_for_turn`` resolves participants from "
+            "the Deliveries accepted against that Turn -- and it reaches only "
+            "participants that HAVE such a Delivery row, which for the "
+            "restored OpenCode loop this unit has not established. "
             "A generic inactivity timeout is therefore UNBLOCKED on the "
             "attribution question FOR LIVE DISPATCH -- an exact signal exists "
             "on all three backends and both lanes while the process that "

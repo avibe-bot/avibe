@@ -1184,8 +1184,13 @@ observations:
       ``logical_turn_id`` into the SAME dict the rebuild is handed, under the
       native steering key, and the restore path reads it back to steer; restored
       ``additional_steer_targets`` are built with ``context=None``. The identity
-      survives the restart and is discarded one call later, so the fix is one
-      line at the rebuild rather than persisting more. HFR-205 is a
+      survives the restart and is discarded one call later. Round 18 retracted
+      what this observation said next, "the fix is one line at the rebuild
+      rather than persisting more", as a claim true of the Turn and false of
+      the Runs: the snapshot holds no run id at all, so the Run half comes from
+      a durable read keyed on the recovered Turn,
+      ``accepted_agent_run_ids_for_turn``, reaching only participants with an
+      accepted Delivery. HFR-205 is a
       characterization test and is not a PR7R-F1/F2 reproducer.
       FINDING 2, a corpus guard credited with production behaviour in five
       artefacts -- round 16's own fix, misfiled. The guard that compares the
@@ -1221,6 +1226,73 @@ observations:
       Rejected: nothing. All four findings were real and in scope; none asked
       for a fix to PR7R-F1 or PR7R-F2, which would have been out of scope by the
       plan's own boundary.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
+      and is still deliberately untouched (HFR-OBS-028).
+  - id: HFR-OBS-043
+    area: run-terminal-truth
+    summary: >-
+      Round 18, three findings, all three accepted, nothing rejected. Two new
+      scenario ids (HFR-207, HFR-208), no verdict word moved, and no budget
+      move -- UNPROVEN_BUDGET counts the 168-cell trigger/outcome matrix and
+      nothing this round touches a cell's proof kind. All three findings landed
+      on round 17's own output, which by now is the expected shape of a round
+      rather than something to remark on.
+      FINDING 1, a size claim standing in for a completeness claim. Round 17
+      closed its Q2 finding by calling the remediation "one line at the rebuild
+      rather than a persistence change"; that is retracted. It holds for the
+      Turn, whose identity the snapshot already carries under the native
+      steering key, and fails for the Runs, because the snapshot carries no run
+      id in any form -- the round's own characterization test asserts exactly
+      that, so a rebuild has nothing to read back. The sweep then established
+      that the Run half is not a persistence change either, for a different
+      reason: ``accepted_agent_run_ids_for_turn`` resolves participants from
+      the Deliveries accepted against a recovered Turn, so once the Turn id is
+      back the Runs are one durable read away. The reach of that read is the
+      new open question, and it is stated rather than guarded: a participant
+      with no accepted Delivery row is outside the answer, and whether the
+      restored OpenCode loop ever has one is not established by this unit.
+      Seven corpus sites carried the retracted claim in two different wordings
+      and both are enrolled separately, because a phrase ledger matches text
+      and not meaning -- one row would have left the other copy standing.
+      FINDING 2, the plan's canonical Q4 verdict still framed the question so
+      that Run-scoped evidence answered it. Round 17 retracted the conflation
+      in the answer and enrolled one wording of it; the plan bullet said the
+      same thing in its own words and was left standing, which is the seventh
+      instance of the class round 16 named. The bullet now states the scope,
+      the plan's wording is enrolled beside the answer's, and HFR-208 is the
+      ledger's complement rather than a duplicate of it: a ledger can only
+      forbid a phrasing, never require the correct one to appear, so when an
+      answer restricts itself with a scope qualifier the plan's verdict bullet
+      for that question must now carry the same qualifier. The word-level tie
+      that predates it cannot see this class, because both documents agreed on
+      the verdict word and disagreed only about what the word was a verdict on.
+      FINDING 3, a validator fixed the level it was standing on and left the
+      level above it. The matrix expansion reads its per-trigger overrides with
+      a defaulting lookup, so an override filed under a mistyped lane or
+      trigger is dropped before the matrix exists: every cell stays
+      well-formed, the budget does not move, and the evidence someone wrote
+      under that key is gone with no failure anywhere. Round 11's validator
+      whitelists cell keys but walks the BUILT matrix and structurally cannot
+      see this, and its own docstring says the hole exists one level up.
+      HFR-207 closes it and demonstrates the gap before asserting the fix --
+      the first half hands the corrupted input to the old validator and shows
+      it accepting, the second half shows the new one raising on the key that
+      is actually wrong, naming lane, trigger and outcome separately.
+      SELF-FOUND, cited by nobody: the summary table near the top of the plan
+      carried a stale scenario range and a stale Q2 verdict. It sits OUTSIDE
+      the span the prose guards read, which begins at the PR7R status heading,
+      so nothing mechanical reaches it. Worth knowing before a later round
+      trusts that table.
+      THE DURABLE RULE, and it is the one skeleton under all three findings:
+      each was a correct fix that stopped at the edge of the artefact in front
+      of it -- a retraction enrolled in the answer but not swept into the plan,
+      a validator written at the level it happened to be reading, a claim
+      verified for one of its two halves. After every fix, ask which other
+      artefact states the same thing and which level the rule really lives at.
+      Rejected: nothing. All three findings were real and in scope; none asked
+      for a fix to PR7R-F1 or PR7R-F2, which would have been out of scope by
+      the plan's own boundary.
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
       and is still deliberately untouched (HFR-OBS-028).

@@ -2178,8 +2178,16 @@ def test_a_restored_opencode_poll_loop_emits_without_its_turn_identity():
     and the restore path reads that key back for steering while handing the
     emit context nothing. Production says so itself -- restored
     ``additional_steer_targets`` are built with ``context=None``. The identity
-    survives the restart and is discarded at the rebuild, which is a one-line
-    remediation and a different one from "persist more".
+    survives the restart and is discarded at the rebuild.
+
+    Round 18 retracted this docstring's next sentence, "which is a one-line
+    remediation and a different one from persist more", because it generalised
+    from the Turn to the cell. The assertions below say why: the Turn is in the
+    snapshot, and ``run-1`` is not in it in any form, so the Run half has
+    nothing to read back. It has a durable source instead --
+    ``accepted_agent_run_ids_for_turn`` over the Deliveries accepted against
+    the recovered Turn -- which is a second remediation, and one that reaches a
+    participant only if it has such a Delivery.
 
     This probe is a CHARACTERIZATION test in the sense this file's header
     means: it asserts the current, wrong behaviour so the gap is executable.
@@ -2293,6 +2301,21 @@ def test_a_restored_opencode_poll_loop_emits_without_its_turn_identity():
     )
     assert "logical_turn_id=state.logical_turn_id" in steer_source
     assert "context=None" in steer_source
+
+    # Round 18. The Run half's remediation is named as a real durable read
+    # rather than described, so the prose above cannot drift from what exists:
+    # the participants are keyed on the Turn this rebuild would have recovered,
+    # and the source is the accepted Deliveries, which is also the limit -- a
+    # participant with no accepted Delivery is not in this answer.
+    from core.session_turns import SessionTurnManager
+    from storage import message_deliveries
+
+    assert set(
+        inspect.signature(SessionTurnManager.accepted_agent_run_ids_for_turn).parameters
+    ) == {"self", "turn_id"}
+    durable_read = inspect.getsource(message_deliveries.accepted_agent_run_ids_for_turn)
+    assert "deliveries_for_turn(conn, turn_id)" in durable_read
+    assert 'delivery.get("state") != "accepted"' in durable_read
 
     # Consistency tie: the matrix must say what this probe just showed. Both
     # opencode cells, because the restore path is reached from either lane --
