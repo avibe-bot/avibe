@@ -769,6 +769,31 @@ RETRACTED_PHRASINGS: Final = (
         "-> 'codex only' -> 'four of six, split by lane' -> all six, and "
         "HFR-183 drives it. The claim is only quotable as history.",
     ),
+    # Round 16, and it is the SAME defect as round 15's back-fill one level
+    # down: round 9's retraction WAS enrolled, as "attribution is thrown away",
+    # and the same claim went on standing in two other wordings inside the very
+    # probe the answer cites. A phrase ledger catches restatements, not
+    # paraphrases -- so enrolling a retraction means grepping the corpus for its
+    # SUBJECT and enrolling every wording found, not enrolling the one sentence
+    # that happened to be under review.
+    (
+        "for codex it drops it",
+        "round 9",
+        "the consumer does not drop it. ``should_emit_progress`` returns False "
+        "for the older turn only after ``CodexAgent.handle_message`` has "
+        "interrupted it under ``_session_locks[base]``, so it is correct "
+        "filtering -- HFR-193 for the serialization, HFR-195 for the late "
+        "events. Say what the consumer does with an INTERRUPTED turn.",
+    ),
+    (
+        "discarded live signal, not correct filtering",
+        "round 9",
+        "round 8's conclusion, argued from the gate key and the registry slot "
+        "being different key spaces without running ``handle_message``, which "
+        "is the serializer between them. The order matters when quoting this: "
+        "the settled reading is 'correct filtering ..., not a discarded live "
+        "signal', which this row deliberately does not match.",
+    ),
 )
 
 #: Words that mark a retraction in prose. A retracted phrasing may appear within

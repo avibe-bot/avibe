@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under fifteen review rounds
+#### PR7R status (2026-08-06) — first increment, revised under sixteen review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
@@ -1242,7 +1242,7 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through fifteen changed how the
+rounds and has held at 168 since; rounds four through sixteen changed how the
 findings are demonstrated, two question verdicts, and nineteen degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
@@ -1792,6 +1792,30 @@ ledger row; all six backend/lane cells expose one. **A citation is not evidence
 until something reads it — a scenario id in prose, a retraction applied only where
 it was noticed, a marker that merely shares a sentence: each looks like the corpus
 checking itself, and none of them was.**
+
+Round 16 — one finding, accepted; no new scenario and no budget move. `HFR-183`'s
+docstring said of codex "for codex it drops it", and its closing comment concluded
+"the drop above is a discarded live signal, not correct filtering" — round 8's
+reading, retracted in round 9 and narrowed again in round 10. The probe Q2 cites as
+its evidence therefore contradicted the answer *in its own summary*, while its later
+sections drove the correct reading: `CodexAgent.handle_message` holds
+`_session_locks[base]` across its whole body and sends `turn/interrupt` before
+`turn/start` (`HFR-193`), so the older turn is already interrupted when the filter
+drops it, and its late events are handled rather than lost (`HFR-195`). Both
+sentences are now historical and both wordings are enrolled.
+
+The ledger is not what failed. Round 9's retraction *was* enrolled — as "attribution
+is thrown away", in round 15 — and the same claim went on standing in two other
+wordings inside the very file that row was written to police, because a phrase
+ledger matches restatements and not paraphrases. Round 15 called its defect "the
+edit was made, the row was not"; this is one level down: the row was made, from the
+sentence a reviewer happened to quote. **Enrolling a retraction means grepping the
+corpus for the claim's subject and enrolling every wording that turns up, not the
+one that was quoted at you.** That sweep was run and found exactly these two. The
+residual risk is stated rather than guarded: a distant enough paraphrase still
+passes, and no mechanical rule distinguishes "restates a retracted claim" from
+"discusses the same subject correctly" — making the ledger semantic would be the
+degenerate shape it exists to prevent, so the remedy is a habit, not a test.
 
 Question verdicts:
 

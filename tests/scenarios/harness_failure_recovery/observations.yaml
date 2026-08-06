@@ -1112,3 +1112,45 @@ observations:
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
       and is still deliberately untouched (HFR-OBS-028).
+
+  - id: HFR-OBS-041
+    area: run-terminal-truth
+    summary: >-
+      Round 16, one finding, accepted. No new scenario id and no budget move.
+      HFR-183's own docstring said, of codex, "for codex it drops it", and its
+      closing comment concluded "the drop above is a discarded live signal, not
+      correct filtering" -- round 8's reading, RETRACTED in round 9 and narrowed
+      again in round 10. So the probe the Q2 answer cites as its evidence
+      asserted the opposite of the answer, in its summary, while its own later
+      sections drove the correct reading: ``CodexAgent.handle_message`` holds
+      ``_session_locks[base]`` across its whole body and sends
+      ``turn/interrupt`` before ``turn/start`` (HFR-193), so the older turn has
+      been interrupted by the time the filter drops it, and its late events are
+      handled rather than lost (HFR-195). Both sentences are now historical and
+      both wordings are enrolled.
+      What makes this worth a durable rule is that the ledger was NOT the thing
+      that failed. Round 9's retraction was enrolled, in round 15, as
+      "attribution is thrown away" -- and the same claim went on standing in two
+      other wordings inside the very file the row was written to police, because
+      a phrase ledger matches restatements and not paraphrases. Round 15 called
+      its own defect "the edit was made, the row was not"; this round is one
+      level down from that: the row was made, and it was made from the sentence
+      that happened to be under review. THE DURABLE RULE: enrolling a retraction
+      means grepping the corpus for the retracted claim's SUBJECT and enrolling
+      every wording that turns up, not enrolling the wording a reviewer quoted.
+      That sweep was run this round -- ``drop``/``discard``/``throw``/``mute``
+      against ``codex``/``signal``/``attribution``/``should_emit_progress``
+      across all five artefacts -- and it found exactly these two and nothing
+      else; every other site was already framed as history or is about PR7R-F2's
+      interrupt outcome, a different subject.
+      The residual risk is stated rather than guarded: a paraphrase far enough
+      from every enrolled phrase still passes, and no mechanical rule this unit
+      can write distinguishes "restates a retracted claim" from "discusses the
+      same subject correctly". Making the ledger semantic would be the
+      degenerate-guard shape it exists to prevent, so the answer is the sweep,
+      which is a habit, not a test.
+      Rejected: nothing. The finding was real and in scope.
+      UNPROVEN_BUDGET stays 168: nothing this round touches a matrix cell.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
+      and is still deliberately untouched (HFR-OBS-028).

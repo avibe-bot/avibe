@@ -727,8 +727,12 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     signal, driven in
     ``test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im``.
 
-    What is NOT settled by that is what the consumer does with the signal, and
-    for codex it drops it -- see the closing section here and HFR-195.
+    What is NOT settled by that is what the consumer does with the signal.
+    Round 8 said, and round 9 RETRACTED, "for codex it drops it". The settled
+    reading is that ``should_emit_progress`` returning False for the older turn
+    is correct filtering of a turn ``handle_message`` has already interrupted --
+    HFR-193 drives the serialization, HFR-195 drives what becomes of that turn's
+    late events, and the closing section here shows the slot the drop reads.
 
     Claude's attribution is a FIFO POSITION, not an id the event carries: the
     head of ``_pending_requests[composite_key]`` is taken to be the turn
@@ -861,9 +865,17 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     # the gate's key and says nothing about this slot's key, which is the base
     # session alone. The remaining state -- "can anything put two LIVE turns on
     # one base session" -- was carried as a probe, and round eight closed it
-    # against the conclusion. A working-path change does exactly that, driven in
-    # ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``. So
-    # the drop above is a discarded live signal, not correct filtering.
+    # against the conclusion: a working-path change splits the gate key, driven
+    # in ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``,
+    # and round eight concluded from it, in a sentence round nine RETRACTED,
+    # that "the drop above is a discarded live signal, not correct filtering".
+    # The gate is not the only serializer. ``CodexAgent.handle_message`` holds
+    # ``_session_locks[base]`` -- the REGISTRY's key space, not the gate's --
+    # across its whole body and sends ``turn/interrupt`` before ``turn/start``,
+    # so turn-1 has already been interrupted by the time turn-2 is the active
+    # turn and the drop above is correct filtering. HFR-193 drives that; HFR-195
+    # drives turn-1's late events, which is what makes the residual window
+    # harmless rather than closed.
 
     # OpenCode. ``_active_requests`` really is one asyncio task slot per base
     # session id -- by annotation and by every read/write site -- and that is
