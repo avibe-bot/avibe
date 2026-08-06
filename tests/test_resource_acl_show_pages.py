@@ -208,32 +208,179 @@ def test_show_page_scope_without_group_context_fails_closed(monkeypatch, tmp_pat
     assert excinfo.value.code == "resource_access_forbidden"
 
 
-def test_remote_instance_owner_admin_can_manage_pages_without_use_access(monkeypatch, tmp_path) -> None:
+def test_remote_organization_admin_can_restrict_pages_without_use_access(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = _seed_show_pages_with_policies()
     admin = _organization_context(
         "admin-1",
         group_ids=frozenset({"group-sales"}),
         organization_role="admin",
-        instance_role="owner",
+        instance_role="viewer",
     )
+    owner = _organization_context("owner-1", instance_role="owner")
     try:
         with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
             store.require_access("ses-private", user_context=admin)
-        private_page = store.update_visibility("ses-private", "public", user_context=admin)
-        rotated, previous_share_id = store.rotate_share("ses-private", user_context=admin)
-        custom, rotated_share_id = store.set_share_id("ses-private", "admin-link", user_context=admin)
+        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+            store.update_visibility("ses-private", "public", user_context=admin)
 
-        assert private_page.visibility == "public"
-        assert previous_share_id == private_page.share_id
+        public_page = store.update_visibility("ses-private", "public", user_context=owner)
+        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+            store.rotate_share("ses-private", user_context=admin)
+        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+            store.set_share_id("ses-private", "admin-link", user_context=admin)
+        assert store.update_visibility("ses-private", "private", user_context=admin).visibility == "private"
+
+        republished = store.update_visibility("ses-private", "public", user_context=owner)
+        rotated, previous_share_id = store.rotate_share("ses-private", user_context=owner)
+        custom, rotated_share_id = store.set_share_id("ses-private", "owner-link", user_context=owner)
+
+        assert public_page.visibility == "public"
+        assert republished.visibility == "public"
+        assert previous_share_id == republished.share_id
         assert rotated_share_id == rotated.share_id
-        assert custom.share_id == "admin-link"
+        assert custom.share_id == "owner-link"
 
         with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
             store.require_access("ses-scope", user_context=admin)
         assert store.update_visibility("ses-scope", "offline", user_context=admin).visibility == "offline"
     finally:
         store.close()
+
+
+def test_remote_show_page_owner_can_control_sharing_without_instance_owner_role(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = _seed_show_pages_with_policies()
+    page_owner = _organization_context("owner-1", instance_role="viewer")
+    try:
+        published = store.update_visibility("ses-private", "public", user_context=page_owner)
+        closed = store.update_visibility("ses-private", "private", user_context=page_owner)
+        republished = store.update_visibility("ses-private", "public", user_context=page_owner)
+        rotated, previous_share_id = store.rotate_share("ses-private", user_context=page_owner)
+        customized, rotated_share_id = store.set_share_id(
+            "ses-private",
+            "page-owner-link",
+            user_context=page_owner,
+        )
+
+        assert published.visibility == "public"
+        assert closed.visibility == "private"
+        assert previous_share_id == republished.share_id
+        assert rotated_share_id == rotated.share_id
+        assert customized.share_id == "page-owner-link"
+    finally:
+        store.close()
+
+
+def test_organization_admin_can_read_show_page_access_metadata_without_use_access(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = _seed_show_pages_with_policies()
+    store.close()
+    admin = _organization_context(
+        "admin-1",
+        group_ids=frozenset({"group-sales"}),
+        organization_role="admin",
+        instance_role="viewer",
+    )
+    monkeypatch.setattr(resource_access_service, "resolve_resource_access_context", lambda _value=None: admin)
+
+    payload = api.get_show_page_access("ses-scope")
+
+    assert payload["access_level"] == "scope"
+    assert payload["can_manage"] is True
+    assert payload["can_publish_public"] is False
+
+
+def test_existing_organization_page_is_registered_privately_by_the_instance_owner(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-legacy")
+        page = store.ensure(
+            "ses-legacy",
+            user_context=_organization_context("owner-1", instance_role="owner"),
+        )
+        with store.engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "show_page",
+                page.session_id,
+                connection=connection,
+            )
+        assert policy is not None
+        assert policy["organization_id"] == "org-1"
+        assert policy["owner_user_id"] == "owner-1"
+        assert policy["access_level"] == "private"
+    finally:
+        store.close()
+
+
+def test_show_page_access_api_distinguishes_personal_and_organization_modes(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    personal_store = ShowPageStore()
+    try:
+        personal_store.ensure("ses-personal")
+    finally:
+        personal_store.close()
+
+    personal = app.test_client().get("/api/show-pages/ses-personal/access")
+    assert personal.status_code == 200
+    assert personal.get_json() == {
+        "ok": True,
+        "mode": "personal",
+        "instance_id": None,
+        "organization_id": None,
+        "access_level": "private",
+        "group_ids": [],
+        "policy_revision": None,
+        "last_applied_control_plane_revision": None,
+        "can_manage": True,
+        "can_publish_public": True,
+        "public_link_enabled": False,
+    }
+
+    config = _save_config(tmp_path)
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-organization")
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id="ses-organization",
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="scope",
+                group_ids=["group-engineering"],
+                policy_revision=4,
+                last_applied_control_plane_revision=4,
+            )
+    finally:
+        store.close()
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(config, subject="owner-1", groups=["group-engineering"], instance_role="owner"),
+        domain="alex.avibe.bot",
+    )
+    organization = client.get(
+        "/api/show-pages/ses-organization/access",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert organization.status_code == 200
+    assert organization.get_json() == {
+        "ok": True,
+        "mode": "organization",
+        "instance_id": "inst_123",
+        "organization_id": "org-1",
+        "access_level": "scope",
+        "group_ids": ["group-engineering"],
+        "policy_revision": 4,
+        "last_applied_control_plane_revision": 4,
+        "can_manage": True,
+        "can_publish_public": True,
+        "public_link_enabled": False,
+    }
 
 
 def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, tmp_path) -> None:

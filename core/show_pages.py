@@ -251,6 +251,47 @@ def require_show_page_management(
         raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 
 
+def require_show_page_sharing_control(
+    connection: Connection,
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
+    """Require resource-owner authority for anonymous publication changes."""
+
+    from storage import resource_access_service
+
+    session_id = validate_session_id(session_id)
+    context = _resolve_resource_access_context(user_context)
+    if not resource_access_service.can_control_resource_sharing(
+        context,
+        "show_page",
+        session_id,
+        connection=connection,
+    ):
+        raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+
+def require_show_page_access_management(
+    connection: Connection,
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
+    """Require authority to manage the audience or make sharing more restrictive."""
+
+    from storage import resource_access_service
+
+    session_id = validate_session_id(session_id)
+    context = _resolve_resource_access_context(user_context)
+    if not resource_access_service.can_manage_show_page_access(
+        context,
+        session_id,
+        connection=connection,
+    ):
+        raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+
 def private_url(session_id: str, *, config: V2Config | None = None) -> str | None:
     base = base_public_url(config)
     if not base:
@@ -395,6 +436,14 @@ class ShowPageStore:
         require_show_page_management(connection, session_id, user_context=user_context)
 
     @staticmethod
+    def _require_sharing_control(connection, session_id: str, user_context: Any) -> None:
+        require_show_page_sharing_control(connection, session_id, user_context=user_context)
+
+    @staticmethod
+    def _require_access_management(connection, session_id: str, user_context: Any) -> None:
+        require_show_page_access_management(connection, session_id, user_context=user_context)
+
+    @staticmethod
     def _require_create_access(user_context: Any) -> None:
         if user_context.can_manage_instance:
             return
@@ -404,7 +453,12 @@ class ShowPageStore:
     def _register_created_resource_policy(connection, session_id: str, user_context: Any) -> None:
         from storage import resource_access_service
 
-        if not (user_context.is_remote and user_context.is_active_organization_member and user_context.subject):
+        if not (
+            user_context.is_remote
+            and user_context.can_manage_instance
+            and user_context.is_active_organization_member
+            and user_context.subject
+        ):
             return
         resource_access_service.ensure_resource_policy(
             connection,
@@ -437,6 +491,7 @@ class ShowPageStore:
                 .first()
             )
             if existing is not None:
+                self._register_created_resource_policy(conn, session_id, context)
                 self._require_resource_access(conn, session_id, context)
                 return _page_from_row(existing)
             self._require_create_access(context)
@@ -473,6 +528,7 @@ class ShowPageStore:
                 .first()
             )
             if existing is not None:
+                self._register_created_resource_policy(conn, session_id, context)
                 self._require_resource_access(conn, session_id, context)
                 return _page_from_row(existing), False
             self._require_create_access(context)
@@ -535,7 +591,14 @@ class ShowPageStore:
         if existing is not None:
             # Check management before reporting a terminal lifecycle state so an
             # unauthorized remote user cannot probe page/session details.
-            page = self.require_management(session_id, user_context=context)
+            if visibility == VISIBILITY_PUBLIC:
+                with self.engine.connect() as conn:
+                    self._require_sharing_control(conn, session_id, context)
+                page = existing
+            else:
+                with self.engine.connect() as conn:
+                    self._require_access_management(conn, session_id, context)
+                page = existing
         else:
             page = None
         # Reject republish BEFORE ``ensure`` so it doesn't first materialize a
@@ -558,7 +621,10 @@ class ShowPageStore:
         if visibility == VISIBILITY_PUBLIC and not page.share_id:
             values["share_id"] = self._unique_share_id()
         with self.engine.begin() as conn:
-            self._require_resource_management(conn, session_id, context)
+            if visibility == VISIBILITY_PUBLIC:
+                self._require_sharing_control(conn, session_id, context)
+            else:
+                self._require_access_management(conn, session_id, context)
             # Archive is terminal and takes the page offline on purpose — never let
             # an archived session's page be brought back online / re-shared. Checked
             # in the SAME txn as the write so a concurrent archive can't slip in
@@ -582,7 +648,9 @@ class ShowPageStore:
         context = _resolve_resource_access_context(user_context)
         existing = self.get(session_id)
         if existing is not None:
-            page = self.require_management(session_id, user_context=context)
+            with self.engine.connect() as conn:
+                self._require_sharing_control(conn, session_id, context)
+            page = existing
         else:
             page = None
         # Same guard as update_visibility, before ``ensure`` materializes a page:
@@ -604,7 +672,7 @@ class ShowPageStore:
         new_share_id = self._unique_share_id()
         now = _utc_now_iso()
         with self.engine.begin() as conn:
-            self._require_resource_management(conn, session_id, context)
+            self._require_sharing_control(conn, session_id, context)
             conn.execute(
                 update(show_pages)
                 .where(show_pages.c.session_id == session_id)
@@ -634,7 +702,8 @@ class ShowPageStore:
         new_share_id = validate_share_id(share_id)
         existing = self.get(session_id)
         if existing is not None:
-            self.require_management(session_id, user_context=context)
+            with self.engine.connect() as conn:
+                self._require_sharing_control(conn, session_id, context)
         # Pre-guard before ``ensure`` so a stale/direct call never materializes a
         # default page for an archived (terminal) session. The in-txn re-reads
         # below are the atomic authority for the concurrent-archive / concurrent
@@ -650,7 +719,7 @@ class ShowPageStore:
         previous_share_id: str | None = None
         try:
             with self.engine.begin() as conn:
-                self._require_resource_management(conn, session_id, context)
+                self._require_sharing_control(conn, session_id, context)
                 # Read visibility, archive status, and the current suffix in the
                 # SAME transaction as the write so a concurrent flip to private/
                 # offline, an archive, or another session claiming the suffix

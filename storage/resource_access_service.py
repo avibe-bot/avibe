@@ -572,6 +572,49 @@ def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str,
     )
 
 
+def _policy_allows_owner_control(
+    context: ResourceUserContext,
+    policy: Mapping[str, Any] | None,
+) -> bool:
+    """Allow high-impact sharing actions only to the resource owner."""
+
+    if context.is_trusted_local:
+        return True
+    if policy is None:
+        return context.is_instance_owner
+    if not context.can_use_resource(str(policy.get("resource_kind") or "")):
+        return False
+    owner_user_id = _clean_optional_string(policy.get("owner_user_id"))
+    if not (owner_user_id and context.subject and owner_user_id == context.subject):
+        return False
+    organization_id = _clean_optional_string(policy.get("organization_id"))
+    return bool(
+        not organization_id
+        or context.is_active_organization_member
+        and context.organization_id == organization_id
+    )
+
+
+def _policy_allows_show_page_access_management(
+    context: ResourceUserContext,
+    policy: Mapping[str, Any] | None,
+) -> bool:
+    """Allow Show Page owners and Organization managers to narrow access."""
+
+    if _policy_allows_owner_control(context, policy):
+        return True
+    if policy is None or policy.get("resource_kind") != "show_page":
+        return False
+    organization_id = _clean_optional_string(policy.get("organization_id"))
+    return bool(
+        organization_id
+        and context.can_use_resource("show_page")
+        and context.is_active_organization_member
+        and context.organization_id == organization_id
+        and context.organization_role in {"owner", "admin"}
+    ) or _policy_allows_management(context, policy)
+
+
 def can_use_resource_policy_snapshot(
     user_context: ResourceUserContext | Mapping[str, Any] | None,
     policy: Mapping[str, Any] | None,
@@ -637,6 +680,38 @@ def can_manage_resource_acl(
     with _connection(connection) as conn:
         policy = _policy_row(conn, kind, identifier)
     return _policy_allows_management(context, policy)
+
+
+def can_manage_show_page_access(
+    user_context: ResourceUserContext | Mapping[str, Any] | None,
+    resource_id: str,
+    *,
+    connection: Connection | None = None,
+) -> bool:
+    """Return whether the caller may manage a Show Page audience or narrow sharing."""
+
+    context = _as_context(user_context)
+    identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    with _connection(connection) as conn:
+        policy = _policy_row(conn, "show_page", identifier)
+    return _policy_allows_show_page_access_management(context, policy)
+
+
+def can_control_resource_sharing(
+    user_context: ResourceUserContext | Mapping[str, Any] | None,
+    resource_kind: str,
+    resource_id: str,
+    *,
+    connection: Connection | None = None,
+) -> bool:
+    """Return whether the resource owner may widen anonymous sharing."""
+
+    context = _as_context(user_context)
+    kind = _validate_resource_kind(resource_kind)
+    identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    with _connection(connection) as conn:
+        policy = _policy_row(conn, kind, identifier)
+    return _policy_allows_owner_control(context, policy)
 
 
 def _row_resource_id(row: Any) -> str | None:

@@ -1229,6 +1229,64 @@ def ensure_show_page(session_id: str) -> dict:
     return {"ok": True, "existed": not created, **_apply_session_meta([payload])[0]}
 
 
+def get_show_page_access(session_id: str) -> dict:
+    """Return the applied authenticated audience and sharing authority."""
+
+    from core.show_pages import ShowPageError, ShowPageStore
+    from storage import resource_access_service
+
+    context = resource_access_service.resolve_resource_access_context()
+    store = ShowPageStore()
+    try:
+        page = store.get(session_id)
+        if page is None:
+            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        with store.engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "show_page",
+                page.session_id,
+                connection=connection,
+            )
+            can_use = resource_access_service.can_use_resource(
+                context,
+                "show_page",
+                page.session_id,
+                connection=connection,
+            )
+            can_manage = resource_access_service.can_manage_show_page_access(
+                context,
+                page.session_id,
+                connection=connection,
+            )
+            can_publish_public = resource_access_service.can_control_resource_sharing(
+                context,
+                "show_page",
+                page.session_id,
+                connection=connection,
+            )
+            if not (can_use or can_manage):
+                raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+    finally:
+        store.close()
+
+    organization_id = policy.get("organization_id") if policy else None
+    return {
+        "ok": True,
+        "mode": "organization" if organization_id else "personal",
+        "instance_id": context.instance_id,
+        "organization_id": organization_id,
+        "access_level": policy.get("access_level", "private") if policy else "private",
+        "group_ids": list(policy.get("group_ids") or []) if policy else [],
+        "policy_revision": policy.get("policy_revision") if policy else None,
+        "last_applied_control_plane_revision": (
+            policy.get("last_applied_control_plane_revision") if policy else None
+        ),
+        "can_manage": can_manage,
+        "can_publish_public": can_publish_public,
+        "public_link_enabled": page.visibility == "public",
+    }
+
+
 def rotate_show_page_share(session_id: str) -> dict:
     """Revoke the current public link and issue a new one (public pages only)."""
     from core.show_pages import ShowPageStore, show_page_payload

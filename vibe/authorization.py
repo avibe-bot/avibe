@@ -278,6 +278,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/org/(?:context|groups)$",
         r"^/api/resource-policies$",
         r"^/api/show-pages$",
+        r"^/api/show-pages/[^/]+/access$",
         r"^/api/show-pages/[^/]+/icon$",
     )
 )

@@ -4394,6 +4394,20 @@ def show_page_ensure_post(session_id):
         return _show_page_error_response(exc)
 
 
+@app.route("/api/show-pages/<session_id>/access", methods=["GET"])
+def show_page_access_get(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    try:
+        response = jsonify(api.get_show_page_access(session_id))
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Vary"] = "Cookie"
+        return response
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
 @app.route("/api/show-pages/<session_id>/rotate-share", methods=["POST"])
 def show_page_rotate_share_post(session_id):
     from core.show_pages import ShowPageError
