@@ -100,7 +100,15 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
         self.assertIn(
-            "If the user asks you to configure, repair, or operate Avibe itself, read `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` before making changes.",
+            "load the versioned `use-avibe` skill once per Agent Session",
+            prompt,
+        )
+        self.assertIn(
+            "Reuse that loaded guidance across later user turns in the same Session; do not fetch it again",
+            prompt,
+        )
+        self.assertNotIn(
+            "read `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` before making changes",
             prompt,
         )
         self.assertIn("## Send files", prompt)
