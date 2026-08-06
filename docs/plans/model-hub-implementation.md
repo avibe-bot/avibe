@@ -1,21 +1,18 @@
 # Model Hub — Implementation Plan
 
-Status: draft v1 · 2026-07-23 · follows the signed product spec
-Spec (signed 2026-07-23): `docs/plans/model-hub.md`
-Design source: `../avibe-docs/design.pen` frames `产品改造 V4 01r – 09`
-Lane workflow standard: `~/vibe-remote-project/.agents/skills/pr-delivery-loop/SKILL.md`
+Status: **v3.0 implementation addendum** · 2026-08-07 · supersedes v2 lane authority;
+follows product spec v3.0
+Spec: `docs/plans/model-hub.md`
+Design source: `../avibe-docs/design.pen`; v3 desktop/mobile frames are owed by K5
+Lane workflow standard: `.agents/skills/pr-delivery-loop/SKILL.md`
 
-> **Superseded for ordering (2026-07-29).** This document plans the **v1** build,
-> which shipped dormant. Spec v2 moved the spend order from one global list to a
-> per-backend ordered subset (`model-hub.md` §0, §4.2; contracts at
-> `contract_version: 3`, with v2 retained as the historical ordering decision).
-> Anything below that assumes a global priority list is
-> historical. This document is not being rewritten in place, only annotated where
-> it would otherwise contradict the frozen contracts. **§3 and §8 are the
-> exceptions: both are v2-current and binding** — §3 now carries the v2 lane plan
-> (approved 2026-07-29), which replaces the v1 lane split, and §8 the acceptance
-> criteria the spec-v2 review loop handed to implementation instead of answering
-> them with more spec.
+> **Authority banner (2026-08-07).** The original v1 milestones and most narrative
+> below are historical records of the dormant build. **§3 and §8 are the binding
+> exceptions.** In §3, only 「v3 current lanes」 is the active lane plan; the retained
+> L0–L6 material is explicitly historical. In §8, AC-1 through AC-21 remain in their
+> original order and AC-22 through AC-24 append the v3 requirements. Frozen contracts
+> remain targeted v4 during K1; K3 owns one coordinated v5 revision before any later
+> implementation lane may edit or implement against those shapes.
 
 ---
 
@@ -96,11 +93,39 @@ orchestrator only.
    `turn-provenance.schema.json` (per-turn model@source record). All three are
    read-only surfaces with no v1 implementation, so every field is required.
 
-## 3. Lanes (v2 plan, approved 2026-07-29)
+## 3. Lanes (v3 current plan, approved 2026-08-07)
+
+### v3 current lanes (binding)
+
+The v3 batch separates product truth, conversion evidence, contract authority, runtime
+behavior, UI, and integration. K1 and K2 may run in parallel because K1 changes only
+the three whitelisted planning documents while K2 extends the engine survey. K3 is the
+**first implementation lane** and the sole owner of the coordinated v5 freeze.
+
+| Lane | Executor preference | Scope | Depends on |
+| --- | --- | --- | --- |
+| **K1 spec v3 sync** | codex | This docs-only PR: `model-hub.md`, binding §3/§8 updates here, and one dated addendum in `model-hub-tos-review.md`; no frozen-contract edit | — |
+| **K2 conversion fidelity** | codex | Extend `model-hub-engine-survey.md` with the owner-requested agentic fidelity matrix and per-pair go/no-go; no product-contract or UI edit | — |
+| **K3 v5 freeze + routing core** | codex | First implementation lane. Author the complete v5 revision set below in one coordinated freeze; replace mappings with per-model route policy/hops; implement the one §4.6 projection, atomic legacy conversion, serializer completeness, route/API guards, retired flag/consent config cleanup, and source-order recommendation changes | K1 |
+| **K4 channel runtime** | codex | Implement native-first same-turn Gateway takeover and recovery, hub-held subscription cross-backend eligibility, `allowed_origins` channel semantics, probe/provenance/event consumers of the v5 chain, and focused backend/scenario evidence; edits no frozen contract | K3 |
+| **K5 Sources + Gateway UI** | claude | Obtain approved v3 frames, then implement exactly two modules, backend order + per-model chain editing, state-only connectors, native/Gateway distinction, and the Claude hub-add warning matrix; remove consent/experimental UI; Configure Agents remains absent | K3; runtime wiring may land after K4 |
+| **K6 integration and GA evidence definition** | either | Check AC-1 through AC-24, scenario catalog, Incus behavior, EN/ZH user docs, and turn the K2 fidelity plus asset-mirror/platform research into proposed gates for owner approval. Does not declare GA or expand its scope | K2, K4, K5 |
+
+**Merge order:** K1 first for product authority. K2 is independent evidence. K3 freezes
+v5 once, then K4 and K5 may proceed in parallel at symbol/file boundaries; K6 closes
+integration. Every lane follows `pr-delivery-loop`; no lane merges itself.
+
+**v5 freeze rule.** K3 owns every edit under `model-hub-contracts/` needed by AC-22
+through AC-24, even when K4 or K5 owns the consumer. After K3 merges, those files are
+read-only to K4–K6. An implementation-proven mismatch escalates for an orchestrator-owned
+targeted successor; it is never patched by the discovering lane.
+
+### Historical v2 lane plan (non-binding; retained for traceability)
 
 The v1 lane split (L1–L7, built for the global priority list) is **superseded** and
 lives in git history at `251f8e7b`. The lane IDs below are the v2 ones, and every
-lane reference in §8 means one of these.
+lane reference inside AC-1 through AC-21 means one of these historical implementers.
+Nothing in this subsection overrides K1–K6 above.
 
 Dispatch preference (owner 2026-07-13): balance claude/codex; rigor-critical and
 cryptography-adjacent backend → codex; product-voice / design-fidelity UI → claude.
@@ -465,7 +490,12 @@ The contracts README's wording stays as written: it is still true, and still GA-
    canvas. For the v2 lanes that means **V6 01–04 and M01/M02** (§3); the frames
    this item originally named were V4's.
 
-## 8. Implementation acceptance criteria (review rounds 8-12, 2026-07-29)
+## 8. Implementation acceptance criteria (AC-1–AC-24; v3 addendum 2026-08-07)
+
+**Current authority.** AC-1 through AC-21 retain their existing order and historical
+record. AC-22 through AC-24 are the binding v3 additions. Any frozen-contract change
+needed by these additions belongs to K3's single coordinated v5 revision set; K1
+records that set here and does not edit `model-hub-contracts/**`.
 
 Review round 8 of the spec-v2 PR (#1081) returned six findings, five P1 and one P2.
 Rounds 6 and 7 had each answered a review by adding a spec section, and each new
@@ -632,6 +662,9 @@ text and AC-8's contract text as one criterion even though only one of them is f
 | **AC-19** | P2 | Close the eligibility reason-key vocabulary | `agent-supply.schema.json` | **L1 v3** (contract) + **L4 (`ui/src/i18n/{en,zh}.json` for the eligibility-reason keys — 07-29 15:07 ruling: the reasons render in L4's source rows and drawer gray-outs, and L1's scope holds no `ui/` file)** | no |
 | **AC-20** | P2 | Enforce the hub-mode half of the mode invariant | `agent-supply.schema.json` | **L1 v3** (contract) | no |
 | **AC-21** | P2 | Make the mirror registry encode its promised checks | `model-hub-contracts/README.md` | **L1 v3** (registry + checker) | no |
+| **AC-22** | P1 | Make one ordered per-model route chain the only Gateway routing model | `model-hub.md` + v5 `agent-supply.schema.json`, `agent-chain.schema.json`, `api.md`, and provenance/event mirrors | **K3 v5** (whole contract revision) + K4 (resolver) + K5 (Gateway UI) + K6 (scenario) | **settled 08-07 — per-model ordering is in scope; mapping-to-chain evolution remains owner-vetoable** |
+| **AC-23** | P1 | Make native subscriptions primary, with same-turn Gateway takeover and optional cross-backend Hub subscription supply | `model-hub.md` + v5 source/OAuth/supply/API/adapter contracts | **K3 v5** (whole contract revision) + K4 (dispatch) + K5 (product states) + K6 (scenario) | **settled 08-07 — supersedes the earlier channel-default suggestion** |
+| **AC-24** | P1 | Show the sole subscription-routing warning when, and only when, Claude is added as a Hub-held Source | `model-hub.md` + Models UI/i18n + scenario evidence | K5 (flow and copy) + K6 (scenario); K3 owns any contract term if implementation proves one necessary | **settled 08-07 — informational warning, not consent** |
 
 **Read the 「Owed by」 column as contract-then-implementation** (07-29, review round 5).
 Where a cell begins **L1 v3**, the frozen-file edit that criterion needs is authored by
@@ -689,6 +722,43 @@ will disagree:
 set and its membership — so whoever fixes one should re-read the other's test. **AC-14
 to AC-17** are not implementation work: lane L0 applied them to the blocks they repair,
 and they are listed so the repairs are traceable to the findings that caused them.
+
+The counts and completion statements above apply to the historical AC-1–AC-21
+inventory. The current ledger has **twenty-four** criteria. AC-22–AC-24 are all
+owner-settled; only the explicitly owner-vetoable evolution and vocabulary choices in
+the v3 spec remain open to veto, not to lane-level invention.
+
+### v5 revision-set handoff notes — v3 Gateway rulings (2026-08-07)
+
+The targeted v4 contracts remain frozen throughout K1. **K3, the first implementation
+lane, owns the whole v5 revision in one coordinated commit**: version declarations,
+schemas, route prose, examples, mirror registry, and checker expectations move
+together. K4–K6 consume v5 and do not edit frozen contracts. The revision set is:
+
+| Frozen surface | Required v5 change | Why |
+| --- | --- | --- |
+| `README.md`, `mirror-registry.json` | Publish v5 as one set; replace mapping and consent mirrors with route-policy, native-first channel, and channel-aware eligibility mirrors | One version must name one coherent resolver contract |
+| `source.schema.json` | Remove `experimental_consent_at` and its conditionals; describe Hub-held subscriptions as explicit opt-in Sources | The flag and per-Source consent mechanism are retired |
+| `oauth-flow.schema.json` | Default subscription creation to the native channel when `channel` is omitted; allow an explicit Hub channel without experimental consent | Claude and ChatGPT subscriptions are native-first but may be added to the Gateway |
+| `agent-supply.schema.json` | Replace `mappings` with a per-menu-model route policy: `follow` or an ordered `custom` hop list of exact `(source_id, model_id)` pairs; retain the independent backend Source-order policy; replace the old consent/API-key-only eligibility reasons with the channel-aware vocabulary | A single-target mapping is only the one-hop form of the same route chain, not a parallel structure, and Hub-held subscriptions are eligible for OpenCode too |
+| `agent-chain.schema.json` | Project exactly the §4.6 chain for both `follow` and `custom`; expose each exact hop and its route origin; remove `via_mapping` semantics | §4.6 is the sole derivation and UI/runtime/probe must consume the same projection |
+| `probe-result.schema.json`, `turn-provenance.schema.json`, `resolution-event.schema.json` | Replace mapping-specific annotations such as `via_mapping` or `mapping_applied` with route-policy/chain equivalents while preserving exact Source/model attribution | Diagnostics must describe the same routing model as execution |
+| `api.md` | Remove the mapping write surface; keep `GET /api/models/agents/<backend>/chain?model=...` and add the matching atomic `PUT` with either `{"policy":"follow"}` or `{"policy":"custom","hops":[...]}`; keep `PUT /api/models/agents/<backend>/sources` as the independent Follow-order surface; update protected-set terms from mapping rows to custom-chain menu models; replace mapping-only errors/events with chain equivalents; update OAuth defaults and eligibility prose | There must be one model-route write shape and one read projection, while backend default order remains separately owned and cannot override a custom chain |
+| `adapter-interface.py`, `opencode-overlay.md` | Keep native subscription origins bound to their own backend client, while allowing Hub-held subscriptions to supply every configured backend through the Gateway | `allowed_origins` is channel-aware; it is not a vendor-wide subscription ban |
+| `migration-scan.schema.json` | Remove experimental-flag and consent language; preserve native subscription import as the default path and leave controlled credential import deferred | Imported subscriptions must remain in native custody |
+
+`runtime-dependency.schema.json` has no v3 ruling-driven change and is outside this
+set unless K3 proves a direct contract dependency. K3 must not use that possibility to
+expand the GA scope.
+
+The route replacement is atomic. Every enabled legacy mapping is materialized as a
+`custom` chain whose hops keep the legacy target model and enumerate its eligible
+Sources in the existing backend Source order; a disabled mapping becomes `follow`.
+If a legacy row cannot be materialized without inventing a Source or model, migration
+fails closed and reports the row. The old mapping key and route disappear in the same
+v5 revision, so no runtime may choose between two routing structures. This proposal
+and the accompanying vocabulary choices are owner-vetoable, as recorded in the v3
+spec; K3 escalates a veto instead of preserving both models.
 
 ### v3 handoff notes — delivery language the push cut stranded in frozen files
 
@@ -1101,6 +1171,72 @@ Review round 12, P2, on `docs/plans/model-hub-contracts/README.md`, [thread](htt
 **Disposition.** New criterion, and the sharpest of the four contract findings: the registry exists so a harness can be *generated* from it, so a row that under-declares its relation is not a documentation nit — it silently removes a check while the registry reports itself complete. M4 gets an executable `bijection` rule naming both directions — **and the pairs themselves, in a machine-readable field** (07-29, review round 3). 「Bijection」 alone constrains only the two *sets*: any permutation of the reasons against the `detail_key`s satisfies it, so a mapping that renders 「订阅客户端不符」 for a consent failure passes a generated harness while being wrong in exactly the way the mirror exists to catch. The registry therefore carries the ordered pairs (a `pairs` list of `[reason, detail_key]`, one line per member), and 「bijection」 becomes what the harness *asserts about that list* — total, injective, and pairwise-matching the two files — rather than the whole of what the row says. M6's Mirrors cell gains `resolution-event.agent` with its declared extra `system` inline, so the row alone determines the check. The invariants themselves already hold in the schemas — only the registry under-declares them. Frozen surface: joins the v3 set.
 
 **Acceptance.** Contract layer, owed by **L1**. A harness generated purely from the registry rows — with no hand-written supplements — runs both relations: the reason ↔ `detail_key` bijection in both directions, and `resolution-event.agent` ⊆ home set ∪ `{system}`. Three mutations are caught by that generated harness: deleting one `detail_key` from either side; **swapping two `detail_key`s between reasons in one file while leaving M4's `pairs` list alone** (07-29, review round 3 — the case a set-only bijection cannot see, and the one that ships wrong copy to a real user); and adding an undeclared value to `resolution-event.agent`, whose enum already holds four, `claude`/`codex`/`opencode`/`system`, so the test adds a fifth. Fails today: M4 reads `none` and M6 omits the field, so a faithful generator emits neither check and still reports the registry fully covered.
+
+### AC-22 — Make one ordered per-model route chain the only Gateway routing model
+
+**Owner ruling 2026-08-07.** Per-model ordering is in scope and supersedes the v2
+non-goal. For every `(backend, menu model)`, the user may choose either `follow` or one
+ordered `custom` chain. Every custom hop is an exact `(source_id, model_id)` pair.
+
+**Acceptance.** A `follow` projection equals the §4.6 Source-order walk byte-for-byte
+apart from explicitly non-semantic status annotations; no other paragraph, schema, or
+service derives a second order. A `custom` projection preserves the submitted hop
+order and exact pair identity, changes no other menu model, and is the shared input to
+runtime resolution, probe, Gateway UI, deletion guards, and diagnostics. A one-hop
+custom chain behaves as the degenerate single-target case without creating a mapping
+row. v5 contains no mapping key, mapping write route, mapping-only status flag, or
+resolver branch.
+
+Migration is tested as one transaction: enabled legacy mappings become materialized
+custom chains, disabled mappings become `follow`, and an unresolvable row aborts the
+revision without partial state. AC-5 and AC-8 remain the migration-time guard evidence;
+after v5, their mapping-specific vocabulary is structurally discharged by the chain
+model rather than kept as compatibility behavior. The replacement algorithm is
+owner-vetoable; a veto blocks K3's freeze and does not authorize dual structures.
+
+### AC-23 — Make native subscriptions primary with automatic Gateway takeover
+
+**Owner ruling 2026-08-07.** Claude and ChatGPT subscriptions are recommended and
+defaulted to their native clients. An omitted subscription channel therefore resolves
+to `native_cli`: Claude Code for Claude and Codex for ChatGPT. Native supply is first
+in that backend's resolution order. A user may separately opt to add either
+subscription as a Hub-held Source, and any Hub-held subscription may participate in
+any backend's `custom` chain.
+
+**Acceptance.** With healthy native subscription supply, the turn never calls the
+Gateway. When the native subscription reports quota exhaustion or cooldown, that same
+turn continues at the first runnable Gateway hop for the backend and model; after the
+native channel recovers, the next turn uses native again without a manual reorder.
+Gateway takeover and return are visible as one coherent channel state, not as a
+configuration change or an error that asks the user to repair healthy settings.
+
+The eligibility matrix has two independently tested axes: native subscription origins
+remain restricted to their own backend client, while Hub-held Claude and ChatGPT
+subscriptions are eligible for Claude, Codex, and OpenCode chains. Explicit Hub add
+works with neither `subscription_hub_experimental` nor a consent timestamp. The reason
+vocabulary has neither `consent_required` nor `opencode_api_key_only`: Hub-held
+subscriptions are eligible for OpenCode, while a native subscription in any
+non-sanctioned client uses the channel-specific `subscription_wrong_client` reason.
+This supersedes AC-19's historical three-member enum, not AC-19's closed-vocabulary
+invariant; v5 mechanically mirrors every remaining member to both locale files. Native
+wrong-client use remains rejected; this is channel binding, not a cross-vendor ban on
+Hub Sources.
+
+### AC-24 — Warn only when Claude is added as a Hub-held Source
+
+**Owner ruling 2026-08-07.** The sole subscription-routing warning belongs to the
+explicit opt-in path that adds a Claude subscription to the Gateway. It states that
+Anthropic explicitly prohibits this use, enforces server-side blocks, real account
+bans have occurred, and the path may fail intermittently. It is informational, not a
+consent gate or persisted acknowledgement.
+
+**Acceptance.** The warning appears exactly once before the Claude Hub-held OAuth
+flow begins. It does not appear for Claude native login, ChatGPT native login,
+ChatGPT Hub-held login, adding a Hub-held subscription to a cross-vendor chain, native
+quota takeover, or automatic return to native. No server flag, Source consent stamp,
+or repeat prompt is required. UI copy and scenario evidence cover every row of that
+matrix. AC-2 and AC-13's irreversibility confirmations remain intact: those guard a
+credential-repair operation and are not subscription-routing warnings.
 
 ## 7. Kickoff checklist (orchestrator)
 

@@ -331,3 +331,32 @@ cross-vendor, cn-sub)
   Re-verify §2.1/§3.1 language and the §7 architectural conclusion **immediately before**
   enabling any subscription flow default-on. This memo gates *defaults*, per impl plan §4; the
   build may proceed on API-key paths in parallel.
+
+---
+
+## 12. Owner addendum — 2026-08-07
+
+This dated product ruling supersedes the parts of §8 recommendations **#1** and **#5**
+that would make API-key-only supply or native-client binding a blanket restriction on
+Hub-held subscriptions. The preceding research, evidence, and original recommendations
+remain intact as the historical risk record; they are not product gates where this
+addendum differs.
+
+The recommended and default subscription path is native: Claude stays in Claude Code's
+local login and ChatGPT stays in Codex's local login. Native supply leads that backend's
+resolution. When native quota is exhausted or cooling down, the same turn automatically
+continues through the first runnable Gateway provider configured for that backend; after
+native supply recovers, subsequent turns return to it automatically.
+
+Users may explicitly add either a Claude or ChatGPT subscription as a Hub-held Source.
+Once added, that Source may supply any configured backend and may appear in a
+cross-vendor per-model route chain. Native subscription origins remain bound to their
+own client; this restriction does not apply to Hub-held Sources. The
+`subscription_hub_experimental` flag and per-Source consent mechanism are retired.
+
+The only subscription-routing warning appears when a user explicitly adds a Claude
+subscription as a Hub-held Source. It must state that Anthropic explicitly prohibits
+this use, enforces server-side blocks, real account bans have occurred, and the path may
+fail intermittently. It is informational, not a consent gate. No warning appears for
+Claude native login, any ChatGPT path, automatic Gateway takeover, automatic return to
+native, or cross-vendor routing.
