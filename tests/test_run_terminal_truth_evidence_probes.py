@@ -598,6 +598,24 @@ def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
 #: A dict key that names a Run, whatever the value under it turns out to be.
 _RUN_ID_KEY = re.compile(r"(?:^|_)runs?_?ids?$|^run_?ids?$", re.IGNORECASE)
 
+#: The trailing id-word to strip off the flat list's key to get its stem, so
+#: ``accepted_agent_run_ids`` yields ``accepted_agent_run`` and any sibling
+#: filed under that stem is recognised as a companion field.
+_ID_SUFFIX = re.compile(r"_?ids?$", re.IGNORECASE)
+
+#: Values a positionally-keyed vector can hold. A vector of dicts is already
+#: caught by the mention and shape rules; this is for the scalar case, which is
+#: the one that carries no id of its own and therefore nothing to match on.
+_SCALAR = (str, int, float, bool, type(None))
+
+
+def _flat_list_stem(flat_list_key: str) -> str:
+    """``accepted_agent_run_ids`` -> ``accepted_agent_run_``, or ``""``."""
+
+    leaf = flat_list_key.rsplit(".", 1)[-1]
+    stem = _ID_SUFFIX.sub("", leaf)
+    return f"{stem}_" if len(stem) >= 3 and stem != leaf else ""
+
 
 def _per_run_provenance_sites(
     recorded: dict, accepted: list[str], *, flat_list_key: str
@@ -614,7 +632,21 @@ def _per_run_provenance_sites(
     like the rule and enforces one special case of it -- and it was load-bearing
     for Q3's verdict, since the verdict rests on this search coming back empty.
 
-    Two rules, because "per-Run" can be spelled two ways:
+    Round 17 wrote "two rules, because per-Run can be spelled two ways" and
+    round 19 retracted the count: both of its rules need the data to CARRY a
+    run id, and the cheapest way to add per-Run provenance to a flat list of
+    ids carries none. A sibling vector --
+    ``{"accepted_agent_run_ids": ["run-a", "run-b"],
+    "accepted_agent_run_sources": ["scheduler", "manual_cli"]}`` -- is keyed by
+    POSITION. No id appears in it and its key is not run-shaped, so a detector
+    built on mention and shape reports the projection clean and Q3 keeps its
+    verdict while the thing the verdict denies sits one key away. It is the
+    third round running that this helper has been found blind to a shape, and
+    the pattern in all three is the same: each rule was written from the
+    example in front of it.
+
+    Four rules now, and the last two exist to cover data that identifies a Run
+    without naming one:
 
     * MENTION -- an accepted run id appears anywhere below the projection as a
       dict key or as a string leaf, outside the flat list that is supposed to
@@ -624,12 +656,33 @@ def _per_run_provenance_sites(
       ``source_run_id``). That catches a record whose ids are not ours, which a
       mention rule alone would call clean on this fixture and let through on
       the next.
+    * STEM -- a key filed under the flat list's own stem, so
+      ``accepted_agent_run_sources`` and ``accepted_agent_run_deadlines`` are
+      companions of ``accepted_agent_run_ids`` by name, whatever they hold and
+      however long they are.
+    * POSITION -- a scalar sequence, at any depth, as long as the accepted-id
+      list and not that list. Deliberately over-inclusive: this detector's
+      EMPTINESS is what carries Q3's verdict, so a false positive costs a human
+      one look and a false negative costs the verdict. Its stated limit is that
+      it is inert when there is a single accepted Run, because "aligned with a
+      one-element list" and "a one-element list" are the same shape; the STEM
+      rule is what covers that case, and the controls below pin both halves.
 
     Paths are returned rather than keys, because a hit two levels down that
     reports only its leaf name is a failure message nobody can act on.
     """
     wanted = set(accepted)
+    stem = _flat_list_stem(flat_list_key)
+    aligned = len(accepted) if len(accepted) >= 2 else None
     sites: list[str] = []
+
+    def positional(node: object) -> bool:
+        return (
+            aligned is not None
+            and isinstance(node, (list, tuple))
+            and len(node) == aligned
+            and all(isinstance(item, _SCALAR) for item in node)
+        )
 
     def walk(node: object, path: str, *, skip_mentions: bool) -> None:
         if isinstance(node, dict):
@@ -639,6 +692,13 @@ def _per_run_provenance_sites(
                     sites.append(f"{where} (key names a Run)")
                 if _RUN_ID_KEY.search(str(key)) and where != flat_list_key:
                     sites.append(f"{where} (key shape names a Run)")
+                companion = (
+                    bool(stem) and str(key).startswith(stem) and where != flat_list_key
+                )
+                if companion:
+                    sites.append(f"{where} (key parallels the flat run-id list)")
+                elif where != flat_list_key and positional(value):
+                    sites.append(f"{where} (positionally aligned with the run ids)")
                 walk(value, where, skip_mentions=where == flat_list_key)
             return
         if isinstance(node, (list, tuple)):
@@ -754,6 +814,54 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
         probe_ids,
         flat_list_key=flat,
     ) == ["runs[0].run_id (key shape names a Run)"]
+
+    # Round 19's shape, and the cheapest way anyone would actually add per-Run
+    # provenance to a flat list of ids: a second list of the same length, keyed
+    # by POSITION. It holds no id and its key is not run-shaped, so the two
+    # rules round 17 shipped both report it clean. Caught twice over here --
+    # by name, because it is filed under the flat list's own stem, and by
+    # length -- and the two are separated below so that neither can be the only
+    # thing holding it.
+    assert _per_run_provenance_sites(
+        {flat: probe_ids, "accepted_agent_run_sources": ["scheduler", "manual_cli"]},
+        probe_ids,
+        flat_list_key=flat,
+    ) == ["accepted_agent_run_sources (key parallels the flat run-id list)"]
+    assert _per_run_provenance_sites(
+        {flat: probe_ids, "batch": {"deadline_seconds": [30, 60]}},
+        probe_ids,
+        flat_list_key=flat,
+    ) == ["batch.deadline_seconds (positionally aligned with the run ids)"]
+
+    # The positional rule is a length match, not "any list": a vector that is
+    # not aligned is not a hit, or the rule would fire on every collection in
+    # the projection and stop meaning anything.
+    assert (
+        _per_run_provenance_sites(
+            {flat: probe_ids, "tags": ["a", "b", "c"]},
+            probe_ids,
+            flat_list_key=flat,
+        )
+        == []
+    )
+
+    # The stated limit, asserted instead of described. With ONE accepted Run,
+    # "aligned with the id list" and "a one-element list" are the same shape,
+    # so the positional rule is switched off and the stem rule is what covers
+    # the case -- both halves pinned, so a later edit cannot quietly drop the
+    # cover and leave the limit written down as if it were still true.
+    one = ["run-a"]
+    assert (
+        _per_run_provenance_sites(
+            {flat: one, "unrelated_pair": ["x"]}, one, flat_list_key=flat
+        )
+        == []
+    )
+    assert _per_run_provenance_sites(
+        {flat: one, "accepted_agent_run_sources": ["scheduler"]},
+        one,
+        flat_list_key=flat,
+    ) == ["accepted_agent_run_sources (key parallels the flat run-id list)"]
 
     assert _per_run_provenance_sites(recorded, accepted, flat_list_key=flat) == []
     # One Turn-level label, and the append path is not what sets it: the second

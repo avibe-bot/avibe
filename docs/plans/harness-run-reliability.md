@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under eighteen review rounds
+#### PR7R status (2026-08-06) — first increment, revised under nineteen review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
@@ -1242,7 +1242,7 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through eighteen changed how the
+rounds and has held at 168 since; rounds four through nineteen changed how the
 findings are demonstrated, three question verdicts, and twenty degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
@@ -1969,6 +1969,37 @@ written at the level it happened to be reading, a claim verified for one of its
 two halves. The habit that catches this is asking, after every fix, *which other
 artefact states the same thing, and which level does this rule really live at.*
 
+Round 19 — one finding, accepted, none rejected; no new scenario, no verdict
+move, and **no budget move**.
+
+1. **Q3's per-Run detector was blind to a vector keyed by position, which is
+   the cheapest shape anyone would actually add.** Round 17 broadened this
+   helper from a top-level intersection to a recursive walk under two rules, a
+   mention rule and a key-shape rule, and said so as a closed count. Both rules
+   need the data to *carry* a run id. A sibling list —
+   `{"accepted_agent_run_ids": ["run-a", "run-b"], "accepted_agent_run_sources":
+   ["scheduler", "manual_cli"]}` — carries none: it is aligned to the id list by
+   index, and its key is not run-shaped. Per-Run provenance would sit one key
+   away from the flat list and the search would report the projection clean,
+   which matters more here than it looks, because Q3's verdict rests on that
+   search coming back empty. Two rules added. A **stem** rule, which catches any
+   key filed under the flat list's own stem regardless of what it holds; and a
+   **positional** rule, a scalar sequence at any depth as long as the accepted
+   list. The positional rule is deliberately over-inclusive — for a detector
+   whose emptiness carries a verdict, a false positive costs one look and a
+   false negative costs the verdict — and its limit is stated *and asserted*: it
+   is inert for a single accepted Run, since "aligned to a one-element list" is
+   not a distinguishable shape, and the stem rule is what covers that case.
+   Round 17's count is retracted and enrolled. The verdict itself does not move:
+   the projection really does hold one Turn-level label and a flat list.
+
+**The lesson is narrow and worth writing down anyway: do not publish a count.**
+This is the third consecutive round in which this one helper was found blind to
+a shape, and each of its rules was written from the example in front of it —
+which is unavoidable. What was avoidable is the sentence that said "two ways"
+and told the next reader the enumeration was closed. A rule plus the shape it
+was derived from invites the next shape; a total does not.
+
 Question verdicts:
 
 1. **Q1 — open, do not close the claim yet.** On the durable Workbench lane,
@@ -2055,7 +2086,12 @@ Question verdicts:
    accepted-run record cannot discriminate between participants — a flat
    `accepted_agent_run_ids` list and one Turn-level `source_kind` that a later
    participant does *not* restamp, with no per-Run source or deadline anywhere
-   in the projection. Which participant originally stamps that label is not
+   in the projection. "Anywhere" is only as strong as the search behind it, and
+   that search has been widened in each of the last two rounds — round 17 for
+   nested and record shapes, round 19 for a sibling vector keyed by position,
+   which carries no run id and so was invisible to both of round 17's rules.
+   The verdict did not move either time: the projection really does hold one
+   Turn-level label and a flat list. Which participant originally stamps that label is not
    reached — `HFR-182` preloads it and drives only the append path — and this
    sentence went on claiming the first participant did until round 15. That is a statement about the projection and must not be read
    as one about the system: each accepted id is the primary key of an

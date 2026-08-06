@@ -917,6 +917,20 @@ RETRACTED_PHRASINGS: Final = (
         "citations for that. Say which SCOPE the recorded fact belongs to; "
         "every Turn-level pre-terminal fact is open.",
     ),
+    # Round 19's row, and it is a COUNT rather than a claim about the system.
+    # Enrolled all the same: "two ways" is the sentence that told the next
+    # reader the enumeration was closed, and closing an enumeration is the
+    # thing that let a third spelling go unlooked-for for two rounds.
+    (
+        "can be spelled two ways",
+        "round 19",
+        "round 17's count of the ways a projection can record something "
+        "per-Run. Both of its rules need the data to CARRY a run id, and a "
+        "sibling vector keyed by POSITION carries none -- "
+        "``accepted_agent_run_sources`` beside ``accepted_agent_run_ids`` is "
+        "per-Run provenance with no id in it and no run-shaped key. Do not "
+        "write a total; write the rule and the shape it was derived from.",
+    ),
     (
         "discarded live signal, not correct filtering",
         "round 9",

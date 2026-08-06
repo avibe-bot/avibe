@@ -2729,6 +2729,14 @@ scenarios:
     layer: contract
     backend: codex
     test: tests/test_run_terminal_truth_evidence_probes.py::test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted
+  # RULE: this row's verdict rests on a SEARCH coming back empty, which makes
+  # the search itself the load-bearing part and every shape it cannot see a
+  # silent pass. It has been widened twice for that reason -- round 17 for
+  # nested maps, record lists and bare scalars, round 19 for a sibling vector
+  # keyed by position, which carries no run id and so was invisible to both of
+  # round 17's rules. Four rules now: mention, key shape, stem and position.
+  # Do not add a shape to the fixture without adding a positive control for it,
+  # and do not write down how many rules there are.
   - id: HFR-182
     name: a Turn's accepted-run batch records no per-Run source or deadline
     status: covered

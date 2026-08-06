@@ -1296,3 +1296,43 @@ observations:
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
       and is still deliberately untouched (HFR-OBS-028).
+  - id: HFR-OBS-044
+    area: run-terminal-truth
+    summary: >-
+      Round 19, one finding, accepted, nothing rejected. No new scenario id, no
+      verdict move, and no budget move -- UNPROVEN_BUDGET stays 168 and nothing
+      here touches a cell's proof kind.
+      FINDING, Q3's per-Run detector was blind to a vector keyed by position.
+      Round 17 broadened this helper from a top-level intersection to a
+      recursive walk under a mention rule and a key-shape rule, and wrote the
+      count down as though the enumeration were closed. Both of those rules
+      need the data to CARRY a run id. A sibling list --
+      ``accepted_agent_run_sources`` beside ``accepted_agent_run_ids``, same
+      length, aligned by index -- carries none, and its key is not run-shaped,
+      so per-Run provenance could sit one key away from the flat list with the
+      search still reporting the projection clean. That matters here more than
+      it looks, because Q3's verdict rests on the search coming back empty.
+      Two rules added. STEM catches any key filed under the flat list's own
+      stem, whatever it holds and however long it is. POSITION catches a scalar
+      sequence at any depth as long as the accepted-id list, and is
+      deliberately over-inclusive: for a detector whose emptiness carries a
+      verdict a false positive costs one look and a false negative costs the
+      verdict. Its limit is stated AND asserted -- inert for a single accepted
+      Run, because "aligned to a one-element list" is not a distinguishable
+      shape, and the stem rule is what covers that case, with both halves
+      pinned so a later edit cannot drop the cover and leave the limit written
+      down as if it were still true. The verdict itself does not move: the
+      projection really does hold one Turn-level label and a flat list.
+      THE DURABLE RULE, and it is narrow: do not publish a count. This is the
+      third consecutive round in which this one helper was found blind to a
+      shape, and each rule was written from the example in front of it, which
+      is unavoidable. What was avoidable is the sentence stating how many ways
+      there were, which told the next reader the enumeration was closed. Round
+      17's count is retracted and enrolled. Write the rule and the shape it was
+      derived from; a total invites nobody to look for the next one.
+      Rejected: nothing. The finding was real and in scope; it did not ask for
+      a fix to PR7R-F1 or PR7R-F2, which would have been out of scope by the
+      plan's own boundary.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
+      and is still deliberately untouched (HFR-OBS-028).
