@@ -81,9 +81,32 @@ describe('Show Page access policy helpers', () => {
     expect(showPageShareCapabilities(manager)).toEqual({
       canReadPayload: false,
       canRevokePublicLinkWithoutPayload: true,
+      canManageDock: false,
     });
     expect(canChangeShowPagePublicLink(manager, false)).toBe(true);
     expect(canChangeShowPagePublicLink(manager, true)).toBe(false);
+  });
+
+  it('fails closed after an access refresh error and keeps Dock authority separate', () => {
+    const manager = access({
+      can_use: false,
+      can_publish_public: false,
+      public_link_enabled: true,
+    });
+
+    expect(showPageShareCapabilities(manager, { accessInvalid: true })).toEqual({
+      canReadPayload: false,
+      canRevokePublicLinkWithoutPayload: false,
+      canManageDock: false,
+    });
+    expect(showPageShareCapabilities(null)).toEqual({
+      canReadPayload: false,
+      canRevokePublicLinkWithoutPayload: false,
+      canManageDock: false,
+    });
+    expect(showPageShareCapabilities(null, { canManageInstance: true }).canReadPayload).toBe(true);
+    expect(showPageShareCapabilities(access(), { canManageInstance: false }).canManageDock).toBe(false);
+    expect(showPageShareCapabilities(access(), { canManageInstance: true }).canManageDock).toBe(true);
   });
 
   it('separates page use from page-specific access management in the chat header', () => {

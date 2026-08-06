@@ -123,18 +123,31 @@ export function canChangeShowPagePublicLink(
   return nextEnabled ? access.can_publish_public : access.can_manage;
 }
 
-export function showPageShareCapabilities(access: ShowPageAccess | null): {
+export function showPageShareCapabilities(
+  access: ShowPageAccess | null,
+  options: {
+    accessInvalid?: boolean;
+    canManageInstance?: boolean;
+  } = {},
+): {
   canReadPayload: boolean;
   canRevokePublicLinkWithoutPayload: boolean;
+  canManageDock: boolean;
 } {
+  const accessValid = options.accessInvalid !== true;
+  const canManageInstance = options.canManageInstance === true;
   return {
-    canReadPayload: access?.can_use !== false,
+    canReadPayload: accessValid && (canManageInstance || access?.can_use === true),
     canRevokePublicLinkWithoutPayload: Boolean(
-      access
+      accessValid
+      && access
       && !access.can_use
       && access.can_manage
       && access.public_link_enabled,
     ),
+    // Dock writes remain Instance-owner operations. Page-level use/manage
+    // authority deliberately does not inherit this independent capability.
+    canManageDock: canManageInstance,
   };
 }
 

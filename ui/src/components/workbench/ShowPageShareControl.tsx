@@ -38,6 +38,8 @@ type ShowPagePayload = ShowPageLinkInfo & {
 export const ShowPageShareControl: React.FC<{
   sessionId: string;
   initialAccess?: ShowPageAccess | null;
+  // Dock mutations use Instance authority, not Show Page resource authority.
+  canManageInstance?: boolean;
   // Lets the chat view re-point the iframe at the route that now serves the
   // page when visibility flips (private↔public swap the serving route).
   onPayloadChange?: (payload: ShowPageLinkInfo) => void;
@@ -45,7 +47,13 @@ export const ShowPageShareControl: React.FC<{
   // inert while it is open so an outside tap there falls through to the parent
   // document and Radix can dismiss (a tap inside an iframe never reaches us).
   onOpenChange?: (open: boolean) => void;
-}> = ({ sessionId, initialAccess = null, onPayloadChange, onOpenChange }) => {
+}> = ({
+  sessionId,
+  initialAccess = null,
+  canManageInstance = false,
+  onPayloadChange,
+  onOpenChange,
+}) => {
   const { t } = useTranslation();
   const api = useApi();
   const dock = useDock();
@@ -76,9 +84,12 @@ export const ShowPageShareControl: React.FC<{
   const [loading, setLoading] = useState(false);
   const [accessLoading, setAccessLoading] = useState(false);
   const [access, setAccess] = useState<ShowPageAccess | null>(initialAccess);
-  const shareCapabilities = showPageShareCapabilities(access);
-  const payload = shareCapabilities.canReadPayload ? candidatePayload : null;
   const [accessError, setAccessError] = useState(false);
+  const shareCapabilities = showPageShareCapabilities(access, {
+    accessInvalid: accessError,
+    canManageInstance,
+  });
+  const payload = shareCapabilities.canReadPayload ? candidatePayload : null;
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   // A visibility mutation is authoritative: it always applies its result and
@@ -137,7 +148,7 @@ export const ShowPageShareControl: React.FC<{
   // refreshing so reopening doesn't flash a spinner.
   const refresh = () => {
     const seq = ++reqSeq.current;
-    const canLoadPayload = access?.can_use !== false;
+    const canLoadPayload = canManageInstance || access?.can_use === true;
     setLoading(canLoadPayload && !payload);
     setAccessLoading(!access);
     setAccessError(false);
@@ -164,6 +175,10 @@ export const ShowPageShareControl: React.FC<{
         setAccess(nextAccess);
       } catch {
         if (seq !== reqSeq.current) return;
+        // A failed refresh cannot leave the previous authority actionable. The
+        // payload stays cached for a later successful refresh, but is withdrawn
+        // while accessError invalidates this control's authorization state.
+        setAccess(null);
         setAccessError(true);
       } finally {
         setAccessLoading(false);
@@ -479,8 +494,8 @@ export const ShowPageShareControl: React.FC<{
         {/* Pin to Dock — records the session's Show Page as a Dock app. Deliberately
             OUTSIDE the visibility branches: pinning is independent of public/private
             (a private page can be pinned) and never changes visibility or deletes the
-            page. Shown whenever the page exists (the popover ensured it on open). */}
-        {payload && (
+            page. Shown only when the page exists and the caller can manage the Instance. */}
+        {payload && shareCapabilities.canManageDock && (
           <div className="border-t border-border pt-3">
             <div className="flex items-center gap-3">
               <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-foreground/[0.03] text-cyan">

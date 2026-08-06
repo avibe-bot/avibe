@@ -293,7 +293,8 @@ export const ChatPage: React.FC = () => {
   // Derived rather than an effect on purpose: the fallback lands in the SAME
   // render that flips ``readOnly``. An effect would first commit one frame with
   // the chat surface still hidden and the iframe already gone — a blank chat.
-  const showPageActive = isShowPageActive(readOnly, showPageMode);
+  const showPageAccessDenied = showPageRestoreAccess === 'deny';
+  const showPageActive = isShowPageActive(readOnly, showPageMode, showPageAccessDenied);
   // True while the share popover is open. The popover floats over the Show Page
   // iframe; making the iframe inert lets an outside tap there reach the parent
   // document so the (non-modal) popover dismisses, without modal-blocking the
@@ -310,6 +311,16 @@ export const ChatPage: React.FC = () => {
   // show the stale enabled/mode and could send control messages to the freshly
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
   const annotation = useShowPageAnnotation(showPageActive ? showPageUrl : null);
+  useEffect(() => {
+    const sid = sessionId;
+    if (!sid || !showPageAccessDenied) return;
+    // The derived showPageActive value already withdrew the iframe in this
+    // render. Persist the fallback and invalidate any in-flight ensure so a
+    // late response cannot re-open content after access was revoked.
+    showPageRestoreAttemptRef.current = sid;
+    selectChatView(sid, true);
+    setShowPageUrl(null);
+  }, [selectChatView, sessionId, showPageAccessDenied]);
   const probeShowPageAccess = useCallback(async (targetSessionId: string) => {
     const generation = ++showPageAccessProbeGenerationRef.current;
     try {
@@ -2226,6 +2237,7 @@ export const ChatPage: React.FC = () => {
           showPageAccess={showPageAccess}
           canOpenShowPage={canOpenShowPage}
           canManageShowPage={canManageShowPage}
+          canManageInstance={capabilities.can_manage_instance}
           sessionActions={sessionActions}
           titleFieldRef={titleFieldRef}
         />
@@ -2809,6 +2821,7 @@ interface ChatHeaderBarProps {
   showPageAccess?: ShowPageAccess | null;
   canOpenShowPage?: boolean;
   canManageShowPage?: boolean;
+  canManageInstance?: boolean;
   // Shared session actions, rendered behind the mobile-only ⋯ at the far right.
   // Empty (or absent) withdraws the trigger — which is what a read-only session
   // yields, since every one of those writes is refused.
@@ -2821,7 +2834,7 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page. Note the
 // live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
 // read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, sessionActions, titleFieldRef }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
   const readOnly = !writable;
   const sessionReadOnly = readOnlyReason !== null;
@@ -2972,6 +2985,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 key={session.id}
                 sessionId={session.id}
                 initialAccess={showPageAccess}
+                canManageInstance={canManageInstance}
                 onPayloadChange={onShowPageVisibilityChange}
                 onOpenChange={onShareOpenChange}
               />
