@@ -28,6 +28,9 @@ from storage.settings_service import SQLiteSettingsService, upsert_scope
 from vibe.message_types import build_partial_index_predicate
 
 
+pytestmark = pytest.mark.no_sqlite_template
+
+
 HEAD_REVISION = "20260806_0047"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
