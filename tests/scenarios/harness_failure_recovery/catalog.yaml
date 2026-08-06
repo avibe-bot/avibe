@@ -2731,6 +2731,15 @@ scenarios:
     # the lock the probe fails, and that is correct: the reachability argument would
     # have gone with it. Do not simulate a contender for a window you are trying to
     # prove is reachable; borrow one from production or leave the finding unproven.
+    # Round 22 fixes what round 21's fix inherited: it corrected the contender's WHO and
+    # left the WHEN in a second fixture, so the parked caller and the End that read it
+    # were never the same handler in the same loop, and the live set End consulted was a
+    # hand-written empty literal -- the answer, typed in. Now one handler carries both,
+    # real handle_message is the parked caller with nothing stubbed between it and the
+    # generation lock, and controller.claude_active_sessions IS the set mark_session_active
+    # writes to, so `idle` is a consequence. RULE: a probe for a window must show the two
+    # facts INTERLEAVED in one run; two fixtures agreeing separately prove neither, and any
+    # state the subject reads must be bound to production, never asserted as a literal.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional
   - id: HFR-181
     name: codex End reports ok/ended when the canonical stop never interrupted
@@ -2998,6 +3007,29 @@ scenarios:
     # way; the rule is not "never bind a turn", it is "this answer is Run-scoped and has to
     # say so".
     test: tests/test_run_terminal_truth_matrix.py::test_q4s_evidence_binds_a_run_and_never_a_turn
+  - id: HFR-211
+    name: a base reached through an import is resolved, or refused out loud
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Round 22's first finding, and it is rounds 20 and 21 judged by their own standard.
+    # Both taught the collection predicate that pytest resolves __test__ and the constructor
+    # refusal through the MRO, both followed only bases defined in the same module, and both
+    # signed the cut with _unittest_ancestry's sentence -- "a false rejection is loud, a
+    # false acceptance is silent". That is true where it was written and inverted where it
+    # was pasted: an unreadable base carrying __test__ = False makes the flag resolver answer
+    # None and fall through to the name rule, an unreadable __init__ makes the constructor
+    # resolver answer False, and both ACCEPT a class pytest drops -- in the opt-out case
+    # without even a warning. A row citing a test under such a class advertises coverage no
+    # run executes.
+    # RULE, in two parts. Bases resolve through absolute imports into repo files, one
+    # re-export hop and dotted module.Class spellings included, so ancestry stops at no file
+    # boundary. And a base that still resolves to nothing RAISES: undecidable is a third
+    # answer, not a synonym for collectible. The raise fires only on the accepting side --
+    # excluding a class is already loud, and demanding a readable family tree from every
+    # helper would be a rule about imports rather than about collection.
+    test: tests/test_run_terminal_truth_matrix.py::test_a_base_reached_through_an_import_is_resolved_or_refused_out_loud
   - id: HFR-210
     name: the capability index reaches every module the catalog cites
     status: covered

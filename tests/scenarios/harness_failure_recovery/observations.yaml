@@ -1459,3 +1459,52 @@ observations:
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails four of this unit's fixes
       and is still deliberately untouched (HFR-OBS-028).
+  - id: HFR-OBS-047
+    area: run-terminal-truth
+    summary: >-
+      Round 22, two findings, both accepted, nothing rejected. One new scenario
+      id -- HFR-211, which raises this unit's span to HFR-180..211 and moves the
+      plan, HFR-194 and HFR-209 in the same commit -- no verdict move, no budget
+      move: UNPROVEN_BUDGET stays 168 and no cell's proof kind changes.
+      FINDING ONE, a justification copied onto a different shape inverted its
+      own error direction. ``_unittest_ancestry`` stops at locally-defined
+      bases and says why: an unresolved base means NOT collectible, so a false
+      rejection is loud and a false acceptance impossible. Rounds 20 and 21
+      pasted that sentence onto ``_resolved_test_flag`` and
+      ``_defines_constructor``, where the arrow points the other way. An
+      unresolved base carrying ``__test__ = False`` makes the flag answer
+      ``None``, which falls through to the name rule and ACCEPTS; one carrying
+      ``__init__`` makes the constructor predicate answer ``False``, which also
+      accepts. pytest collects neither -- checked against this repository's
+      pytest, not reasoned, and the opt-out case is dropped without even a
+      warning, so the documented safe boundary was producing exactly the silent
+      direction it claimed to rule out. Bases now resolve across absolute
+      imports, including one re-export hop and dotted ``module.Class``
+      spellings, and a base that still resolves to nothing RAISES rather than
+      defaulting to collectible -- asked only on the accepting side, because
+      undecidable is not the same as collectible. Relative imports and star
+      imports stay unresolved on purpose and are therefore now loud.
+      FINDING TWO, two fixtures agreeing separately prove no interleaving.
+      Round 21 made HFR-180's lock holder real and left the window's two halves
+      in different fixtures: the parked caller and the End that read it were
+      never the same handler in the same event loop, and the live set End
+      consulted was a hand-written empty literal -- the answer, typed in. Now
+      one handler carries both, the parked caller is real
+      ``ClaudeAgent.handle_message`` with nothing stubbed between it and the
+      generation lock, End runs while that turn is suspended, and
+      ``controller.claude_active_sessions`` IS the set ``mark_session_active``
+      writes to, so ``idle`` is a consequence rather than a premise.
+      Counter-checked twice against production: drop the ``async with`` from
+      ``cleanup_session``, or stamp the turn active before resolving it, and
+      the probe fails with the message saying the window is closed.
+      THE DURABLE RULE, a justification does not travel with the shape it is
+      pasted onto. This is round 21's own lesson -- a fix inherits the blind
+      spot of the thing it fixes -- applied to a COMMENT. The sentence stayed
+      true of its original function and became exactly backwards two lines
+      down. Re-derive the error direction at every site that quotes a reason; a
+      reason is not a label.
+      Rejected: nothing. Neither finding asked for a fix to PR7R-F1 or PR7R-F2,
+      which would have been out of scope by the plan's own boundary.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails five of this unit's fixes
+      and is still deliberately untouched (HFR-OBS-028).

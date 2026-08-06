@@ -3,7 +3,7 @@
 Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
 PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
 PR4 (#1173) are complete. Only PR7R remains as the next unit, and it is
-evidence-only; its first increment is in flight (`HFR-180…210`, see §7). PR4's
+evidence-only; its first increment is in flight (`HFR-180…211`, see §7). PR4's
 conditional transport-attempt delta (PR4B) opens only if a current-master
 reproducer proves a missing durable fact.**
 
@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…210`, `HFR-211…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 open — every backend/lane keys a progress event by Turn on LIVE dispatch, but OpenCode's restart path rebuilds its emit context and drops the Turn and the accepted Runs, so those two cells are `defect`; the live residual is the per-session activity timestamp. Q1/Q3/Q4/Q5 open, Q4 Run-scoped and Claude-only, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…211`, `HFR-212…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 open — every backend/lane keys a progress event by Turn on LIVE dispatch, but OpenCode's restart path rebuilds its emit context and drops the Turn and the accepted Runs, so those two cells are `defect`; the live residual is the per-session activity timestamp. Q1/Q3/Q4/Q5 open, Q4 Run-scoped and Claude-only, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,11 +1227,11 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under twenty-one review rounds
+#### PR7R status (2026-08-06) — first increment, revised under twenty-two review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
-`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…204`, `HFR-206…210`) and fed by
+`HFR-192…194`, `HFR-196`, `HFR-198`, `HFR-200…204`, `HFR-206…211`) and fed by
 `tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
 `HFR-191`, `HFR-195`, `HFR-197`, `HFR-199`, `HFR-205`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
@@ -1242,7 +1242,7 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through twenty-one changed how the
+rounds and has held at 168 since; rounds four through twenty-two changed how the
 findings are demonstrated, three question verdicts, and twenty degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
@@ -2114,6 +2114,44 @@ its endpoints and left its interior unchecked. The question that catches this
 is not *did I fix it* but *what did I have to assume to make the fix pass, and
 who is supplying that assumption.*
 
+Round 22 — two findings, **both accepted, none rejected**; one new scenario
+(`HFR-211`), no verdict move, and **no budget move**.
+
+1. **A justification copied onto a different shape inverted its own error
+   direction.** `_unittest_ancestry` stops at locally-defined bases and says
+   why: an unresolved base means *not* collectible, so a false rejection is
+   loud and a false acceptance impossible. Rounds 20 and 21 pasted that
+   sentence onto `_resolved_test_flag` and `_defines_constructor`, where the
+   arrow points the other way — an unresolved base carrying `__test__ = False`
+   answers `None` and falls through to the name rule, and one carrying
+   `__init__` answers `False`; both **accept**, and pytest collects neither.
+   Checked against this repository's pytest rather than reasoned: the opt-out
+   case is dropped without even a warning. Bases now resolve across absolute
+   imports, including one re-export hop and dotted `module.Class` spellings,
+   and a base that still resolves to nothing **raises** — asked only on the
+   accepting side, because undecidable is not the same as collectible.
+
+2. **Two fixtures agreeing separately prove no interleaving.** Round 21 made
+   the lock holder real and left the two halves of `HFR-180`'s window in
+   different fixtures: the parked caller and the End that read it were never
+   the same handler in the same loop, and the live set End consulted was an
+   empty literal — the answer, typed in. Now one handler carries both, the
+   parked caller is real `ClaudeAgent.handle_message` with nothing stubbed
+   between it and the generation lock, End runs in the same event loop while
+   that turn is suspended, and `claude_active_sessions` **is** the set
+   `mark_session_active` writes to, so `idle` is a consequence rather than a
+   premise. Counter-checked twice against production: drop the `async with`
+   from `cleanup_session`, or stamp the turn active before resolving it, and
+   the probe fails with the message that says the window is closed.
+
+**The durable lesson is that a justification does not travel with the shape it
+is pasted onto.** Round 21's own lesson — a fix inherits the blind spot of the
+thing it fixes — applied to a *comment*: the sentence stayed true of its
+original function and became exactly backwards two lines down, which is why the
+boundary was producing the silent direction it claimed to rule out. Re-derive
+the error direction at every site that quotes a reason; a reason is not a
+label.
+
 Question verdicts:
 
 1. **Q1 — open, do not close the claim yet.** On the durable Workbench lane,
@@ -2455,8 +2493,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…210` — occupied by PR7R's first increment (`HFR-188…210` were
-  taken by its round-6 through round-21 reviews); `HFR-211…219` still reserved for
+- PR7: `HFR-180…211` — occupied by PR7R's first increment (`HFR-188…211` were
+  taken by its round-6 through round-22 reviews); `HFR-212…219` still reserved for
   the remaining probes listed in §7
 
 Check the catalog again immediately before coding. The highest merged ID is

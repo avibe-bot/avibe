@@ -9,6 +9,7 @@ silently.
 """
 
 import ast
+import functools
 import io
 import re
 import tokenize
@@ -179,6 +180,146 @@ def _root_name(node: ast.expr) -> str:
     return node.id if isinstance(node, ast.Name) else ""
 
 
+def _dotted_bindings(module_body: list[ast.stmt]) -> dict[str, str]:
+    """Local name -> the dotted path it stands for, for ABSOLUTE imports only.
+
+    Round 22. ``import a.b as x`` binds a module; ``from a.b import C`` binds
+    whatever ``C`` is, which may be a class or may be a submodule -- the
+    statement does not say, and neither does this map. The caller decides by
+    trying to open the path, which is the only way to tell them apart without
+    importing anything.
+
+    Relative imports and ``import *`` are left out on purpose: neither can be
+    resolved from this AST alone, and a name this map does not carry is a name
+    ``_base_class`` reports as unresolvable, which is now loud rather than
+    silently accepted.
+    """
+    bound: dict[str, str] = {}
+    for node in module_body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bound[alias.asname] = alias.name
+                else:
+                    head = alias.name.split(".")[0]
+                    bound.setdefault(head, head)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                if alias.name != "*":
+                    bound.setdefault(
+                        alias.asname or alias.name, f"{node.module}.{alias.name}"
+                    )
+    return bound
+
+
+@functools.lru_cache(maxsize=None)
+def _module_body_of(root: str, dotted: str) -> tuple[ast.stmt, ...] | None:
+    """The top-level body of the repo module ``dotted`` names, if there is one.
+
+    Resolved against ``root`` -- the working directory -- for the same reason
+    ``_assert_symbol_exists`` opens ``tests/foo.py`` relative to it: a node id
+    in this unit is a repo-relative path, and an import inside that file is a
+    repo-rooted dotted path. Cached because the ancestry walk revisits the same
+    handful of modules and because the cached body's identity is what the
+    cycle guards below compare.
+    """
+    base = Path(root, *dotted.split("."))
+    for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+        if candidate.is_file():
+            try:
+                return tuple(ast.parse(candidate.read_text(encoding="utf-8")).body)
+            except (OSError, SyntaxError):
+                return None
+    return None
+
+
+def _dotted_target(base: ast.expr, module_body) -> str | None:
+    """The dotted path a base EXPRESSION names, resolved through this module's imports."""
+    parts: list[str] = []
+    node = base
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    head = _dotted_bindings(module_body).get(node.id)
+    if head is None:
+        return None
+    return ".".join([head, *reversed(parts)])
+
+
+def _class_at(dotted: str | None, hops: int = 4) -> tuple[ast.ClassDef, tuple] | None:
+    """The ``ClassDef`` at a dotted path, following re-exports a few hops."""
+    if not dotted or "." not in dotted or hops <= 0:
+        return None
+    where, _, name = dotted.rpartition(".")
+    body = _module_body_of(str(Path.cwd()), where)
+    if body is None:
+        return None
+    found = next(
+        (node for node in body if isinstance(node, ast.ClassDef) and node.name == name),
+        None,
+    )
+    if found is not None:
+        return found, body
+    onward = _dotted_bindings(body).get(name)
+    return _class_at(onward, hops - 1) if onward != dotted else None
+
+
+def _base_class(base: ast.expr, module_body) -> tuple[ast.ClassDef, tuple] | None:
+    """The class a base names -- defined here, or reached through an import.
+
+    Round 22, and it is the boundary rounds 20 and 21 wrote down and mis-signed.
+    Both of those docstrings said locally-defined bases only, "a false rejection
+    is loud and a false acceptance is silent" -- which is true of
+    ``_unittest_ancestry``, where an unresolved base means NOT collectible, and
+    exactly backwards for the two predicates that inherited the sentence. An
+    unresolved base carrying ``__test__ = False`` makes ``_resolved_test_flag``
+    answer ``None``, which falls through to the name rule and ACCEPTS; an
+    unresolved base carrying ``__init__`` makes ``_defines_constructor`` answer
+    ``False``, which also accepts. pytest collects neither -- checked, not
+    reasoned: the opt-out case is dropped without even a warning -- so the
+    boundary was producing the silent direction it claimed to avoid.
+
+    So the bases are followed across modules now, and anything still
+    unresolvable is refused out loud by ``_collectible_class`` rather than
+    guessed at. The justification did not travel with the code shape it was
+    copied onto; that is the lesson, and it is round 21's own lesson about
+    fixes inheriting blind spots, applied to a COMMENT.
+    """
+    local = {n.name: n for n in module_body if isinstance(n, ast.ClassDef)}
+    if isinstance(base, ast.Name) and base.id in local:
+        return local[base.id], tuple(module_body)
+    return _class_at(_dotted_target(base, module_body))
+
+
+def _unresolved_ancestry(node: ast.ClassDef, module_body, seen=frozenset()) -> list[str]:
+    """Base spellings on this class's ancestry that resolve to nothing readable.
+
+    A unittest base resolved by ``_unittest_ancestry`` is not one of them, and
+    neither is ``object``: both are decided, just not by reading a file.
+    """
+    direct, packages = _unittest_names(module_body)
+    stray: list[str] = []
+    for base in node.bases:
+        if isinstance(base, ast.Attribute):
+            if base.attr in _UNITTEST_BASES and _root_name(base) in packages:
+                continue
+        elif isinstance(base, ast.Name):
+            if base.id in direct or base.id == "object":
+                continue
+        resolved = _base_class(base, module_body)
+        if resolved is None:
+            stray.append(ast.unparse(base))
+            continue
+        parent, parent_body = resolved
+        key = (id(parent_body), parent.name)
+        if key in seen:
+            continue
+        stray.extend(_unresolved_ancestry(parent, parent_body, seen | {key}))
+    return stray
+
+
 def _unittest_names(module_body: list[ast.stmt]) -> tuple[frozenset[str], frozenset[str]]:
     """Names bound in this module to a unittest TestCase, and to unittest itself.
 
@@ -207,7 +348,7 @@ def _unittest_names(module_body: list[ast.stmt]) -> tuple[frozenset[str], frozen
 
 
 def _unittest_ancestry(
-    node: ast.ClassDef, module_body: list[ast.stmt], seen: frozenset[str] = frozenset()
+    node: ast.ClassDef, module_body, seen: frozenset = frozenset()
 ) -> bool:
     """Does this class REALLY inherit a unittest TestCase, resolved in this module?
 
@@ -227,23 +368,27 @@ def _unittest_ancestry(
     module does not define and did not import from unittest is NOT collectible
     here: a false rejection is loud and one line to fix, a false acceptance is
     the silent citation rot this resolver exists to stop.
+
+    Round 22 lets the transitive half cross a module boundary, through the
+    shared ``_base_class`` resolver: an intermediate base defined in a sibling
+    helper file is the same intermediate the round-13 docstring promised to
+    follow, and stopping at the file edge was an accident of where the
+    dictionary of local classes came from.
     """
     direct, packages = _unittest_names(module_body)
-    local = {n.name: n for n in module_body if isinstance(n, ast.ClassDef)}
     for base in node.bases:
         if isinstance(base, ast.Attribute):
             if base.attr in _UNITTEST_BASES and _root_name(base) in packages:
                 return True
-        elif isinstance(base, ast.Name):
-            if base.id in direct:
-                return True
-            parent = local.get(base.id)
-            if (
-                parent is not None
-                and base.id not in seen
-                and _unittest_ancestry(parent, module_body, seen | {base.id})
-            ):
-                return True
+        elif isinstance(base, ast.Name) and base.id in direct:
+            return True
+        resolved = _base_class(base, module_body)
+        if resolved is None:
+            continue
+        parent, parent_body = resolved
+        key = (id(parent_body), parent.name)
+        if key not in seen and _unittest_ancestry(parent, parent_body, seen | {key}):
+            return True
     return False
 
 
@@ -283,7 +428,7 @@ def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | 
 
 
 def _resolved_test_flag(
-    node: ast.ClassDef, module_body: list[ast.stmt], seen: frozenset[str] = frozenset()
+    node: ast.ClassDef, module_body, seen: frozenset = frozenset()
 ) -> bool | None:
     """``__test__`` as pytest would READ it -- through the bases, not off the body.
 
@@ -297,30 +442,36 @@ def _resolved_test_flag(
     That is the same silent-citation rot the opt-out check was added to stop,
     one attribute lookup deeper than round 14 looked.
 
-    Only LOCALLY defined bases are followed, in declaration order, which is the
-    same boundary ``_unittest_ancestry`` draws and for the same reason: a base
-    imported from elsewhere cannot be resolved from this AST, and a false
-    rejection is loud while a false acceptance is silent.
+    Round 22 removes the local-only boundary this docstring used to defend with
+    ``_unittest_ancestry``'s sentence -- "a false rejection is loud while a
+    false acceptance is silent" -- which is true there and inverted here. An
+    unreadable base carrying ``__test__ = False`` makes this function answer
+    ``None``, the caller falls through to the name rule, and a ``Test*`` class
+    pytest drops WITHOUT EVEN A WARNING is reported as collectible. So bases
+    are followed across modules by ``_base_class``, and a base that is still
+    unreadable is refused out loud by ``_collectible_class`` instead of being
+    reasoned past here.
     """
 
     own = _test_flag(node.body)
     if own is not None:
         return own
-    local = {n.name: n for n in module_body if isinstance(n, ast.ClassDef)}
     for base in node.bases:
-        if not isinstance(base, ast.Name) or base.id in seen:
+        resolved = _base_class(base, module_body)
+        if resolved is None:
             continue
-        parent = local.get(base.id)
-        if parent is None:
+        parent, parent_body = resolved
+        key = (id(parent_body), parent.name)
+        if key in seen:
             continue
-        inherited = _resolved_test_flag(parent, module_body, seen | {base.id})
+        inherited = _resolved_test_flag(parent, parent_body, seen | {key})
         if inherited is not None:
             return inherited
     return None
 
 
 def _defines_constructor(
-    node: ast.ClassDef, module_body: list[ast.stmt], seen: frozenset[str] = frozenset()
+    node: ast.ClassDef, module_body, seen: frozenset = frozenset()
 ) -> bool:
     """``__init__``/``__new__`` as pytest would FIND them -- through the bases.
 
@@ -333,10 +484,13 @@ def _defines_constructor(
     called it collectible, so a catalog row could advertise executable
     coverage for methods pytest silently refuses to run.
 
-    Same ancestry boundary as ``_resolved_test_flag`` and ``_unittest_ancestry``
-    -- locally defined bases only, in declaration order. An imported base
-    cannot be resolved from this AST, and this predicate errs the way the other
-    two do: a false rejection is loud, a false acceptance is silent.
+    Round 22 removes the local-only boundary, and the sentence that used to
+    justify it. This predicate errs the OPPOSITE way from ``_unittest_ancestry``
+    whose reasoning it borrowed: an unreadable base with ``__init__`` on it
+    makes this answer ``False``, which accepts a class pytest refuses by name
+    -- the silent direction, not the loud one. Bases now resolve through
+    ``_base_class`` across modules, and one that still will not resolve is
+    refused out loud by ``_collectible_class``.
     """
 
     if any(
@@ -345,14 +499,15 @@ def _defines_constructor(
         for child in node.body
     ):
         return True
-    local = {n.name: n for n in module_body if isinstance(n, ast.ClassDef)}
-    return any(
-        isinstance(base, ast.Name)
-        and base.id not in seen
-        and base.id in local
-        and _defines_constructor(local[base.id], module_body, seen | {base.id})
-        for base in node.bases
-    )
+    for base in node.bases:
+        resolved = _base_class(base, module_body)
+        if resolved is None:
+            continue
+        parent, parent_body = resolved
+        key = (id(parent_body), parent.name)
+        if key not in seen and _defines_constructor(parent, parent_body, seen | {key}):
+            return True
+    return False
 
 
 def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
@@ -379,16 +534,42 @@ def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
     reading one class body while fixing the line above it -- the whole point
     being that pytest resolves BOTH through the MRO, so a fix that travels for
     one attribute and not the other is half a rule twice over.
+
+    Round 22 makes the MRO travel across FILES, and adds the one answer this
+    predicate never had: "I cannot tell". Rounds 20 and 21 followed only bases
+    defined in the same module and justified the cut with ``_unittest_ancestry``
+    's sentence about false rejections being loud -- which is backwards for
+    both of them, because an unreadable base is exactly how ``__test__ = False``
+    and an inherited ``__init__`` sneak past. So bases resolve through imports
+    now, and a base that STILL resolves to nothing raises instead of being
+    guessed at: undecidable is not the same as collectible, and the whole point
+    of this predicate is that a citation may not advertise coverage pytest does
+    not run.
     """
     flag = _resolved_test_flag(node, module_body)
     if flag is False:
         return False
-    if _unittest_ancestry(node, module_body):
+    unittest_base = _unittest_ancestry(node, module_body)
+    if not (unittest_base or node.name.startswith("Test") or flag):
+        return False
+    # Only asked on the ACCEPTING side. A class this rule would exclude anyway
+    # needs no ancestry: excluding it is the loud direction -- a citation into
+    # it fails right below with "pytest does not collect class" -- and asking
+    # every helper class in the corpus to have a readable family tree would be
+    # a rule about imports, not about collection.
+    stray = _unresolved_ancestry(node, module_body)
+    assert not stray, (
+        f"cannot decide whether pytest collects class {node.name!r}: its "
+        f"base(s) {stray} resolve to nothing readable from this repo, and both "
+        f"``__test__`` and the constructor refusal are ATTRIBUTE lookups that "
+        f"an unreadable ancestor can flip -- silently, in the opt-out case. "
+        f"Give the base a repo-local definition this walker can reach, or stop "
+        f"citing tests under this class; do not let it default to collectible"
+    )
+    if unittest_base:
         # The unittest plugin claims these, constructor and all: TestCase
         # itself defines ``__init__``, so the rule below cannot apply here.
         return True
-    if not (node.name.startswith("Test") or flag):
-        return False
     # Round 12, verified against this repo's pytest rather than reasoned: a
     # name-collected class that defines ``__init__`` or ``__new__`` is REFUSED
     # with ``PytestCollectionWarning: cannot collect test class ... because it
@@ -1598,6 +1779,127 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     assert cited, "no citations to check"
     for node_id in sorted(cited):
         _assert_node_exists(node_id)
+
+
+def test_a_base_reached_through_an_import_is_resolved_or_refused_out_loud(
+    tmp_path, monkeypatch
+) -> None:
+    """HFR-211: ancestry stops at no file boundary, and undecidable is not collectible.
+
+    Round 22, and it is the round-20/21 fixes judged by their own standard.
+    Both of them followed only bases defined in the SAME module and signed the
+    cut with ``_unittest_ancestry``'s sentence -- "a false rejection is loud, a
+    false acceptance is silent". That sentence is true where it was written,
+    because an unresolved base there means "not a TestCase" and the class is
+    dropped. Copied onto the flag and the constructor it means the reverse:
+    an unreadable ``__test__ = False`` returns ``None`` and falls through to the
+    name rule, an unreadable ``__init__`` returns ``False``, and both ACCEPT a
+    class pytest will not collect. The opt-out case does not even warn -- this
+    repo's pytest drops it in silence -- so a catalog row citing a test under
+    such a class would advertise coverage no run executes, with every guard in
+    this file green. The justification did not travel with the shape it was
+    pasted onto, which is round 21's lesson about fixes inheriting blind spots
+    aimed one layer up, at a comment.
+
+    Two answers, then. Bases resolve through absolute imports into repo files,
+    including one re-export hop and a dotted ``module.Class`` spelling; and a
+    base that still resolves to nothing raises rather than defaulting either
+    way, because "I cannot tell" is a third answer this predicate never had.
+    Checked against this repo's pytest, not reasoned: it collects exactly
+    ``TestImportedPlain`` and ``ImportedCaseTests`` out of the fixture below.
+    """
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "bases.py").write_text(
+        "import unittest\n"
+        "class MutedBase:\n"
+        "    __test__ = False\n"
+        "class CtorBase:\n"
+        "    def __init__(self): ...\n"
+        "class PlainBase:\n"
+        "    def helper(self): ...\n"
+        "class MidCase(unittest.TestCase):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    # One hop of re-export, which is how a package's ``__init__`` usually
+    # publishes a helper: the name the importer sees is bound in a module that
+    # does not define it.
+    (tmp_path / "pkg" / "reexport.py").write_text(
+        "from pkg.bases import MutedBase\n", encoding="utf-8"
+    )
+    (tmp_path / "tests" / "imported_bases.py").write_text(
+        "import pkg.bases\n"
+        "from pkg.bases import CtorBase, MidCase, MutedBase, PlainBase\n"
+        "from pkg.reexport import MutedBase as Muted2\n"
+        "class TestImportedOptOut(MutedBase):\n"
+        "    def test_case(self): ...\n"
+        "class TestReexportedOptOut(Muted2):\n"
+        "    def test_case(self): ...\n"
+        "class TestImportedCtor(CtorBase):\n"
+        "    def test_case(self): ...\n"
+        "class TestDottedCtor(pkg.bases.CtorBase):\n"
+        "    def test_case(self): ...\n"
+        "class TestImportedPlain(PlainBase):\n"
+        "    def test_case(self): ...\n"
+        "class ImportedCaseTests(MidCase):\n"
+        "    def test_case(self): ...\n",
+        encoding="utf-8",
+    )
+    # The undecidable one, in its own file so the walk over the file above is
+    # not cut short by the raise.
+    (tmp_path / "tests" / "opaque_base.py").write_text(
+        "from third_party.nowhere import Mystery\n"
+        "class TestOpaque(Mystery):\n"
+        "    def test_case(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _module_body_of.cache_clear()
+    rel = Path("tests/imported_bases.py")
+
+    # Resolved across the file boundary, in both directions. ``PlainBase``
+    # carries nothing, so the name rule stands; ``MidCase`` reaches
+    # ``unittest.TestCase`` through an intermediate in another module, which is
+    # the transitive case round 13 promised and round 22 finally delivers.
+    _assert_node_exists(f"{rel}::TestImportedPlain::test_case")
+    _assert_node_exists(f"{rel}::ImportedCaseTests::test_case")
+    for refused in (
+        "TestImportedOptOut",
+        "TestReexportedOptOut",
+        "TestImportedCtor",
+        "TestDottedCtor",
+    ):
+        with pytest.raises(
+            AssertionError, match=f"pytest does not collect class '{refused}'"
+        ):
+            _assert_node_exists(f"{rel}::{refused}::test_case")
+
+    discovered = {
+        suffix
+        for suffix, _node in _collected_tests(
+            ast.parse((tmp_path / rel).read_text(encoding="utf-8")).body
+        )
+    }
+    assert discovered == {
+        "TestImportedPlain::test_case",
+        "ImportedCaseTests::test_case",
+    }, discovered
+
+    # And the third answer. Neither reader may guess: the citation check and
+    # the discovery walk both go through the one predicate, so both raise, and
+    # the message says what to do about it rather than what went wrong.
+    opaque = Path("tests/opaque_base.py")
+    with pytest.raises(AssertionError, match="cannot decide whether pytest collects"):
+        _assert_node_exists(f"{opaque}::TestOpaque::test_case")
+    with pytest.raises(AssertionError, match="cannot decide whether pytest collects"):
+        _collected_tests(
+            ast.parse((tmp_path / opaque).read_text(encoding="utf-8")).body
+        )
+
+    monkeypatch.undo()
+    _module_body_of.cache_clear()
 
 
 def test_a_mistyped_matrix_key_is_an_error_not_a_silent_fallback():

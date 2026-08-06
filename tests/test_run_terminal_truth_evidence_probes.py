@@ -23,6 +23,7 @@ HFR-205.
 
 import ast
 import asyncio
+import contextlib
 import inspect
 import re
 import textwrap
@@ -273,6 +274,20 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     terminates, hop for hop, as asserted below. So the holder is now End's own
     teardown and the parked caller is the real resolver: both sides acquire and
     release through production, and only the two innermost bodies are stubbed.
+
+    Round 22 puts the halves in ONE interleaving, which is what round 21 still
+    owed. Fixing the holder left the two facts staged apart -- contention on a
+    throwaway handler calling ``get_or_create_claude_session`` directly, End
+    afterwards on a different fixture reading a live set written empty by hand
+    -- and two separately green facts do not add up to "an accepted turn and a
+    blind End coexist". So there is one handler now, the parked caller is
+    ``ClaudeAgent.handle_message`` with nothing stubbed between it and the
+    generation lock, End runs inside the same event loop while that turn is
+    suspended, and the set ``_resolve_live_state`` reads is the handler's own
+    ``active_sessions`` -- so ``idle`` is a consequence of the parked turn,
+    not a literal. The lesson is the one round 21 wrote down, aimed at round
+    21: a fix inherits the blind spot of the thing it fixes, and replacing a
+    fixture's WHO does not answer a question about its WHEN.
     """
     # The race, read off production instead of assumed. ``mark_session_active``
     # is what fills ``claude_active_sessions``; it is called only after
@@ -311,42 +326,118 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     assert "async with self._claude_runtime_generation_lock(composite_key):" in resolve_source
     assert "await self._wait_for_claude_receiver_cleanup(retry.composite_key)" in resolve_source
 
-    # Round 21 replaces the lock owner. The previous draft took the lock by
-    # hand, and review was right that an artificially held lock proves only
-    # that the resolver can be blocked -- not that anything in production ever
-    # blocks it, which is the reachability question this probe exists to
-    # settle. The holder below is ``SessionHandler.cleanup_session``, real
-    # production code, and it is not an arbitrary choice: it is the exact
-    # method End's chain lands on, hop by hop, as asserted further down. So
-    # this is End itself holding the generation lock while a warm-idle second
-    # turn arrives -- the interleave the finding describes, driven rather than
-    # argued. Only ``_cleanup_session_locked`` and
-    # ``_get_or_create_claude_session_locked`` are stubbed; every lock
-    # acquisition and release on both sides is production's.
-    async def _drive_generation_lock() -> tuple[bool, bool]:
-        handler = object.__new__(SessionHandler)
-        handler.claude_runtime_generation_locks = {}
-        resolved = object()
+    # ONE handler, and everything below happens on it. Round 21 made End's own
+    # ``cleanup_session`` the lock holder instead of the test, and review was
+    # right that the halves were still staged apart: the contention ran on a
+    # throwaway handler against a bare ``get_or_create_claude_session`` call,
+    # and End ran afterwards, on a different fixture, reading a live set the
+    # test had written empty by hand. Two green halves are not the claim. The
+    # claim is that an ACCEPTED TURN and a blind End coexist, so round 22 puts
+    # them in one interleaving: ``ClaudeAgent.handle_message`` is the parked
+    # caller, ``cleanup_session`` is the holder, and the set
+    # ``_resolve_live_state`` reads IS the handler's own ``active_sessions``.
+    # "Idle" is then a consequence of the parked turn not having stamped
+    # itself, which is the whole of PR7R-F1 -- not a literal this test chose.
+    handler = object.__new__(SessionHandler)
+    handler.claude_runtime_generation_locks = {}
+    handler.active_sessions = set()
+    handler.session_turn_started = {}
+    handler.session_last_activity = {}
+    client = types.SimpleNamespace(
+        # The turn is live; the CLI has not exited yet.
+        _transport=types.SimpleNamespace(_process=types.SimpleNamespace(returncode=None))
+    )
+    handler.claude_sessions = {"slack_a:/w": client}
+    handler._claude_runtime_generation_key = lambda context, subagent: "slack_a:/w"
 
-        async def _locked(*args, **kwargs):
-            return resolved
+    async def _resolve_locked(*args, **kwargs):
+        return client
 
-        handler._claude_runtime_generation_key = lambda context, subagent: "slack_a:/w"
-        handler._get_or_create_claude_session_locked = _locked
+    handler._get_or_create_claude_session_locked = _resolve_locked
 
-        # Uncontended. One scheduler step is enough for the whole call, which
-        # is the half that makes reading the source insufficient: the ``await``
-        # is there and it does not suspend.
+    # REACHABILITY, which an early draft left to the reader and review was
+    # right to challenge. The state this probe needs -- a client registered in
+    # ``claude_sessions`` while its key is absent from ``claude_active_sessions``
+    # -- is not a fresh-startup state: ``_get_or_create_claude_session_locked``
+    # registers the client only once connection completes, so during a COLD
+    # start there is nothing for ``_end_claude`` to tear down and the defect
+    # cannot fire. It is the ordinary WARM-IDLE state. ``mark_session_idle``
+    # discards the key from the live set and deliberately keeps the client --
+    # it even touches activity on the strength of the client still being there.
+    # Driven on the very handler the interleaving then runs on, so the state
+    # under test is the state production put there.
+    handler.mark_session_active("slack_a:/w")
+    assert "slack_a:/w" in handler.active_sessions
+    handler.mark_session_idle("slack_a:/w")
+    assert "slack_a:/w" not in handler.active_sessions
+    assert "slack_a:/w" in handler.claude_sessions, (
+        "warm-idle: the live set forgot the key and the client is still there"
+    )
+
+    # The real backend object. Only the cancel path is stubbed, and only
+    # because this probe ends the turn rather than completing it: the turn
+    # never gets past session resolution, which is the point.
+    agent = object.__new__(ClaudeAgent)
+    agent.session_handler = handler
+    agent._remove_specific_pending_reaction = _AsyncFlag()
+    agent._delete_ack = _AsyncFlag()
+    agent._remove_pending_request = lambda *a, **kw: None
+    agent._mark_session_idle_if_no_pending_requests = lambda *a, **kw: None
+    agent._release_service_runtime_turn = lambda *a, **kw: None
+    # A backstop one statement PAST the subject, so that a run in which the
+    # window has closed reports the closure instead of crashing somewhere
+    # downstream. ``_wait_for_activity_output`` is the first await after
+    # ``mark_session_active``: if session resolution ever returns during the
+    # staged window, the turn stamps itself and stops here, and it is
+    # ``unstamped`` below that fails -- with a sentence about the race, which
+    # is the assertion that should speak.
+    _never = asyncio.Event()
+
+    async def _hold(*args, **kwargs):
+        await _never.wait()
+
+    agent._wait_for_activity_output = _hold
+    request = types.SimpleNamespace(
+        context=None,
+        base_session_id="b1",
+        composite_session_id="slack_a:/w",
+        subagent_name=None,
+        subagent_model=None,
+        subagent_reasoning_effort=None,
+    )
+
+    # End's fixture, sharing the handler's own registries rather than copies.
+    session_handler = _RealTeardownMarking()
+    session_handler.claude_sessions = handler.claude_sessions
+    end_runtime_session = _AsyncFlag(result=True)
+    controller = types.SimpleNamespace(
+        agent_service=types.SimpleNamespace(
+            agents={"claude": types.SimpleNamespace(end_runtime_session=end_runtime_session)}
+        ),
+        session_handler=session_handler,
+        claude_sessions=handler.claude_sessions,
+        # Not a literal: this is the set ``mark_session_active`` writes to.
+        claude_active_sessions=handler.active_sessions,
+        session_last_activity=handler.session_last_activity,
+        # Direct-IM lane: no Workbench turn projection to rescue the probe.
+        session_turns=types.SimpleNamespace(in_flight={}),
+        command_handler=types.SimpleNamespace(handle_stop=_AsyncFlag(result=True)),
+    )
+
+    async def _drive_the_interleave():
+        # Uncontended first. One scheduler step is enough for the whole call,
+        # which is the half that makes reading the source insufficient: the
+        # ``await`` is there and it does not suspend.
         free = asyncio.create_task(handler.get_or_create_claude_session(None))
         await asyncio.sleep(0)
-        uncontended_finished_in_one_step = free.done()
-        assert await free is resolved
+        uncontended = free.done()
+        assert await free is client
 
-        # Contended by End's own teardown. ``cleanup_session`` takes the
-        # generation lock for this key and holds it across its locked body; the
-        # warm second turn is admitted and parks INSIDE session resolution,
-        # before anything stamps it active. Eight scheduler steps, so "not
-        # done" is a park and not a slow start.
+        # Now the contention, and it is production's: ``cleanup_session``
+        # takes the generation lock for this key and holds it across its
+        # locked body. That method is not an arbitrary choice of holder -- it
+        # is the exact one End's own chain terminates on, hop by hop, as
+        # asserted further down.
         inside_cleanup = asyncio.Event()
         finish_cleanup = asyncio.Event()
 
@@ -357,87 +448,27 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
         handler._cleanup_session_locked = _cleanup_locked
         teardown = asyncio.create_task(handler.cleanup_session("slack_a:/w"))
         await inside_cleanup.wait()
-        second = asyncio.create_task(handler.get_or_create_claude_session(None))
+
+        # A real accepted turn arrives on the warm-idle session. Nothing
+        # between ``handle_message`` and the generation lock is stubbed; it
+        # parks inside session resolution, before anything stamps it active.
+        # Eight scheduler steps, so "not done" is a park and not a slow start.
+        turn = asyncio.create_task(agent.handle_message(request))
         for _ in range(8):
             await asyncio.sleep(0)
-        parked = not second.done()
-        finish_cleanup.set()
-        await teardown
-        assert await second is resolved
-        return uncontended_finished_in_one_step, parked
+        parked = not turn.done()
+        unstamped = "slack_a:/w" not in handler.active_sessions
 
-    uncontended_finished_in_one_step, parked = asyncio.run(_drive_generation_lock())
-    assert uncontended_finished_in_one_step, (
-        "an uncontended acquire suspended after all; if that changes, the "
-        "retraction above is what needs rereading, not this assertion"
-    )
-    assert parked, (
-        "a second turn did not park inside session resolution while End's own "
-        "teardown held the generation lock, so the window PR7R-F1 depends on "
-        "is not a window and the finding needs rereading. This fails if "
-        "``cleanup_session`` stops taking the lock, which is the right way for "
-        "it to fail -- the reachability argument would be gone with it."
-    )
-
-    # REACHABILITY, which the previous draft left to the reader and review was
-    # right to challenge. The state below -- a client registered in
-    # ``claude_sessions`` while its key is absent from ``claude_active_sessions``
-    # -- is not a fresh-startup state: ``_get_or_create_claude_session_locked``
-    # registers the client only once connection completes, so during a COLD
-    # start there is nothing for ``_end_claude`` to tear down and the defect
-    # cannot fire. It is the ordinary WARM-IDLE state. ``mark_session_idle``
-    # discards the key from the live set and deliberately keeps the client --
-    # it even touches activity on the strength of the client still being there.
-    # A second turn arriving on that warm session is admitted, waits on the
-    # generation lock, and is invisible to ``_resolve_live_state`` the whole
-    # time. Driven, not asserted in prose.
-    warm = object.__new__(SessionHandler)
-    warm.active_sessions = set()
-    warm.session_turn_started = {}
-    warm.session_last_activity = {}
-    warm.claude_sessions = {"slack_a:/w": object()}
-    warm.mark_session_active("slack_a:/w")
-    assert "slack_a:/w" in warm.active_sessions
-    warm.mark_session_idle("slack_a:/w")
-    assert "slack_a:/w" not in warm.active_sessions
-    assert "slack_a:/w" in warm.claude_sessions, (
-        "the warm-idle state the fixture below stages is exactly this one"
-    )
-
-    session_handler = _RealTeardownMarking()
-    client = types.SimpleNamespace(
-        # The turn is live; the CLI has not exited yet.
-        _transport=types.SimpleNamespace(_process=types.SimpleNamespace(returncode=None))
-    )
-    session_handler.claude_sessions = {"slack_a:/w": client}
-
-    end_runtime_session = _AsyncFlag(result=True)
-    controller = types.SimpleNamespace(
-        agent_service=types.SimpleNamespace(
-            agents={"claude": types.SimpleNamespace(end_runtime_session=end_runtime_session)}
-        ),
-        session_handler=session_handler,
-        claude_sessions=session_handler.claude_sessions,
-        # The live turn set has NOT been stamped yet -- this is the race window.
-        claude_active_sessions=set(),
-        session_last_activity={},
-        # Direct-IM lane: no Workbench turn projection to rescue the probe.
-        session_turns=types.SimpleNamespace(in_flight={}),
-        command_handler=types.SimpleNamespace(handle_stop=_AsyncFlag(result=True)),
-    )
-
-    live_state = running_agents._resolve_live_state(
-        controller,
-        backend="claude",
-        session_id="ses-im",
-        composite_key="slack_a:/w",
-        base_session_id="b1",
-    )
-    # The turn IS running; the probe cannot see it.
-    assert live_state == "idle"
-
-    result = asyncio.run(
-        running_agents.end_running_agent(
+        # End arrives HERE -- with that turn still in flight, in the same
+        # event loop, reading the same registries.
+        live_state = running_agents._resolve_live_state(
+            controller,
+            backend="claude",
+            session_id="ses-im",
+            composite_key="slack_a:/w",
+            base_session_id="b1",
+        )
+        result = await running_agents.end_running_agent(
             controller,
             backend="claude",
             # The browser polled the row while it was genuinely active.
@@ -446,7 +477,44 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
             composite_key="slack_a:/w",
             base_session_id="b1",
         )
+
+        # Retire the parked turn BEFORE the lock is released. Letting it
+        # resume would run it through the rest of ``handle_message`` -- the
+        # activity wait, the query, the receiver task -- none of which this
+        # probe is about, and all of which would need stubbing to reach a
+        # conclusion that is already reached.
+        turn.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await turn
+        finish_cleanup.set()
+        await teardown
+        return uncontended, parked, unstamped, live_state, result
+
+    uncontended, parked, unstamped, live_state, result = asyncio.run(
+        _drive_the_interleave()
     )
+    assert uncontended, (
+        "an uncontended acquire suspended after all; if that changes, the "
+        "retraction above is what needs rereading, not this assertion"
+    )
+    assert parked, (
+        "``handle_message`` did not park inside session resolution while End's "
+        "own teardown held the generation lock, so the window PR7R-F1 depends "
+        "on is not a window and the finding needs rereading. This fails if "
+        "``cleanup_session`` stops taking the lock, which is the right way for "
+        "it to fail -- the reachability argument would be gone with it."
+    )
+    assert unstamped, (
+        "the accepted turn was already stamped active while End looked, so "
+        "the window PR7R-F1 depends on was not open. Either session resolution "
+        "returned inside the staged contention -- ``cleanup_session`` stopped "
+        "taking the generation lock -- or ``handle_message`` now stamps before "
+        "it resolves. Both close the race; both make this finding wrong, which "
+        "is the right way for this probe to fail."
+    )
+    # The turn IS running -- a real ``handle_message`` is suspended mid-call
+    # right now -- and the probe cannot see it.
+    assert live_state == "idle"
 
     assert result["ok"] is True and result["action"] == "ended"
     # Consequence 1. The canonical stop -- the ONLY path that emits a
