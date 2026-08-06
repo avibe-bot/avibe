@@ -40,7 +40,6 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
-    SETTLEMENTS_WITHOUT_RESULT,
 )
 from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
@@ -1965,26 +1964,28 @@ class ConsolidatedMessageDispatcher:
                         "Activity output batch recovery is incomplete",
                         delivered=False,
                     )
-                # IM silent-terminal evidence describes what the BACKEND produced,
-                # which is why an output that names its own settlement is excluded:
-                # its empty body is a release, not a result, and stamping the trace
-                # ``failed``/``completed`` from it asserts a backend outcome that
-                # never happened. This tests the whole ``SETTLEMENTS_WITHOUT_RESULT``
-                # set rather than ``stopped`` alone so a teardown reason added later
-                # inherits the exclusion instead of having to rediscover this line --
-                # a contained backend teardown (``contained_teardown_output_for``) is
-                # the second member and was writing ``terminal_outcome=failed`` for a
-                # runtime the service retired on purpose. Only an explicitly named
-                # settlement can reach here; ``_turn_release_settlement`` derives
-                # ``terminal_result`` / ``turn_only_result`` for everything else, and
-                # neither is in the set.
+                # This row is the IM turn's ONLY terminal boundary — an IM turn has
+                # no durable execution owner, and ``list_turn_groups`` /
+                # ``_latest_source_message_anchor`` both close a turn on it. So a
+                # settlement that ends a turn without a result must still write one;
+                # skipping it leaves the turn logically open, which renders as a
+                # still-running activity card long after the runtime is gone. Only
+                # ``stopped`` is exempt, and only because the stop path reports the
+                # boundary itself. Passing the settlement lets the row say
+                # ``canceled`` where ``is_error`` alone would have said ``failed`` —
+                # a contained backend teardown gets a boundary that is honest about
+                # being an interruption rather than a backend fault.
                 if (
                     mutates_turn_lifecycle
                     and context.platform != "avibe"
                     and self._turn_release_settlement(output_semantics)
-                    not in SETTLEMENTS_WITHOUT_RESULT
+                    != SETTLED_BY_STOPPED
                 ):
-                    persist_silent_terminal(context, is_error=is_error)
+                    persist_silent_terminal(
+                        context,
+                        is_error=is_error,
+                        settled_by=self._turn_release_settlement(output_semantics),
+                    )
                 if canonical_type == "result" and output_semantics.settles_run:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may

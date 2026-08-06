@@ -1838,11 +1838,11 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
     #
     # #1202 stopped a service-initiated teardown from being REPORTED as a backend
     # failure. The emit that follows still described it as one: an ordinary silent
-    # ``result`` with ``is_error=True``, which the dispatcher reads as a failed Turn,
-    # ``failed`` IM silent-terminal evidence, and an ``agent_runs`` row terminalized
-    # from an empty body. These assert the settlement now matches the classification
-    # on all three paths that can reach it, and — the point of the negative controls
-    # — that an ordinary backend failure is untouched.
+    # ``result`` carrying only the terminal-turn default, so an ``agent_runs`` row
+    # was terminalized from an empty body and the durable Turn read ``failed``.
+    # These assert the settlement now matches the classification on all three paths
+    # that can reach it, and — the point of the negative controls — that an ordinary
+    # backend failure is untouched.
 
     def assert_contained_settlement(self, emitter):
         """The terminal emit routed a contained teardown through the settlement lane."""
@@ -1856,9 +1856,14 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         # ``_record_agent_run_terminal_result``; the settlement lane owns the row.
         self.assertFalse(output.settles_run)
         self.assertTrue(output.completes_turn)
-        # The dot is not the failure channel here — the settlement is.
-        self.assertNotIn("is_error", call.kwargs)
-        self.assertNotIn("terminal_error", call.kwargs)
+        # No terminal result was produced, and that stays true whoever killed the
+        # process: clearing the flag would collapse the status bubble to a green
+        # ``done`` for a turn that answered nothing.
+        self.assertTrue(call.kwargs["is_error"])
+        # Suppressing the DIAGNOSTIC is what separates this from a real failure —
+        # the dispatcher reads the pair as an intentional silent end (``stopped``)
+        # rather than a fault, and the settlement carries the machine-readable cause.
+        self.assertIsNone(call.kwargs["terminal_error"])
 
     def assert_uncontained_settlement(self, emitter, diagnostic_fragment):
         """An ordinary backend failure still settles as one."""

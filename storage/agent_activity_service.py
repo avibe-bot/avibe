@@ -134,6 +134,23 @@ def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
     )
 
 
+def _outcome_status(terminal_outcome: Any) -> str:
+    """Render a stored terminal outcome as an activity-group status.
+
+    One mapper for both boundary kinds — the durable Turn row and the IM
+    ``silent_terminal`` trace that stands in for one — so a settlement never means
+    two different things depending on which surface recorded it. A turn that was
+    canceled or never written its outcome is ``interrupted``, not ``done``: it
+    ended without producing an answer, and the group chip should say so.
+    """
+
+    if terminal_outcome == "failed":
+        return "failed"
+    if terminal_outcome in {"canceled", "not_written"}:
+        return "interrupted"
+    return "done"
+
+
 def _terminal_status(msg_type: Any, metadata: Optional[dict] = None) -> str:
     """done for a normal completion (result / silent marker); failed for an ``error``
     or a ``backend_failure`` notify."""
@@ -310,9 +327,11 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                     "row_kind": "turn_terminal",
                     "text": None,
                     "is_silent": True,
-                    "terminal_status": (
-                        "failed" if terminal_outcome == "failed" else "done"
-                    ),
+                    # Same mapping as the durable-Turn branch below, because the
+                    # silent marker IS the IM stand-in for one: a turn the service
+                    # retired writes ``canceled`` here too, and rendering that as a
+                    # green ``done`` would claim an answer that was never produced.
+                    "terminal_status": _outcome_status(terminal_outcome),
                 }
             )
             continue
@@ -358,13 +377,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "row_kind": "turn_terminal",
                 "text": None,
                 "is_silent": True,
-                "terminal_status": (
-                    "failed"
-                    if turn["terminal_outcome"] == "failed"
-                    else "interrupted"
-                    if turn["terminal_outcome"] in {"canceled", "not_written"}
-                    else "done"
-                ),
+                "terminal_status": _outcome_status(turn["terminal_outcome"]),
             }
         )
     # Sort by decoded emission microsecond (true cross-table order); the phase rank

@@ -345,38 +345,41 @@ class ClaudeAgent(BaseAgent):
 
         ``contained`` is #1202's classification: the service killed this Claude
         process itself. That branch is the whole point of the split. Emitting the
-        ordinary shape for it recorded a FAILED Turn, IM silent-terminal evidence
-        stamped ``failed``, and an ``agent_runs`` row terminalized from an empty
-        body -- provenance that contradicts the classification the caller already
-        made, and which #1202 only hid the bubble for. ``contained_teardown_output_for``
-        routes the release through the settlement lane instead, where the run lands
-        ``failed`` with ``interrupt_reason=backend_refresh``: still terminal, still
-        visible to anything reading the reason, but no longer indistinguishable from
-        a backend that actually broke.
+        ordinary shape for it recorded a FAILED Turn and an ``agent_runs`` row
+        terminalized from an empty body -- provenance that contradicts the
+        classification the caller already made, and which #1202 only hid the bubble
+        for. ``contained_teardown_output_for`` routes the release through the
+        settlement lane instead, where the run lands ``failed`` with
+        ``interrupt_reason=backend_refresh``: still terminal, still visible to
+        anything reading the reason, but no longer indistinguishable from a backend
+        that actually broke.
 
-        ``is_error`` is deliberately absent on that branch. It is the sidebar dot's
-        only input, and a runtime the service retired on purpose is not a session
-        the user should find sitting in a failed state with nothing shown to explain
-        it. The settlement carries the failure; the dot does not have to.
+        What does NOT change is ``is_error``. It carries no dot or sidebar state on
+        this path; inside the dispatcher's silent branch it feeds exactly three
+        things -- the collapsed status bubble's footer word, the durable Turn
+        outcome, and the IM silent-terminal trace -- and for all three "no terminal
+        result was produced" remains true no matter who killed the process. Clearing
+        it would collapse the bubble to a green ``done`` for a turn that answered
+        nothing.
+
+        The one thing suppressed is ``terminal_error``: with the flag set and no
+        diagnostic, the bubble reads ``stopped`` (an intentional silent end) rather
+        than ``failed``, which is exactly what this is. The settlement supplies the
+        machine-readable cause; the footer only has to stop claiming success.
         """
 
-        if contained:
-            await self.controller.emit_agent_message(
-                context,
-                "result",
-                "",
-                level="silent",
-                output=contained_teardown_output_for(request),
-            )
-            return
         await self.controller.emit_agent_message(
             context,
             "result",
             "",
             is_error=True,
             level="silent",
-            output=terminal_output_for(request),
-            terminal_error=diagnostic,
+            output=(
+                contained_teardown_output_for(request)
+                if contained
+                else terminal_output_for(request)
+            ),
+            terminal_error=None if contained else diagnostic,
         )
 
     def _release_service_runtime_turn(self, context: MessageContext) -> None:

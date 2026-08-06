@@ -31,6 +31,7 @@ from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USE
 from core.message_context import resolve_turn_sink_key
 from core.native_dispatch_phase import backend_dispatch_attempted
 from core.run_settlement import (
+    NON_COMPLETING_TURN_SETTLEMENTS,
     SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
@@ -6902,10 +6903,30 @@ class SessionTurnManager:
 
     @staticmethod
     def _durable_terminal_outcome(*, is_error: bool, settled_by: str | None) -> str:
+        """Map a release to the durable Turn outcome. The settlement wins.
+
+        A named settlement in ``SETTLEMENTS_WITHOUT_RESULT`` says the Turn ended
+        WITHOUT the backend producing a terminal result, so ``completed`` is never
+        truthful for one -- yet only ``stopped`` used to be excluded, which left
+        ``backend_refresh`` recording a retired runtime as a completed Turn. That is
+        the same event ``release_for_backend_refresh`` writes as ``canceled``
+        (``failed`` for a start it could not resolve), so the two paths for one
+        service-initiated teardown disagreed depending on which reached the row
+        first.
+
+        ``canceled`` rather than ``failed`` because the Turn was retired, not broken;
+        the RUN still settles ``failed`` with ``interrupt_reason=backend_refresh``
+        through ``SETTLEMENT_TERMINAL_STATUS``, so invariant 2 of
+        ``docs/plans/harness-run-reliability.md`` keeps its structured cause.
+        ``restarted`` is deliberately absent -- its call site already forces
+        ``failed`` before reaching here, and a service shutdown is not a cancellation.
+        """
+
+        non_completing = NON_COMPLETING_TURN_SETTLEMENTS.get(settled_by or "")
+        if non_completing is not None:
+            return non_completing
         if is_error:
             return "failed"
-        if settled_by == SETTLED_BY_STOPPED:
-            return "canceled"
         return "completed"
 
     def _finish_durable_terminal_result(

@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from sqlalchemy.exc import IntegrityError
 
+from core.run_settlement import NON_COMPLETING_TURN_SETTLEMENTS
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
@@ -472,12 +473,25 @@ def persist_agent_message(
         return None
 
 
-def persist_silent_terminal(context: MessageContext, *, is_error: bool) -> None:
+def persist_silent_terminal(
+    context: MessageContext,
+    *,
+    is_error: bool,
+    settled_by: str | None = None,
+) -> None:
     """Record reply-less IM terminal evidence outside the Message transcript.
 
     Durable Workbench turns settle through ``session_turns``. IM turns do not have
     that execution owner, so their empty/silent terminal result is retained as an
     append-only trace event for activity grouping and fork-boundary recovery.
+
+    ``settled_by`` names the release when the turn ended without the backend
+    producing a result, and it outranks ``is_error`` for the same reason it does on
+    a durable Turn: a runtime the service retired on purpose ended ``canceled``,
+    not ``failed``. Omitting the event entirely is NOT the alternative -- this row
+    IS the IM turn's boundary, so dropping it leaves the turn's tool activity
+    logically open, which ``list_turn_groups`` renders as a still-running card and
+    ``_latest_source_message_anchor`` reads as no fork boundary at all.
     """
 
     session_id = (context.platform_specific or {}).get("agent_session_id")
@@ -504,7 +518,10 @@ def persist_silent_terminal(context: MessageContext, *, is_error: bool) -> None:
                 event_type="silent_terminal",
                 visibility="trace",
                 metadata={
-                    "terminal_outcome": "failed" if is_error else "completed",
+                    "terminal_outcome": NON_COMPLETING_TURN_SETTLEMENTS.get(
+                        settled_by or "",
+                        "failed" if is_error else "completed",
+                    ),
                 },
                 agent_name=agent_name,
                 backend=backend,

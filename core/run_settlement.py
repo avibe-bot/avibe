@@ -231,6 +231,31 @@ SETTLEMENT_TERMINAL_STATUS: Final = {
     SETTLED_BY_INTERRUPTED: "failed",
 }
 
+
+# ----- which durable TURN outcome each settlement writes -------------------
+#
+# Separate from the map above because a Turn and a Run answer different
+# questions. The Run asks "did this unit of work succeed" — an infrastructure
+# interruption is a ``failed`` run with a structured cause. The Turn asks "how
+# did this execution end", and a runtime the service retired on purpose ended
+# ``canceled``, the same word ``release_for_backend_refresh`` writes when it
+# retires a live Turn directly. Recording ``failed`` there instead would make the
+# two paths for ONE teardown disagree depending on which reached the row first.
+#
+# Only settlements that end a Turn with no terminal result belong here; anything
+# absent falls through to the ordinary ``is_error`` mapping. ``restarted`` is
+# excluded on purpose — its call site forces ``failed`` before reaching the
+# mapper, because a service shutdown is not a cancellation — as is
+# ``no_terminal_result``, the pessimistic default a fallback releaser writes,
+# which is a genuine failure to produce a result rather than a deliberate stop.
+#: Shared by ``SessionTurnManager._durable_terminal_outcome`` (durable Workbench
+#: Turns) and ``persist_silent_terminal`` (the IM trace that stands in for one),
+#: so both surfaces describe the same settlement with the same word.
+NON_COMPLETING_TURN_SETTLEMENTS: Final = {
+    SETTLED_BY_STOPPED: "canceled",
+    SETTLED_BY_BACKEND_REFRESH: "canceled",
+}
+
 def covered(test_node: str) -> tuple[str, str]:
     """Declare the consuming test that proves one teardown matrix cell."""
 

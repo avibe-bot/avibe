@@ -15,6 +15,7 @@ from core.message_output import (
     stop_output_for,
 )
 from core.run_settlement import (
+    NON_COMPLETING_TURN_SETTLEMENTS,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
@@ -22,7 +23,9 @@ from core.run_settlement import (
     SETTLEMENT_TERMINAL_STATUS,
     SETTLEMENTS_WITHOUT_RESULT,
 )
+from core.session_turns import SessionTurnManager
 from modules.im import MessageContext
+from storage.agent_activity_service import _outcome_status
 
 
 class _StubSettingsManager:
@@ -449,7 +452,11 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
                 completes_run=False,
             )
 
-        persist.assert_called_once_with(context, is_error=False)
+        persist.assert_called_once_with(
+            context,
+            is_error=False,
+            settled_by=SETTLED_BY_TURN_ONLY_RESULT,
+        )
 
     async def test_stop_output_release_names_the_stop_and_records_no_run_terminal(self):
         """HFR-036: the synthetic result a user stop emits must NOT record the run.
@@ -489,13 +496,16 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         interruption, not a backend result.
 
         #1202 stopped these from being SHOWN as backend errors; the emit that
-        followed still described one — an ``is_error=True`` silent result, which the
-        dispatcher turned into a failed Turn, ``failed`` IM silent-terminal evidence,
-        and an ``agent_runs`` row terminalized from an empty body. Same fix shape as
-        the stop above: name the settlement so the lanes reach the writer that maps
-        ``backend_refresh`` to ``failed`` with a structured cause (invariant 2 of
-        ``docs/plans/harness-run-reliability.md``), and claim no run terminal so the
-        empty body never becomes the result.
+        followed still terminalized an ``agent_runs`` row from an empty body. Same
+        fix shape as the stop above: name the settlement so the lanes reach the
+        writer that maps ``backend_refresh`` to ``failed`` with a structured cause
+        (invariant 2 of ``docs/plans/harness-run-reliability.md``), and claim no run
+        terminal so the empty body never becomes the result.
+
+        The IM boundary is still written, unlike the stop above — an IM turn has no
+        durable execution owner, so this row is the ONLY thing that closes it — but
+        it is written with the settlement, so it records ``canceled`` rather than
+        asserting a backend fault.
         """
         controller = self._terminal_lifecycle_controller()
 
@@ -511,11 +521,61 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             settled_by=SETTLED_BY_BACKEND_REFRESH,
         )
         self.assertIn(SETTLED_BY_BACKEND_REFRESH, SETTLEMENTS_WITHOUT_RESULT)
-        # Still terminal, still failed — the cause is what changed, not the outcome.
+        # Still terminal, still a failed RUN — the cause is what changed.
         self.assertEqual(SETTLEMENT_TERMINAL_STATUS[SETTLED_BY_BACKEND_REFRESH], "failed")
+        # The TURN is canceled, not failed: retired, not broken.
+        self.assertEqual(
+            NON_COMPLETING_TURN_SETTLEMENTS[SETTLED_BY_BACKEND_REFRESH], "canceled"
+        )
         dispatcher._record_agent_run_terminal_result.assert_not_called()
-        # No silent-terminal trace: the empty body is a release, not backend evidence.
-        persist.assert_not_called()
+        persist.assert_called_once_with(
+            context,
+            is_error=False,
+            settled_by=SETTLED_BY_BACKEND_REFRESH,
+        )
+
+    def test_durable_turn_outcome_never_completes_a_result_less_settlement(self):
+        """The Turn-level half of #1204, at the mapper both surfaces share.
+
+        ``_durable_terminal_outcome`` special-cased ``stopped`` only, so a
+        ``backend_refresh`` release with no error flag recorded the durable Turn as
+        ``completed`` — a retired runtime reported as a finished answer, and a
+        straight contradiction of what ``release_for_backend_refresh`` writes for
+        the very same event.
+        """
+        outcome = SessionTurnManager._durable_terminal_outcome
+
+        self.assertEqual(
+            outcome(is_error=False, settled_by=SETTLED_BY_BACKEND_REFRESH), "canceled"
+        )
+        # The settlement outranks the flag: how the turn ended is not a function of
+        # whether a result was produced, and both agree it was retired.
+        self.assertEqual(
+            outcome(is_error=True, settled_by=SETTLED_BY_BACKEND_REFRESH), "canceled"
+        )
+        self.assertEqual(
+            outcome(is_error=False, settled_by=SETTLED_BY_STOPPED), "canceled"
+        )
+        # Unnamed releases are unchanged — this must not become a blanket override.
+        self.assertEqual(outcome(is_error=False, settled_by=None), "completed")
+        self.assertEqual(outcome(is_error=True, settled_by=None), "failed")
+        self.assertEqual(
+            outcome(is_error=False, settled_by=SETTLED_BY_TERMINAL_RESULT), "completed"
+        )
+
+    def test_activity_group_status_renders_a_canceled_boundary_as_interrupted(self):
+        """The IM trace and the durable Turn must not disagree on one settlement.
+
+        ``list_turn_groups`` already rendered a ``canceled`` durable Turn as
+        ``interrupted``; the silent marker that stands in for one on IM was mapped
+        with a separate two-way test that could only say ``failed`` or ``done``, so
+        the same teardown showed a green ``done`` chip there.
+        """
+        self.assertEqual(_outcome_status("canceled"), "interrupted")
+        self.assertEqual(_outcome_status("not_written"), "interrupted")
+        self.assertEqual(_outcome_status("failed"), "failed")
+        self.assertEqual(_outcome_status("completed"), "done")
+        self.assertEqual(_outcome_status(None), "done")
 
     async def test_slack_result_uses_native_markdown_sender_when_available(self):
         im_client = _NativeMarkdownIMClient()
