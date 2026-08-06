@@ -164,6 +164,82 @@ def test_private_show_page_login_freezes_target_in_authorize_and_handshake(
     assert stored["show_page_id"] == "session-one"
 
 
+def test_existing_broader_session_reauthorization_stops_when_grant_is_missing(
+    monkeypatch,
+    tmp_path,
+):
+    from core.show_pages import ShowPageStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    store = ShowPageStore()
+    try:
+        store.ensure("session-one")
+    finally:
+        store.close()
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "guest@example.com",
+            "guest-1",
+            role="editor",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    start = client.get(
+        "/show/session-one/__show/me",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+    authorize_params = httpx.URL(start.headers["Location"]).params
+    state = authorize_params["state"]
+    state_payload = ui_server._read_oauth_state(
+        config.remote_access.vibe_cloud.session_secret,
+        state,
+    )
+    assert state_payload is not None
+    nonce = remote_access._oauth_handshakes[state_payload["r"]]["nonce"]
+    monkeypatch.setattr(
+        remote_access,
+        "exchange_oauth_code",
+        lambda *args, **kwargs: {
+            "claims": {
+                "email": "guest@example.com",
+                "sub": "guest-1",
+                "nonce": nonce,
+            },
+            "session_claims": {
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "editor",
+                "vibe_instance_access_source": "email",
+            },
+        },
+    )
+
+    callback = client.get(
+        f"/auth/callback?code=test-code&state={state}",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+    assert callback.status_code == 302
+    assert ui_server.REMOTE_SHOW_PAGE_REAUTH_PARAM in callback.headers["Location"]
+
+    denied = client.get(
+        callback.headers["Location"],
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+    assert denied.status_code == 404
+    assert "Location" not in denied.headers
+
+
 def test_show_page_email_session_is_confined_to_its_signed_route(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -2174,6 +2250,96 @@ def test_remote_owner_can_still_read_authorized_session_history(
     assert [row["text"] for row in response.get_json()["messages"]] == [
         "readable history"
     ]
+
+
+def test_signed_show_page_entitlement_does_not_bypass_session_history_acl(
+    monkeypatch,
+    tmp_path,
+):
+    from core.show_pages import ShowPageStore
+    from storage import (
+        messages_service,
+        project_access_service,
+        projects_service,
+        workbench_sessions_service,
+    )
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "page-entitlement-project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(conn, str(project_dir))
+        applied = project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": project["id"],
+                "organization_id": "org-1",
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "organization_group",
+                        "principal_value": "group-engineering",
+                        "access_role": "viewer",
+                    }
+                ],
+            },
+        )
+        assert applied.outcome == "applied"
+        session = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="codex",
+            agent_name="owner-worker",
+        )
+        messages_service.append(
+            conn,
+            scope_id=project["scope_id"],
+            session_id=session["id"],
+            platform="avibe",
+            author="user",
+            message_type="user",
+            text="owner-only transcript",
+        )
+    show_pages = ShowPageStore()
+    try:
+        show_pages.ensure(session["id"])
+    finally:
+        show_pages.close()
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "guest@example.com",
+            "guest-1",
+            session_claims={
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "editor",
+                "vibe_instance_access_source": "organization_group",
+                "vibe_organization_id": "org-1",
+                "vibe_organization_member_id": "member-guest-1",
+                "vibe_organization_role": "member",
+                "vibe_group_ids": ["group-sales"],
+                "vibe_show_page_id": session["id"],
+            },
+        ),
+        domain="alex.avibe.bot",
+    )
+    response = client.get(
+        f"/api/sessions/{session['id']}/messages",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"ok": False, "error": "not_found"}
 
 
 def test_remote_viewer_can_read_but_cannot_use_management_api(monkeypatch, tmp_path):

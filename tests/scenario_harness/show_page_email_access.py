@@ -92,7 +92,30 @@ class ShowPageEmailAccessScenarioHarness:
             "nonce": handshake["nonce"],
         }
 
-    def complete_login(self, handshake: dict[str, str]):
+    def seed_broader_session(self) -> None:
+        cookie = remote_access.make_session_cookie(
+            self.config,
+            "guest@example.com",
+            "guest-1",
+            session_claims={
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "editor",
+                "vibe_instance_access_source": "email",
+            },
+        )
+        self.client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            cookie,
+            domain="alex.avibe.bot",
+        )
+
+    def complete_login(
+        self,
+        handshake: dict[str, str],
+        *,
+        instance_role: str = "viewer",
+        access_source: str = "show_page_email",
+    ):
         show_page_id = handshake["show_page_id"]
         exchange_result = {
             "claims": {
@@ -102,8 +125,8 @@ class ShowPageEmailAccessScenarioHarness:
             },
             "session_claims": {
                 "vibe_instance_id": "inst_123",
-                "vibe_instance_role": "viewer",
-                "vibe_instance_access_source": "show_page_email",
+                "vibe_instance_role": instance_role,
+                "vibe_instance_access_source": access_source,
                 "vibe_show_page_id": show_page_id,
             },
         }

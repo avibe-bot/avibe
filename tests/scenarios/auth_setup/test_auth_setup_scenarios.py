@@ -67,6 +67,23 @@ class ShowPageEmailAccessScenarioTests(unittest.TestCase):
         self.assertEqual(other.get_json()["error"], "show_page_access_forbidden")
         self.assertEqual(api.status_code, 403)
 
+        self.harness.seed_broader_session()
+        existing_session_handshake = self.harness.begin_login("session-one")
+        existing_session_callback = self.harness.complete_login(
+            existing_session_handshake,
+            instance_role="editor",
+            access_source="email",
+        )
+        self.assertEqual(existing_session_callback.status_code, 302)
+        self.assertEqual(
+            existing_session_callback.headers["Location"],
+            existing_session_handshake["next_path"],
+        )
+        self.assertEqual(
+            self.harness.get(existing_session_handshake["next_path"]).status_code,
+            200,
+        )
+
 
 class _FakeNextTurnRuntime:
     def __init__(self):

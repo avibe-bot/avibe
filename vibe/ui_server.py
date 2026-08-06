@@ -167,6 +167,7 @@ VAULT_SANDBOX_PERMISSIONS_POLICY = (
 )
 REMOTE_OAUTH_COOKIE_NAME = "__Host-vibe_remote_oauth"
 REMOTE_OAUTH_RETRY_PARAM = "__vibe_oauth_retry"
+REMOTE_SHOW_PAGE_REAUTH_PARAM = "__vibe_show_page_reauth"
 # Lifetime of the short-lived OAuth handshake (signed state + PKCE cookie). The
 # cookie MUST carry an explicit Max-Age: iOS standalone PWAs drop session-scoped
 # cookies (no Max-Age) across the cross-origin authorize excursion / app
@@ -1646,6 +1647,27 @@ def _add_oauth_retry_param(value: str) -> str:
     return urlunsplit(("", "", parsed.path or "/", urlencode(params), ""))
 
 
+def _strip_show_page_reauth_param(value: str) -> str:
+    target = _safe_remote_redirect_target(value)
+    parsed = urlsplit(target)
+    query = urlencode(
+        [
+            (key, val)
+            for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+            if key != REMOTE_SHOW_PAGE_REAUTH_PARAM
+        ]
+    )
+    return urlunsplit(("", "", parsed.path or "/", query, ""))
+
+
+def _add_show_page_reauth_param(value: str) -> str:
+    target = _strip_show_page_reauth_param(value)
+    parsed = urlsplit(target)
+    params = parse_qsl(parsed.query, keep_blank_values=True)
+    params.append((REMOTE_SHOW_PAGE_REAUTH_PARAM, "1"))
+    return urlunsplit(("", "", parsed.path or "/", urlencode(params), ""))
+
+
 def _oauth_callback_arg(name: str) -> str | None:
     return request.args.get(name) or request.args.get(f"amp;{name}")
 
@@ -1662,7 +1684,11 @@ def _show_page_id_from_private_route(path: str) -> str | None:
         return None
 
 
-def _redirect_to_vibe_cloud_login(config: V2Config):
+def _redirect_to_vibe_cloud_login(
+    config: V2Config,
+    *,
+    show_page_reauth: bool = False,
+):
     from vibe import remote_access
 
     cloud = config.remote_access.vibe_cloud
@@ -1670,7 +1696,9 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     raw_next = request.full_path if request.query_string else request.path
-    next_target = _strip_oauth_retry_param(raw_next)
+    next_target = _strip_show_page_reauth_param(_strip_oauth_retry_param(raw_next))
+    if show_page_reauth:
+        next_target = _add_show_page_reauth_param(next_target)
     show_page_id = _show_page_id_from_private_route(request.path)
     rid = secrets.token_urlsafe(18)
     state = _make_oauth_state(
@@ -2207,7 +2235,22 @@ def enforce_remote_access_cookie():
                     return _auth_rate_limit_response()
                 return _redirect_to_vibe_cloud_login(config)
             return jsonify({"ok": False, "error": "remote_access_authorization_refresh_required"}), 401
-        g.authorization_context = context_from_session_payload(payload)
+        context = context_from_session_payload(payload)
+        if request.method == "GET" and context.instance_access_source != "show_page_email":
+            show_page_id = _show_page_id_from_private_route(request.path)
+            if show_page_id is not None:
+                resource_allowed = context.can_use_show_page(
+                    show_page_id
+                ) or _show_page_resource_access_allowed(context, show_page_id)
+                reauth_attempted = request.args.get(REMOTE_SHOW_PAGE_REAUTH_PARAM) == "1"
+                raw_next = request.full_path if request.query_string else request.path
+                if reauth_attempted and resource_allowed:
+                    return redirect(_strip_show_page_reauth_param(raw_next))
+                if not reauth_attempted and not resource_allowed:
+                    if _auth_rate_limited():
+                        return _auth_rate_limit_response()
+                    return _redirect_to_vibe_cloud_login(config, show_page_reauth=True)
+        g.authorization_context = context
         g.remote_session_payload = payload
         g.remote_authorization_refresh_at = remote_access.session_authorization_refresh_deadline(payload)
         if remote_access.session_needs_renewal(payload):
@@ -2461,9 +2504,9 @@ async def enforce_remote_local_execution_boundary():
 _PROJECT_RESOURCE_PATHS = (
     ("project", re.compile(r"^/api/projects/([^/]+)(?:/agents-md)?$")),
     ("session", re.compile(r"^/api/sessions/([^/]+)(?:/.*)?$")),
-    ("session", re.compile(r"^/api/show-pages/([^/]+)(?:/.*)?$")),
-    ("session", re.compile(r"^/api/show/sessions/([^/]+)(?:/.*)?$")),
-    ("session", re.compile(r"^/show/([^/]+)(?:/.*)?$")),
+    ("show_page", re.compile(r"^/api/show-pages/([^/]+)(?:/.*)?$")),
+    ("show_page", re.compile(r"^/api/show/sessions/([^/]+)(?:/.*)?$")),
+    ("show_page", re.compile(r"^/show/([^/]+)(?:/.*)?$")),
 )
 
 
@@ -2496,7 +2539,7 @@ def enforce_project_role_capabilities():
         return None
 
     kind, resource_id = resource
-    if kind == "session" and context.can_use_show_page(resource_id):
+    if kind == "show_page" and context.can_use_show_page(resource_id):
         return None
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -6172,6 +6215,11 @@ def remote_access_auth_callback():
             or session_claims.get("vibe_show_page_id") != expected_show_page_id
         ):
             raise remote_access.OAuthCodeExchangeError("invalid_show_page_id")
+        if (
+            isinstance(expected_show_page_id, str)
+            and session_claims.get("vibe_show_page_id") == expected_show_page_id
+        ):
+            next_target = _strip_show_page_reauth_param(next_target)
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
         reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__

@@ -224,7 +224,16 @@ def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, t
     assert {item["session_id"] for item in catalog.get_json()["pages"]} == {"ses-public", "ses-scope"}
     assert mutation.status_code == 403
     assert mutation.get_json()["code"] == "resource_access_forbidden"
-    assert page.status_code == 403
+    assert page.status_code == 302
+    assert "show_page_id=ses-private" in page.headers["Location"]
+
+    reauth_result = client.get(
+        "/show/ses-private/?__vibe_show_page_reauth=1",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+    assert reauth_result.status_code == 403
 
 
 def test_remote_show_page_creation_defaults_private_and_org_public_does_not_share(monkeypatch, tmp_path) -> None:

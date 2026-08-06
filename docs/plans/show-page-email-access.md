@@ -20,6 +20,12 @@ Anonymous Public links remain an independent sharing switch.
 - When a broader user also has the target ShowPage email grant, the broader
   source and role remain unchanged while the signed `vibe_show_page_id` is
   retained as an independent exact-page entitlement.
+- The exact-page entitlement bypass applies only to ShowPage routes and
+  ShowPage-specific APIs. Generic Session APIs still require their normal
+  Project/session ACL so a page grant cannot expose the owner's transcript.
+- A broader browser session that predates a page grant reauthorizes once when
+  the requested ShowPage is otherwise forbidden, allowing the control plane to
+  refresh the signed exact-page entitlement without requiring logout.
 - A `show_page_email` browser session may serve only the exact
   `/show/<vibe_show_page_id>` route subtree and required public static assets.
   Workbench, Chat, other Sessions, Agents, files, Cloud capabilities, APIs, and
