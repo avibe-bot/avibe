@@ -3857,6 +3857,27 @@ scenarios:
     # than the late receipt and must clear stale UI working state, not surface a
     # false transport failure banner. A genuinely unresolved Stop remains 409.
     test: tests/test_internal_server.py::test_cancel_accepts_terminal_settlement_that_races_the_stop_receipt
+  - id: HFR-432
+    name: an OpenCode steer accepted at the native terminal boundary is refused honestly
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: opencode
+    # prompt_async returns 204 after persisting the user message, but the old
+    # native Turn may finish before it can consume that message. The adapter
+    # waits for the terminal status transition and refuses the steer when no
+    # same-turn continuation remains, leaving the durable FIFO fallback intact.
+    test: tests/test_agent_steering.py::test_opencode_rejects_write_that_arrives_after_native_turn_ended
+  - id: HFR-433
+    name: a Claude steered Assistant response owns the following terminal result
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: claude
+    # The accepted steering barrier suppresses only a buffered pre-steer result.
+    # Once the receiver has emitted Assistant text in the current generation,
+    # its ResultMessage is the real continuation and must settle the pending Turn.
+    test: tests/test_claude_agent_sessions.py::test_steered_assistant_and_result_settle_the_pending_turn
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
