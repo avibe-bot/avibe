@@ -1251,6 +1251,56 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
             reason="failed",
         )
 
+    async def test_user_stop_collapses_status_as_stopped(self):
+        """A turn the user called off is not a turn that succeeded.
+
+        The footer word was derived from ``is_error`` alone, and a stop emits with
+        that flag CLEAR -- correctly, nobody's backend broke. So the last thing the
+        user saw after pressing Stop was a green ``✅ done`` on a turn that never
+        answered. The settlement is the fact that contradicts it, exactly as it does
+        on the Turn-outcome and sidebar surfaces.
+        """
+
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        context = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                level="silent",
+                output=stop_output_for(None),
+            )
+
+        dispatcher._collapse_status_bubble.assert_awaited_once_with(
+            context,
+            controller.im_client,
+            reason="stopped",
+        )
+
+    async def test_silent_success_still_collapses_as_done(self):
+        """The negative control, on the same call site the stop test asserts.
+
+        A silent turn that simply chose not to speak (a ``<silent>`` reply) carries
+        no settlement and no error, and must keep the green word. Only membership in
+        ``SETTLEMENTS_WITHOUT_RESULT`` takes it away.
+        """
+
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        context = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(context, "result", "", level="silent")
+
+        dispatcher._collapse_status_bubble.assert_awaited_once_with(
+            context,
+            controller.im_client,
+            reason="done",
+        )
+
     async def test_notify_does_not_settle_dot(self):
         controller = _AvibeStatusController()
         dispatcher = ConsolidatedMessageDispatcher(controller)

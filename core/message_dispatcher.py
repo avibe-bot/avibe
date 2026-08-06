@@ -40,6 +40,7 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
+    SETTLEMENTS_WITHOUT_RESULT,
 )
 from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
@@ -1902,7 +1903,17 @@ class ConsolidatedMessageDispatcher:
         # a clean turn is "done" (✅); a failure is "stopped" (⏹) when it was an
         # intentional silent stop (e.g. user stop), else "failed" (⏹). An explicit
         # diagnostic distinguishes a silent backend failure from a silent stop.
-        if not is_error:
+        #
+        # The settlement outranks ``is_error`` here, as it already does on every
+        # other terminal surface. A user Stop is not an error -- nobody's backend
+        # broke -- so it emits with the flag CLEAR, and reading the flag alone put
+        # a green ``✅ done`` on a turn the user called off before it answered.
+        # ``SETTLEMENTS_WITHOUT_RESULT`` is the existing "no terminal result will
+        # ever arrive for this run" set, which is exactly the condition that
+        # forbids the word ``done``; membership is tested rather than naming
+        # ``stopped``, so a future settlement in that set cannot regress to a
+        # green footer by being forgotten here.
+        if not is_error and output_semantics.settled_by not in SETTLEMENTS_WITHOUT_RESULT:
             terminal_reason = "done"
         elif level == "silent" and terminal_error is None:
             terminal_reason = "stopped"
