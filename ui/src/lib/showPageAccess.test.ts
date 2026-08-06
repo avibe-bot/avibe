@@ -4,6 +4,7 @@ import { isRevisionConflict, OrganizationApiError } from '@/features/organizatio
 import {
   buildShowPageAccessPatch,
   canChangeShowPagePublicLink,
+  showPageShareCapabilities,
   showPageHeaderAccess,
   showPageAudienceLabelKey,
   showPageAudienceLevels,
@@ -65,6 +66,21 @@ describe('Show Page access policy helpers', () => {
     expect(canChangeShowPagePublicLink(manager, false)).toBe(true);
     expect(canChangeShowPagePublicLink(manager, true)).toBe(false);
     expect(canChangeShowPagePublicLink(access(), true)).toBe(true);
+  });
+
+  it('lets an access-only manager revoke a Public link without reading its payload', () => {
+    const manager = access({
+      can_use: false,
+      can_publish_public: false,
+      public_link_enabled: true,
+    });
+
+    expect(showPageShareCapabilities(manager)).toEqual({
+      canReadPayload: false,
+      canRevokePublicLinkWithoutPayload: true,
+    });
+    expect(canChangeShowPagePublicLink(manager, false)).toBe(true);
+    expect(canChangeShowPagePublicLink(manager, true)).toBe(false);
   });
 
   it('separates page use from page-specific access management in the chat header', () => {

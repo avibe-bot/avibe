@@ -14,6 +14,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Select } from '@/components/ui/select';
 import {
   isRevisionConflict,
@@ -27,7 +28,10 @@ import type {
   OrganizationResource,
   ResourceAccessLevel,
 } from '@/features/organization/api/types';
-import { organizationAuthorizationReturnPath } from '@/features/organization/policy';
+import {
+  organizationAuthorizationReturnPath,
+  requiresResourceAccessNarrowingConfirmation,
+} from '@/features/organization/policy';
 import {
   buildShowPageAccessPatch,
   showPageAudienceLabelKey,
@@ -75,10 +79,12 @@ export function ShowPageWorkspaceAccessControl({
   access,
   active,
   sessionId,
+  onConfirmationOpenChange,
 }: {
   access: ShowPageAccess | null;
   active: boolean;
   sessionId: string;
+  onConfirmationOpenChange?: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
   const [gate, setGate] = useState<ManagementGate>('idle');
@@ -87,11 +93,16 @@ export function ShowPageWorkspaceAccessControl({
   const [level, setLevel] = useState<ResourceAccessLevel>(access?.access_level ?? 'private');
   const [groupIds, setGroupIds] = useState<string[]>(access?.group_ids ?? []);
   const [saving, setSaving] = useState(false);
+  const [confirmNarrowing, setConfirmNarrowing] = useState(false);
   const generationRef = useRef(0);
 
   const organizationId = access?.organization_id ?? null;
   const instanceId = access?.instance_id ?? null;
   const canManage = access?.can_manage === true;
+  const setNarrowingConfirmationOpen = useCallback((next: boolean) => {
+    setConfirmNarrowing(next);
+    onConfirmationOpenChange?.(next);
+  }, [onConfirmationOpenChange]);
 
   const accessPath = useMemo(() => {
     if (!organizationId || !instanceId) return null;
@@ -139,6 +150,7 @@ export function ShowPageWorkspaceAccessControl({
     setGroups([]);
     setLevel(access?.access_level ?? 'private');
     setGroupIds(access?.group_ids ?? []);
+    setNarrowingConfirmationOpen(false);
     setGate('idle');
     if (active && access?.mode === 'organization' && access.can_manage) {
       void loadManagement();
@@ -146,7 +158,7 @@ export function ShowPageWorkspaceAccessControl({
     return () => {
       generationRef.current += 1;
     };
-  }, [access, active, loadManagement]);
+  }, [access, active, loadManagement, setNarrowingConfirmationOpen]);
 
   const visibleGroups = groups.filter((group) => !group.archived_at || groupIds.includes(group.id));
   const toggleGroup = (group: OrganizationGroup) => {
@@ -170,7 +182,7 @@ export function ShowPageWorkspaceAccessControl({
   );
   const editable = access?.mode === 'organization' && canManage && gate === 'ready' && !saving;
 
-  const save = async () => {
+  const commit = async () => {
     if (!accessPath || !patch || !dirty || !editable) return;
     setSaving(true);
     try {
@@ -186,7 +198,22 @@ export function ShowPageWorkspaceAccessControl({
       setGate(isRevisionConflict(error) ? 'conflict' : gateForError(error));
     } finally {
       setSaving(false);
+      setNarrowingConfirmationOpen(false);
     }
+  };
+
+  const save = () => {
+    if (!patch || !dirty || !editable) return;
+    if (requiresResourceAccessNarrowingConfirmation(
+      currentLevel,
+      currentGroupIds,
+      patch.access_level,
+      patch.group_ids,
+    )) {
+      setNarrowingConfirmationOpen(true);
+      return;
+    }
+    void commit();
   };
 
   const startAuthorization = async () => {
@@ -215,7 +242,8 @@ export function ShowPageWorkspaceAccessControl({
   const syncPresentation = resource ? showPageSyncPresentation(resource.sync.status) : null;
 
   return (
-    <section className="space-y-2.5" aria-label={t('chat.showPage.workspaceAccess')}>
+    <>
+      <section className="space-y-2.5" aria-label={t('chat.showPage.workspaceAccess')}>
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="text-sm font-medium">{t('chat.showPage.workspaceAccess')}</div>
@@ -366,13 +394,22 @@ export function ShowPageWorkspaceAccessControl({
             variant="outline"
             className="h-7"
             disabled={!dirty || !patch || saving}
-            onClick={() => void save()}
+            onClick={save}
           >
             {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
             {t('chat.showPage.applyWorkspaceAccess')}
           </Button>
         </div>
       ) : null}
-    </section>
+      </section>
+      <ConfirmDialog
+        open={confirmNarrowing}
+        onOpenChange={setNarrowingConfirmationOpen}
+        title={t('organization.resources.narrowTitle')}
+        description={t('organization.resources.narrowBody')}
+        confirmLabel={t('organization.actions.saveChanges')}
+        onConfirm={commit}
+      />
+    </>
   );
 }

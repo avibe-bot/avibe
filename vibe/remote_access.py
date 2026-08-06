@@ -1323,7 +1323,7 @@ def _sync_one_organization(
     acknowledged = 0
     skipped = 0
     ack_errors = 0
-    narrowed_resource_kinds: set[str] = set()
+    affected_resource_kinds: set[str] = set()
     engine = get_cached_sqlite_engine()
     for raw_intent in intents:
         try:
@@ -1363,8 +1363,6 @@ def _sync_one_organization(
                         outcome["policy"],
                     )
                 )
-                if policy_narrowed:
-                    narrowed_resource_kinds.add(resource_kind)
                 if resource_kind == "vault_secret" and outcome["status"] == "applied":
                     from storage import vault_service
 
@@ -1379,6 +1377,7 @@ def _sync_one_organization(
                 if release_key is not None:
                     release_scopes = _load_pending_vault_release_scopes(connection, release_key)
             if outcome["status"] == "applied":
+                affected_resource_kinds.add(resource_kind)
                 applied += 1
             if release_scopes:
                 try:
@@ -1441,14 +1440,14 @@ def _sync_one_organization(
         except Exception:
             logger.warning("failed to clear published empty resource organization", exc_info=True)
             ack_errors += 1
-    if narrowed_resource_kinds:
+    if affected_resource_kinds:
         from vibe.sse_broker import broker
 
         broker.publish(
             "authorization.changed",
             {
                 "project_ids": [],
-                "resource_kinds": sorted(narrowed_resource_kinds),
+                "resource_kinds": sorted(affected_resource_kinds),
             },
         )
     return {

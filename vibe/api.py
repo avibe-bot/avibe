@@ -1195,14 +1195,30 @@ def set_show_page_visibility(session_id: str, visibility: str) -> dict:
     route layer maps to a 4xx response.
     """
     from core.show_pages import ShowPageStore, show_page_payload
+    from storage import resource_access_service
 
     config = V2Config.load()
+    context = resource_access_service.resolve_resource_access_context()
     store = ShowPageStore()
     try:
         updated = store.update_visibility(session_id, visibility)
-        payload = show_page_payload(updated, config=config)
+        with store.engine.connect() as connection:
+            can_use = resource_access_service.can_use_resource(
+                context,
+                "show_page",
+                session_id,
+                connection=connection,
+            )
+        payload = show_page_payload(updated, config=config) if can_use else None
     finally:
         store.close()
+    if payload is None:
+        # Audience managers may revoke an anonymous link without page-use
+        # access. Do not return page paths, URLs, share IDs, or session metadata.
+        return {
+            "ok": True,
+            "public_link_enabled": updated.visibility == "public",
+        }
     return {"ok": True, **_apply_session_meta([payload])[0]}
 
 

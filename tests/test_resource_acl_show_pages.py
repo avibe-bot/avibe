@@ -244,8 +244,45 @@ def test_remote_organization_admin_can_restrict_pages_without_use_access(monkeyp
         with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
             store.require_access("ses-scope", user_context=admin)
         assert store.update_visibility("ses-scope", "offline", user_context=admin).visibility == "offline"
+        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+            store.update_visibility("ses-scope", "private", user_context=admin)
+        restored = store.update_visibility(
+            "ses-scope",
+            "private",
+            user_context=_organization_context("owner-1", instance_role="viewer"),
+        )
+        assert restored.visibility == "private"
     finally:
         store.close()
+
+
+def test_access_only_manager_visibility_response_does_not_expose_page_payload(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    store = _seed_show_pages_with_policies()
+    admin = _organization_context(
+        "admin-1",
+        group_ids=frozenset({"group-sales"}),
+        organization_role="admin",
+        instance_role="viewer",
+    )
+    try:
+        store.update_visibility(
+            "ses-private",
+            "public",
+            user_context=_organization_context("owner-1", instance_role="viewer"),
+        )
+    finally:
+        store.close()
+    monkeypatch.setattr(
+        resource_access_service,
+        "resolve_resource_access_context",
+        lambda _value=None: admin,
+    )
+
+    result = api.set_show_page_visibility("ses-private", "private")
+
+    assert result == {"ok": True, "public_link_enabled": False}
 
 
 def test_remote_show_page_owner_can_control_sharing_without_instance_owner_role(monkeypatch, tmp_path) -> None:
@@ -309,6 +346,11 @@ def test_remote_show_page_owner_mutations_reach_resource_acl_as_viewer(monkeypat
         "environ_base": _remote_peer(),
     }
 
+    ensured = client.post(
+        f"/api/show-pages/{session_id}/ensure",
+        json={},
+        **request_options,
+    )
     published = client.post(
         f"/api/show-pages/{session_id}/visibility",
         json={"visibility": "public"},
@@ -325,6 +367,8 @@ def test_remote_show_page_owner_mutations_reach_resource_acl_as_viewer(monkeypat
         **request_options,
     )
 
+    assert ensured.status_code == 200
+    assert ensured.get_json()["existed"] is True
     assert published.status_code == 200
     assert rotated.status_code == 200
     assert customized.status_code == 200

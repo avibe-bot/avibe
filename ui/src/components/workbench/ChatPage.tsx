@@ -164,6 +164,7 @@ export const ChatPage: React.FC = () => {
     sessionId: string;
     access: ShowPageAccess | null;
   } | null>(null);
+  const showPageAccessProbeGenerationRef = useRef(0);
   const showPageAccess = capabilities.can_use_show_pages
     && showPageAccessResult?.sessionId === sessionId
     ? showPageAccessResult?.access ?? null
@@ -217,18 +218,24 @@ export const ChatPage: React.FC = () => {
   // show the stale enabled/mode and could send control messages to the freshly
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
   const annotation = useShowPageAnnotation(showPageMode ? showPageUrl : null);
+  const probeShowPageAccess = useCallback(async (targetSessionId: string) => {
+    const generation = ++showPageAccessProbeGenerationRef.current;
+    try {
+      const nextAccess = await api.probeShowPageAccess(targetSessionId);
+      if (generation !== showPageAccessProbeGenerationRef.current) return;
+      setShowPageAccessResult({ sessionId: targetSessionId, access: nextAccess });
+    } catch {
+      if (generation !== showPageAccessProbeGenerationRef.current) return;
+      setShowPageAccessResult({ sessionId: targetSessionId, access: null });
+    }
+  }, [api]);
   useEffect(() => {
-    let cancelled = false;
     if (!sessionId || !capabilities.can_use_show_pages) return undefined;
-    void api.probeShowPageAccess(sessionId).then((nextAccess) => {
-      if (!cancelled) setShowPageAccessResult({ sessionId, access: nextAccess });
-    }).catch(() => {
-      if (!cancelled) setShowPageAccessResult({ sessionId, access: null });
-    });
+    void probeShowPageAccess(sessionId);
     return () => {
-      cancelled = true;
+      showPageAccessProbeGenerationRef.current += 1;
     };
-  }, [api, capabilities.can_use_show_pages, sessionId]);
+  }, [capabilities.can_use_show_pages, probeShowPageAccess, sessionId]);
 
   useEffect(() => {
     // ChatPage is reused across :sessionId — clear all show-page state so the
@@ -1127,9 +1134,12 @@ export const ChatPage: React.FC = () => {
         void syncTurnState({ quiet: true });
         void refreshSessionRowUntilNativeBound();
       },
-      onAuthorizationChanged: () => {
+      onAuthorizationChanged: (data) => {
         const currentSessionId = sessionIdRef.current;
         if (!currentSessionId) return;
+        if (data.resource_kinds?.includes('show_page')) {
+          void probeShowPageAccess(currentSessionId);
+        }
         setSessionCanChat(false);
         void api.getSession(currentSessionId, { cache: false })
           .then((nextSession) => {
@@ -1149,7 +1159,7 @@ export const ChatPage: React.FC = () => {
       },
     });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refresh, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
+  }, [api, sessionId, appendMessage, reconcile, refresh, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive, probeShowPageAccess]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -2494,6 +2504,7 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
           </Button>}
           {canManageShowPage && (showPageMode || showPageAccess) && (
             <ShowPageShareControl
+              key={session.id}
               sessionId={session.id}
               initialAccess={showPageAccess}
               onPayloadChange={onShowPageVisibilityChange}

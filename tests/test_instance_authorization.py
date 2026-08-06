@@ -96,7 +96,7 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("POST", "/api/show-pages/ses-1/visibility") == "viewer"
     assert required_instance_role("POST", "/api/show-pages/ses-1/rotate-share") == "viewer"
     assert required_instance_role("POST", "/api/show-pages/ses-1/share-id") == "viewer"
-    assert required_instance_role("POST", "/api/show-pages/ses-1/ensure") == "owner"
+    assert required_instance_role("POST", "/api/show-pages/ses-1/ensure") == "viewer"
     assert required_instance_role("GET", "/api/config") == "viewer"
     assert required_instance_role("GET", "/api/workbench/prefs") == "viewer"
     assert required_instance_role("PUT", "/api/workbench/prefs") == "owner"

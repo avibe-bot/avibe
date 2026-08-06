@@ -13,6 +13,7 @@ import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/plat
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import {
   canChangeShowPagePublicLink,
+  showPageShareCapabilities,
   type ShowPageAccess,
 } from '../../lib/showPageAccess';
 import { ShowPageShareIdField } from './ShowPageShareIdField';
@@ -30,7 +31,8 @@ type ShowPagePayload = ShowPageLinkInfo & {
 
 // Share affordance for the current session's Show Page. Resource managers may
 // open the audience controls without receiving access to the page content;
-// public-link and link actions render only when the caller can use the page.
+// page links render only when the caller can use the page; an access-only
+// manager receives a metadata-only control for revoking an existing public link.
 export const ShowPageShareControl: React.FC<{
   sessionId: string;
   initialAccess?: ShowPageAccess | null;
@@ -48,6 +50,7 @@ export const ShowPageShareControl: React.FC<{
   const { pages, mergePage, reload } = useShowPageInventory();
   const inventoryPage = pages.find((page) => page.session_id === sessionId);
   const [open, setOpen] = useState(false);
+  const [workspaceConfirmationOpen, setWorkspaceConfirmationOpen] = useState(false);
   const [localPayload, setLocalPayload] = useState<ShowPagePayload | null>(null);
   const candidatePayload = useMemo<ShowPagePayload | null>(() => {
     const local = localPayload?.session_id === sessionId ? localPayload : null;
@@ -71,7 +74,8 @@ export const ShowPageShareControl: React.FC<{
   const [loading, setLoading] = useState(false);
   const [accessLoading, setAccessLoading] = useState(false);
   const [access, setAccess] = useState<ShowPageAccess | null>(initialAccess);
-  const payload = access?.can_use === false ? null : candidatePayload;
+  const shareCapabilities = showPageShareCapabilities(access);
+  const payload = shareCapabilities.canReadPayload ? candidatePayload : null;
   const [accessError, setAccessError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -167,6 +171,7 @@ export const ShowPageShareControl: React.FC<{
 
   const handleOpenChange = (next: boolean) => {
     setOpen(next);
+    if (!next) setWorkspaceConfirmationOpen(false);
     onOpenChange?.(next);
     if (next) refresh();
   };
@@ -182,6 +187,24 @@ export const ShowPageShareControl: React.FC<{
         setAccess((current) => current ? {
           ...current,
           public_link_enabled: next === 'public',
+        } : current);
+        reqSeq.current += 1;
+      })
+      .catch(() => undefined)
+      .finally(() => setBusy(false));
+  };
+
+  const revokePublicLinkWithoutPayload = () => {
+    if (!shareCapabilities.canRevokePublicLinkWithoutPayload) return;
+    setBusy(true);
+    api
+      .setShowPageVisibility(sessionId, 'private')
+      .then(() => {
+        // Do not retain the mutation payload: this manager can revoke anonymous
+        // access but cannot read the page, its link, or its share identifier.
+        setAccess((current) => current ? {
+          ...current,
+          public_link_enabled: false,
         } : current);
         reqSeq.current += 1;
       })
@@ -232,7 +255,13 @@ export const ShowPageShareControl: React.FC<{
           <Share2 className="size-3.5" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80 space-y-3">
+      <PopoverContent
+        align="end"
+        className="w-80 space-y-3"
+        onInteractOutside={(event) => {
+          if (workspaceConfirmationOpen) event.preventDefault();
+        }}
+      >
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
 
         {loading && !access ? (
@@ -306,6 +335,7 @@ export const ShowPageShareControl: React.FC<{
             access={access}
             active={open}
             sessionId={sessionId}
+            onConfirmationOpenChange={setWorkspaceConfirmationOpen}
           />
           {accessError ? (
             <p className="mt-2 text-[11px] leading-snug text-destructive">
@@ -313,6 +343,34 @@ export const ShowPageShareControl: React.FC<{
             </p>
           ) : null}
         </div>
+
+        {shareCapabilities.canRevokePublicLinkWithoutPayload ? (
+          <div className="border-t border-border pt-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{t('chat.showPage.publicLink')}</div>
+                <p className="mt-0.5 text-[11px] leading-snug text-muted">
+                  {t('chat.showPage.publicLinkOnDesc')}
+                </p>
+              </div>
+              <Switch
+                checked
+                disabled={
+                  busy
+                  || accessLoading
+                  || !canChangeShowPagePublicLink(access, false)
+                }
+                onCheckedChange={(next) => {
+                  if (!next) revokePublicLinkWithoutPayload();
+                }}
+                label={t('chat.showPage.publicLink')}
+              />
+            </div>
+            <p className="mt-1.5 text-[11px] leading-snug text-muted">
+              {t('chat.showPage.publicLinkOwnerOnly')}
+            </p>
+          </div>
+        ) : null}
 
         {payload ? (
           <>

@@ -443,6 +443,24 @@ class ShowPageStore:
     def _require_access_management(connection, session_id: str, user_context: Any) -> None:
         require_show_page_access_management(connection, session_id, user_context=user_context)
 
+    @classmethod
+    def _require_visibility_transition_control(
+        cls,
+        connection,
+        session_id: str,
+        user_context: Any,
+        *,
+        current_visibility: str,
+        target_visibility: str,
+    ) -> None:
+        if target_visibility == VISIBILITY_PUBLIC or (
+            current_visibility == VISIBILITY_OFFLINE
+            and target_visibility != VISIBILITY_OFFLINE
+        ):
+            cls._require_sharing_control(connection, session_id, user_context)
+            return
+        cls._require_access_management(connection, session_id, user_context)
+
     @staticmethod
     def _require_create_access(user_context: Any) -> None:
         if user_context.can_manage_instance:
@@ -591,14 +609,15 @@ class ShowPageStore:
         if existing is not None:
             # Check management before reporting a terminal lifecycle state so an
             # unauthorized remote user cannot probe page/session details.
-            if visibility == VISIBILITY_PUBLIC:
-                with self.engine.connect() as conn:
-                    self._require_sharing_control(conn, session_id, context)
-                page = existing
-            else:
-                with self.engine.connect() as conn:
-                    self._require_access_management(conn, session_id, context)
-                page = existing
+            with self.engine.connect() as conn:
+                self._require_visibility_transition_control(
+                    conn,
+                    session_id,
+                    context,
+                    current_visibility=existing.visibility,
+                    target_visibility=visibility,
+                )
+            page = existing
         else:
             page = None
         # Reject republish BEFORE ``ensure`` so it doesn't first materialize a
@@ -621,10 +640,18 @@ class ShowPageStore:
         if visibility == VISIBILITY_PUBLIC and not page.share_id:
             values["share_id"] = self._unique_share_id()
         with self.engine.begin() as conn:
-            if visibility == VISIBILITY_PUBLIC:
-                self._require_sharing_control(conn, session_id, context)
-            else:
-                self._require_access_management(conn, session_id, context)
+            current_visibility = conn.execute(
+                select(show_pages.c.visibility).where(show_pages.c.session_id == session_id)
+            ).scalar_one()
+            # Re-evaluate against the in-transaction row so a concurrent transition
+            # to offline cannot turn an access-manager operation into a republish.
+            self._require_visibility_transition_control(
+                conn,
+                session_id,
+                context,
+                current_visibility=current_visibility,
+                target_visibility=visibility,
+            )
             # Archive is terminal and takes the page offline on purpose — never let
             # an archived session's page be brought back online / re-shared. Checked
             # in the SAME txn as the write so a concurrent archive can't slip in

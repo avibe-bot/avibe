@@ -65,6 +65,21 @@ export function canChangeShowPagePublicLink(
   return nextEnabled ? access.can_publish_public : access.can_manage;
 }
 
+export function showPageShareCapabilities(access: ShowPageAccess | null): {
+  canReadPayload: boolean;
+  canRevokePublicLinkWithoutPayload: boolean;
+} {
+  return {
+    canReadPayload: access?.can_use !== false,
+    canRevokePublicLinkWithoutPayload: Boolean(
+      access
+      && !access.can_use
+      && access.can_manage
+      && access.public_link_enabled,
+    ),
+  };
+}
+
 export function showPageSyncPresentation(status: SyncStatus): {
   key: string;
   tone: 'muted' | 'pending' | 'error';

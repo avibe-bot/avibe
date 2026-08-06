@@ -8,6 +8,12 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
+vi.mock('@/components/ui/confirm-dialog', () => ({
+  ConfirmDialog: ({ open, title }: { open: boolean; title: string }) => (
+    <div data-confirm-open={String(open)}>{title}</div>
+  ),
+}));
+
 const access = (overrides: Partial<ShowPageAccess> = {}): ShowPageAccess => ({
   ok: true,
   mode: 'organization',
@@ -58,5 +64,12 @@ describe('ShowPageWorkspaceAccessControl', () => {
 
     expect(html).toContain('<select disabled=""');
     expect(html).toContain('chat.showPage.workspaceReadOnly');
+  });
+
+  it('mounts the established Organization audience-narrowing confirmation', () => {
+    const html = renderControl(access({ access_level: 'public' }));
+
+    expect(html).toContain('data-confirm-open="false"');
+    expect(html).toContain('organization.resources.narrowTitle');
   });
 });

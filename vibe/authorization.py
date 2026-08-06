@@ -286,6 +286,7 @@ _VIEWER_HTTP_RULES = tuple(
 _VIEWER_HTTP_MUTATION_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
+        ("POST", r"^/api/show-pages/[^/]+/ensure$"),
         ("POST", r"^/api/show-pages/[^/]+/visibility$"),
         ("POST", r"^/api/show-pages/[^/]+/rotate-share$"),
         ("POST", r"^/api/show-pages/[^/]+/share-id$"),
