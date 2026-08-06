@@ -72,6 +72,8 @@ from core.scheduled_tasks import (
     TaskDispatchResult,
     TaskExecutionRequest,
     TaskExecutionStore,
+    FAILURE_CODE_SEND_NOW_GATE_UNAVAILABLE,
+    SEND_NOW_GATE_UNAVAILABLE_I18N_KEY,
     _TASK_RESULT_NOT_RECORDED_I18N_KEY,
     _agent_run_message_for_request,
     build_session_key_for_context,
@@ -8643,6 +8645,42 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
         (session_id, "run in workbench session", "avibe", request.id, "queue")
     ]
     assert handler_calls == []
+
+
+def test_avibe_agent_run_send_now_refuses_without_turn_gate(monkeypatch, tmp_path) -> None:
+    """A send-now Agent Run fails typed instead of bypassing durable admission."""
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="must stay durable",
+        agent_name="codex",
+        delivery_intent="send_now",
+    )
+    direct_calls: list[str] = []
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        direct_calls.append(message)
+        return None
+
+    controller = _avibe_controller_double(
+        gate=None,
+        handle_scheduled_message=_handle_scheduled_message,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert stored["error"] == i18n_t(SEND_NOW_GATE_UNAVAILABLE_I18N_KEY, "en")
+    assert stored["metadata"]["failure_code"] == FAILURE_CODE_SEND_NOW_GATE_UNAVAILABLE
+    assert direct_calls == []
 
 
 def test_explicit_queue_delivery_intent_remains_queued() -> None:

@@ -453,6 +453,10 @@ class DeliveryRequest:
     admission_context: dict[str, Any] | None = None
     native_message_id: str | None = None
     parent_native_message_id: str | None = None
+    # A caller that will immediately promote the durable FIFO head can request
+    # P3 admission without the usual idle-session auto-start. This keeps the
+    # admission and promotion decision on one post-admission queue snapshot.
+    admission_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -2252,7 +2256,7 @@ class SessionTurnManager:
                     raise RuntimeError("P3 queue claim lost after writer reservation")
                 delivery = queued
             active = delivery_store.active_turn(conn, request.session_id)
-            while active is None and not backend_draining:
+            while active is None and not backend_draining and not request.admission_only:
                 queued_payloads = delivery_store.claimable_fifo_prefix(
                     conn, request.session_id
                 )

@@ -3870,16 +3870,16 @@ scenarios:
     # The timeout never enters the empty successful-result fallback.
     test: tests/test_agent_service.py::test_hfr_432_opencode_timeout_releases_fifo_and_shared_runtime
   - id: HFR-434
-    name: an OpenCode steer accepted at the native terminal boundary is refused honestly
+    name: an OpenCode steer at the native terminal boundary stays reconcilable
     status: covered
     kind: recovery
     layer: contract
     backend: opencode
-    # prompt_async returns 204 after persisting the user message, but the old
-    # native Turn may finish before it can consume that message. The adapter
-    # waits for the terminal status transition and refuses the steer when no
-    # same-turn continuation remains, leaving the durable FIFO fallback intact.
-    test: tests/test_agent_steering.py::test_opencode_rejects_write_that_arrives_after_native_turn_ended
+    # prompt_async returns 204 after persisting the user message, while its worker
+    # may still be registering the continuation as busy. A transient idle sample
+    # keeps the exact attempt in reconciliation so it cannot be replayed; later
+    # native evidence either accepts the attempt or closes it terminally.
+    test: tests/test_agent_steering.py::test_opencode_keeps_reconciliation_armed_after_post_write_idle
   - id: HFR-435
     name: a Claude steered Assistant response owns the following terminal result
     status: covered

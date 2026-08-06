@@ -1455,16 +1455,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     status_after_write is None
                     or status_after_write.get("type") not in {"busy", "retry"}
                 ):
-                    # OpenCode can return 204 after appending a user message just
-                    # as the old native Turn becomes idle. That message is not a
-                    # same-turn steer and must not be materialized as accepted.
-                    state.awaiting_after_message_ids = None
-                    state.awaiting_user_text = None
-                    state.awaiting_start_confirmation_deadline = None
-                    state.awaiting_active_status_observed = False
+                    # The prompt write is durable, but OpenCode can take longer
+                    # than this first status sample to register the continuation as
+                    # busy. Keep the five-second reconciliation evidence armed so
+                    # the poll owner can observe either start confirmation or the
+                    # exact native attempt before any retry is admitted.
                     return steer_result(
-                        SteerOutcome.REFUSED,
-                        reason="native_turn_not_continued",
+                        SteerOutcome.UNKNOWN,
+                        reason="native_turn_start_pending",
                         backend=self.name,
                     )
         except OpenCodePromptRejectedError as exc:

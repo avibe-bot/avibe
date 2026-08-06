@@ -287,6 +287,10 @@ def create_app(controller: "Controller") -> FastAPI:
                     and delivery_request.priority == "p3"
                     else persisted_intent
                 )
+                delivery_request = replace(
+                    delivery_request,
+                    admission_only=effective_delivery_intent == "send_now",
+                )
                 provenance = (delivery_request.metadata or {}).get(
                     SCHEDULED_PROVENANCE_KEY
                 )
@@ -391,6 +395,7 @@ def create_app(controller: "Controller") -> FastAPI:
                     SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
                 },
                 native_message_id=native_message_id or None,
+                admission_only=delivery_intent == "send_now",
             )
 
         if context.platform_specific is None:
@@ -459,10 +464,16 @@ def create_app(controller: "Controller") -> FastAPI:
                 delivery_owner_transferred=True,
             )
         delivery_state = str(result.state)
-        if effective_delivery_intent == "send_now" and target_was_busy:
+        if effective_delivery_intent == "send_now":
             with get_cached_sqlite_engine().connect() as conn:
+                admitted = message_deliveries.get_delivery(conn, delivery_id)
                 observed_head = message_deliveries.ordering_head(conn, session_id)
-            if observed_head is not None:
+            if (
+                admitted is not None
+                and admitted["state"] == "queued"
+                and observed_head is not None
+                and observed_head["state"] == "queued"
+            ):
                 await manager.send_now(
                     session_id,
                     expected_delivery_id=str(observed_head["id"]),

@@ -1177,8 +1177,14 @@ class ClaudeAgent(BaseAgent):
             message_stream = client.receive_messages().__aiter__()
             while True:
                 settling_ambiguous_primary = False
+                terminal_steering_generation = None
                 try:
                     message = await anext(message_stream)
+                    # Capture ownership at the receive boundary. The receiver may
+                    # yield while it captures session metadata or opens an
+                    # agent-initiated turn; sampling generation later can relabel a
+                    # buffered pre-steer frame as the steered continuation.
+                    terminal_steering_generation = self._steering_generation(composite_key)
                 except StopAsyncIteration:
                     message = self._ambiguous_primary_results.pop(composite_key, None)
                     if message is None:
@@ -1238,11 +1244,8 @@ class ClaudeAgent(BaseAgent):
                         continue
 
                     message_type = self._detect_message_type(message)
-                    terminal_steering_generation = (
-                        self._steering_generation(composite_key)
-                        if message_type in {"assistant", "result", "system"}
-                        else None
-                    )
+                    if message_type not in {"assistant", "result", "system"}:
+                        terminal_steering_generation = None
                     formatter = self._get_formatter(context)
                     is_model_refusal_fallback = self._is_model_refusal_fallback_message(message)
                     model_refusal_fallback_notice = (

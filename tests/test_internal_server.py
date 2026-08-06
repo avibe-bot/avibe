@@ -3080,7 +3080,7 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
 
 
 def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, tmp_path):
-    """Agent-to-Agent send-now persists first, then steers the exact FIFO head."""
+    """HFR-430: send-now persists first, then steers the exact FIFO head."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
@@ -3197,6 +3197,126 @@ def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, t
         "status": "accepted",
         "target_was_busy": True,
     }
+
+
+def test_agent_run_send_now_promotes_a_turn_started_during_admission(monkeypatch, tmp_path):
+    """A stale idle snapshot cannot downgrade explicit send-now into P3 queueing."""
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_agent_send_now_admission_race",
+            now="2026-07-30T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session_id = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )["id"]
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="apply the late correction",
+        agent_name="worker",
+        delivery_intent="send_now",
+    )
+    assert request_store.claim(request.id) is not None
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    controller.session_turns._steer = AsyncMock(
+        return_value=steer_result(SteerOutcome.ACCEPTED)
+    )
+    original_deliver = controller.session_turns.deliver
+    inserted_racer = False
+
+    async def _deliver_with_race(delivery_request, *, context=None):
+        nonlocal inserted_racer
+        if delivery_request.admission_only and not inserted_racer:
+            inserted_racer = True
+            with engine.begin() as conn:
+                owner = _reserve_submission(
+                    conn,
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    text="racing owner",
+                )
+                turn_id = message_deliveries.new_turn_id()
+                message_deliveries.insert_turn(
+                    conn,
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    initial_delivery_id=owner["id"],
+                    state="starting",
+                    backend="claude",
+                )
+                claimed = message_deliveries.open_start_attempt(
+                    conn,
+                    owner["id"],
+                    expected_version=1,
+                    turn_id=turn_id,
+                    attempt_id=message_deliveries.new_attempt_id(),
+                )
+                assert claimed is not None
+                bound = message_deliveries.bind_native_start(
+                    conn,
+                    turn_id,
+                    expected_version=int(
+                        message_deliveries.get_turn(conn, turn_id)["version"]
+                    ),
+                    runtime_key=f"runtime:{session_id}",
+                    runtime_turn_id=f"runtime-turn:{turn_id}",
+                    native_turn_id=f"native:{turn_id}",
+                )
+                assert bound is not None
+                accepted = message_deliveries.materialize_start_acceptance(
+                    conn,
+                    turn_id=turn_id,
+                    evidence={"kind": "test_native_acceptance"},
+                )
+                assert accepted
+        return await original_deliver(delivery_request, context=context)
+
+    controller.session_turns.deliver = _deliver_with_race
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{request.id}",
+        platform_specific={
+            "task_execution_id": request.id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    async def _exercise():
+        return await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            context,
+            request.message or "",
+            delivery_intent="send_now",
+        )
+
+    result = asyncio.run(_exercise())
+
+    assert result.target_was_busy is False
+    assert result.delivery_status == "accepted"
+    controller.session_turns._steer.assert_awaited_once()
+    controller.command_handler.handle_stop.assert_not_awaited()
+    with engine.connect() as conn:
+        assert message_deliveries.list_queued(conn, session_id) == []
 
 
 def test_agent_run_send_now_refusal_keeps_the_turn_and_queue(monkeypatch, tmp_path):
