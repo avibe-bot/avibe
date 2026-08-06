@@ -353,10 +353,11 @@ observations:
     source: PR7R current-master evidence matrix (HFR-183, HFR-184)
     result: confirmed
     detail: >-
-      Four of six backend/lane cells expose a per-Turn progress signal, and the
-      split is by LANE, not by backend: all three backends are attributed on the
-      durable Workbench lane, and on direct IM only codex is, because its id rides
-      the notification instead of the context. Codex's ``item/*`` notifications carry a
+      ALL SIX backend/lane cells expose a per-Turn progress signal. Four rounds of
+      corrections got here; the intermediate verdicts ("no backend", then "codex
+      only", then "four of six, split by lane") are kept below because each was
+      wrong for the same reason and the sequence is the lesson.
+      Codex's ``item/*`` notifications carry a
       ``turnId`` and ``_find_request_for_notification`` resolves the participating
       Run's request from that id through a per-turn map, so the event IS attributable
       to an exact Turn -- but ``should_emit_progress`` then gates on the single
@@ -374,18 +375,32 @@ observations:
       likewise one asyncio task per base session -- but that projection is not the
       event stream: ``run_prompt_poll`` is handed the exact ``AgentRequest`` and
       every progress emit in it passes ``request.context``, whose ``turn_token``
-      ``_process_message`` has already read as ``logical_turn_id``. That token is
-      stamped only by ``core/session_turns.py`` and the streaming turn dispatch,
-      both Workbench owners, so opencode has the signal on the durable lane and not
-      on direct IM. The plan's rule requires an exact signal for EVERY backend and
-      lane, so a generic inactivity timeout is still blocked on evidence and no
-      implementation PR may be opened for one yet -- but the shape of the remaining
-      work now differs per cell: the four attributed cells need an existing
-      attribution carried through to the stamp, and the two open ones -- claude and
-      opencode on direct IM -- are the SAME fix, because both fail for the same
-      reason, that ``turn_token`` is stamped only by ``core/session_turns.py`` and
-      ``core/services/dispatch.py``, which are Workbench owners. Two cells, one
-      change: stamp a Turn identifier into an IM-scoped context.
+      ``_process_message`` has already read as ``logical_turn_id``. Round 5 held
+      claude and opencode OPEN on direct IM on the ground that this token is
+      "stamped only by ``core/session_turns.py`` and the streaming turn dispatch,
+      both Workbench owners". That was FALSE, and it is the fourth correction of
+      this observation. The claim came from grepping the LITERAL string
+      ``"turn_token"``; the write that decides the question is CONSTANT-KEYED --
+      ``platform_specific[AGENT_TURN_TOKEN]`` in
+      ``AgentService._stamp_runtime_turn`` (modules/agents/service.py:1015), which
+      ``AgentService.handle_message`` calls unconditionally, before the backend is
+      invoked, for every request on every lane. So a plain IM request already
+      carries a freshly generated per-Turn token: claude's adopt path has one to
+      copy and opencode's ``logical_turn_id`` is non-empty. Driven, not read --
+      HFR-188 calls the real ``handle_message`` twice on one runtime key and
+      asserts the tokens differ (per Turn, not per session) and that a
+      pre-existing Workbench token is preserved rather than overwritten. What
+      remains is downstream and is remediation, not a missing capability: the
+      activity timestamp is per SESSION on every backend, so the exact
+      attribution is aggregated away at the last step. The earlier claim that
+      codex additionally DISCARDS the signal at ``should_emit_progress`` is also
+      narrowed: that filter reads the single ``_active_turns[base]`` slot, and the
+      runtime gate is held across the whole backend call and released only by the
+      outbound dispatcher, so one runtime key admits one live turn at a time
+      (driven in HFR-191) and the slot is not lossy for live turns. The filter is
+      correct as written. On the attribution question the plan's all-or-nothing
+      rule is therefore SATISFIED and a generic inactivity timeout is no longer
+      blocked by Q2; the per-Turn timestamp is the work that is left.
       This corrects the same observation THREE times, all three the same way: a
       lossy base-session projection was read and a conclusion about the event
       stream was drawn from it -- ``_active_turns[base]`` for codex, then, after
@@ -393,7 +408,11 @@ observations:
       named, ``session_turn_started[composite_key]`` for claude. Naming a mistake
       is not the same as being immune to it; the durable form of the lesson is a
       rule, not a memory -- before concluding a backend has no signal, read the
-      producer, not the map the producer writes into.
+      producer, not the map the producer writes into. Round 6 made it FOUR, in a
+      disguise the rule as written did not cover: the producer WAS read, and the
+      search for its input was a literal grep that a constant-keyed write slips
+      past. The rule extends -- a "nothing writes X" claim is only as good as the
+      search that produced it, so resolve the KEY, not the string.
       Separately, a Turn's accepted-run
       record cannot discriminate between its participants: it holds a flat
       ``accepted_agent_run_ids`` list and one Turn-level ``source_kind`` stamped by
@@ -412,14 +431,26 @@ observations:
     source: PR7R current-master evidence matrix (Q1, Q4, Q5)
     result: confirmed
     detail: >-
-      Of the plan's five questions only Q5 closes outright in master's favour.
+      Of the plan's five questions Q5 was recorded as the one closing outright in
+      master's favour. It closes by HALVES, and round 6 corrected the other half.
       ``health`` / ``consecutive_failures`` / ``recent_failures`` are derived per
       read by ``SQLiteBackgroundTaskStore._classify_health`` over the bounded verdict
       window ``_health_rows`` collects, rather than stored counters: a failure ages
       out of the window on its own and a success downgrades ``failing`` to
-      ``degraded`` instead of erasing history. ``last_run_at`` / ``last_error`` are
-      written in the same CAS-guarded terminal transition that settles the Run. No
-      health cursor is needed. Q1 holds on the durable Workbench lane only -- a
+      ``degraded`` instead of erasing history. That half stands and needs no health
+      cursor. ``last_run_at`` / ``last_error`` are NOT "written in the same
+      CAS-guarded terminal transition that settles the Run", as this observation
+      first said. They are a DEFINITION-level stamp committed by
+      ``store.mark_task_result`` inside ``_execute_task``
+      (core/scheduled_tasks.py:~8394); the Run's own terminal CAS is
+      ``request_store.complete`` in ``_execute_claimed_request``'s ``finally``
+      (~7815-7829), a second write that happens after the first has already
+      committed. HFR-261 reconciles the case where that CAS REFUSES the
+      transition; nothing reconciles process loss in the gap, so a definition can
+      advertise a ``last_run_at`` / ``last_error`` for a Run that never reached a
+      terminal status. Unlike the derived trio these two are stored, so they can
+      drift -- they project an ATTEMPT, not settled Run history. Q5 is therefore
+      ``open``. Q1 holds on the durable Workbench lane only -- a
       Delivery reservation and an ownership transfer both leave the Run ``running``
       -- but nothing exercises the direct-IM reservation or backend-acceptance
       boundary, so the premature-success claim may not be closed yet. Q4 names four
@@ -564,3 +595,38 @@ observations:
       built from a comparison between two derived collections proves consistency,
       never existence, so anything the plan advertises has to be named literally
       somewhere in the guard.
+  - id: HFR-OBS-031
+    date: 2026-08-06
+    source: sixth adversarial review of the PR7R matrix (PR #1212)
+    result: confirmed
+    detail: >-
+      A "nothing writes X" claim is only as strong as the search that produced
+      it, and a literal grep is a weak search. Five rounds of this unit held two
+      matrix cells open because ``turn_token`` appeared to be stamped only by
+      Workbench owners; the write that settles the question is
+      ``platform_specific[AGENT_TURN_TOKEN]`` in
+      ``AgentService._stamp_runtime_turn``, a CONSTANT-KEYED write in the shared
+      admission layer that ``handle_message`` performs for every request on every
+      lane before the backend runs. Grepping the string missed it; resolving the
+      constant would have found it in one step. This is the fourth correction of
+      the same underlying error in six rounds (HFR-OBS-024), and the first where
+      the previously-stated rule -- read the producer, not its projection -- was
+      followed and still did not help, because the failure had moved from WHICH
+      artefact was read to HOW it was searched for. Two consequences beyond the
+      cells: the shared admission layer is worth probing directly, since anything
+      it does is true of all three backends and both lanes at once, and a claim
+      of absence deserves the same counter-check standard as a claim of presence
+      (both new probes here DRIVE the real ``AgentService`` and were validated by
+      mutating the production write and the gate acquire). A third consequence
+      applies to over-claiming from a filter: the earlier reading that codex
+      DISCARDS its exact-Turn signal at ``should_emit_progress`` does not survive
+      the observation that the runtime gate is held across the whole backend call,
+      so one runtime key admits one live turn at a time and the single
+      ``_active_turns[base]`` slot is not lossy for live turns. The filter is
+      correct; only the per-SESSION activity timestamp aggregates the attribution
+      away. Separately, this round found scenario ids drifting from the catalog --
+      a docstring saying HFR-186 for a test filed as HFR-187, and two guards with
+      no catalog row at all. Every other guard in the unit checks that a CITATION
+      resolves to a test; none checked the reverse, that a test announcing an id
+      is the test that id names. HFR-192 now ties the two directions together for
+      both PR7R modules.

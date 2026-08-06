@@ -1,4 +1,4 @@
-"""HFR-184..HFR-186: the PR7R evidence matrix is closed and self-consistent.
+"""HFR-184..HFR-187, HFR-189..HFR-190, HFR-192: the PR7R matrix is closed and self-consistent.
 
 Same contract as HFR-105 for ``TEARDOWN_SETTLEMENT_MATRIX``: growing a
 dimension fails here until every new cell names a consuming test or a precise
@@ -219,7 +219,7 @@ def test_every_question_and_finding_names_a_real_consuming_test() -> None:
 
 
 def test_a_citation_with_the_wrong_class_component_is_rejected() -> None:
-    """HFR-186: the node resolver reads the whole id, not just its last word.
+    """HFR-187: the node resolver reads the whole id, not just its last word.
 
     The regression this pins: a class-qualified citation used to pass on the
     strength of the function name alone, so renaming the class -- or citing a
@@ -254,7 +254,7 @@ def test_a_citation_with_the_wrong_class_component_is_rejected() -> None:
 
 
 def test_a_finding_owner_must_resolve_to_a_real_symbol() -> None:
-    """HFR-186: the owner suffix is validated, not decoration.
+    """HFR-189: the owner suffix is validated, not decoration.
 
     The regression this pins: the guard used to keep only the module path and
     assert the FILE existed, so every owner suffix -- the part that says which
@@ -277,7 +277,7 @@ def test_a_finding_owner_must_resolve_to_a_real_symbol() -> None:
 
 
 def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:
-    """HFR-186: Q2's per-backend/per-lane obligation has no missing cells.
+    """HFR-190: Q2's per-backend/per-lane obligation has no missing cells.
 
     The verdict is tied to the table rather than pinned to a literal. Q2 opened
     once a backend was shown to carry an exact-Turn attribution, and it may only
@@ -295,3 +295,54 @@ def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:
         assert verdict == "answered", kinds
     else:
         assert verdict == "open", kinds
+
+
+def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None:
+    """HFR-192: the id in a docstring is the id in the catalog, or neither is real.
+
+    The regression this pins is the one review caught by hand: a test whose
+    docstring opened ``HFR-186`` while the catalog filed it under ``HFR-187``,
+    and two more that carried an id no catalog row claimed at all. Both failures
+    are invisible to every other guard here -- the matrix checks that citations
+    resolve to test FUNCTIONS, and nothing checked the reverse direction, that a
+    test announcing a scenario id is the test that id was assigned to. A
+    docstring id is how a reader navigates from a failure back to the scenario,
+    so a wrong one is worse than none.
+
+    Scope is the two PR7R modules on purpose: this asserts a convention the rest
+    of the suite does not yet follow, and widening it is a separate change.
+    """
+    yaml = pytest.importorskip("yaml")
+    catalog_path = (
+        Path(__file__).resolve().parent
+        / "scenarios"
+        / "harness_failure_recovery"
+        / "catalog.yaml"
+    )
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    by_id = {row["id"]: row["test"] for row in scenarios}
+
+    modules = (
+        "tests/test_run_terminal_truth_matrix.py",
+        "tests/test_run_terminal_truth_evidence_probes.py",
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    seen = 0
+    for rel in modules:
+        tree = ast.parse((repo_root / rel).read_text(encoding="utf-8"))
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+                continue
+            doc = ast.get_docstring(node) or ""
+            head = doc.split(":", 1)[0].split("/", 1)[0].strip()
+            assert head.startswith("HFR-"), (
+                f"{rel}::{node.name} does not open its docstring with a scenario id"
+            )
+            assert head in by_id, f"{rel}::{node.name} claims {head}, which no catalog row owns"
+            assert by_id[head] == f"{rel}::{node.name}", (
+                f"{head} is filed against {by_id[head]} but claimed by {rel}::{node.name}"
+            )
+            seen += 1
+    # A floor, so deleting every docstring id cannot turn this into a vacuous pass.
+    assert seen >= 10, seen

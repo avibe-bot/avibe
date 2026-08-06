@@ -205,6 +205,14 @@ _Q2_SIGNALS = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
     "test_which_backends_attribute_a_progress_event_to_an_exact_turn"
 )
+_Q2_ADMISSION = (
+    "tests/test_run_terminal_truth_evidence_probes.py::"
+    "test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im"
+)
+_Q2_SERIALIZED = (
+    "tests/test_run_terminal_truth_evidence_probes.py::"
+    "test_one_runtime_key_admits_one_live_turn_at_a_time"
+)
 _Q3_PROBE = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
     "test_the_accepted_run_batch_records_no_per_run_source_or_deadline"
@@ -674,28 +682,32 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # the remediation has to build on, which is why the distinction is recorded
     # rather than smoothed over.
     ("claude", "durable_workbench"): covered(_Q2_SIGNALS),
-    # ...and it needs a ``turn_token`` to copy. Same lane split as opencode, for
-    # the same reason: only ``core/session_turns.py`` and the streaming turn
-    # dispatch stamp one. On a plain IM context ``_adopt_pending_turn_token``
-    # finds no token, and the attribution keys it can still copy are Run
-    # provenance, not a Turn identifier.
-    ("claude", "direct_im"): unproven(
-        "the adopt path runs on this lane too, but nothing stamps a "
-        "``turn_token`` into an IM context for it to copy, so the emit carries "
-        "no Turn identifier. Probe: drive an IM-scoped claude turn and assert "
-        "whether any emitted event names a Turn at all."
-    ),
+    # ...and it needs a ``turn_token`` to copy, which the previous round said it
+    # never gets on IM. That was FALSE, and it is the fourth distinct mechanism
+    # of the same recurring error: the search was a literal grep for
+    # ``"turn_token"``, and the write that matters is CONSTANT-KEYED --
+    # ``platform_specific[AGENT_TURN_TOKEN]`` in ``_stamp_runtime_turn``
+    # (modules/agents/service.py:1015), called unconditionally by
+    # ``AgentService.handle_message`` BEFORE the backend is invoked. That is the
+    # shared admission layer every backend and BOTH lanes pass through, so a
+    # plain IM request carries a freshly generated per-Turn token by the time
+    # the adopt path looks for one. Driven, not read: the probe runs the real
+    # ``handle_message`` twice and asserts the two tokens differ.
+    ("claude", "direct_im"): covered(_Q2_ADMISSION),
     # Codex is the exception, and the first draft of this table got it wrong by
     # reading only the base-session projection. The app-server's ``item/*`` and
     # ``turn/*`` notifications carry a ``turnId`` in their params, and
     # ``_find_request_for_notification`` resolves the participating Run's
     # request from THAT id through ``get_request_for_turn`` -- a per-turn map,
-    # not a per-session one. The exact-Turn signal therefore exists. What
-    # discards it is downstream: ``should_emit_progress`` gates on
-    # ``is_active_turn``, which reads the ONE ``_active_turns[base]`` slot, and
-    # the activity timestamp is stamped per session. So the attribution is
-    # available and thrown away, which is a different -- and cheaper -- problem
-    # than not having it.
+    # not a per-session one. The exact-Turn signal therefore exists. An earlier
+    # round said the signal is then DISCARDED by ``should_emit_progress``, which
+    # gates on the single ``_active_turns[base]`` slot -- an over-claim. The
+    # runtime gate is acquired in ``AgentService.handle_message`` and held for
+    # the whole turn, so one runtime key admits one live turn at a time and that
+    # slot names the only live turn there is; the gate is DRIVEN in
+    # ``test_one_runtime_key_admits_one_live_turn_at_a_time``. What is left is
+    # narrower: the activity timestamp is stamped per SESSION, so the exact
+    # attribution is available and then aggregated away at the last step.
     ("codex", "durable_workbench"): covered(_Q2_SIGNALS),
     ("codex", "direct_im"): covered(_Q2_SIGNALS),
     # OpenCode was read the same wrong way as codex, one round later, and for
@@ -707,17 +719,13 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # reads that same context's ``turn_token`` as ``logical_turn_id`` before
     # polling starts. So each progress emit carries its own Turn's token.
     ("opencode", "durable_workbench"): covered(_Q2_SIGNALS),
-    # ...but only where a token exists. ``turn_token`` is stamped by
-    # ``SessionTurnManager`` and by ``core/services/dispatch.py``'s streaming
-    # turn dispatch -- both Workbench-lane owners. Nothing stamps one on a
-    # plain IM message, so ``logical_turn_id`` is ``""`` there and the emit
-    # carries no Turn to attribute against.
-    ("opencode", "direct_im"): unproven(
-        "the poll loop's emits carry ``request.context``, but nothing stamps a "
-        "``turn_token`` into an IM context, so ``logical_turn_id`` is empty on "
-        "this lane. Probe: drive an IM-scoped opencode turn and assert whether "
-        "any emitted progress event carries a Turn identifier at all."
-    ),
+    # ...and the same admission stamp settles this lane too. The previous round
+    # named ``SessionTurnManager`` and ``core/services/dispatch.py`` as the only
+    # writers; both are Workbench owners, which is what made the lane split look
+    # real. ``_stamp_runtime_turn`` is a third writer and it is upstream of
+    # both, so ``logical_turn_id`` is NOT empty on IM -- ``_process_message``
+    # reads a token that the admission layer put there.
+    ("opencode", "direct_im"): covered(_Q2_ADMISSION),
 }
 
 
@@ -753,11 +761,11 @@ PR7R_QUESTIONS: Final = {
             "Which observable assistant/tool events can be attributed to the "
             "exact Turn and participating Runs, per backend and per lane?"
         ),
-        "verdict": "open",
+        "verdict": "answered",
         "answer": (
-            "Four of six cells can, and the ANSWER SPLITS BY LANE, not by "
-            "backend -- which is the finding, and which took three corrections "
-            "to see because the same reading error was made three times. Each "
+            "ALL SIX cells can, and it took four corrections to get here "
+            "because the same reading error was made four times in four "
+            "different disguises. The first three: each "
             "time, a backend's base-session PROJECTION was read -- "
             "``_active_turns[base]`` for codex, ``_active_requests[base]`` for "
             "opencode, ``session_turn_started[composite_key]`` for claude -- "
@@ -771,27 +779,41 @@ PR7R_QUESTIONS: Final = {
             "``logical_turn_id``. Claude's long-lived receiver adopts the "
             "FIFO-matched pending request's ``turn_token`` onto the emit "
             "context before any assistant/tool output, so Avibe supplies the "
-            "correlation the SDK lacks. What the two remaining cells have in "
-            "common is the LANE: ``turn_token`` is stamped only by "
+            "correlation the SDK lacks. The FOURTH error was this table's own "
+            "previous verdict: it held claude and opencode ``direct_im`` open "
+            "on the ground that ``turn_token`` is stamped only by "
             "``core/session_turns.py`` and the streaming turn dispatch, both "
-            "Workbench owners, so claude and opencode have nothing to copy or "
-            "forward on direct IM. Codex is unaffected because its id rides the "
-            "notification rather than the context. In every one of the four "
-            "covered cells the attribution is then DISCARDED -- codex at "
-            "``should_emit_progress``, which gates on the single "
-            "``_active_turns[base]`` slot, and all of them at a per-session "
-            "activity timestamp. The plan's rule still bites: an exact signal "
-            "is required for EVERY backend and lane, so a generic inactivity "
-            "timeout is still blocked. What changed is the shape of the work -- "
-            "four cells need an existing attribution carried through to the "
-            "stamp, and the two IM cells need a Turn stamped into the context "
-            "at all, which is one fix and not two. Note also that claude's "
-            "attribution is a FIFO POSITION rather than an id the event "
-            "carries: exact under per-key serialization, weaker than codex's, "
-            "and the remediation has to build on it as it is. "
-            "See ``EXACT_TURN_PROGRESS_SIGNALS`` for the two remaining cells."
+            "Workbench owners. That was arrived at by grepping the LITERAL "
+            "string ``\"turn_token\"``, and the write that matters is "
+            "CONSTANT-KEYED: ``platform_specific[AGENT_TURN_TOKEN]``, written "
+            "by ``AgentService._stamp_runtime_turn`` "
+            "(modules/agents/service.py:1015) which "
+            "``AgentService.handle_message`` calls unconditionally, before the "
+            "backend runs, on every request from every lane. So the claimed "
+            "lane split does not exist: a plain IM request carries a "
+            "freshly-generated per-Turn token by the time claude's adopt path "
+            "looks for one and by the time opencode reads ``logical_turn_id``. "
+            "This is now DRIVEN rather than read -- the probe calls the real "
+            "``handle_message`` twice on one runtime key and asserts the two "
+            "tokens differ, i.e. per-Turn and not per-session, and that a "
+            "pre-existing Workbench token is preserved rather than overwritten. "
+            "What remains is NOT attribution but its downstream use: the "
+            "activity timestamp every backend stamps is per SESSION, and codex "
+            "additionally filters at ``should_emit_progress`` on the single "
+            "``_active_turns[base]`` slot. That filter is correct as written -- "
+            "the runtime gate is held across the whole backend call and "
+            "released only by the outbound dispatcher, so one runtime key "
+            "admits one live turn at a time (driven, second test) and the slot "
+            "is not lossy for live turns. So a generic inactivity timeout is "
+            "UNBLOCKED on the attribution question: an exact signal exists on "
+            "all three backends and both lanes, and the remaining work is to "
+            "carry it into a per-Turn timestamp instead of a per-session one -- "
+            "remediation, not a missing capability. Note claude's attribution "
+            "is a FIFO POSITION rather than an id the event carries: exact "
+            "under per-key serialization, weaker than codex's ``turnId``, and "
+            "the remediation has to build on it as it is."
         ),
-        "evidence": (_Q2_SIGNALS,),
+        "evidence": (_Q2_SIGNALS, _Q2_ADMISSION, _Q2_SERIALIZED),
     },
     "Q3": {
         "question": (
@@ -883,19 +905,36 @@ PR7R_QUESTIONS: Final = {
             "last_error already monotonic projections of bounded terminal Run "
             "history?"
         ),
-        "verdict": "answered",
+        "verdict": "open",
         "answer": (
-            "Yes. ``health``/``consecutive_failures``/``recent_failures`` are "
-            "derived per read by "
-            "``SQLiteBackgroundTaskStore._classify_health`` over the bounded "
-            "verdict window ``_health_rows`` collects -- they are not stored "
-            "counters, so they cannot drift, a failure that ages out of the "
+            "SPLIT, and the previous ``answered`` verdict was carried by the "
+            "half that holds. ``health``/``consecutive_failures``/"
+            "``recent_failures`` ARE monotonic projections: they are derived "
+            "per read by ``SQLiteBackgroundTaskStore._classify_health`` over "
+            "the bounded verdict window ``_health_rows`` collects, so they are "
+            "not stored counters, cannot drift, a failure that ages out of the "
             "window stops counting on its own, and a success downgrades "
-            "``failing`` to ``degraded`` instead of erasing the history. "
-            "``last_run_at``/``last_error`` are written in the same CAS-guarded "
-            "terminal transition that settles the Run. No health cursor is "
-            "needed, and dispatch or Delivery acceptance never touches any of "
-            "them."
+            "``failing`` to ``degraded`` instead of erasing the history. No "
+            "health cursor is needed for those three, and dispatch or Delivery "
+            "acceptance never touches them. "
+            "``last_run_at``/``last_error`` are NOT the same thing, and the "
+            "earlier claim that they are 'written in the same CAS-guarded "
+            "terminal transition that settles the Run' is false. They are a "
+            "definition-level stamp written by ``store.mark_task_result`` "
+            "inside ``_execute_task`` (core/scheduled_tasks.py:~8394), which "
+            "COMMITS and returns; the Run's own terminal CAS is "
+            "``request_store.complete`` in ``_execute_claimed_request``'s "
+            "``finally`` (~7815-7829), a SECOND write that happens afterwards. "
+            "Two writes, not one transition, with a window between them. "
+            "HFR-261 reconciles the case where the terminal CAS REFUSES the "
+            "transition -- nothing reconciles process loss in the gap, which "
+            "leaves a definition advertising a ``last_run_at``/``last_error`` "
+            "for a Run that never reached a terminal status. So these two "
+            "fields are a projection of an ATTEMPT, not of settled Run "
+            "history, and unlike the health trio they can drift because they "
+            "are stored rather than derived. Probe: kill between "
+            "``mark_task_result`` and ``request_store.complete`` and assert "
+            "whether any reconciliation restores agreement."
         ),
         "evidence": (
             _HEALTH_WINDOW_AGES_OUT,

@@ -1227,11 +1227,13 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under five review rounds
+#### PR7R status (2026-08-06) — first increment, revised under six review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
-`tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`) and fed by
-`tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`). It expands
+`tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
+`HFR-192`) and fed by
+`tests/test_run_terminal_truth_evidence_probes.py` (`HFR-180…183`, `HFR-188`,
+`HFR-191`). It expands
 to the full 3 × 2 × 4 × 7 = 168 cells; each cell is written once per
 (lane, trigger, outcome) with a `per_backend` override wherever the backend
 demonstrably changes the answer, because the durable owner chain is chosen by
@@ -1240,8 +1242,8 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four and five changed how the findings
-are demonstrated, one Q2 verdict, and one degenerate guard. Why it moved is the
+rounds and has held at 168 since; rounds four through six changed how the
+findings are demonstrated, two question verdicts, and two degenerate guards. Why it moved is the
 most useful thing this increment produced. Cells were marked
 `covered` by a test that is real, passing, and about something adjacent to the
 cell rather than about the cell. The first round found fifty such cells, in four
@@ -1372,6 +1374,47 @@ One method note, since an evidence-only unit has no production diff to stash: ne
 assertions are counter-checked by **mutating the production fact** and confirming
 the probe fails. That check needs checking too — one round's mutation appended a
 comment that left the asserted substring intact and produced a false pass.
+
+Round 6 closed Q2 and re-opened Q5, and both corrections came from the same
+place: a claim of **absence** that no one had driven. Q2 had held claude and
+opencode on direct IM open because `turn_token` "is stamped only by
+`core/session_turns.py` and the streaming turn dispatch, both Workbench owners".
+That was arrived at by grepping the literal string; the write that decides it is
+constant-keyed — `platform_specific[AGENT_TURN_TOKEN]` in
+`AgentService._stamp_runtime_turn`, which `handle_message` performs for **every**
+request on **both** lanes before the backend is invoked. The lane split does not
+exist. `HFR-188` now drives the real `handle_message` twice on one runtime key
+and asserts the tokens differ (per Turn, not per session) and that a pre-existing
+Workbench token is preserved. All six cells are `covered`, the guard forces Q2 to
+`answered`, and the inactivity timeout is no longer blocked on attribution — what
+is left is that the activity timestamp is per **session**, which is remediation.
+`HFR-191` narrows the companion over-claim: codex's `should_emit_progress` filter
+reads the single `_active_turns[base]` slot, and the runtime gate is held across
+the whole backend call, so one runtime key admits one live turn at a time and the
+slot is not lossy. The filter is correct as written.
+
+This is the **fourth** correction of the same underlying error (see HFR-OBS-024),
+and the first where the previously-stated rule — read the producer, not its
+projection — was followed and still did not help, because the failure had moved
+from *which* artefact was read to *how* it was searched for. The rule extends: a
+"nothing writes X" claim is only as good as the search behind it, so resolve the
+**key**, not the string.
+
+Q5 went the other way. Its answer said `last_run_at`/`last_error` "are written in
+the same CAS-guarded terminal transition that settles the Run" — they are not.
+`store.mark_task_result` commits a definition-level stamp inside `_execute_task`,
+and the Run's terminal CAS is a *second* write, `request_store.complete` in
+`_execute_claimed_request`'s `finally`. HFR-261 reconciles a refused transition;
+nothing reconciles process loss in the gap, so a definition can advertise a
+`last_run_at` for a Run that never settled. The health trio remains answered —
+derived per read over a bounded window, so it cannot drift — and Q5's verdict is
+now `open` on the two stored fields alone.
+
+The round's second degenerate guard was in the labelling itself: a docstring
+claiming `HFR-186` for a test the catalog files as `HFR-187`, plus two guards with
+no catalog row at all. Every guard here checks that a **citation** resolves to a
+test; none checked the reverse. `HFR-192` ties both directions for the two PR7R
+modules.
 
 Question verdicts:
 
@@ -1537,9 +1580,14 @@ ordering is by how many cells one harness closes:
 4. **Per-backend** overrides for codex and opencode wherever step 2 or 3 shows
    the answer differs: the pending-output and local-settlement rows are
    Claude-only in production today, which is also what Q4 turns on.
-5. The **two remaining Q2 exact-signal probes** in
-   `EXACT_TURN_PROGRESS_SIGNALS` — claude and opencode on direct IM, which are
-   one change, not two — plus the Q3 admission drive through
+5. Q2 is closed; what it leaves behind is a **per-Turn activity timestamp** —
+   every backend has an exact-Turn attribution and every backend then stamps
+   activity per session, so the signal is aggregated away at the last step. That
+   is remediation for the implementation unit, not evidence work. Still open on
+   the evidence side: the **Q5 crash-gap probe** (kill between
+   `mark_task_result` and `request_store.complete` and check whether anything
+   reconciles the definition stamp with the Run's terminal status), the Q3
+   admission drive through
    `_hydrate_delivery_batch_context`, whether the cancellation site joins
    `agent_runs`/`run_definitions`, and Q4's terminal-result latch probe.
 

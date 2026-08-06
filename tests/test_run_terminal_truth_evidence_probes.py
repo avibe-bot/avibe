@@ -14,7 +14,7 @@ be about. Where the real subject is out of reach in this unit, the claim is
 narrowed to what is reached and the rest becomes a named probe in the matrix,
 never a green test that reads like coverage.
 
-Scenario ids: HFR-180 .. HFR-183.
+Scenario ids: HFR-180 .. HFR-183, HFR-188, HFR-191.
 """
 
 import ast
@@ -31,6 +31,7 @@ from core.session_turns import SessionTurnManager
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.codex.event_handler import CodexEventHandler
 from modules.agents.codex.turn_state import CodexTurnRegistry
+from modules.agents.service import AgentService
 
 
 class _AsyncFlag:
@@ -742,15 +743,13 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
         in inspect.getsource(ClaudeAgent._pop_pending_request)
     )
 
-    # And it needs a ``turn_token`` to copy: with none in the source context and
-    # no attribution keys on either side, the adopt is a no-op, which is exactly
-    # the direct-IM lane.
-    im_receiver_context = types.SimpleNamespace(platform_specific={})
-    ClaudeAgent._adopt_pending_turn_token(
-        im_receiver_context,
-        types.SimpleNamespace(context=types.SimpleNamespace(platform_specific={})),
-    )
-    assert im_receiver_context.platform_specific == {}
+    # The adopt copies whatever the pending request carries, so what it does on
+    # direct IM depends entirely on whether anything stamped that request. This
+    # probe used to answer "nothing does" by handing the adopt two empty
+    # contexts and observing a no-op -- which showed only that copying nothing
+    # copies nothing. The real answer is one layer up, in the shared admission
+    # path, and it is driven in
+    # ``test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im``.
 
     # Codex. Two distinct Runs accepted into one base session.
     registry = CodexTurnRegistry()
@@ -788,16 +787,25 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
         CodexEventHandler._on_item_completed
     )
 
-    # And it is DISCARDED one step later. ``should_emit_progress`` gates on
+    # And it is narrowed one step later. ``should_emit_progress`` gates on
     # ``is_active_turn``, which reads the single ``_active_turns[base]`` slot,
-    # so turn-1's progress -- correctly attributed a line earlier -- is dropped
-    # while turn-1 is still live.
+    # so a notification naming turn-1 is dropped once turn-2 is the active turn.
     assert registry.get_active_turn("base-1") == "turn-2"
     assert registry.get_turn("turn-1") is not None
     assert registry.should_emit_progress("turn-2") is True
-    assert registry.should_emit_progress("turn-1") is False, (
-        "the notification named turn-1 exactly; the emit gate throws that away"
-    )
+    assert registry.should_emit_progress("turn-1") is False
+
+    # That is a fact about the REGISTRY, and this probe deliberately stops
+    # claiming more. It used to conclude the gate "throws away" live progress,
+    # which requires turn-1 to still be running when turn-2 becomes active --
+    # a state this fixture postulates by registering both turns by hand and
+    # never shows to occur. It does not occur: the runtime gate admits one turn
+    # per key at a time (driven in
+    # ``test_one_runtime_key_admits_one_live_turn_at_a_time``), so by the time
+    # turn-2 is active turn-1 is finished and the drop is correct filtering.
+    # What remains unproven is narrower and is carried as a probe on the matrix:
+    # whether any state -- steering, a supersede, a key collision -- can put two
+    # live turns on one base session.
 
     # OpenCode. ``_active_requests`` really is one asyncio task slot per base
     # session id -- by annotation and by every read/write site -- and that is
@@ -861,19 +869,195 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     assert set(EXACT_TURN_PROGRESS_SIGNALS) == {
         (backend, lane) for backend in BACKENDS for lane in LANES
     }
-    # The split is by LANE, not by backend: everything on the durable Workbench
-    # lane is attributed, and only codex is on direct IM (its id rides the
-    # notification instead of the context).
-    attributed = {("codex", "direct_im")} | {
-        (backend, "durable_workbench") for backend in BACKENDS
-    }
+    # All six, after round 6. There is no lane split and no backend split: the
+    # two IM cells were open only because the shared admission layer had been
+    # missed, and the citation for those two is the probe that drives it.
     for cell, (kind, reason) in EXACT_TURN_PROGRESS_SIGNALS.items():
-        if cell in attributed:
-            assert kind == "covered", cell
-            assert reason.endswith(
-                "test_which_backends_attribute_a_progress_event_to_an_exact_turn"
-            ), cell
-        else:
-            assert kind == "unproven", cell
-            assert "probe" in reason.lower(), cell
+        assert kind == "covered", cell
+        expected = (
+            "test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im"
+            if cell[1] == "direct_im" and cell[0] != "codex"
+            else "test_which_backends_attribute_a_progress_event_to_an_exact_turn"
+        )
+        assert reason.endswith(expected), cell
 
+
+
+# ----- HFR-188 / HFR-191: Q2, the shared admission layer -------------------
+
+
+class _AdmissionAgent:
+    """The smallest agent ``AgentService`` will drive, recording what it is handed.
+
+    It records ``platform_specific`` AT THE MOMENT the backend is invoked, which
+    is the only moment that matters: a token stamped after the backend starts
+    emitting is not available to the emit.
+    """
+
+    name = "claude"
+
+    def __init__(self, release=None):
+        self.seen: list[dict] = []
+        self.release = release
+
+    def runtime_turn_key(self, request):
+        return request.composite_session_id
+
+    async def handle_message(self, request):
+        self.seen.append(dict(request.context.platform_specific or {}))
+        if self.release is not None:
+            await self.release.wait()
+
+    async def clear_sessions(self, _session_key):
+        return 0
+
+    async def handle_stop(self, _request):
+        return False
+
+
+def _im_request(message: str, runtime_key: str = "slack_c1:/w"):
+    """A direct-IM request: no Workbench turn token anywhere on its context."""
+    return types.SimpleNamespace(
+        context=types.SimpleNamespace(platform_specific={}),
+        message=message,
+        composite_session_id=runtime_key,
+    )
+
+
+def _admission_service():
+    service = AgentService(controller=types.SimpleNamespace(session_turns=None))
+    agent = _AdmissionAgent()
+    service.register(agent)
+    return service, agent
+
+
+def test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im():
+    """HFR-188 / Q2: direct IM gets an exact Turn token from AgentService.
+
+    This probe exists because the previous answer to Q2 was wrong, and wrong in
+    a fourth distinct way. Rounds 2-4 each read a lossy base-session PROJECTION
+    and concluded the event stream carried nothing. This was a different mistake
+    with the same shape: the writers of ``turn_token`` were found by grepping the
+    LITERAL string, which turns up ``core/session_turns.py`` and
+    ``core/services/dispatch.py`` -- both Workbench owners -- and misses the
+    single most central writer, because ``AgentService`` writes
+    ``platform_specific[AGENT_TURN_TOKEN]`` through the constant. The layer the
+    grep skipped is the one EVERY request passes through, on every lane.
+
+    So "nothing stamps a ``turn_token`` into an IM context" was false. It is
+    replaced here by driving the real ``AgentService.handle_message`` with an
+    IM-scoped request rather than by reading source. Three properties, because a
+    token is only useful if it is present, exact, and non-destructive:
+
+    1. it is on the context BEFORE the backend is invoked;
+    2. a second turn on the SAME runtime key gets a DIFFERENT token -- otherwise
+       it would be a session id in disguise and would attribute nothing;
+    3. an existing Workbench ``turn_token`` is preserved, so the durable lane's
+       own identifier is not clobbered by the admission stamp.
+    """
+    from modules.agents.base import (
+        AGENT_RUNTIME_TURN_KEY,
+        AGENT_RUNTIME_TURN_TOKEN,
+        AGENT_TURN_TOKEN,
+    )
+
+    assert AGENT_TURN_TOKEN == "turn_token"  # the key the backends read
+
+    async def _drive():
+        service, agent = _admission_service()
+        first = _im_request("one")
+        second = _im_request("two")
+        # The gate is held past the backend call and released by the outbound
+        # dispatcher at terminal delivery, so the release is explicit here --
+        # which is itself the fact the serialization probe below turns on.
+        await asyncio.wait_for(service.handle_message("claude", first), timeout=5)
+        service.release_runtime_turn(first.context)
+        await asyncio.wait_for(service.handle_message("claude", second), timeout=5)
+        service.release_runtime_turn(second.context)
+        return agent, first, second
+
+    agent, first, second = asyncio.run(_drive())
+
+    # (1) present at backend-invocation time, not merely at the end of the turn.
+    assert len(agent.seen) == 2
+    tokens = [seen.get(AGENT_TURN_TOKEN) for seen in agent.seen]
+    assert all(tokens), agent.seen
+    # ...and it is the runtime gate's token, which is what makes it a TURN id
+    # rather than an unrelated correlation value.
+    for seen in agent.seen:
+        assert seen[AGENT_TURN_TOKEN] == seen[AGENT_RUNTIME_TURN_TOKEN]
+        assert seen[AGENT_RUNTIME_TURN_KEY] == "slack_c1:/w"
+
+    # (2) exact per Turn. Same session, same runtime key, different token.
+    assert tokens[0] != tokens[1], tokens
+    assert first.context.platform_specific[AGENT_TURN_TOKEN] == tokens[0]
+    assert second.context.platform_specific[AGENT_TURN_TOKEN] == tokens[1]
+
+    # (3) a context that already carries a Workbench turn token keeps it: the
+    # stamp fills a gap, it does not overwrite the durable lane's identifier.
+    async def _drive_workbench():
+        service, agent = _admission_service()
+        request = _im_request("wb")
+        request.context.platform_specific[AGENT_TURN_TOKEN] = "wb-turn-1"
+        await asyncio.wait_for(service.handle_message("claude", request), timeout=5)
+        service.release_runtime_turn(request.context)
+        return agent
+
+    wb_agent = asyncio.run(_drive_workbench())
+    assert wb_agent.seen[0][AGENT_TURN_TOKEN] == "wb-turn-1"
+    assert wb_agent.seen[0][AGENT_RUNTIME_TURN_TOKEN] != "wb-turn-1"
+
+
+def test_one_runtime_key_admits_one_live_turn_at_a_time():
+    """HFR-191 / Q2: the admission gate serializes turns per runtime key.
+
+    Review challenged the codex half of the Q2 probe on reachability, and the
+    challenge holds. That probe registers two turns for one base session and
+    shows ``should_emit_progress`` dropping the older one -- but if production
+    cannot have two LIVE turns on one key, the older id is stale by the time the
+    newer one is active, and dropping it is correct filtering rather than a
+    discarded signal. Same standard this unit applied to PR7R-F1 in round 4: an
+    ordering is not a defect until the state is shown to occur.
+
+    It does not occur. The gate is acquired in ``handle_message`` before the
+    backend is invoked and is NOT released when the backend returns -- the
+    outbound dispatcher releases it at terminal delivery -- so a second turn on
+    the same key cannot enter the backend while the first is live. Driven here
+    rather than read off the production comment that says so.
+    """
+    from modules.agents.base import AGENT_TURN_TOKEN
+
+    async def _drive():
+        service = AgentService(controller=types.SimpleNamespace(session_turns=None))
+        release = asyncio.Event()
+        agent = _AdmissionAgent(release=release)
+        service.register(agent)
+
+        first_request = _im_request("first")
+        first = asyncio.create_task(service.handle_message("claude", first_request))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert len(agent.seen) == 1  # first turn is inside the backend
+
+        second = asyncio.create_task(service.handle_message("claude", _im_request("second")))
+        await asyncio.sleep(0.05)
+        # The second turn is queued on the gate: its backend has NOT been
+        # entered, so there is no second live turn for this runtime key.
+        assert len(agent.seen) == 1, agent.seen
+
+        release.set()
+        await asyncio.wait_for(first, timeout=5)
+        service.release_runtime_turn(first_request.context)
+        await asyncio.wait_for(second, timeout=5)
+        return agent
+
+    agent = asyncio.run(_drive())
+    assert len(agent.seen) == 2
+    assert agent.seen[0][AGENT_TURN_TOKEN] != agent.seen[1][AGENT_TURN_TOKEN]
+
+    # Codex's ``_active_turns`` is keyed by base session and its runtime key is
+    # derived from that same base session, so the serialization above governs
+    # exactly the slot the codex half of the Q2 probe reads.
+    assert "base_session_id" in inspect.getsource(
+        CodexAgent._runtime_turn_key_for_base_session
+    )

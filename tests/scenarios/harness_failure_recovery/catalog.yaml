@@ -2771,6 +2771,41 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_run_terminal_truth_matrix.py::test_a_citation_with_the_wrong_class_component_is_rejected
+  - id: HFR-188
+    name: the shared admission layer stamps a per-Turn token on direct IM
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im
+  - id: HFR-189
+    name: a PR7R finding owner must resolve to a real symbol
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_a_finding_owner_must_resolve_to_a_real_symbol
+  - id: HFR-190
+    name: the Q2 signal table is spelled for every backend and lane
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_the_q2_signal_table_is_spelled_for_every_backend_and_lane
+  - id: HFR-191
+    name: one runtime key admits one live turn at a time
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_one_runtime_key_admits_one_live_turn_at_a_time
+  - id: HFR-192
+    name: every PR7R test agrees with the catalog about its scenario id
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
