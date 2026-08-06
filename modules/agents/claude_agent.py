@@ -267,6 +267,19 @@ class ClaudeAgent(BaseAgent):
                         preserve_pending_request_state=True,
                     )
                 if not handled:
+                    # Third and last emit site that can be holding a claimed
+                    # Activity batch. The request is in the FIFO from the moment
+                    # it is queued, so a background Activity that completes while
+                    # ``client.query`` is in flight attaches its batch here; the
+                    # auth branch above already requeues for exactly that reason.
+                    # Both receiver paths hand the batch back before their
+                    # terminal emit, unconditionally -- do the same rather than
+                    # only for a contained teardown, because the non-contained
+                    # release is no better: it terminalizes those Runs from this
+                    # empty error body. Requeueing resets the request output to
+                    # the plain terminal shape, so the emit below carries no
+                    # provenance it can no longer honour.
+                    self._requeue_request_activity(request)
                     contained = await self.session_handler.handle_session_error(
                         runtime_session_key, context, e, client=client
                     )

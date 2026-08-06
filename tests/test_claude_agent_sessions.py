@@ -2111,6 +2111,95 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         persist.assert_not_called()
         self.assert_contained_settlement(controller.emit_agent_message)
 
+    async def test_direct_query_requeues_a_claimed_activity_batch(self):
+        """The same claim leak on the path where no receiver ever runs.
+
+        The request joins the FIFO before ``client.query`` is awaited, so a
+        background Activity that finishes while the query is in flight attaches
+        its batch to exactly this request -- the race the auth branch above
+        already requeues for. If the query then fails into a contained teardown,
+        the release declines to complete the Run and drops the claim with it.
+        Requeue like both receiver paths do.
+        """
+
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        runtime_key = "wechat_o9:activity:/tmp/work"
+        activity = SessionActivity(
+            id="activity-2",
+            backend="claude",
+            runtime_key=runtime_key,
+            session_id="ses-2",
+            kind="background_task",
+            status="completed",
+            run_id="run-2",
+        )
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="hello",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id="wechat_o9:/tmp/work",
+            session_key="wechat-user",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+
+        async def _query_after_activity_lands(*_args, **_kwargs):
+            # The batch attaches to the queued request mid-query, then the
+            # transport turns out to be gone.
+            request.output_activities = [activity]
+            request.output = activity_completion_output(
+                activity,
+                activities=[activity],
+                detached=False,
+                completes_turn=True,
+            )
+            raise RuntimeError("Cannot write to terminated process (exit code: -9)")
+
+        client = SimpleNamespace(
+            query=AsyncMock(side_effect=_query_after_activity_lands),
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+            _vibe_runtime_base_session_id="wechat_o9:activity",
+            _vibe_runtime_session_key=runtime_key,
+        )
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(return_value=client),
+            mark_session_active=lambda _key: None,
+            mark_session_idle=lambda _key: None,
+            handle_session_error=AsyncMock(return_value=True),
+            claude_teardown_is_intentional=lambda *_a, **_k: True,
+            cleanup_session=AsyncMock(),
+            capture_session_id=lambda *_: None,
+        )
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        agent._prepare_message_with_files = lambda req: req.message
+        agent._delete_ack = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        registry = SimpleNamespace(
+            requeue_completed_outputs=Mock(),
+            has_active=lambda *_a, **_k: False,
+            has_completed_output=lambda *_a, **_k: False,
+        )
+        agent._activity_registry = lambda: registry
+
+        with patch("core.message_mirror.persist_agent_message"):
+            await agent.handle_message(request)
+
+        registry.requeue_completed_outputs.assert_called_once_with([activity])
+        self.assertEqual(request.output_activities, [])
+        self.assert_contained_settlement(controller.emit_agent_message)
+        released = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(released.activity_ids, ())
+        self.assertIsNone(released.activity_batch_id)
+        self.assertEqual(released.run_ids, ())
+
     async def test_receiver_eof_terminated_auth_adopts_turn_before_recovery(self):
         controller = _StubController()
         controller._get_session_key = lambda context: "telegram::user::U1"
