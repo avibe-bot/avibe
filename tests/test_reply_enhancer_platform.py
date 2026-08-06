@@ -100,16 +100,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
         self.assertIn(
-            "Use the `use-avibe` playbook for Avibe configuration, repair, and operations",
+            "Use the `use-avibe` playbook for Avibe configuration, repair, explanation, "
+            "and operations",
             prompt,
         )
         self.assertIn(
-            "If it is not already available, consult the remote playbook",
+            "Before changing Avibe state or disrupting its running service, consult that playbook",
             prompt,
         )
         self.assertIn(
-            "before directly changing persistent configuration, credentials, routing, "
-            "or remote-access state",
+            "use `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` "
+            "when it is not installed locally",
             prompt,
         )
         self.assertIn("skills/use-avibe/SKILL.md", prompt)

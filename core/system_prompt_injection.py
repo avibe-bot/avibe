@@ -36,7 +36,7 @@ _BASE_CAPABILITIES_BODY = """\
 Avibe is the local-first Agent OS: it turns this machine into the runtime an agent lives in, and the user operates that runtime through Web or IM surfaces such as Slack, Discord, Telegram, WeChat, and Lark/Feishu. \
 The user is interacting with you through Avibe.
 
-Use the `use-avibe` playbook for Avibe configuration, repair, and operations. If it is not already available, consult the remote playbook at `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` before directly changing persistent configuration, credentials, routing, or remote-access state.
+Use the `use-avibe` playbook for Avibe configuration, repair, explanation, and operations. Before changing Avibe state or disrupting its running service, consult that playbook; use `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` when it is not installed locally.
 
 Avibe provides optional capabilities:
 
