@@ -1539,11 +1539,17 @@ def replace_show_page_authorized_emails(
         not isinstance(email, str) for email in returned_emails
     ):
         raise RuntimeError("show_page_email_access_invalid_response")
+    changed = bool(result.get("changed"))
+    if changed and "authorization_revision" not in result:
+        raise RuntimeError("show_page_email_access_invalid_response")
     if result.get("authorization_revision") is not None:
-        _replace_authorization_revision(config, result["authorization_revision"])
+        try:
+            _replace_authorization_revision(config, result["authorization_revision"])
+        except ValueError as exc:
+            raise RuntimeError("show_page_email_access_invalid_response") from exc
     return {
         "emails": returned_emails,
-        "changed": bool(result.get("changed")),
+        "changed": changed,
     }
 
 

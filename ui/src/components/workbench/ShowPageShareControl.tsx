@@ -17,6 +17,7 @@ import {
   isShowPageVisibilityPayload,
   showPageShareCapabilities,
   type ShowPageAccess,
+  type ShowPageVisibilityResult,
 } from '../../lib/showPageAccess';
 import { ShowPageShareIdField } from './ShowPageShareIdField';
 import { ShowPageWorkspaceAccessControl } from './ShowPageWorkspaceAccessControl';
@@ -102,6 +103,31 @@ export const ShowPageShareControl: React.FC<{
   const applyPayload = (next: ShowPagePayload) => {
     setLocalPayload(next);
     mergePage(next as ShowPage);
+  };
+
+  const applyMutationResult = (
+    result: ShowPageVisibilityResult<ShowPagePayload>,
+    options: { publicLinkEnabled?: boolean } = {},
+  ) => {
+    const canReadResult = isShowPageVisibilityPayload(result);
+    if (canReadResult) {
+      applyPayload(result as ShowPagePayload);
+    } else {
+      // Access can change after this control renders. A metadata-only response
+      // deliberately has no page identity or link, so withdraw every retained
+      // copy before revalidating the inventory instead of merging malformed data.
+      setLocalPayload(null);
+      removePage(sessionId);
+      reload();
+    }
+    setAccess((current) => current ? {
+      ...current,
+      can_use: canReadResult ? current.can_use : false,
+      public_link_enabled: canReadResult
+        ? options.publicLinkEnabled ?? current.public_link_enabled
+        : result.public_link_enabled,
+    } : current);
+    reqSeq.current += 1;
   };
 
   useEffect(() => {
@@ -198,27 +224,9 @@ export const ShowPageShareControl: React.FC<{
     api
       .setShowPageVisibility<ShowPagePayload>(sessionId, next)
       .then((res) => {
-        // Authoritative server state: always apply it, and invalidate any
-        // in-flight refresh read so a stale read can't revert us afterwards.
-        const canReadResult = isShowPageVisibilityPayload(res);
-        if (canReadResult) {
-          applyPayload(res);
-        } else {
-          // Access changed after this popover rendered. A metadata-only result
-          // intentionally carries no page path, link, share id, or session id;
-          // withdraw every retained copy before revalidating the inventory.
-          setLocalPayload(null);
-          removePage(sessionId);
-          reload();
-        }
-        setAccess((current) => current ? {
-          ...current,
-          can_use: canReadResult ? current.can_use : false,
-          public_link_enabled: canReadResult
-            ? next === 'public'
-            : res.public_link_enabled,
-        } : current);
-        reqSeq.current += 1;
+        // Authoritative server state: apply it and invalidate any in-flight
+        // refresh read so a stale read cannot revert us afterwards.
+        applyMutationResult(res, { publicLinkEnabled: next === 'public' });
       })
       .catch(() => undefined)
       .finally(() => setBusy(false));
@@ -246,10 +254,7 @@ export const ShowPageShareControl: React.FC<{
     setBusy(true);
     api
       .rotateShowPageShare(sessionId)
-      .then((res: ShowPagePayload) => {
-        applyPayload(res);
-        reqSeq.current += 1;
-      })
+      .then((res: ShowPageVisibilityResult<ShowPagePayload>) => applyMutationResult(res))
       .catch(() => undefined)
       .finally(() => setBusy(false));
   };
@@ -444,10 +449,9 @@ export const ShowPageShareControl: React.FC<{
                   shareId={payload.share_id}
                   disabled={busy || !access?.can_publish_public}
                   onSaved={(res) => {
-                    // Authoritative server state, same handling as a visibility
-                    // change: apply it and invalidate any in-flight refresh read.
-                    applyPayload(res as ShowPagePayload);
-                    reqSeq.current += 1;
+                    // Custom-link updates can also return metadata only when
+                    // page-use access changed while the editor was open.
+                    applyMutationResult(res as ShowPageVisibilityResult<ShowPagePayload>);
                   }}
                 />
               </div>

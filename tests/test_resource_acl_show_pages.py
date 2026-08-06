@@ -716,6 +716,32 @@ def test_show_page_email_grants_report_unavailable_without_cloud_pairing(
     assert response.get_json()["code"] == "show_page_email_access_not_configured"
 
 
+def test_show_page_email_grants_report_transient_device_failures_as_retryable(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-email-access-transient")
+    finally:
+        store.close()
+    monkeypatch.setattr(
+        remote_access,
+        "get_show_page_authorized_emails",
+        lambda _show_page_id: (_ for _ in ()).throw(
+            RuntimeError("resource_acl_device_unavailable")
+        ),
+    )
+
+    response = app.test_client().get(
+        "/api/show-pages/ses-email-access-transient/authorized-emails"
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["code"] == "show_page_email_access_transient"
+
+
 def test_show_page_email_grant_device_requests_freeze_the_target(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -763,6 +789,27 @@ def test_show_page_email_grant_device_requests_freeze_the_target(monkeypatch, tm
         ),
     ]
     assert revisions == [9]
+
+
+def test_show_page_email_grant_change_requires_authorization_revision(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    monkeypatch.setattr(remote_access, "_resource_acl_sync_configured", lambda _config: True)
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda *_args, **_kwargs: {
+            "emails": ["guest@example.com"],
+            "changed": True,
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="show_page_email_access_invalid_response"):
+        remote_access.replace_show_page_authorized_emails(
+            "session-one",
+            ["guest@example.com"],
+            config,
+        )
 
 
 def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, tmp_path) -> None:

@@ -1506,19 +1506,28 @@ def _show_page_email_access_error(exc: Exception):
     from core.show_pages import ShowPageError
     from vibe import remote_access
 
-    if isinstance(exc, ShowPageError):
-        return exc
-    if isinstance(exc, remote_access.BackendRequestError):
-        code = str(exc.payload.get("error") or "show_page_email_access_unavailable")
-    else:
-        code = str(exc) or "show_page_email_access_unavailable"
-    if code not in {
+    known_codes = {
         "invalid_email",
         "too_many_entries",
         "show_page_email_access_not_configured",
         "show_page_email_access_invalid_response",
-    }:
-        code = "show_page_email_access_unavailable"
+    }
+    transient_code = "show_page_email_access_transient"
+    if isinstance(exc, ShowPageError):
+        return exc
+    if isinstance(exc, remote_access.BackendRequestError):
+        raw_code = str(exc.payload.get("error") or "")
+        code = raw_code if raw_code in known_codes else (
+            transient_code if exc.status >= 500 else "show_page_email_access_unavailable"
+        )
+    else:
+        raw_code = str(exc)
+        code = transient_code if raw_code in {
+            "resource_acl_device_unavailable",
+            "show_page_email_access_invalid_response",
+        } else raw_code or "show_page_email_access_unavailable"
+        if code not in known_codes and code != transient_code:
+            code = "show_page_email_access_unavailable"
     return ShowPageError(code, code=code)
 
 

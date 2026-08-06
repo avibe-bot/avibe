@@ -4782,6 +4782,8 @@ def _show_page_error_response(exc):
     # the chosen suffix is already claimed.
     elif code in {"not_public", "share_id_taken"}:
         status = 409
+    elif code == "show_page_email_access_transient":
+        status = 503
     else:
         status = 400
     return _coded_error_response(code, str(exc), status)

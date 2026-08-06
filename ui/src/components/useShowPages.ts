@@ -3,8 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
-import type { ShowPageLinkInfo } from '../lib/showPageLinks';
-import { isShowPageVisibilityPayload } from '../lib/showPageAccess';
+import { isShowPageVisibilityPayload, type ShowPageVisibilityResult } from '../lib/showPageAccess';
 import {
   getShowPagesInventoryStore,
   type ShowPage,
@@ -84,7 +83,12 @@ export function useShowPages() {
     setBusyId(page.session_id);
     try {
       const res = await api.rotateShowPageShare(page.session_id);
-      mergePage(res);
+      if (isShowPageVisibilityPayload(res)) {
+        mergePage(res);
+      } else {
+        removePage(page.session_id);
+        reload();
+      }
       showToast(t('showPages.toast.rotated'));
     } catch {
       // handled by ApiContext
@@ -95,8 +99,13 @@ export function useShowPages() {
 
   // The custom-link field owns its own request/validation; we only merge the
   // returned payload (new share_id, updated_at) and confirm.
-  const onShareIdSaved = (next: ShowPageLinkInfo) => {
-    mergePage(next as ShowPage);
+  const onShareIdSaved = (next: ShowPageVisibilityResult, sessionId: string) => {
+    if (isShowPageVisibilityPayload(next)) {
+      mergePage(next as unknown as ShowPage);
+    } else {
+      removePage(sessionId);
+      reload();
+    }
     showToast(t('showPages.shareId.toast.saved'));
   };
 

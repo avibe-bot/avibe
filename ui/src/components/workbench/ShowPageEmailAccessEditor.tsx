@@ -26,10 +26,12 @@ export function ShowPageEmailAccessEditor({
   active,
   canManage,
   sessionId,
+  onConfirmationOpenChange,
 }: {
   active: boolean;
   canManage: boolean;
   sessionId: string;
+  onConfirmationOpenChange?: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
   const api = useApi();
@@ -41,6 +43,10 @@ export function ShowPageEmailAccessEditor({
   const [saving, setSaving] = useState(false);
   const [confirmNarrowing, setConfirmNarrowing] = useState(false);
   const generationRef = useRef(0);
+  const setConfirmationOpen = useCallback((next: boolean) => {
+    setConfirmNarrowing(next);
+    onConfirmationOpenChange?.(next);
+  }, [onConfirmationOpenChange]);
 
   const load = useCallback(async () => {
     const generation = ++generationRef.current;
@@ -66,12 +72,12 @@ export function ShowPageEmailAccessEditor({
     setDraft('');
     setDraftInvalid(false);
     setSaving(false);
-    setConfirmNarrowing(false);
+    setConfirmationOpen(false);
     if (active && canManage) void load();
     return () => {
       generationRef.current += 1;
     };
-  }, [active, canManage, load, sessionId]);
+  }, [active, canManage, load, sessionId, setConfirmationOpen]);
 
   const dirty = useMemo(
     () => emails.join('\u0000') !== savedEmails.join('\u0000'),
@@ -93,7 +99,7 @@ export function ShowPageEmailAccessEditor({
 
   const commit = async () => {
     if (!dirty || saving || draft.trim()) return;
-    setConfirmNarrowing(false);
+    setConfirmationOpen(false);
     setSaving(true);
     try {
       const result = await api.replaceShowPageAuthorizedEmails(sessionId, emails);
@@ -250,7 +256,7 @@ export function ShowPageEmailAccessEditor({
       </div>
       <ConfirmDialog
         open={confirmNarrowing}
-        onOpenChange={setConfirmNarrowing}
+        onOpenChange={setConfirmationOpen}
         title={t('organization.resources.narrowTitle')}
         description={t('organization.resources.narrowBody')}
         confirmLabel={t('organization.actions.saveChanges')}

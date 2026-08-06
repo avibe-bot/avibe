@@ -437,6 +437,7 @@ export function ShowPageWorkspaceAccessControl({
           active={active}
           canManage={access.can_publish_public}
           sessionId={sessionId}
+          onConfirmationOpenChange={onConfirmationOpenChange}
         />
       ) : null}
       </section>
