@@ -66,7 +66,24 @@ def is_retryable_http_error(err: urllib.error.HTTPError) -> bool:
         code = int(err.code)
     except Exception:
         return False
-    return code in RETRYABLE_HTTP_STATUS_CODES
+    return code in RETRYABLE_HTTP_STATUS_CODES or is_rate_limit_http_error(err)
+
+
+def is_rate_limit_http_error(err: urllib.error.HTTPError) -> bool:
+    """Recognize GitHub rate-limit 403s without treating permission errors as transient."""
+    try:
+        code = int(err.code)
+    except Exception:
+        return False
+    if code != 403:
+        return False
+
+    headers = getattr(err, "headers", None)
+    if headers is None:
+        return False
+    retry_after = headers.get("Retry-After")
+    remaining = headers.get("X-RateLimit-Remaining")
+    return bool(retry_after) or str(remaining or "").strip() == "0"
 
 
 def get_authenticated_login(token: str | None) -> str | None:

@@ -21,6 +21,7 @@ from _github_wait_common import (  # noqa: E402
     get_authenticated_login,
     get_token,
     github_get,
+    is_rate_limit_http_error,
     is_retryable_http_error,
     list_paginated,
     list_paginated_with_count,
@@ -253,15 +254,19 @@ def _render_activity(
             next_pr_status,
         )
 
-    lines = [f"GitHub PR activity detected for {repo}#{pr_number}"]
-
     visible_limit = max(event_limit, 1)
-    for entry in rendered_events[:visible_limit]:
+    reaction_events = rendered_events[-len(new_reactions) :] if new_reactions else []
+    non_reaction_events = rendered_events[: len(rendered_events) - len(reaction_events)]
+    non_reaction_limit = max(visible_limit - len(reaction_events), 0)
+    displayed_events = non_reaction_events[:non_reaction_limit] + reaction_events
+    omitted_events = len(non_reaction_events) - len(displayed_events[:non_reaction_limit])
+
+    lines = [f"GitHub PR activity detected for {repo}#{pr_number}"]
+    for entry in displayed_events:
         lines.append(entry)
 
-    total_events = len(rendered_events)
-    if total_events > visible_limit:
-        lines.append(f"- {total_events - visible_limit} additional event(s) omitted")
+    if omitted_events:
+        lines.append(f"- {omitted_events} additional event(s) omitted")
 
     return (
         "\n".join(lines),
@@ -360,7 +365,10 @@ def main() -> int:
     parser.add_argument("--since-reaction-id", type=int, default=None, help="Existing PR-body reaction cursor")
     parser.add_argument("--since-pr-status", help=argparse.SUPPRESS)
     parser.add_argument("--since-pr-id", type=int, default=None, help="Existing repository pull request cursor")
-    parser.add_argument("--cursor-output", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--cursor-output",
+        help="Write consumed activity cursors here when the waiter detects an event",
+    )
     parser.add_argument(
         "--cursor-file",
         help="Read baseline cursors, or write them when --snapshot-cursors is set",
@@ -392,6 +400,13 @@ def main() -> int:
 
     token = get_token()
     viewer_login = None if args.include_self_comments else get_authenticated_login(token)
+    if token is not None and not args.include_self_comments and viewer_login is None:
+        print(
+            "Unable to resolve the authenticated GitHub viewer identity; "
+            "use a token that can read /user or pass --include-self-comments explicitly.",
+            file=sys.stderr,
+        )
+        return 2
     if token is None and not args.allow_unauthenticated:
         print(
             (
@@ -552,7 +567,7 @@ def main() -> int:
         )
         if initial_output is not None:
             _write_cursor_output(
-                args.cursor_output,
+                args.cursor_output or args.cursor_file,
                 review_cursor=review_cursor,
                 review_comment_cursor=review_comment_cursor,
                 issue_comment_cursor=issue_comment_cursor,
@@ -599,7 +614,10 @@ def main() -> int:
                     stop_after_id=pr_cursor if pr_cursor > 0 else None,
                 )
         except urllib.error.HTTPError as err:
-            if token is None and err.code in {403, 429}:
+            if not is_retryable_http_error(err):
+                print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
+                return 1
+            if token is None and (err.code == 429 or is_rate_limit_http_error(err)):
                 print(
                     (
                         "GitHub unauthenticated polling hit a rate limit. "
@@ -607,7 +625,7 @@ def main() -> int:
                     ),
                     file=sys.stderr,
                 )
-                return 1
+                return RETRY_EXIT_CODE
             print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
             continue
         except Exception as err:  # noqa: BLE001
@@ -656,7 +674,7 @@ def main() -> int:
                 continue
 
             _write_cursor_output(
-                args.cursor_output,
+                args.cursor_output or args.cursor_file,
                 review_cursor=review_cursor,
                 review_comment_cursor=review_comment_cursor,
                 issue_comment_cursor=issue_comment_cursor,

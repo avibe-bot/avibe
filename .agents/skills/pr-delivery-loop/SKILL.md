@@ -159,8 +159,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   **the bot withdraws the reaction when the review completes**, so 👀 is
   evidence only inside its own window. Capture the URL returned by
   `gh pr comment <pr> --body '@codex review'`, extract that comment's ID, and
-  query `repos/<o>/<r>/issues/comments/<comment-id>` directly within ~2
-  minutes: present = picked up, absent = never picked up, post the trigger
+  query `repos/<o>/<r>/issues/comments/<comment-id>/reactions` directly within ~2
+  minutes. Require a reaction with `content == "eyes"` whose `user.login` is
+  `chatgpt-codex-connector` or `chatgpt-codex-connector[bot]`; aggregate counts or
+  reactions from other users do not prove pickup. If absent, post the trigger
   again. Never use `issues/<pr>/comments --jq '.[-1]'` to identify the trigger.
   Outside that window every historical trigger reads 0 including the ones that
   were reviewed, so never infer "it never started" from a reaction count after
@@ -172,6 +174,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   self-contained with `_github_wait_common.py`. Use one-shot watches per phase,
   re-arm after each round, and never `--forever`. A CI-only wait may use the
   bundled `wait_action.py`.
+- The PR waiter filters your own reviews and comments by the authenticated
+  GitHub viewer login. It must resolve that identity before polling; if `/user`
+  is unavailable, fail closed or explicitly pass `--include-self-comments` and
+  account for those events in the cursor plan.
 - The one-watch invariant is scoped by owner and concern: one live lane/fix
   watch per PR, plus one independent orchestrator gate watch when the work is
   delegated. Verify the watch name, target session, command, and `--pr <N>`
@@ -179,8 +185,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   unrelated global monitors as the lane watch.
 - Before each push, snapshot all current activity cursors with
   `wait_pr.py --snapshot-cursors --cursor-file <file>`; after the push, pass
-  that file to the newly armed waiter so a review arriving during setup remains
-  observable.
+  that file to the newly armed waiter as both `--cursor-file <file>` and
+  `--cursor-output <file>` so consumed events are persisted before any re-arm.
+  The bundled waiter also defaults cursor progress to `--cursor-file` when no
+  separate output path is supplied.
 - Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
   settled: your own thread resolutions count as "review activity" to a watch
   armed earlier in the round, so it self-consumes on YOUR close-out actions and
@@ -212,6 +220,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   `Reviewed commit: <sha>` equal to the current head, or (b) a `+1` reaction
   from that bot on the PR body. Findings arrive as a review with inline
   threads. A contributor comment that quotes the pass text is never a verdict.
+- The CI waiter matches every distinct Actions run ID for each requested
+  workflow name at the exact SHA and branch. A workflow name is not a unique
+  run identity; do not declare CI complete while a second matching run is
+  pending or failed.
 - A `+1` reaction carries no commit sha by itself. Immediately before pushing a
   new head, snapshot all PR activity cursors with the bundled waiter's
   `--snapshot-cursors --cursor-file <file>` mode. Start the post-push waiter
