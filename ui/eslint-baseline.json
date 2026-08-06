@@ -4,7 +4,7 @@
     "@typescript-eslint/no-explicit-any": "The untyped edge of the Python API. Each one is a response body, an SSE event payload or a third-party callback that reaches the UI as `any`. Typing them is a per-endpoint contract change against the backend, not a lint fix, and doing it as one sweep would produce a diff nobody can review. The ratchet's job here is to stop a NEW endpoint from landing untyped; the recorded ones come down endpoint by endpoint.",
     "react-hooks/set-state-in-effect": "Legitimate-looking `reset derived state when the subject changes` and prop-mirroring effects in components with no test coverage. Each rewrite changes when a render happens, so each needs its own regression test first; batching them behind a lint deadline is how a subtle render-order bug ships.",
     "react-hooks/preserve-manual-memoization": "Advice for adopting the React Compiler, not a defect. `babel-plugin-react-compiler` is not in this project's Vite plugin list, so no shipped behaviour depends on these; they become actionable in the change that turns the compiler on.",
-    "react-refresh/only-export-components": "`src/context/ApiContext.tsx` only. Every other context module in the UI now splits its handle from its provider, but this one is 3142 lines with ~78 consumers, and the split means relocating the ~1200-line provider in the single most contended file in the repository (36 unmerged branches currently modify it). The cost is a merge conflict for everyone else, and the benefit is hot-reload for one file \u2014 so it belongs in a change that owns ApiContext, not in a lint cleanup.",
+    "react-refresh/only-export-components": "`src/context/ApiContext.tsx` only. Every other context module in the UI now splits its handle from its provider, but this one is 3142 lines with ~78 consumers, and the split means relocating the ~1200-line provider in the single most contended file in the repository (36 unmerged branches currently modify it). The cost is a merge conflict for everyone else, and the benefit is hot-reload for one file — so it belongs in a change that owns ApiContext, not in a lint cleanup.",
     "react-hooks/exhaustive-deps": "Inline `eslint-disable` comments predating this cleanup. Each one also opts its component out of the compiler-backed hook analysis, so the suppressed count is a direct measure of the UI the other react-hooks rules cannot see: removing all 43 raises the error count rather than lowering it. Frozen here so that area cannot grow while it is retired component by component.",
     "react-hooks/refs": "Inline suppressions of the render-phase ref rule, in the same unanalysable area as the exhaustive-deps ones above. Frozen so no new render-phase ref access can be hidden behind a comment."
   },
@@ -126,7 +126,7 @@
       "@typescript-eslint/no-explicit-any": 5
     },
     "src/context/ApiContext.tsx": {
-      "@typescript-eslint/no-explicit-any": 52,
+      "@typescript-eslint/no-explicit-any": 51,
       "react-refresh/only-export-components": 1
     },
     "src/context/DockProvider.tsx": {

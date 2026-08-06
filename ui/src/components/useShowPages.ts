@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import type { ShowPageLinkInfo } from '../lib/showPageLinks';
+import { isShowPageVisibilityPayload } from '../lib/showPageAccess';
 import {
   getShowPagesInventoryStore,
   type ShowPage,
@@ -38,6 +39,7 @@ export function useShowPageInventory(enabled = true) {
     loading,
     loaded,
     mergePage: store.mergePage,
+    removePage: store.removePage,
     replaceTitleIfCurrent: store.replaceTitleIfCurrent,
     reload,
   };
@@ -51,7 +53,7 @@ export function useShowPages() {
   const api = useApi();
   const { showToast } = useToast();
   const { t } = useTranslation();
-  const { pages, loading, loaded, mergePage, replaceTitleIfCurrent, reload } =
+  const { pages, loading, loaded, mergePage, removePage, replaceTitleIfCurrent, reload } =
     useShowPageInventory();
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -59,8 +61,16 @@ export function useShowPages() {
     if (page.visibility === visibility || busyId) return;
     setBusyId(page.session_id);
     try {
-      const res = await api.setShowPageVisibility(page.session_id, visibility);
-      mergePage(res);
+      const res = await api.setShowPageVisibility<ShowPage>(page.session_id, visibility);
+      if (isShowPageVisibilityPayload(res)) {
+        mergePage(res);
+      } else {
+        // The caller lost page-use access between render and mutation. The
+        // metadata-only response deliberately contains no page identifiers or
+        // links, so withdraw the retained inventory row immediately.
+        removePage(page.session_id);
+        reload();
+      }
       showToast(t('showPages.toast.updated'));
     } catch {
       // ApiContext surfaces a toast on failure.

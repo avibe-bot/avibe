@@ -14,6 +14,7 @@ import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/plat
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import {
   canChangeShowPagePublicLink,
+  isShowPageVisibilityPayload,
   showPageShareCapabilities,
   type ShowPageAccess,
 } from '../../lib/showPageAccess';
@@ -48,7 +49,7 @@ export const ShowPageShareControl: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const dock = useDock();
-  const { pages, mergePage, reload } = useShowPageInventory();
+  const { pages, mergePage, removePage, reload } = useShowPageInventory();
   const inventoryPage = pages.find((page) => page.session_id === sessionId);
   const [open, setOpen] = useState(false);
   const [workspaceConfirmationOpen, setWorkspaceConfirmationOpen] = useState(false);
@@ -180,14 +181,27 @@ export const ShowPageShareControl: React.FC<{
   const setVisibilityTo = (next: string) => {
     setBusy(true);
     api
-      .setShowPageVisibility(sessionId, next)
-      .then((res: ShowPagePayload) => {
+      .setShowPageVisibility<ShowPagePayload>(sessionId, next)
+      .then((res) => {
         // Authoritative server state: always apply it, and invalidate any
         // in-flight refresh read so a stale read can't revert us afterwards.
-        applyPayload(res);
+        const canReadResult = isShowPageVisibilityPayload(res);
+        if (canReadResult) {
+          applyPayload(res);
+        } else {
+          // Access changed after this popover rendered. A metadata-only result
+          // intentionally carries no page path, link, share id, or session id;
+          // withdraw every retained copy before revalidating the inventory.
+          setLocalPayload(null);
+          removePage(sessionId);
+          reload();
+        }
         setAccess((current) => current ? {
           ...current,
-          public_link_enabled: next === 'public',
+          can_use: canReadResult ? current.can_use : false,
+          public_link_enabled: canReadResult
+            ? next === 'public'
+            : res.public_link_enabled,
         } : current);
         reqSeq.current += 1;
       })

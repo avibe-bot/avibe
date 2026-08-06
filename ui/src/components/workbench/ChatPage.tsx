@@ -25,7 +25,9 @@ import { isVaultApprovalRequest, placeVaultProvisionRequests } from '../../lib/v
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import {
   showPageHeaderAccess,
+  showPageRestoreAccessDecision,
   type ShowPageAccess,
+  type ShowPageAccessProbe,
 } from '../../lib/showPageAccess';
 import { showPageEmbeddedPath } from '../../apps/showPageAvatar';
 import { downloadFile, fileMeta } from '../../lib/filesApi';
@@ -199,15 +201,20 @@ export const ChatPage: React.FC = () => {
   const canChat = capabilities.can_chat && sessionCanChat;
   const [showPageAccessResult, setShowPageAccessResult] = useState<{
     sessionId: string;
-    access: ShowPageAccess | null;
+    probe: ShowPageAccessProbe;
   } | null>(null);
   const showPageAccessProbeGenerationRef = useRef(0);
-  const showPageAccess = capabilities.can_use_show_pages
+  const currentShowPageAccessProbe = capabilities.can_use_show_pages
     && showPageAccessResult?.sessionId === sessionId
-    ? showPageAccessResult?.access ?? null
+    ? showPageAccessResult?.probe ?? null
     : null;
-  const showPageAccessResolved = capabilities.can_manage_instance
-    || showPageAccessResult?.sessionId === sessionId;
+  const showPageAccess = currentShowPageAccessProbe?.status === 'granted'
+    ? currentShowPageAccessProbe.access
+    : null;
+  const showPageRestoreAccess = showPageRestoreAccessDecision(
+    capabilities.can_manage_instance,
+    currentShowPageAccessProbe,
+  );
   const { canOpen: canOpenShowPage, canManage: canManageShowPage } = showPageHeaderAccess(
     capabilities.can_manage_instance,
     showPageAccess,
@@ -306,12 +313,15 @@ export const ChatPage: React.FC = () => {
   const probeShowPageAccess = useCallback(async (targetSessionId: string) => {
     const generation = ++showPageAccessProbeGenerationRef.current;
     try {
-      const nextAccess = await api.probeShowPageAccess(targetSessionId);
+      const nextProbe = await api.probeShowPageAccess(targetSessionId);
       if (generation !== showPageAccessProbeGenerationRef.current) return;
-      setShowPageAccessResult({ sessionId: targetSessionId, access: nextAccess });
+      setShowPageAccessResult({ sessionId: targetSessionId, probe: nextProbe });
     } catch {
       if (generation !== showPageAccessProbeGenerationRef.current) return;
-      setShowPageAccessResult({ sessionId: targetSessionId, access: null });
+      setShowPageAccessResult({
+        sessionId: targetSessionId,
+        probe: { status: 'error', access: null },
+      });
     }
   }, [api]);
   useEffect(() => {
@@ -1644,14 +1654,14 @@ export const ChatPage: React.FC = () => {
       showPageRestoreAttemptRef.current = sid;
       return;
     }
-    if (!showPageAccessResolved) return;
+    if (showPageRestoreAccess === 'wait') return;
     showPageRestoreAttemptRef.current = sid;
-    if (!canOpenShowPage) {
+    if (showPageRestoreAccess === 'deny') {
       writeChatViewMode(sid, 'chat');
       return;
     }
     void openShowPage(sid);
-  }, [canOpenShowPage, deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal, showPageAccessResolved]);
+  }, [deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal, showPageRestoreAccess]);
 
   // When the share control resolves the page (open) or flips its visibility, the
   // serving route changes (private → /show/, public → /p/). Re-point the iframe

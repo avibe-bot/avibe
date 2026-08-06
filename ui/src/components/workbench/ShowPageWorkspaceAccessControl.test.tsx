@@ -2,7 +2,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ShowPageAccess } from '@/lib/showPageAccess';
-import { ShowPageWorkspaceAccessControl } from './ShowPageWorkspaceAccessControl';
+import {
+  ShowPageOrganizationAuthorizationPrompt,
+  ShowPageWorkspaceAccessControl,
+} from './ShowPageWorkspaceAccessControl';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -35,6 +38,26 @@ const renderControl = (value: ShowPageAccess) => renderToStaticMarkup(
 );
 
 describe('ShowPageWorkspaceAccessControl', () => {
+  it('offers explicit reauthorization after an Organization subject mismatch', () => {
+    const html = renderToStaticMarkup(
+      <ShowPageOrganizationAuthorizationPrompt gate="subject_mismatch" onAuthorize={() => undefined} />,
+    );
+
+    expect(html).toContain('chat.showPage.organizationSubjectMismatch');
+    expect(html).toContain('chat.showPage.organizationSignInAgain');
+    expect(html).toContain('<button');
+  });
+
+  it('keeps the normal Organization sign-in action on the same recovery component', () => {
+    const html = renderToStaticMarkup(
+      <ShowPageOrganizationAuthorizationPrompt gate="authorization_required" onAuthorize={() => undefined} />,
+    );
+
+    expect(html).toContain('chat.showPage.organizationSignInDesc');
+    expect(html).toContain('chat.showPage.organizationSignIn');
+    expect(html).toContain('<button');
+  });
+
   it('renders Personal as a fixed Private audience without Organization choices', () => {
     const html = renderControl(access({
       mode: 'personal',

@@ -3187,6 +3187,7 @@
       "loadingWorkspaceAccess": "正在加载组织权限…",
       "workspaceReadOnly": "只有页面所有者或组织管理者可以修改此访问范围。",
       "organizationSignIn": "登录",
+      "organizationSignInAgain": "重新登录",
       "organizationSignInDesc": "登录 avibe.bot 后才能修改组织访问范围。",
       "organizationUnavailable": "当前 Avibe 尚未连接 avibe.bot 的组织管理功能。",
       "organizationSubjectMismatch": "当前登录的 avibe.bot 账号与此 Avibe 会话不一致。",

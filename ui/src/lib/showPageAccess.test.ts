@@ -4,10 +4,13 @@ import { isRevisionConflict, OrganizationApiError } from '@/features/organizatio
 import {
   buildShowPageAccessPatch,
   canChangeShowPagePublicLink,
+  classifyShowPageAccessProbe,
+  isShowPageVisibilityPayload,
   showPageShareCapabilities,
   showPageHeaderAccess,
   showPageAudienceLabelKey,
   showPageAudienceLevels,
+  showPageRestoreAccessDecision,
   showPageSyncPresentation,
   type ShowPageAccess,
 } from './showPageAccess';
@@ -94,6 +97,36 @@ describe('Show Page access policy helpers', () => {
     });
     expect(showPageHeaderAccess(false, null)).toEqual({ canOpen: false, canManage: false });
     expect(showPageHeaderAccess(true, null)).toEqual({ canOpen: true, canManage: true });
+  });
+
+  it('keeps transient access probe failures distinct from definitive denials', () => {
+    const granted = classifyShowPageAccessProbe(200, access());
+    const managerOnly = classifyShowPageAccessProbe(200, access({ can_use: false }));
+    const denied = classifyShowPageAccessProbe(403, { error: 'resource_access_forbidden' });
+    const missing = classifyShowPageAccessProbe(404, { error: 'show_page_not_found' });
+    const unavailable = classifyShowPageAccessProbe(503, { error: 'backend_unavailable' });
+
+    expect(showPageRestoreAccessDecision(false, granted)).toBe('allow');
+    expect(showPageRestoreAccessDecision(false, managerOnly)).toBe('deny');
+    expect(showPageRestoreAccessDecision(false, denied)).toBe('deny');
+    expect(showPageRestoreAccessDecision(false, missing)).toBe('deny');
+    expect(showPageRestoreAccessDecision(false, unavailable)).toBe('wait');
+    expect(showPageRestoreAccessDecision(false, { status: 'error', access: null })).toBe('wait');
+    expect(showPageRestoreAccessDecision(true, null)).toBe('allow');
+  });
+
+  it('distinguishes metadata-only visibility results from readable page payloads', () => {
+    expect(isShowPageVisibilityPayload({
+      ok: true,
+      public_link_enabled: false,
+    })).toBe(false);
+    expect(isShowPageVisibilityPayload({
+      ok: true,
+      session_id: 'session-1',
+      visibility: 'private',
+      active_url: '/show/session-1/',
+      share_id: null,
+    })).toBe(true);
   });
 
   it('distinguishes pending, offline, and error sync states', () => {

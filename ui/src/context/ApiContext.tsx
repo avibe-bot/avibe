@@ -7,8 +7,14 @@ import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
+import type { ShowPageLinkInfo } from '../lib/showPageLinks';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
-import type { ShowPageAccess } from '../lib/showPageAccess';
+import {
+  classifyShowPageAccessProbe,
+  type ShowPageAccess,
+  type ShowPageAccessProbe,
+  type ShowPageVisibilityResult,
+} from '../lib/showPageAccess';
 import {
   WorkbenchEventReconnectLoop,
   type WorkbenchEventConnectionState,
@@ -491,7 +497,7 @@ export type ApiContextType = {
   removeUser: (userId: string, platform?: string) => Promise<any>;
   getShowPages: () => Promise<any>;
   getShowPageAccess: (sessionId: string) => Promise<ShowPageAccess>;
-  probeShowPageAccess: (sessionId: string) => Promise<ShowPageAccess | null>;
+  probeShowPageAccess: (sessionId: string) => Promise<ShowPageAccessProbe>;
   getWebPushStatus: (payload?: WebPushStatusPayload) => Promise<WebPushStatus>;
   getWebPushVapidPublicKey: () => Promise<{ ok: boolean; public_key: string }>;
   subscribeWebPush: (
@@ -502,7 +508,10 @@ export type ApiContextType = {
   ) => Promise<WebPushSubscriptionResult>;
   unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
-  setShowPageVisibility: (sessionId: string, visibility: string) => Promise<any>;
+  setShowPageVisibility: <Payload extends ShowPageLinkInfo = ShowPageLinkInfo>(
+    sessionId: string,
+    visibility: string,
+  ) => Promise<ShowPageVisibilityResult<Payload>>;
   /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. */
   ensureShowPage: (sessionId: string) => Promise<any>;
   rotateShowPageShare: (sessionId: string) => Promise<any>;
@@ -2809,11 +2818,18 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getShowPages: () => getJson('/api/show-pages'),
     getShowPageAccess: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
     probeShowPageAccess: async (sessionId) => {
-      const payload = await getJson(
-        `/api/show-pages/${encodeURIComponent(sessionId)}/access`,
-        { handleError: false },
-      );
-      return payload?.ok === true ? payload as ShowPageAccess : null;
+      try {
+        const response = await apiFetch(`/api/show-pages/${encodeURIComponent(sessionId)}/access`);
+        let payload: unknown;
+        try {
+          payload = await response.json();
+        } catch {
+          return { status: 'error', access: null };
+        }
+        return classifyShowPageAccessProbe(response.status, payload);
+      } catch {
+        return { status: 'error', access: null };
+      }
     },
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),

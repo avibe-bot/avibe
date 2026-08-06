@@ -3187,6 +3187,7 @@
       "loadingWorkspaceAccess": "Loading Organization access…",
       "workspaceReadOnly": "Only the Show Page owner or an Organization manager can change this audience.",
       "organizationSignIn": "Sign in",
+      "organizationSignInAgain": "Sign in again",
       "organizationSignInDesc": "Sign in to avibe.bot to change the Organization audience.",
       "organizationUnavailable": "This Avibe is not connected to avibe.bot Organization management.",
       "organizationSubjectMismatch": "The signed-in avibe.bot account does not match this Avibe session.",

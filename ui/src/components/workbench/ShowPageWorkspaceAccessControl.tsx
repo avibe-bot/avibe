@@ -52,6 +52,7 @@ type ManagementGate =
   | 'error';
 
 type ResourceResponse = { resource: OrganizationResource };
+type OrganizationAuthorizationGate = 'authorization_required' | 'subject_mismatch';
 
 const LEVEL_ICONS = {
   private: LockKeyhole,
@@ -73,6 +74,44 @@ function gateForError(error: unknown): ManagementGate {
 function sessionGate(session: CloudManagementSession): ManagementGate {
   if (session.connected) return 'ready';
   return session.state;
+}
+
+export function ShowPageOrganizationAuthorizationPrompt({
+  gate,
+  onAuthorize,
+}: {
+  gate: OrganizationAuthorizationGate;
+  onAuthorize: () => void;
+}) {
+  const { t } = useTranslation();
+  const subjectMismatch = gate === 'subject_mismatch';
+  return (
+    <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
+      <span className={clsx(
+        'flex min-w-0 items-start gap-1.5 text-[11px] leading-snug',
+        subjectMismatch ? 'text-destructive' : 'text-muted',
+      )}>
+        {subjectMismatch ? <TriangleAlert className="mt-0.5 size-3.5 shrink-0" /> : null}
+        <span>
+          {t(subjectMismatch
+            ? 'chat.showPage.organizationSubjectMismatch'
+            : 'chat.showPage.organizationSignInDesc')}
+        </span>
+      </span>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-7 shrink-0"
+        onClick={onAuthorize}
+      >
+        <LogIn className="size-3.5" />
+        {t(subjectMismatch
+          ? 'chat.showPage.organizationSignInAgain'
+          : 'chat.showPage.organizationSignIn')}
+      </Button>
+    </div>
+  );
 }
 
 export function ShowPageWorkspaceAccessControl({
@@ -327,29 +366,19 @@ export function ShowPageWorkspaceAccessControl({
         </div>
       ) : null}
 
-      {access?.mode === 'organization' && canManage && gate === 'authorization_required' ? (
-        <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
-          <span className="text-[11px] leading-snug text-muted">
-            {t('chat.showPage.organizationSignInDesc')}
-          </span>
-          <Button type="button" size="sm" variant="outline" className="h-7 shrink-0" onClick={() => void startAuthorization()}>
-            <LogIn className="size-3.5" />
-            {t('chat.showPage.organizationSignIn')}
-          </Button>
-        </div>
-      ) : null}
+      {access?.mode === 'organization'
+        && canManage
+        && (gate === 'authorization_required' || gate === 'subject_mismatch') ? (
+          <ShowPageOrganizationAuthorizationPrompt
+            gate={gate}
+            onAuthorize={() => void startAuthorization()}
+          />
+        ) : null}
 
       {access?.mode === 'organization' && canManage && gate === 'cloud_not_connected' ? (
         <div className="flex items-start gap-1.5 text-[11px] leading-snug text-muted">
           <CloudOff className="mt-0.5 size-3.5 shrink-0" />
           {t('chat.showPage.organizationUnavailable')}
-        </div>
-      ) : null}
-
-      {access?.mode === 'organization' && canManage && gate === 'subject_mismatch' ? (
-        <div className="flex items-start gap-1.5 text-[11px] leading-snug text-destructive">
-          <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
-          {t('chat.showPage.organizationSubjectMismatch')}
         </div>
       ) : null}
 
