@@ -1579,16 +1579,16 @@ def test_remote_show_page_icon_upload_is_blocked_before_filesystem_access(
 
 
 @pytest.mark.parametrize(
-    "path",
+    ("path", "local_only"),
     [
-        "/api/models/runtime/status",
-        "/api/models/agents",
-        "/api/backend/codex/runtime",
-        "/api/backend/codex/auth",
+        ("/api/models/runtime/status", False),
+        ("/api/models/agents", False),
+        ("/api/backend/codex/runtime", True),
+        ("/api/backend/codex/auth", False),
     ],
 )
-def test_remote_model_and_backend_reads_remain_available(path):
-    assert not ui_server._is_remote_local_execution_request("GET", path)
+def test_remote_model_and_backend_reads_follow_execution_safety_policy(path, local_only):
+    assert ui_server._is_remote_local_execution_request("GET", path) is local_only
 
 
 @pytest.mark.parametrize(
@@ -1952,8 +1952,8 @@ def test_remote_owner_can_still_read_agent_instructions_and_queue(
 
     assert project_response.status_code == 200
     assert project_response.get_json()["source"] == "none"
-    assert global_response.status_code == 200
-    assert global_response.get_json() == {"backends": []}
+    assert global_response.status_code == 403
+    assert global_response.get_json()["code"] == "remote_execution_disabled"
     assert queue_response.status_code == 200
     assert queue_response.get_json() == {"queued": []}
     assert ui_server._is_remote_local_execution_request("POST", "/api/skills/preview")
