@@ -128,6 +128,16 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
 @pytest.mark.parametrize(
     ("method", "path"),
     [
+        ("POST", "/api/show-pages/ses-1/visibility"),
+        ("GET", "/api/backend/codex/runtime"),
+        ("GET", "/api/global-prompts"),
+        ("GET", "/api/harness/runs"),
+        ("GET", "/api/harness/runs/run-1"),
+        ("GET", "/api/harness/bootstrap"),
+        ("GET", "/api/vault/pubkey"),
+        ("GET", "/api/vault/agent/pubkey"),
+        ("GET", "/api/vault/sandbox/root-metadata"),
+        ("GET", "/api/vault/vmk"),
         ("GET", "/api/doctor"),
         ("POST", "/api/doctor"),
         ("POST", "/api/logs"),
@@ -174,12 +184,12 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("PUT", "/api/resource-policies/agent/agent-1", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/models/runtime/status", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/models/agents/codex/chain", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/backend/codex/runtime", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/backend/codex/runtime", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/opencode/permission-status", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/vault/audit", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/dock/pins", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/web-push/subscriptions", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/harness/runs/run-1", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/harness/runs/run-1", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/users", REMOTE_HTTP_ALLOWED),
         ("GET", "/show/ses-1/", REMOTE_HTTP_ALLOWED),
         ("POST", "/show/ses-1/__show/events", REMOTE_HTTP_ALLOWED),
@@ -203,6 +213,25 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
     expected,
 ) -> None:
     assert http_authorization_policy(method, path).remote_access == expected
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/show-pages/ses-1/visibility"),
+        ("GET", "/api/backend/codex/runtime"),
+        ("GET", "/api/global-prompts"),
+        ("GET", "/api/harness/runs"),
+        ("GET", "/api/harness/runs/run-1"),
+        ("GET", "/api/harness/bootstrap"),
+        ("GET", "/api/vault/pubkey"),
+        ("GET", "/api/vault/agent/pubkey"),
+        ("GET", "/api/vault/sandbox/root-metadata"),
+        ("GET", "/api/vault/vmk"),
+    ],
+)
+def test_remote_local_execution_and_sensitive_surfaces_are_local_only(method, path) -> None:
+    assert http_authorization_policy(method, path).remote_access == REMOTE_HTTP_LOCAL_ONLY
 
 
 def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:

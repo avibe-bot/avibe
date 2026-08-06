@@ -6156,13 +6156,22 @@ def _remote_resource_access_context():
 def _resource_policy_api_payload(policy: dict[str, Any], user_context: Any, connection: Any) -> dict[str, Any]:
     from storage import resource_access_service
 
+    can_manage = resource_access_service.can_manage_resource_acl(
+        user_context,
+        policy["resource_kind"],
+        policy["resource_id"],
+        connection=connection,
+    )
+    group_ids = policy.get("group_ids") or []
+    if not can_manage:
+        group_ids = sorted(set(group_ids).intersection(user_context.group_ids or set()))
     return {
         "resource_kind": policy["resource_kind"],
         "resource_id": policy["resource_id"],
         "access_level": policy["access_level"],
         "owner_user_id": policy.get("owner_user_id"),
         "organization_id": policy.get("organization_id"),
-        "group_ids": policy.get("group_ids") or [],
+        "group_ids": group_ids,
         "policy_revision": policy.get("policy_revision"),
         "last_applied_control_plane_revision": policy.get("last_applied_control_plane_revision"),
         "can_use": resource_access_service.can_use_resource(
@@ -6171,12 +6180,7 @@ def _resource_policy_api_payload(policy: dict[str, Any], user_context: Any, conn
             policy["resource_id"],
             connection=connection,
         ),
-        "can_manage": resource_access_service.can_manage_resource_acl(
-            user_context,
-            policy["resource_kind"],
-            policy["resource_id"],
-            connection=connection,
-        ),
+        "can_manage": can_manage,
     }
 
 
@@ -10378,6 +10382,20 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
 
 def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str:
     """Project-filter aggregate payloads whose values depend on the recipient."""
+    if event_type == "vaults.updated" and context is not None and context.is_remote:
+        try:
+            envelope = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            return payload
+        if isinstance(envelope, dict) and isinstance(envelope.get("data"), dict):
+            return json.dumps(
+                {
+                    **envelope,
+                    "data": {"scope": envelope["data"].get("scope", "")},
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
     if event_type != "inbox.unread.changed":
         return payload
     try:

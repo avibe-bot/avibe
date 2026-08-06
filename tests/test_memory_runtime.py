@@ -1521,6 +1521,30 @@ def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: P
     assert runtime._process is not None
 
 
+def test_runtime_repair_rejects_supervisor_between_restart_attempts(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    class _Process:
+        running = False
+        down = False
+
+        async def stop(self) -> None:
+            raise AssertionError("a recovering supervisor must not be stopped")
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        artifact_manager=FakeMemoryArtifactManager(root_format=None, fingerprint=None),
+        effective_home=tmp_path,
+    )
+    runtime._process = _Process()
+
+    assert asyncio.run(runtime.install_artifact()) == {
+        "ok": False,
+        "reason": "memory_runtime_install_requires_disabled_memory",
+        "download_error": None,
+    }
+
+
 def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_path: Path, monkeypatch) -> None:
     async def run() -> None:
         cleanup_started = asyncio.Event()

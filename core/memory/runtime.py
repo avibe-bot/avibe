@@ -433,6 +433,14 @@ class MemoryRuntime:
                     "reason": "memory_runtime_install_requires_disabled_memory",
                     "download_error": None,
                 }
+            if supervisor is not None and not getattr(supervisor, "down", False):
+                # A supervisor between retry attempts owns a live recovery
+                # lifecycle. Refuse repair without cancelling that lifecycle.
+                return {
+                    "ok": False,
+                    "reason": "memory_runtime_install_requires_disabled_memory",
+                    "download_error": None,
+                }
             if supervisor is not None:
                 async with self.module._lifecycle_lock:
                     try:

@@ -358,6 +358,10 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
         ("DELETE", r"^/api/settings/thread$"),
         ("GET", r"^/api/bind-codes$"),
         ("DELETE", r"^/api/projects/[^/]+$"),
+        ("GET", r"^/api/harness/(?:runs|bootstrap|runs/[^/]+)$"),
+        ("GET", r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|vmk)$"),
+        ("GET", r"^/api/global-prompts$"),
+        ("POST", r"^/api/show-pages/[^/]+/visibility$"),
     )
 )
 
@@ -385,11 +389,11 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|settings|vmk|requests|requests/[^/]+|provision-requests/[^/]+|provision-requests/by-id/[^/]+|grants|audit)$",
+            r"^/api/vault/(?:settings|requests|requests/[^/]+|provision-requests/[^/]+|provision-requests/by-id/[^/]+|grants|audit)$",
         ),
         (
             frozenset({"POST"}),
-            r"^/api/show-pages/[^/]+/(?:ensure|rotate-share|share-id|visibility)$",
+            r"^/api/show-pages/[^/]+/(?:ensure|rotate-share|share-id)$",
         ),
         (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
         (frozenset({"POST"}), r"^/api/dock/pins$"),
@@ -411,7 +415,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/(?:projects/[^/]+/agents-md|global-prompts)$",
+            r"^/api/projects/[^/]+/agents-md$",
         ),
         (frozenset({"GET", "HEAD"}), r"^/api/skills/(?:check|find)$"),
         (
@@ -428,7 +432,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/backend/(?:[^/]+/runtime|(?:claude|codex)/auth|[^/]+/auth/oauth/status/[^/]+)$",
+            r"^/api/backend/(?:(?:claude|codex)/auth|[^/]+/auth/oauth/status/[^/]+)$",
         ),
         (
             frozenset({"GET", "HEAD"}),
@@ -436,7 +440,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/harness/(?:counts|tasks|watches|runs|bootstrap|runs/[^/]+)$",
+            r"^/api/harness/(?:counts|tasks|watches)$",
         ),
         (frozenset({"GET", "HEAD"}), r"^/api/users$"),
     )

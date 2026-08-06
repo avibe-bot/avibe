@@ -1319,14 +1319,22 @@ class V2Config:
             avault=avault,
         )
 
-        memory_payload = payload.get("memory") or {}
+        memory_payload = payload.get("memory")
+        if memory_payload is None:
+            memory_payload = {}
         if not isinstance(memory_payload, dict):
             raise ValueError("Config 'memory' must be an object")
-        memory_processing_payload = memory_payload.get("processing") or {}
+        memory_processing_payload = memory_payload.get("processing")
+        if memory_processing_payload is None:
+            memory_processing_payload = {}
         if not isinstance(memory_processing_payload, dict):
             raise ValueError("Config 'memory.processing' must be an object")
-        memory_llm_payload = memory_processing_payload.get("llm") or {}
-        memory_embedding_payload = memory_processing_payload.get("embedding") or {}
+        memory_llm_payload = memory_processing_payload.get("llm")
+        memory_embedding_payload = memory_processing_payload.get("embedding")
+        if memory_llm_payload is None:
+            memory_llm_payload = {}
+        if memory_embedding_payload is None:
+            memory_embedding_payload = {}
         if not isinstance(memory_llm_payload, dict):
             raise ValueError("Config 'memory.processing.llm' must be an object")
         if not isinstance(memory_embedding_payload, dict):
