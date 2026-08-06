@@ -186,6 +186,8 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("POST", "/api/config", REMOTE_HTTP_PAYLOAD_FILTERED),
         ("PATCH", "/api/projects/proj-1", REMOTE_HTTP_PAYLOAD_FILTERED),
         ("PATCH", "/api/sessions/ses-1", REMOTE_HTTP_PAYLOAD_FILTERED),
+        ("GET", "/api/settings", REMOTE_HTTP_LOCAL_ONLY),
+        ("HEAD", "/api/settings", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/settings", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/settings/thread", REMOTE_HTTP_LOCAL_ONLY),
         ("DELETE", "/api/settings/thread", REMOTE_HTTP_LOCAL_ONLY),

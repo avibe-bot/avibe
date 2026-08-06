@@ -1136,6 +1136,33 @@ def test_remote_im_settings_are_rejected_before_store_access(monkeypatch, tmp_pa
     assert response.get_json()["code"] == "remote_execution_disabled"
 
 
+def test_remote_im_settings_read_is_rejected_before_store_access(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+    monkeypatch.setattr(
+        api,
+        "get_settings",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("remote IM settings read reached the local settings store")
+        ),
+    )
+
+    response = client.get(
+        "/api/settings?platform=slack",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
 def test_remote_thread_scope_settings_are_blocked_before_store_access(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)

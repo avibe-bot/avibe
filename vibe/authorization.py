@@ -351,6 +351,8 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
         ),
         ("POST", r"^/api/asr/transcribe$"),
         ("POST", r"^/api/show/sessions/[^/]+/(?:events|prewarm)$"),
+        ("GET", r"^/api/settings$"),
+        ("HEAD", r"^/api/settings$"),
         ("POST", r"^/api/settings$"),
         ("POST", r"^/api/settings/thread$"),
         ("DELETE", r"^/api/settings/thread$"),
@@ -379,7 +381,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         (frozenset({"GET", "HEAD", "POST"}), r"^/api/agent-onboarding$"),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/(?:agents/[^/]+|settings)$",
+            r"^/api/agents/[^/]+$",
         ),
         (
             frozenset({"GET", "HEAD"}),
