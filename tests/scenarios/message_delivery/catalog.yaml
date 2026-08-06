@@ -139,7 +139,7 @@ scenarios:
     status: covered
     kind: recovery
     layer: contract
-    test: tests/test_opencode_server.py::OpenCodeServerTests::test_durable_attempt_maps_to_opencode_part_evidence
+    test: tests/test_agent_steering.py::test_message_delivery_021_opencode_preserves_native_order_and_recovers_exact_part
   - id: MESSAGE-DELIVERY-101
     name: Unresolved fallback-capable delivery fences only later FIFO submissions
     status: covered

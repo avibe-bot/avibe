@@ -658,10 +658,28 @@ async def test_opencode_keeps_reconciliation_armed_after_post_write_idle() -> No
 
 
 @pytest.mark.anyio
-async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> None:
+async def test_message_delivery_021_opencode_preserves_native_order_and_recovers_exact_part() -> None:
+    """Scenario: MESSAGE-DELIVERY-021."""
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()
-    server = _OpenCodeServer()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "primary-user", "role": "user"},
+                "parts": [{"type": "text", "text": "primary"}],
+            },
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "parentID": "primary-user",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "primary result"}],
+            },
+        ]
+    )
     agent = _opencode_agent(primary, gate_task, server)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     attempt_id = ATTEMPT_ID
@@ -682,6 +700,34 @@ async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> 
         assert receipt.outcome is SteerOutcome.ACCEPTED
         assert server.prompt_calls[0]["attempt_id"] == ATTEMPT_ID
         assert "message_id" not in server.prompt_calls[0]
+        inserted_user = server.messages[-1]
+        server.messages.append(
+            {
+                "info": {
+                    "id": "steer-assistant-1",
+                    "role": "assistant",
+                    "parentID": inserted_user["info"]["id"],
+                    "time": {"completed": 2},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "steer result"}],
+            }
+        )
+
+        assert [message["info"]["id"] for message in server.messages] == [
+            "primary-user",
+            "primary-assistant",
+            "steer-user-1",
+            "steer-assistant-1",
+        ]
+        assert inserted_user["parts"] == [
+            {
+                "type": "text",
+                "text": STEER_TEXT,
+                "id": "prt_1234567890abcdef1234567890abcdef",
+            }
+        ]
+        assert server.messages[-1]["info"]["parentID"] == "steer-user-1"
 
         reconciled = await reconcile_steer_attempt(
             controller,

@@ -501,7 +501,6 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_durable_attempt_maps_to_opencode_part_evidence(self):
-        """MESSAGE-DELIVERY-021: OpenCode owns native message ordering."""
         attempt_id = delivery_store.new_attempt_id()
 
         self.assertRegex(attempt_id, r"^atm_[0-9a-f]{32}$")
