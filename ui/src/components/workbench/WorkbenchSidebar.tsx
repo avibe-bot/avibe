@@ -33,7 +33,7 @@ import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { SessionPinAction } from './SessionPinAction';
-import { sessionRowActionPaddingClass } from './sessionRowLayout';
+import { SESSION_ROW_MENU_POSITION_CLASS, sessionRowActionPaddingClass } from './sessionRowLayout';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -356,6 +356,11 @@ const SessionRow: React.FC<{
               </span>
             </>
           )}
+          <span className={clsx('absolute inset-y-0 flex items-center', SESSION_ROW_MENU_POSITION_CLASS)}>
+            <PopoverTrigger asChild>
+              <SessionActionsTrigger label={t('workbench.sessionActions')} open={menuOpen} />
+            </PopoverTrigger>
+          </span>
         </div>
       </PopoverAnchor>
       <SessionActionMenuContent

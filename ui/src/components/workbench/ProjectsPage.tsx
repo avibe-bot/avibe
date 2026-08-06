@@ -32,6 +32,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
+import { mobileSessionActions } from './chatSessionActions';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { SessionPinIndicator } from './SessionPinIndicator';
@@ -352,7 +353,7 @@ const MobileSessionRow: React.FC<{
           />
         </PopoverTrigger>
         <SessionActionMenuContent
-          actions={actions}
+          actions={mobileSessionActions(actions)}
           label={t('workbench.sessionActions')}
           align="end"
           onClose={() => setMenuOpen(false)}
