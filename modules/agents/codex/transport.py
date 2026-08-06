@@ -120,9 +120,15 @@ class CodexTransport:
             logger.info("Codex app-server initialized: %s", resp)
             await self.send_notification("initialized")
             self._initialized = True
-        except Exception:
-            logger.exception("Codex app-server handshake failed, cleaning up")
-            await self.stop()
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                logger.info("Codex app-server handshake cancelled, cleaning up")
+            else:
+                logger.exception("Codex app-server handshake failed, cleaning up")
+            try:
+                await self.stop()
+            except Exception:
+                logger.exception("Failed to clean up Codex app-server after handshake failure")
             raise
 
     async def stop(self) -> None:

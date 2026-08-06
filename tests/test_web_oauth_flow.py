@@ -1416,6 +1416,7 @@ def test_test_web_auth_happy_path_returns_excerpt(
 
 def test_test_web_auth_codex_uses_owned_runtime_when_backend_is_disabled(
     service: AgentAuthService,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     probe = AsyncMock(return_value="Hello from temporary Codex")
@@ -1425,7 +1426,16 @@ def test_test_web_auth_codex_uses_owned_runtime_when_backend_is_disabled(
         shutdown_runtime=shutdown,
     )
     captured = []
+    configured_cwd = tmp_path / "user-runtime"
+    probe_runtime = tmp_path / "avibe-runtime"
     service.controller.agent_service = SimpleNamespace(agents={})
+    monkeypatch.setattr(
+        _Config,
+        "runtime",
+        SimpleNamespace(default_cwd=str(configured_cwd)),
+        raising=False,
+    )
+    monkeypatch.setattr("config.paths.get_runtime_dir", lambda: probe_runtime)
     monkeypatch.setattr(service, "_get_cli_binary", lambda _backend: "codex-custom")
     monkeypatch.setattr(
         service,
@@ -1438,11 +1448,12 @@ def test_test_web_auth_codex_uses_owned_runtime_when_backend_is_disabled(
     assert result["ok"] is True
     assert captured[0].binary == "codex-custom"
     probe.assert_awaited_once_with(
-        os.getcwd(),
+        str(probe_runtime / "codex-connection-probe"),
         model=None,
         on_diagnostic=ANY,
     )
     shutdown.assert_awaited_once_with()
+    assert not configured_cwd.exists()
 
 
 def test_disabled_backend_probe_uses_persisted_codex_binary(
@@ -1462,6 +1473,7 @@ def test_disabled_backend_probe_uses_persisted_codex_binary(
 
 def test_test_web_auth_codex_does_not_probe_model_hub_transport(
     service: AgentAuthService,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     live_probe = AsyncMock(
@@ -1477,6 +1489,8 @@ def test_test_web_auth_codex_does_not_probe_model_hub_transport(
         shutdown_runtime=AsyncMock(),
     )
     service.controller.agent_service = SimpleNamespace(agents={"codex": live_agent})
+    probe_runtime = tmp_path / "avibe-runtime"
+    monkeypatch.setattr("config.paths.get_runtime_dir", lambda: probe_runtime)
     monkeypatch.setattr(
         service,
         "_create_codex_probe_agent",
@@ -1488,7 +1502,7 @@ def test_test_web_auth_codex_does_not_probe_model_hub_transport(
     assert result["ok"] is True
     live_probe.assert_not_awaited()
     temp_probe.assert_awaited_once_with(
-        os.getcwd(),
+        str(probe_runtime / "codex-connection-probe"),
         model=None,
         on_diagnostic=ANY,
     )

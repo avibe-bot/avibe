@@ -202,12 +202,13 @@ class CodexAgent(BaseAgent):
         return lambda: self._transport_alive(transport)
 
     def can_reuse_direct_connection_probe(self, cwd: str) -> bool:
-        """Return whether a live transport is suitable for direct-auth testing."""
+        """Return whether a cached transport can test direct credentials."""
 
         transport = self._transports.get(cwd)
-        return not (
+        return bool(
             transport is not None
-            and getattr(transport, "runtime_fingerprint", "direct") != "direct"
+            and getattr(transport, "runtime_fingerprint", "direct") == "direct"
+            and os.path.isdir(cwd)
         )
 
     async def probe_connection(
@@ -226,20 +227,21 @@ class CodexAgent(BaseAgent):
         thread_id = ""
         closed_task: asyncio.Task[None] | None = None
         probe_cwds = self._connection_probe_cwds
-        probe_cwds[cwd] = probe_cwds.get(cwd, 0) + 1
+        owns_probe_cwd = False
         try:
-            transport = self._transports.get(cwd)
             if (
-                transport is not None
-                and getattr(transport, "runtime_fingerprint", "direct") != "direct"
+                getattr(self, "_registered_runtime", True)
+                and not self.can_reuse_direct_connection_probe(cwd)
             ):
                 raise CodexConnectionProbeRuntimeMismatchError(
-                    "The cached Codex transport does not use direct credentials"
+                    "No cached direct Codex transport is available for the probe"
                 )
-            if transport is None or not transport.is_initialized:
-                transport = await self._get_or_create_transport(cwd)
-            else:
-                self._touch_transport_activity(cwd)
+            transport = await self._get_or_create_transport(
+                cwd,
+                allow_runtime_replacement=False,
+            )
+            probe_cwds[cwd] = probe_cwds.get(cwd, 0) + 1
+            owns_probe_cwd = True
 
             thread_response = await transport.send_request(
                 "thread/start",
@@ -330,11 +332,12 @@ class CodexAgent(BaseAgent):
                 if closed_task is not None:
                     closed_task.cancel()
                     await asyncio.gather(closed_task, return_exceptions=True)
-                remaining = probe_cwds.get(cwd, 0) - 1
-                if remaining > 0:
-                    probe_cwds[cwd] = remaining
-                else:
-                    probe_cwds.pop(cwd, None)
+                if owns_probe_cwd:
+                    remaining = probe_cwds.get(cwd, 0) - 1
+                    if remaining > 0:
+                        probe_cwds[cwd] = remaining
+                    else:
+                        probe_cwds.pop(cwd, None)
 
     async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
         router = getattr(self.controller, "model_hub_runtime", None)
@@ -1503,6 +1506,8 @@ class CodexAgent(BaseAgent):
         self,
         cwd: str,
         launch: "ModelHubLaunch | None" = None,
+        *,
+        allow_runtime_replacement: bool = True,
     ) -> CodexTransport:
         """Return an initialized transport for the given working directory."""
         # Serialize creation per cwd
@@ -1517,6 +1522,10 @@ class CodexAgent(BaseAgent):
                 desired_fingerprint = launch.fingerprint if launch is not None else "direct"
                 existing_fingerprint = getattr(existing, "runtime_fingerprint", "direct")
                 runtime_changed = existing_fingerprint != desired_fingerprint
+                if existing is not None and runtime_changed and not allow_runtime_replacement:
+                    raise CodexConnectionProbeRuntimeMismatchError(
+                        "The cached Codex transport does not use direct credentials"
+                    )
                 if existing and existing.is_initialized:
                     # Reuse only while the directory the app-server was spawned in
                     # is still the SAME directory (#561): after a delete (+ possible

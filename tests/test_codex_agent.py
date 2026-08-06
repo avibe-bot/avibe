@@ -275,7 +275,27 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         agent._connection_probes = {}
         agent._connection_probe_turns = {}
         agent._connection_probe_cwds = {}
+        agent.can_reuse_direct_connection_probe = Mock(
+            return_value=getattr(transport, "runtime_fingerprint", "direct") == "direct"
+        )
+        agent._get_or_create_transport = AsyncMock(return_value=transport)
         return agent
+
+    def test_live_probe_requires_a_cached_direct_transport_and_existing_cwd(self):
+        agent = object.__new__(CodexAgent)
+        agent._transports = {}
+        with tempfile.TemporaryDirectory() as cwd:
+            self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
+
+            direct = SimpleNamespace(runtime_fingerprint="direct")
+            agent._transports[cwd] = direct
+            self.assertTrue(agent.can_reuse_direct_connection_probe(cwd))
+
+            direct.runtime_fingerprint = "hub:openai/gpt-5.4-mini"
+            self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
+
+            direct.runtime_fingerprint = "direct"
+        self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
 
     async def test_reuses_existing_transport_with_isolated_ephemeral_thread(self):
         requests = []
@@ -313,9 +333,13 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         transport = _Transport()
         agent = self._agent(cwd, transport)
         diagnostics = []
-        agent._get_or_create_transport = AsyncMock(
-            side_effect=AssertionError("existing transport should be reused")
-        )
+
+        async def acquire_transport(_cwd, *, allow_runtime_replacement):
+            self.assertEqual(agent._connection_probe_cwds, {})
+            self.assertFalse(allow_runtime_replacement)
+            return transport
+
+        agent._get_or_create_transport = AsyncMock(side_effect=acquire_transport)
 
         with patch.object(
             _MODULE.paths,
@@ -329,7 +353,10 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result, "hello")
-        agent._get_or_create_transport.assert_not_awaited()
+        agent._get_or_create_transport.assert_awaited_once_with(
+            cwd,
+            allow_runtime_replacement=False,
+        )
         self.assertEqual(requests[0][0], "thread/start")
         self.assertEqual(
             requests[0][1],
@@ -507,6 +534,23 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
             await agent.probe_connection(cwd)
 
+        self.assertEqual(agent._connection_probe_cwds, {})
+
+    async def test_runtime_fingerprint_race_does_not_replace_model_hub_transport(self):
+        cwd = "/tmp/user-project"
+        transport = SimpleNamespace(is_initialized=True, runtime_fingerprint="direct")
+        agent = self._agent(cwd, transport)
+        agent._get_or_create_transport = AsyncMock(
+            side_effect=CodexConnectionProbeRuntimeMismatchError("runtime changed")
+        )
+
+        with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
+            await agent.probe_connection(cwd)
+
+        agent._get_or_create_transport.assert_awaited_once_with(
+            cwd,
+            allow_runtime_replacement=False,
+        )
         self.assertEqual(agent._connection_probe_cwds, {})
 
     async def test_unregistered_probe_runtime_preserves_live_activation(self):
@@ -3850,6 +3894,28 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(result, cached)
             cached.stop.assert_not_awaited()
             ctor.assert_not_called()
+
+    async def test_probe_validation_does_not_replace_incompatible_runtime(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            cached = SimpleNamespace(
+                is_initialized=True,
+                runtime_fingerprint="hub:openai/gpt-5.4-mini",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = cached
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+
+            with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
+                await agent._get_or_create_transport(
+                    cwd,
+                    allow_runtime_replacement=False,
+                )
+
+            cached.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], cached)
 
     async def test_untracked_legacy_entry_reuses_without_inode(self):
         import tempfile

@@ -505,8 +505,8 @@ class AgentAuthService:
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
         return cli_path or backend
 
-    def _resolve_backend_probe_cwd(self, backend: str) -> str:
-        """Return the default runtime cwd for an isolated backend Agent probe."""
+    def _resolve_backend_probe_cwd(self, backend: str, *, prepare: bool = False) -> str:
+        """Resolve the configured runtime cwd without mutating it by default."""
         config = getattr(getattr(self, "controller", None), "config", None)
         candidates = (
             getattr(self._resolve_backend_config(backend), "cwd", None),
@@ -516,6 +516,8 @@ class AgentAuthService:
         for raw in candidates:
             if isinstance(raw, str) and raw.strip():
                 path = os.path.abspath(os.path.expanduser(raw.strip()))
+                if not prepare:
+                    return path
                 try:
                     os.makedirs(path, exist_ok=True)
                     return path
@@ -2248,7 +2250,10 @@ class AgentAuthService:
             return {"ok": False, "error": "unsupported_backend"}
 
         binary = self._get_cli_binary(backend)
-        probe_cwd = self._resolve_backend_probe_cwd(backend)
+        probe_cwd = self._resolve_backend_probe_cwd(
+            backend,
+            prepare=backend == "claude",
+        )
         auth_mode = None
         if backend == "claude":
             backend_cfg = self._resolve_backend_config("claude")
@@ -2452,9 +2457,13 @@ class AgentAuthService:
         on_diagnostic: Callable[[str], None] | None = None,
     ) -> str:
         """Reuse a matching direct runtime, or own a temporary direct runtime."""
+        from config import paths
         from config.v2_compat import CodexCompatConfig
         from config.v2_config import DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
-        from modules.agents.codex import CodexConnectionProbeRuntimeMismatchError
+        from modules.agents.codex import (
+            CODEX_CONNECTION_PROBE_DIR,
+            CodexConnectionProbeRuntimeMismatchError,
+        )
 
         backend_cfg = self._resolve_backend_config("codex")
         runtime_config = CodexCompatConfig(
@@ -2495,9 +2504,10 @@ class AgentAuthService:
                 pass
 
         probe_agent = self._create_codex_probe_agent(runtime_config)
+        isolated_cwd = str(paths.get_runtime_dir() / CODEX_CONNECTION_PROBE_DIR)
         try:
             return await probe_agent.probe_connection(
-                cwd,
+                isolated_cwd,
                 model=model,
                 on_diagnostic=on_diagnostic,
             )

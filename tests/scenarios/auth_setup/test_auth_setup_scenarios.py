@@ -400,6 +400,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         agent._connection_probes = {}
         agent._connection_probe_turns = {}
         agent._connection_probe_cwds = {}
+        agent._get_or_create_transport = AsyncMock(
+            return_value=agent._transports[str(home)]
+        )
         controller.agent_service = SimpleNamespace(agents={"codex": agent})
         service = AgentAuthService(controller)
 
@@ -426,6 +429,10 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(harness.test_result["ok"])
         self.assertEqual(harness.test_result["excerpt"], "codex-probe-ok")
+        agent._get_or_create_transport.assert_awaited_once_with(
+            str(home),
+            allow_runtime_replacement=False,
+        )
         self.assertEqual(
             requests,
             [

@@ -3,6 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -10,6 +11,48 @@ from modules.agents.codex.transport import CodexTransport, STREAM_BUFFER_LIMIT
 
 
 class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_initialize_stops_unpublished_transport(self):
+        initialize_started = asyncio.Event()
+
+        class _Stream:
+            async def readline(self):
+                await asyncio.Event().wait()
+
+        process = SimpleNamespace(
+            pid=123,
+            returncode=None,
+            stdin=None,
+            stdout=_Stream(),
+            stderr=_Stream(),
+        )
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+
+        async def wait_for_initialize(_method, _params):
+            initialize_started.set()
+            await asyncio.Event().wait()
+
+        async def stop_transport():
+            transport._cleanup_tasks()
+
+        transport.send_request = AsyncMock(side_effect=wait_for_initialize)
+        transport.stop = AsyncMock(side_effect=stop_transport)
+
+        with (
+            patch(
+                "modules.agents.codex.transport.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            patch("modules.agents.codex.transport.process_identity", return_value={}),
+            patch("modules.agents.codex.transport.log_process_snapshot"),
+        ):
+            task = asyncio.create_task(transport.start())
+            await initialize_started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        transport.stop.assert_awaited_once_with()
+
     async def test_reader_task_failure_marks_transport_not_alive(self):
         transport = CodexTransport(binary="codex", cwd="/tmp")
         transport._process = SimpleNamespace(returncode=None)
