@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from storage import message_deliveries as delivery_store
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
 
 
@@ -490,21 +492,22 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "msg_exact_evidence",
         )
 
-    def test_durable_attempt_maps_to_opencode_message_namespace(self):
-        self.assertEqual(
-            SERVER_MODULE.native_message_id_for_attempt("atm_exact_evidence"),
-            "msg_exact_evidence",
-        )
+    def test_durable_attempt_maps_between_surrounding_native_messages(self):
+        timestamp_ms = 1_775_630_400_000
+        with patch.object(delivery_store.time, "time", return_value=timestamp_ms / 1000):
+            attempt_id = delivery_store.new_attempt_id()
 
-    def test_attempt_evidence_accepts_current_and_legacy_native_ids(self):
-        self.assertEqual(
-            SERVER_MODULE.native_message_ids_for_attempt("atm_exact_evidence"),
-            ("msg_exact_evidence", "atm_exact_evidence"),
-        )
-        self.assertEqual(
-            SERVER_MODULE.native_message_ids_for_attempt("legacy-evidence"),
-            ("legacy-evidence",),
-        )
+        native_message_id = SERVER_MODULE.native_message_id_for_attempt(attempt_id)
+        previous_order = ((timestamp_ms - 1) * 0x1000) & ((1 << 48) - 1)
+        next_order = (timestamp_ms * 0x1000 + 1) & ((1 << 48) - 1)
+
+        self.assertRegex(native_message_id, r"^msg_[0-9a-f]{26}$")
+        self.assertLess(f"msg_{previous_order:012x}{'z' * 14}", native_message_id)
+        self.assertLess(native_message_id, f"msg_{next_order:012x}{'0' * 14}")
+
+    def test_legacy_random_attempt_identity_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SERVER_MODULE.native_message_id_for_attempt("atm_exact_evidence")
 
     async def test_prompt_async_exposes_definitive_http_rejection(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

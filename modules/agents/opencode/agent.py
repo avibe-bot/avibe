@@ -57,7 +57,6 @@ from .server import (
     OpenCodePromptRejectedError,
     OpenCodeServerManager,
     native_message_id_for_attempt,
-    native_message_ids_for_attempt,
 )
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
@@ -1550,40 +1549,36 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reason="runtime_unavailable",
                 backend=self.name,
             )
-        diagnostics: list[str] = []
-        observed_evidence = False
-        for native_message_id in native_message_ids_for_attempt(request.attempt_id):
-            try:
-                message = await server.get_message(
-                    native_session_id,
-                    native_message_id,
-                    directory,
-                )
-            except Exception as exc:  # noqa: BLE001 - absence is not negative proof
-                diagnostics.append(str(exc))
-                continue
-            observed_evidence = True
-            info = message.get("info") if isinstance(message, dict) else None
-            if (
-                isinstance(info, dict)
-                and str(info.get("id") or "") == native_message_id
-                and info.get("role") == "user"
-            ):
-                return steer_result(
-                    SteerOutcome.ACCEPTED,
-                    reason="native_message_found",
-                    backend=self.name,
-                    native_message_id=native_message_id,
-                )
+        native_message_id = native_message_id_for_attempt(request.attempt_id)
+        try:
+            message = await server.get_message(
+                native_session_id,
+                native_message_id,
+                directory,
+            )
+        except Exception as exc:  # noqa: BLE001 - absence is not negative proof
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+        info = message.get("info") if isinstance(message, dict) else None
+        if (
+            isinstance(info, dict)
+            and str(info.get("id") or "") == native_message_id
+            and info.get("role") == "user"
+        ):
+            return steer_result(
+                SteerOutcome.ACCEPTED,
+                reason="native_message_found",
+                backend=self.name,
+                native_message_id=native_message_id,
+            )
         return steer_result(
             SteerOutcome.UNKNOWN,
-            reason=(
-                "untrusted_attempt_evidence"
-                if observed_evidence
-                else "attempt_evidence_unavailable"
-            ),
+            reason="untrusted_attempt_evidence",
             backend=self.name,
-            diagnostic="; ".join(diagnostics),
         )
 
     async def handle_stop(self, request: AgentRequest) -> bool:
@@ -1762,14 +1757,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 verification_unknown = True
 
             baseline_message_ids = set(poll_info.baseline_message_ids)
-            start_attempt_message_ids = set(
-                native_message_ids_for_attempt(start_attempt_id)
+            start_attempt_message_id = (
+                native_message_id_for_attempt(start_attempt_id)
+                if start_attempt_id
+                else ""
             )
             start_attempt_found = any(
-                start_attempt_message_ids
+                start_attempt_message_id
                 and message.get("info", {}).get("role") == "user"
                 and str(message.get("info", {}).get("id") or "")
-                in start_attempt_message_ids
+                == start_attempt_message_id
                 for message in messages
             )
             has_in_progress = False

@@ -46,6 +46,7 @@ OPENCODE_LOG_TAIL_BYTES = 2_000_000
 MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
 _CURRENT_OWNER_PID = os.getpid()
+_DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{26})$")
 
 
 def _percent_encode_path(path: str) -> str:
@@ -60,25 +61,13 @@ def _percent_encode_path(path: str) -> str:
 
 
 def native_message_id_for_attempt(attempt_id: str) -> str:
-    """Map one durable attempt identity into OpenCode's message namespace."""
+    """Map one ordered durable attempt into OpenCode's message namespace."""
 
     value = str(attempt_id or "").strip()
-    if not value.startswith("atm") or len(value) == 3:
-        raise ValueError("OpenCode prompt attempt identity must start with 'atm'")
-    return f"msg{value[3:]}"
-
-
-def native_message_ids_for_attempt(attempt_id: str) -> tuple[str, ...]:
-    """Return current and legacy native identities for exact evidence reads."""
-
-    value = str(attempt_id or "").strip()
-    if not value:
-        return ()
-    try:
-        current = native_message_id_for_attempt(value)
-    except ValueError:
-        return (value,)
-    return (current, value) if current != value else (value,)
+    match = _DURABLE_ATTEMPT_ID_RE.fullmatch(value)
+    if match is None:
+        raise ValueError("OpenCode prompt attempt identity is not ordered")
+    return f"msg_{match.group(1)}"
 
 
 class OpenCodePromptRejectedError(RuntimeError):

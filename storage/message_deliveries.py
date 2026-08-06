@@ -50,7 +50,11 @@ def new_delivery_id() -> str:
 
 
 def new_attempt_id() -> str:
-    return f"atm_{uuid.uuid4().hex}"
+    # Keep the leading order key compatible with timestamp-first native IDs.
+    # The zeroed low bits leave room for a native assistant created in the same
+    # millisecond to sort after this user-message attempt.
+    order_key = (int(time.time() * 1_000) * 0x1000) & ((1 << 48) - 1)
+    return f"atm_{order_key:012x}{uuid.uuid4().hex[:14]}"
 
 
 def _canonical_json(value: Any) -> str:
