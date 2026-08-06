@@ -9,7 +9,14 @@ from typing import Any, Mapping
 
 INSTANCE_ROLES = frozenset({"owner", "editor", "viewer"})
 INSTANCE_ACCESS_SOURCES = frozenset(
-    {"owner", "public_instance", "email", "email_domain", "organization_group"}
+    {
+        "owner",
+        "public_instance",
+        "email",
+        "email_domain",
+        "organization_group",
+        "show_page_email",
+    }
 )
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
@@ -61,6 +68,7 @@ class AuthorizationContext:
     membership_version: str | None = None
     claims_issued_at: int | None = None
     authorization_revision: int | None = None
+    show_page_id: str | None = None
     is_remote: bool = False
     is_trusted_local: bool = False
 
@@ -117,6 +125,15 @@ class AuthorizationContext:
 
         minimum_role = _RESOURCE_USE_MINIMUM_ROLES.get(resource_kind)
         return minimum_role is not None and self.has_role(minimum_role)
+
+    def can_use_show_page(self, show_page_id: str) -> bool:
+        """Return whether a Show Page-only session targets this exact page."""
+
+        return bool(
+            self.instance_access_source == "show_page_email"
+            and self.show_page_id
+            and self.show_page_id == show_page_id
+        )
 
     @property
     def can_use_terminal_files(self) -> bool:
@@ -193,6 +210,9 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
     )
     if access_source not in INSTANCE_ACCESS_SOURCES:
         return AuthorizationContext(is_remote=True)
+    show_page_id = _optional_string(payload.get("vibe_show_page_id"), limit=200)
+    if (access_source == "show_page_email") != (show_page_id is not None):
+        return AuthorizationContext(is_remote=True)
     raw_groups = payload.get("vibe_group_ids", payload.get("group_ids", []))
     group_ids = (
         frozenset(value for item in raw_groups if (value := _optional_string(item)) is not None)
@@ -230,6 +250,7 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
                 payload.get("authorization_revision"),
             )
         ),
+        show_page_id=show_page_id,
         is_remote=True,
     )
 
@@ -312,6 +333,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/resource-policies$",
         r"^/api/show-pages$",
         r"^/api/show-pages/[^/]+/access$",
+        r"^/api/show-pages/[^/]+/authorized-emails$",
         r"^/api/show-pages/[^/]+/icon$",
     )
 )
@@ -323,6 +345,7 @@ _VIEWER_HTTP_MUTATION_RULES = tuple(
         ("POST", r"^/api/show-pages/[^/]+/visibility$"),
         ("POST", r"^/api/show-pages/[^/]+/rotate-share$"),
         ("POST", r"^/api/show-pages/[^/]+/share-id$"),
+        ("PUT", r"^/api/show-pages/[^/]+/authorized-emails$"),
     )
 )
 
@@ -401,6 +424,10 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         (
             frozenset({"POST"}),
             r"^/api/show-pages/[^/]+/(?:ensure|rotate-share|share-id|visibility)$",
+        ),
+        (
+            frozenset({"GET", "HEAD", "PUT"}),
+            r"^/api/show-pages/[^/]+/authorized-emails$",
         ),
         (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
         (frozenset({"POST"}), r"^/api/dock/pins$"),

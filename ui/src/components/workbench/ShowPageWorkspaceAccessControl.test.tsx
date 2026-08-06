@@ -11,6 +11,16 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
+vi.mock('@/context/ApiContext', () => ({
+  ApiError: class ApiError extends Error {
+    code = null;
+  },
+  useApi: () => ({
+    getShowPageAuthorizedEmails: vi.fn(),
+    replaceShowPageAuthorizedEmails: vi.fn(),
+  }),
+}));
+
 vi.mock('@/components/ui/confirm-dialog', () => ({
   ConfirmDialog: ({ open, title }: { open: boolean; title: string }) => (
     <div data-confirm-open={String(open)}>{title}</div>
@@ -58,7 +68,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(html).toContain('<button');
   });
 
-  it('renders Personal as a fixed Private audience without Organization choices', () => {
+  it('gives Personal an email audience without Organization choices', () => {
     const html = renderControl(access({
       mode: 'personal',
       instance_id: null,
@@ -71,6 +81,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(html).not.toContain('chat.showPage.workspaceLevels.public');
     expect(html).not.toContain('chat.showPage.workspaceLevels.scope');
     expect(html).not.toContain('<select');
+    expect(html).toContain('chat.showPage.emailAccess');
   });
 
   it('renders all Organization audiences and keeps the public wire value labeled as Organization', () => {
@@ -80,6 +91,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(html).toContain('value="public" selected=""');
     expect(html).toContain('value="scope"');
     expect(html).toContain('chat.showPage.workspaceLevels.public');
+    expect(html).toContain('chat.showPage.emailAccess');
   });
 
   it('keeps the Organization audience read-only for a non-owner viewer', () => {
@@ -87,6 +99,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
 
     expect(html).toContain('<select disabled=""');
     expect(html).toContain('chat.showPage.workspaceReadOnly');
+    expect(html).not.toContain('chat.showPage.emailAccessDesc');
   });
 
   it('mounts the established Organization audience-narrowing confirmation', () => {

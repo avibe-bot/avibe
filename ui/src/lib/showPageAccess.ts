@@ -33,6 +33,19 @@ export type ShowPageVisibilityResult<Payload extends ShowPageLinkInfo = ShowPage
   | ShowPageVisibilityPayload<Payload>
   | ShowPageVisibilityMetadata;
 
+export type ShowPageAuthorizedEmails = {
+  ok: true;
+  emails: string[];
+  changed?: boolean;
+};
+
+const SHOW_PAGE_EMAIL_PATTERN = /^[a-z0-9._%+-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/;
+
+export function normalizeShowPageAuthorizedEmail(raw: string): string | null {
+  const normalized = raw.trim().toLowerCase();
+  return SHOW_PAGE_EMAIL_PATTERN.test(normalized) ? normalized : null;
+}
+
 function isShowPageAccess(value: unknown): value is ShowPageAccess {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<ShowPageAccess>;

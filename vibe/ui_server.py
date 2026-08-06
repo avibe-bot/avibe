@@ -1650,6 +1650,18 @@ def _oauth_callback_arg(name: str) -> str | None:
     return request.args.get(name) or request.args.get(f"amp;{name}")
 
 
+def _show_page_id_from_private_route(path: str) -> str | None:
+    match = re.match(r"^/show/([^/]+)(?:/|$)", path or "")
+    if match is None:
+        return None
+    try:
+        from core.show_pages import validate_session_id
+
+        return validate_session_id(unquote(match.group(1)))
+    except Exception:
+        return None
+
+
 def _redirect_to_vibe_cloud_login(config: V2Config):
     from vibe import remote_access
 
@@ -1659,6 +1671,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     raw_next = request.full_path if request.query_string else request.path
     next_target = _strip_oauth_retry_param(raw_next)
+    show_page_id = _show_page_id_from_private_route(request.path)
     rid = secrets.token_urlsafe(18)
     state = _make_oauth_state(
         cloud.session_secret,
@@ -1684,6 +1697,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
         next_target=next_target,
         device_hash=_oauth_device_hash(cloud.session_secret, device_id),
         redirect_uri=redirect_uri,
+        show_page_id=show_page_id,
     )
     oauth_cookie = _make_oauth_cookie(
         cloud.session_secret,
@@ -1693,6 +1707,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
             "code_verifier": code_verifier,
             "next": next_target,
             "redirect_uri": redirect_uri,
+            "show_page_id": show_page_id,
             "exp": int(datetime.now().timestamp()) + REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS,
         },
     )
@@ -1703,6 +1718,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
         nonce,
         code_challenge,
         redirect_uri=redirect_uri,
+        show_page_id=show_page_id,
     )
     response.set_cookie(
         REMOTE_OAUTH_COOKIE_NAME,
@@ -2207,6 +2223,52 @@ def enforce_remote_access_cookie():
 
 
 @app.before_request
+def enforce_show_page_email_scope():
+    """Keep an email-grant session inside its one signed Show Page subtree."""
+
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return None
+    context = getattr(g, "authorization_context", None)
+    if context is None:
+        from vibe import remote_access
+        from vibe.authorization import context_from_session_payload
+
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+        if payload is not None:
+            context = context_from_session_payload(payload)
+    if context is None or context.instance_access_source != "show_page_email":
+        return None
+
+    path = request.path or ""
+    public_static = (
+        path.startswith("/assets/")
+        or path.startswith(f"{_SHOW_RUNTIME_VENDOR_PREFIX}/")
+        or path.startswith("/p/")
+        or path == "/favicon.ico"
+        or path in _PWA_PUBLIC_ASSETS
+        or path
+        in {
+            _SHOW_RUNTIME_PUBLIC_CLIENT_SHIM_PATH,
+            _SHOW_RUNTIME_PUBLIC_REACT_REFRESH_SHIM_PATH,
+            "/auth/callback",
+            "/auth/logout",
+            "/health",
+        }
+    )
+    expected_prefix = f"/show/{context.show_page_id}" if context.show_page_id else ""
+    exact_show_page = bool(
+        expected_prefix and (path == expected_prefix or path.startswith(f"{expected_prefix}/"))
+    )
+    if public_static or exact_show_page:
+        return None
+    return jsonify({"ok": False, "error": "show_page_access_forbidden"}), 403
+
+
+@app.before_request
 def enforce_instance_role_capabilities():
     if _remote_auth_exempt_path():
         return None
@@ -2434,6 +2496,8 @@ def enforce_project_role_capabilities():
         return None
 
     kind, resource_id = resource
+    if kind == "session" and context.can_use_show_page(resource_id):
+        return None
     engine = create_sqlite_engine()
     with engine.connect() as conn:
         role = (
@@ -3066,6 +3130,8 @@ def _project_session_access_allowed(context: Any, session_id: str, minimum_role:
         return True
     if not context.has_role(minimum_role):
         return False
+    if minimum_role == "viewer" and context.can_use_show_page(session_id):
+        return True
     engine = _projects_engine()
     with engine.connect() as conn:
         role = project_access_service.get_effective_session_role(
@@ -4739,6 +4805,41 @@ def show_page_access_get(session_id):
         return _show_page_error_response(exc)
 
 
+@app.route("/api/show-pages/<session_id>/authorized-emails", methods=["GET"])
+def show_page_authorized_emails_get(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    try:
+        response = jsonify(api.get_show_page_authorized_emails(session_id))
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Vary"] = "Cookie"
+        return response
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
+@app.route("/api/show-pages/<session_id>/authorized-emails", methods=["PUT"])
+def show_page_authorized_emails_put(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    payload = request.json if isinstance(request.json, dict) else {}
+    emails = payload.get("emails")
+    if (
+        not isinstance(emails, list)
+        or len(emails) > 64
+        or any(not isinstance(email, str) for email in emails)
+    ):
+        return _show_page_error_response(
+            ShowPageError("Invalid Show Page email audience.", code="invalid_email")
+        )
+    try:
+        return jsonify(api.replace_show_page_authorized_emails(session_id, emails))
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
 @app.route("/api/show-pages/<session_id>/rotate-share", methods=["POST"])
 def show_page_rotate_share_post(session_id):
     from core.show_pages import ShowPageError
@@ -5754,6 +5855,10 @@ def cloud_management_auth_callback():
         _mark_cloud_management_manual(response)
         return response
     browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
+    failure_next_path = (
+        cloud_management.handshake_next_path(state, browser_id)
+        or "/admin/organization/overview"
+    )
     try:
         grant, next_path = cloud_management.complete_authorization(
             config,
@@ -5769,7 +5874,7 @@ def cloud_management_auth_callback():
             else "cloud_management_unavailable"
         )
         response = _cloud_management_redirect(
-            "/admin/organization/overview",
+            failure_next_path,
             code,
         )
         cloud_management.invalidate_grant(
@@ -6017,6 +6122,7 @@ def remote_access_auth_callback():
         handshake_nonce = cookie_state.get("nonce")
         next_target = cookie_state.get("next")
         redirect_uri = str(cookie_state.get("redirect_uri") or cloud.redirect_uri)
+        expected_show_page_id = cookie_state.get("show_page_id")
     elif store_record is not None and _oauth_store_record_device_bound(cloud.session_secret, store_record):
         # Store-fallback for the iOS standalone PWA case, where the handshake cookie's
         # state desyncs (authorize ran in a separate in-app-browser context). Gated on
@@ -6029,6 +6135,7 @@ def remote_access_auth_callback():
         handshake_nonce = store_record.get("nonce")
         next_target = store_record.get("next")
         redirect_uri = str(store_record.get("redirect_uri") or cloud.redirect_uri)
+        expected_show_page_id = store_record.get("show_page_id")
     else:
         # Neither the cookie nor the server-side store yielded the handshake.
         # Rate-limited: this branch is unauthenticated-reachable.
@@ -6058,6 +6165,11 @@ def remote_access_auth_callback():
         session_claims = result.get("session_claims")
         if not isinstance(session_claims, dict):
             raise remote_access.OAuthCodeExchangeError("invalid_session_claims")
+        if session_claims.get("vibe_instance_access_source") == "show_page_email" and (
+            not isinstance(expected_show_page_id, str)
+            or session_claims.get("vibe_show_page_id") != expected_show_page_id
+        ):
+            raise remote_access.OAuthCodeExchangeError("invalid_show_page_id")
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
         reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__

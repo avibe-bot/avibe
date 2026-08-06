@@ -184,7 +184,7 @@ scenarios:
     backend: cloud_management
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_silent_reauthorization_stops_after_login_required
   - id: AUTH-SETUP-307
-    name: Remote Organization callback remains bound to the same subject
+    name: Remote Organization callback remains subject-bound and returns failures to its workflow
     status: covered
     kind: authorization
     layer: scenario

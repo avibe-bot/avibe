@@ -95,6 +95,40 @@ def test_malformed_role_context_fails_closed() -> None:
     assert context.can_read_instance is False
 
 
+def test_show_page_email_context_requires_and_matches_one_exact_target() -> None:
+    context = context_from_session_payload(
+        {
+            "sub": "guest-1",
+            "email": "guest@example.com",
+            "vibe_instance_id": "inst-1",
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "show_page_email",
+            "vibe_show_page_id": "session-one",
+            "vibe_instance_authorization_revision": 0,
+        }
+    )
+
+    assert context.can_use_show_page("session-one") is True
+    assert context.can_use_show_page("session-two") is False
+    assert context.show_page_id == "session-one"
+
+    missing_target = context_from_session_payload(
+        {
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "show_page_email",
+        }
+    )
+    unexpected_target = context_from_session_payload(
+        {
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "email",
+            "vibe_show_page_id": "session-one",
+        }
+    )
+    assert missing_target.can_read_instance is False
+    assert unexpected_target.can_read_instance is False
+
+
 def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("GET", "/api/projects") == "viewer"
     assert required_instance_role("GET", "/api/projects/proj-1") == "viewer"

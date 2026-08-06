@@ -1340,38 +1340,56 @@ def list_show_pages() -> dict:
     }
 
 
+def _show_page_mutation_response(
+    store,
+    page,
+    *,
+    config: V2Config,
+    additional_payload: dict | None = None,
+) -> dict:
+    """Return mutation details only when the caller can use the page."""
+    from storage import resource_access_service
+
+    context = resource_access_service.resolve_resource_access_context()
+    with store.engine.connect() as connection:
+        can_use = resource_access_service.can_use_resource(
+            context,
+            "show_page",
+            page.session_id,
+            connection=connection,
+        )
+    if not can_use:
+        # Audience managers may revoke an anonymous link without page-use
+        # access. Do not return page paths, URLs, share IDs, or session metadata.
+        return {
+            "ok": True,
+            "public_link_enabled": page.visibility == "public",
+        }
+    from core.show_pages import show_page_payload
+
+    payload = show_page_payload(page, config=config)
+    return {
+        "ok": True,
+        **(additional_payload or {}),
+        **_apply_session_meta([payload])[0],
+    }
+
+
 def set_show_page_visibility(session_id: str, visibility: str) -> dict:
     """Switch a Show Page between private / public / offline.
 
     Raises ``ShowPageError`` (a ``ValueError``) for invalid input, which the
     route layer maps to a 4xx response.
     """
-    from core.show_pages import ShowPageStore, show_page_payload
-    from storage import resource_access_service
+    from core.show_pages import ShowPageStore
 
     config = V2Config.load()
-    context = resource_access_service.resolve_resource_access_context()
     store = ShowPageStore()
     try:
         updated = store.update_visibility(session_id, visibility)
-        with store.engine.connect() as connection:
-            can_use = resource_access_service.can_use_resource(
-                context,
-                "show_page",
-                session_id,
-                connection=connection,
-            )
-        payload = show_page_payload(updated, config=config) if can_use else None
+        return _show_page_mutation_response(store, updated, config=config)
     finally:
         store.close()
-    if payload is None:
-        # Audience managers may revoke an anonymous link without page-use
-        # access. Do not return page paths, URLs, share IDs, or session metadata.
-        return {
-            "ok": True,
-            "public_link_enabled": updated.visibility == "public",
-        }
-    return {"ok": True, **_apply_session_meta([payload])[0]}
 
 
 def ensure_show_page(session_id: str) -> dict:
@@ -1459,18 +1477,97 @@ def get_show_page_access(session_id: str) -> dict:
     }
 
 
+def _require_show_page_email_access_management(session_id: str) -> None:
+    from core.show_pages import ShowPageError, ShowPageStore
+    from storage import resource_access_service
+
+    context = resource_access_service.resolve_resource_access_context()
+    store = ShowPageStore()
+    try:
+        page = store.get(session_id)
+        if page is None:
+            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        with store.engine.connect() as connection:
+            if not resource_access_service.can_manage_show_page_access(
+                context,
+                page.session_id,
+                connection=connection,
+            ):
+                raise ShowPageError(
+                    "Show Page access is not permitted.",
+                    code="resource_access_forbidden",
+                )
+    finally:
+        store.close()
+
+
+def _show_page_email_access_error(exc: Exception):
+    from core.show_pages import ShowPageError
+    from vibe import remote_access
+
+    if isinstance(exc, ShowPageError):
+        return exc
+    if isinstance(exc, remote_access.BackendRequestError):
+        code = str(exc.payload.get("error") or "show_page_email_access_unavailable")
+    else:
+        code = str(exc) or "show_page_email_access_unavailable"
+    if code not in {
+        "invalid_email",
+        "too_many_entries",
+        "show_page_email_access_not_configured",
+        "show_page_email_access_invalid_response",
+    }:
+        code = "show_page_email_access_unavailable"
+    return ShowPageError(code, code=code)
+
+
+def get_show_page_authorized_emails(session_id: str) -> dict:
+    """Return exact email grants for one owner-managed Show Page."""
+
+    from vibe import remote_access
+
+    _require_show_page_email_access_management(session_id)
+    try:
+        result = remote_access.get_show_page_authorized_emails(session_id)
+    except Exception as exc:
+        raise _show_page_email_access_error(exc) from exc
+    return {"ok": True, "emails": result["emails"]}
+
+
+def replace_show_page_authorized_emails(session_id: str, emails: list[str]) -> dict:
+    """Replace one Show Page's exact email grants through paired-device auth."""
+
+    from vibe import remote_access
+
+    _require_show_page_email_access_management(session_id)
+    normalized = sorted({str(email).strip().lower() for email in emails if str(email).strip()})
+    try:
+        result = remote_access.replace_show_page_authorized_emails(session_id, normalized)
+    except Exception as exc:
+        raise _show_page_email_access_error(exc) from exc
+    return {
+        "ok": True,
+        "emails": result["emails"],
+        "changed": result["changed"],
+    }
+
+
 def rotate_show_page_share(session_id: str) -> dict:
     """Revoke the current public link and issue a new one (public pages only)."""
-    from core.show_pages import ShowPageStore, show_page_payload
+    from core.show_pages import ShowPageStore
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
         updated, previous_share_id = store.rotate_share(session_id)
-        payload = show_page_payload(updated, config=config)
+        return _show_page_mutation_response(
+            store,
+            updated,
+            config=config,
+            additional_payload={"previous_share_id": previous_share_id},
+        )
     finally:
         store.close()
-    return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
 
 
 def set_show_page_share_id(session_id: str, share_id: str) -> dict:
@@ -1480,16 +1577,20 @@ def set_show_page_share_id(session_id: str, share_id: str) -> dict:
     revokes the previous public URL. Raises ``ShowPageError`` for an invalid /
     taken suffix or a non-public page, which the route layer maps to a 4xx/409.
     """
-    from core.show_pages import ShowPageStore, show_page_payload
+    from core.show_pages import ShowPageStore
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
         updated, previous_share_id = store.set_share_id(session_id, share_id)
-        payload = show_page_payload(updated, config=config)
+        return _show_page_mutation_response(
+            store,
+            updated,
+            config=config,
+            additional_payload={"previous_share_id": previous_share_id},
+        )
     finally:
         store.close()
-    return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
 
 
 def upload_show_page_icon(

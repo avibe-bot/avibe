@@ -104,6 +104,26 @@ def test_management_return_path_allows_only_supported_same_origin_workflows(
     assert cloud_management.validate_next_path(candidate) == expected
 
 
+def test_management_return_path_is_visible_only_to_the_bound_browser(monkeypatch, tmp_path) -> None:
+    config = _save_config(monkeypatch, tmp_path)
+    backend = SimpleNamespace(base_url="https://avibe.bot")
+    monkeypatch.setattr(cloud_management, "_validated_backend", lambda _config: backend)
+    _, state = cloud_management.begin_authorization(
+        config,
+        browser_id="browser-1",
+        remote_subject="user-1",
+        callback_origin=REMOTE_ORIGIN,
+        next_path="/chat/session-1?tab=show-page",
+        silent=False,
+    )
+
+    assert cloud_management.handshake_next_path(state, "browser-1") == (
+        "/chat/session-1?tab=show-page"
+    )
+    assert cloud_management.handshake_next_path(state, "browser-2") is None
+    assert cloud_management.handshake_next_path("missing-state", "browser-1") is None
+
+
 def test_local_start_uses_https_handoff_and_never_exposes_token(monkeypatch, tmp_path) -> None:
     _save_config(monkeypatch, tmp_path)
     captured: dict[str, object] = {}

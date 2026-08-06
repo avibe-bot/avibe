@@ -39,6 +39,7 @@ import {
   showPageSyncPresentation,
   type ShowPageAccess,
 } from '@/lib/showPageAccess';
+import { ShowPageEmailAccessEditor } from './ShowPageEmailAccessEditor';
 
 type ManagementGate =
   | 'idle'
@@ -429,6 +430,14 @@ export function ShowPageWorkspaceAccessControl({
             {t('chat.showPage.applyWorkspaceAccess')}
           </Button>
         </div>
+      ) : null}
+
+      {access ? (
+        <ShowPageEmailAccessEditor
+          active={active}
+          canManage={canManage}
+          sessionId={sessionId}
+        />
       ) : null}
       </section>
       <ConfirmDialog

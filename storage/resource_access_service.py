@@ -243,6 +243,7 @@ def metadata_with_resource_user_context(
         "vibe_membership_version": context.membership_version,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
+        "vibe_show_page_id": context.show_page_id,
         "claims_issued_at": context.claims_issued_at,
         "vibe_instance_authorization_revision": context.authorization_revision,
         "authorization_expires_at": _resource_context_expires_at(context),
@@ -542,11 +543,14 @@ def _replace_policy_groups(
 def _policy_allows(
     context: ResourceUserContext,
     resource_kind: str,
+    resource_id: str,
     policy: Mapping[str, Any] | None,
     group_ids: Sequence[str],
 ) -> bool:
     if context.is_trusted_local:
         return True
+    if context.instance_access_source == "show_page_email":
+        return resource_kind == "show_page" and context.can_use_show_page(resource_id)
     if not context.can_use_resource(resource_kind):
         return False
     if policy is None:
@@ -660,6 +664,7 @@ def can_use_resource_policy_snapshot(
     return _policy_allows(
         context,
         str(resource_kind),
+        str(policy.get("resource_id") or ""),
         policy,
         [str(group_id) for group_id in group_ids],
     )
@@ -689,7 +694,7 @@ def can_use_resource(
     with _connection(connection) as conn:
         policy = _policy_row(conn, kind, identifier)
         groups = _policy_groups(conn, kind, identifier) if policy else []
-        return _policy_allows(context, kind, policy, groups)
+        return _policy_allows(context, kind, identifier, policy, groups)
 
 
 def can_manage_resource_acl(
@@ -791,7 +796,13 @@ def filter_accessible_resources(
         row
         for row, identifier in candidates
         if identifier is not None
-        and _policy_allows(context, kind, policies.get(identifier), groups.get(identifier, []))
+        and _policy_allows(
+            context,
+            kind,
+            identifier,
+            policies.get(identifier),
+            groups.get(identifier, []),
+        )
     ]
 
 

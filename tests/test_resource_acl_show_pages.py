@@ -114,6 +114,43 @@ def test_show_page_list_filters_private_public_scope_and_missing_group_context(m
     assert no_group_ids == {"ses-public"}
 
 
+def test_show_page_email_context_bypasses_audience_only_for_its_signed_page(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = _seed_show_pages_with_policies()
+    context = resource_access_service.ResourceUserContext(
+        subject="guest-1",
+        email="guest@example.com",
+        instance_role="viewer",
+        instance_access_source="show_page_email",
+        show_page_id="ses-private",
+        is_remote=True,
+    )
+    try:
+        with store.engine.connect() as connection:
+            assert resource_access_service.can_use_resource(
+                context,
+                "show_page",
+                "ses-private",
+                connection=connection,
+            )
+            assert not resource_access_service.can_use_resource(
+                context,
+                "show_page",
+                "ses-public",
+                connection=connection,
+            )
+            assert not resource_access_service.can_use_resource(
+                context,
+                "agent",
+                "ses-private",
+                connection=connection,
+            )
+    finally:
+        store.close()
+
+
 def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -283,6 +320,32 @@ def test_access_only_manager_visibility_response_does_not_expose_page_payload(mo
     result = api.set_show_page_visibility("ses-private", "private")
 
     assert result == {"ok": True, "public_link_enabled": False}
+
+
+def test_excluded_scoped_owner_share_mutations_do_not_expose_page_payload(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    store = _seed_show_pages_with_policies()
+    excluded_owner = _organization_context(
+        "owner-1",
+        group_ids=frozenset({"group-sales"}),
+        instance_role="viewer",
+    )
+    try:
+        store.update_visibility("ses-scope", "public", user_context=excluded_owner)
+    finally:
+        store.close()
+    monkeypatch.setattr(
+        resource_access_service,
+        "resolve_resource_access_context",
+        lambda _value=None: excluded_owner,
+    )
+
+    rotated = api.rotate_show_page_share("ses-scope")
+    customized = api.set_show_page_share_id("ses-scope", "excluded-owner-link")
+
+    assert rotated == {"ok": True, "public_link_enabled": True}
+    assert customized == {"ok": True, "public_link_enabled": True}
 
 
 def test_remote_show_page_owner_can_control_sharing_without_instance_owner_role(monkeypatch, tmp_path) -> None:
@@ -496,6 +559,144 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
         "can_publish_public": True,
         "public_link_enabled": False,
     }
+
+
+def test_show_page_owner_can_read_and_replace_exact_email_grants(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-email-access")
+    finally:
+        store.close()
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        remote_access,
+        "get_show_page_authorized_emails",
+        lambda show_page_id: calls.append(("GET", show_page_id))
+        or {"emails": ["guest@example.com"]},
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "replace_show_page_authorized_emails",
+        lambda show_page_id, emails: calls.append(("PUT", show_page_id, emails))
+        or {"emails": emails, "changed": True},
+    )
+    client = app.test_client()
+
+    loaded = client.get("/api/show-pages/ses-email-access/authorized-emails")
+    replaced = client.put(
+        "/api/show-pages/ses-email-access/authorized-emails",
+        json={"emails": [" Guest@Example.com ", "guest@example.com"]},
+        headers=csrf_headers(client),
+    )
+
+    assert loaded.status_code == 200
+    assert loaded.get_json() == {"ok": True, "emails": ["guest@example.com"]}
+    assert loaded.headers["Cache-Control"] == "no-store, private"
+    assert replaced.status_code == 200
+    assert replaced.get_json() == {
+        "ok": True,
+        "emails": ["guest@example.com"],
+        "changed": True,
+    }
+    assert calls == [
+        ("GET", "ses-email-access"),
+        ("PUT", "ses-email-access", ["guest@example.com"]),
+    ]
+
+
+def test_show_page_email_grants_reject_non_manager_without_contacting_backend(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = _seed_show_pages_with_policies()
+    store.close()
+    monkeypatch.setattr(
+        resource_access_service,
+        "resolve_resource_access_context",
+        lambda _value=None: _organization_context("member-1"),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "get_show_page_authorized_emails",
+        lambda _show_page_id: pytest.fail("backend must not be contacted"),
+    )
+
+    response = app.test_client().get(
+        "/api/show-pages/ses-public/authorized-emails"
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "resource_access_forbidden"
+
+
+def test_show_page_email_grants_report_unavailable_without_cloud_pairing(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-email-access")
+    finally:
+        store.close()
+
+    response = app.test_client().get(
+        "/api/show-pages/ses-email-access/authorized-emails"
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "show_page_email_access_not_configured"
+
+
+def test_show_page_email_grant_device_requests_freeze_the_target(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    calls: list[tuple] = []
+    monkeypatch.setattr(remote_access, "_resource_acl_sync_configured", lambda _config: True)
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda cfg, method, suffix, payload=None: calls.append(
+            (cfg, method, suffix, payload)
+        )
+        or (
+            {"emails": ["guest@example.com"]}
+            if method == "GET"
+            else {
+                "emails": ["guest@example.com"],
+                "changed": True,
+                "authorization_revision": 9,
+            }
+        ),
+    )
+    revisions: list[int] = []
+    monkeypatch.setattr(
+        remote_access,
+        "_replace_authorization_revision",
+        lambda _config, revision: revisions.append(revision) or revision,
+    )
+
+    loaded = remote_access.get_show_page_authorized_emails("session/one", config)
+    replaced = remote_access.replace_show_page_authorized_emails(
+        "session/one",
+        ["guest@example.com"],
+        config,
+    )
+
+    assert loaded == {"emails": ["guest@example.com"]}
+    assert replaced == {"emails": ["guest@example.com"], "changed": True}
+    assert calls == [
+        (config, "GET", "show-pages/session%2Fone/authorized-emails", None),
+        (
+            config,
+            "PUT",
+            "show-pages/session%2Fone/authorized-emails",
+            {"emails": ["guest@example.com"]},
+        ),
+    ]
+    assert revisions == [9]
 
 
 def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, tmp_path) -> None:

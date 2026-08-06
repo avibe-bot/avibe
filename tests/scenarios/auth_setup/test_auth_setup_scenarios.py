@@ -197,13 +197,14 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
     def test_remote_callback_keeps_the_bound_subject(self):
         """Scenario: AUTH-SETUP-307"""
         backend = SimpleNamespace(base_url="https://avibe.bot")
+        next_path = "/chat/session-1?tab=show-page"
         with patch.object(cloud_management, "_validated_backend", return_value=backend):
             _, state = cloud_management.begin_authorization(
                 self.harness.config,
                 browser_id="browser-1",
                 remote_subject="user-1",
                 callback_origin=REMOTE_ORIGIN,
-                next_path="/admin/organization/overview",
+                next_path=next_path,
                 silent=False,
             )
         client = self.harness.remote_client(subject="user-2")
@@ -229,7 +230,10 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
                 base_url=REMOTE_ORIGIN,
             )
         self.assertEqual(response.status_code, 302)
-        self.assertIn("cloud_management_error=cloud_management_subject_mismatch", response.headers["location"])
+        self.assertEqual(
+            response.headers["location"],
+            f"{next_path}&cloud_management_error=cloud_management_subject_mismatch",
+        )
         self.assertNotIn("not-exposed", response.text)
 
     def test_trusted_loopback_flow_can_establish_the_first_subject(self):

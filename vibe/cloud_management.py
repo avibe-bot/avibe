@@ -259,6 +259,16 @@ def authorization_url_for_handoff(
     return _authorization_url(config, _validated_backend(config).base_url, handshake), handshake.browser_id
 
 
+def handshake_next_path(state: str | None, browser_id: str | None) -> str | None:
+    """Return a handshake's safe next path only to its bound browser."""
+    if not state or not browser_id:
+        return None
+    handshake = handshake_for_handoff(state)
+    if handshake is None or not secrets.compare_digest(handshake.browser_id, browser_id):
+        return None
+    return validate_next_path(handshake.next_path)
+
+
 def pop_handshake(state: str) -> ManagementHandshake | None:
     with _lock:
         _prune_locked(time.time())

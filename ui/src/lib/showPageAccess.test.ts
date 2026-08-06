@@ -6,6 +6,7 @@ import {
   canChangeShowPagePublicLink,
   classifyShowPageAccessProbe,
   isShowPageVisibilityPayload,
+  normalizeShowPageAuthorizedEmail,
   showPageShareCapabilities,
   showPageHeaderAccess,
   showPageAudienceLabelKey,
@@ -42,6 +43,14 @@ describe('Show Page access policy helpers', () => {
 
   it('presents the public wire value as Organization access', () => {
     expect(showPageAudienceLabelKey('public')).toBe('chat.showPage.workspaceLevels.public');
+  });
+
+  it('normalizes exact email grants with the backend validation contract', () => {
+    expect(normalizeShowPageAuthorizedEmail(' Guest+Demo@Example.COM ')).toBe(
+      'guest+demo@example.com',
+    );
+    expect(normalizeShowPageAuthorizedEmail('guest@example')).toBeNull();
+    expect(normalizeShowPageAuthorizedEmail('guest@')).toBeNull();
   });
 
   it('requires at least one group for scoped access and normalizes duplicates', () => {
