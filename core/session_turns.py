@@ -4259,9 +4259,17 @@ class SessionTurnManager:
                     interruption == SETTLED_BY_STOPPED
                     and not cancel_defers_queue_resume
                 )
+                # Same map as every other Turn-outcome surface. This branch used
+                # to hardcode ``stopped``, so a rolling refresh landed ``failed``
+                # here while ``release_for_backend_refresh`` -- the very caller
+                # that cancelled this runner -- wrote ``canceled`` for the durable
+                # Turns it reached directly. One teardown, two outcomes, decided
+                # by which writer won the race. ``restarted`` is absent from the
+                # map and still falls through to ``failed``: a service shutdown
+                # is not a cancellation.
                 result = self._terminalize_durable_turn(
                     turn_id,
-                    "canceled" if interruption == SETTLED_BY_STOPPED else "failed",
+                    NON_COMPLETING_TURN_SETTLEMENTS.get(interruption, "failed"),
                     settled_by=interruption,
                     evidence_kind=(
                         "service_shutdown"
