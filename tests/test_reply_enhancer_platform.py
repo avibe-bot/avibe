@@ -100,11 +100,15 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
         self.assertIn(
-            "load the versioned `use-avibe` skill once per Agent Session",
+            "ensure the versioned `use-avibe` guidance is available in the active Agent Session context",
             prompt,
         )
         self.assertIn(
-            "Reuse that loaded guidance across later user turns in the same Session; do not fetch it again",
+            "do not fetch it again merely because a new user turn started",
+            prompt,
+        )
+        self.assertIn(
+            "Reload only if context compaction removed the guidance",
             prompt,
         )
         self.assertNotIn(
