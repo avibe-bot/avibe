@@ -758,6 +758,39 @@ def create_app(controller: "Controller") -> FastAPI:
             logger.exception("internal Agent backend reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    @app.post("/internal/backend-auth/test")
+    async def _test_backend_auth(request: Request) -> Any:
+        """Probe credentials through the controller-owned Agent runtime."""
+        payload = await _safe_json(request)
+        backend = payload.get("backend")
+        model = payload.get("model")
+        if not isinstance(backend, str) or not backend.strip():
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "backend must be a non-empty string"},
+            )
+        if model is not None and not isinstance(model, str):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "model must be a string"},
+            )
+        service = getattr(controller, "agent_auth_service", None)
+        test = getattr(service, "test_web_auth", None)
+        if not callable(test):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "backend_runtime_unavailable"},
+            )
+        try:
+            result = await test(
+                backend.strip().lower(),
+                model=model.strip() if isinstance(model, str) and model.strip() else None,
+            )
+            return JSONResponse(status_code=200, content=result)
+        except Exception as exc:
+            logger.exception("internal backend auth test failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""

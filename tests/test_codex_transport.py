@@ -3,6 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -10,6 +11,48 @@ from modules.agents.codex.transport import CodexTransport, STREAM_BUFFER_LIMIT
 
 
 class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_initialize_stops_unpublished_transport(self):
+        initialize_started = asyncio.Event()
+
+        class _Stream:
+            async def readline(self):
+                await asyncio.Event().wait()
+
+        process = SimpleNamespace(
+            pid=123,
+            returncode=None,
+            stdin=None,
+            stdout=_Stream(),
+            stderr=_Stream(),
+        )
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+
+        async def wait_for_initialize(_method, _params):
+            initialize_started.set()
+            await asyncio.Event().wait()
+
+        async def stop_transport():
+            transport._cleanup_tasks()
+
+        transport.send_request = AsyncMock(side_effect=wait_for_initialize)
+        transport.stop = AsyncMock(side_effect=stop_transport)
+
+        with (
+            patch(
+                "modules.agents.codex.transport.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            patch("modules.agents.codex.transport.process_identity", return_value={}),
+            patch("modules.agents.codex.transport.log_process_snapshot"),
+        ):
+            task = asyncio.create_task(transport.start())
+            await initialize_started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        transport.stop.assert_awaited_once_with()
+
     async def test_reader_task_failure_marks_transport_not_alive(self):
         transport = CodexTransport(binary="codex", cwd="/tmp")
         transport._process = SimpleNamespace(returncode=None)
@@ -54,6 +97,30 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectionError):
             await transport.send_notification("initialized")
 
+    async def test_cancelled_request_does_not_leave_pending_rpc(self):
+        request_written = asyncio.Event()
+
+        class _Stdin:
+            def is_closing(self):
+                return False
+
+            def write(self, _payload):
+                return None
+
+            async def drain(self):
+                request_written.set()
+
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        transport._process = SimpleNamespace(returncode=None, stdin=_Stdin())
+
+        task = asyncio.create_task(transport.send_request("turn/interrupt", {}))
+        await request_written.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(transport._pending, {})
+
     async def test_pending_notification_keeps_terminal_pipeline_alive(self):
         transport = CodexTransport(binary="codex", cwd="/tmp")
         started = asyncio.Event()
@@ -77,6 +144,30 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
             await transport._notify_task
 
         self.assertFalse(transport.has_pending_notifications)
+
+    async def test_wait_closed_waits_for_already_read_notifications(self):
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handle(_method, _params):
+            started.set()
+            await release.wait()
+
+        transport._notification_cb = handle
+        transport._notify_task = asyncio.create_task(transport._notify_worker())
+        transport._notify_queue.put_nowait(("turn/completed", {}))
+        await started.wait()
+        transport._closed_event.set()
+        waiter = asyncio.create_task(transport.wait_closed())
+        await asyncio.sleep(0)
+        self.assertFalse(waiter.done())
+
+        release.set()
+        await waiter
+        await asyncio.sleep(0)
+        transport._notify_task.cancel()
+        await transport._notify_task
 
     def test_stream_buffer_limit_allows_large_codex_thread_responses(self):
         self.assertGreaterEqual(STREAM_BUFFER_LIMIT, 128 * 1024 * 1024)

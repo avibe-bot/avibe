@@ -574,6 +574,44 @@ def test_reconcile_agent_backends_endpoint_rejects_invalid_shape():
     }
 
 
+def test_backend_auth_endpoint_uses_controller_owned_service():
+    controller = _build_controller_double()
+    test_web_auth = AsyncMock(return_value={"ok": True, "excerpt": "hello"})
+    controller.agent_auth_service = SimpleNamespace(test_web_auth=test_web_auth)
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(
+                "/internal/backend-auth/test",
+                json={"backend": "Codex", "model": "gpt-5.4-mini"},
+            )
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "excerpt": "hello"}
+    test_web_auth.assert_awaited_once_with("codex", model="gpt-5.4-mini")
+
+
+def test_backend_auth_endpoint_rejects_invalid_shape():
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(
+                "/internal/backend-auth/test",
+                json={"backend": "codex", "model": ["gpt-5.4-mini"]},
+            )
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 400
+    assert resp.json() == {"ok": False, "error": "model must be a string"}
+
+
 async def _dispatch_round_trip(body: dict) -> httpx.Response:
     app = internal_server.create_app(_build_controller_double())
     transport = httpx.ASGITransport(app=app)

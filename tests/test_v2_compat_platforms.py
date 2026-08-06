@@ -50,6 +50,7 @@ def test_to_app_config_preserves_enabled_platforms():
     assert compat.platform == "discord"
     assert compat.platforms == {"enabled": ["slack", "discord"], "primary": "discord"}
     assert compat.enabled_platforms() == ["slack", "discord"]
+    assert compat.default_cwd == config.runtime.default_cwd
 
 
 def test_to_app_config_preserves_telegram_config():

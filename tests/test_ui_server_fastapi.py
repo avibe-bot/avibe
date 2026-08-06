@@ -120,6 +120,32 @@ def test_fastapi_schema_routes_are_not_exposed():
     assert client.get("/openapi.json").status_code != 200
 
 
+def test_backend_auth_test_routes_through_controller_runtime(monkeypatch):
+    from vibe import internal_client
+
+    calls = []
+
+    async def _test_backend_auth(backend, *, model=None):
+        calls.append((backend, model))
+        return {
+            "status_code": 200,
+            "body": {"ok": True, "excerpt": "hello"},
+        }
+
+    monkeypatch.setattr(internal_client, "test_backend_auth", _test_backend_auth)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/backend/codex/auth/test",
+        json={"model": "gpt-5.4-mini"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "excerpt": "hello"}
+    assert calls == [("codex", "gpt-5.4-mini")]
+
+
 def test_thread_settings_routes_use_native_fastapi(monkeypatch):
     from vibe import api
 
