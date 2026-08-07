@@ -12,6 +12,7 @@ from config.v2_config import (
     TelegramConfig,
     LarkConfig,
     WeChatConfig,
+    MemoryConfig,
 )
 
 
@@ -87,6 +88,7 @@ class AppCompatConfig:
     # Mirrors ``V2Config.runtime.harness_prompt_echo``; read on the IM turn path, so
     # it has to reach the controller's runtime config like ``resource_governance``.
     harness_prompt_echo: bool = True
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def enabled_platforms(self) -> list[str]:
         enabled = self.platforms.get("enabled") if isinstance(self.platforms, dict) else None
@@ -166,4 +168,5 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         reply_enhancements=v2.reply_enhancements,
         resource_governance=v2.runtime.resource_governance,
         harness_prompt_echo=v2.runtime.harness_prompt_echo,
+        memory=v2.memory,
     )

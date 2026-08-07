@@ -442,7 +442,6 @@ export const ChatPage: React.FC = () => {
   const [messageFontSize, setMessageFontSize] = useState(() => normalizeChatMessageFontSize(undefined));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
   // ``working`` = a turn is in flight for this session (from our send, or any
   // other origin we observe). Drives the thinking bubble + the Send→Stop swap.
   const [working, setWorking] = useState(false);
@@ -1331,6 +1330,7 @@ export const ChatPage: React.FC = () => {
       // feature; the backend enqueues it (202) instead of refusing.
       const ready = (attachments ?? []).filter((a) => a.status === 'ready');
       if (!sessionId || (!text.trim() && ready.length === 0)) return;
+      const refs = references ?? [];
       markWorking();
       setError(null);
       try {
@@ -1339,7 +1339,6 @@ export const ChatPage: React.FC = () => {
         // stream — we don't hold the response open. ``apiFetch`` attaches the
         // CSRF token that ``protect_mutating_ui_requests`` requires under
         // remote-access mode (raw ``fetch`` would 403).
-        const refs = references ?? [];
         const content =
           ready.length > 0 || refs.length > 0
             ? {
@@ -1435,19 +1434,23 @@ export const ChatPage: React.FC = () => {
         // A turn started — show the user row. If this send happened from a
         // historical search window, first replace that window with the live tail;
         // the persisted prompt belongs there, not grafted below old context.
-        if (body && body.id) {
+        if (body?.id) {
+          const message = body as WorkbenchMessage;
           if (historicalWindowRef.current) {
             const caughtUp = await reloadLatestMessages();
             if (sessionId === sessionIdRef.current) {
-              if (caughtUp) setJumpTarget((body as WorkbenchMessage).id);
-              else appendMessage(body as WorkbenchMessage);
+              if (caughtUp) setJumpTarget(message.id);
+              else appendMessage(message);
             }
           } else {
-            appendMessage(body as WorkbenchMessage);
+            appendMessage(message);
           }
         }
       } catch (err) {
         if (sessionId === sessionIdRef.current) {
+          // The request may have raced a turn owned by another tab or source.
+          // Reconcile rather than clearing that turn's Stop state optimistically.
+          void syncTurnStateRef.current?.();
           setWorking(false);
           setError(errorMessage(err) ?? String(err));
           // Signal the composer the send didn't start so it restores the text +
@@ -2181,7 +2184,6 @@ export const ChatPage: React.FC = () => {
             {error}
           </div>
         )}
-
         <Transcript
           messages={messages}
           session={session}

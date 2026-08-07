@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { isStandaloneAppTab } from '../apps/appLaunch';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
+import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
@@ -28,6 +29,7 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
+import { isAdvancedSettingsPath, isMemorySettingsPath } from '../lib/adminNavigation';
 
 type ShellNavItem = {
   // Optional: a parent that only groups children (no page of its own) omits `to`
@@ -221,6 +223,7 @@ export const AppShell: React.FC = () => {
   const location = useLocation();
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
   const [config, setConfig] = useState<any>(null);
+  const [memoryNavVisible, setMemoryNavVisible] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   // The mobile admin nav sheet (opened from the 更多 tab). Close it whenever the
@@ -248,6 +251,17 @@ export const AppShell: React.FC = () => {
       setConfig(c);
       setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
+  }, [api]);
+
+  useEffect(() => {
+    const refreshMemoryNav = () => {
+      void api.getMemorySettings()
+        .then((memory) => setMemoryNavVisible(memoryNavShouldBeVisible(memory)))
+        .catch(() => setMemoryNavVisible(false));
+    };
+    refreshMemoryNav();
+    window.addEventListener('avibe:memory-settings-changed', refreshMemoryNav);
+    return () => window.removeEventListener('avibe:memory-settings-changed', refreshMemoryNav);
   }, [api]);
 
   // Global ⌘K / Ctrl+K toggles the message-search palette. Intercept the chord
@@ -326,18 +340,17 @@ export const AppShell: React.FC = () => {
       icon: Bot,
       match: (p) => p.startsWith('/admin/settings/backends'),
     },
+    ...(memoryNavVisible
+      ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain, match: isMemorySettingsPath }]
+      : []),
     {
-      // 高级设置: the remaining Settings tabs (messaging leads). Platforms +
-      // backends moved out to their own sidebar destinations above, so exclude
-      // their routes from the active match.
+      // 高级设置: the remaining Settings tabs (messaging leads). Platforms,
+      // backends, models, and Memory have their own sidebar destinations, so
+      // exclude those routes from the active match.
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),
       icon: Settings,
-      match: (p) =>
-        p.startsWith('/admin/settings') &&
-        !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends') &&
-        !p.startsWith('/admin/settings/models'),
+      match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
 
@@ -356,11 +369,7 @@ export const AppShell: React.FC = () => {
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),
       icon: Settings,
-      match: (p) =>
-        p.startsWith('/admin/settings') &&
-        !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends') &&
-        !p.startsWith('/admin/settings/models'),
+      match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
   // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom

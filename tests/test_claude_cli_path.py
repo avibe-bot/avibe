@@ -346,7 +346,10 @@ def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_p
     _run_session(handler, context)
 
     assert captured["connected"] is True
-    assert captured["options"].disallowed_tools == ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
+    expected = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
+    if not session_handler_module.CLAUDE_SDK_HOOKS_AVAILABLE or session_handler_module.HookMatcher is None:
+        expected.append("Workflow")
+    assert captured["options"].disallowed_tools == expected
 
 
 def test_session_handler_ensures_agent_session_id_before_prompt(

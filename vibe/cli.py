@@ -60,6 +60,7 @@ from core.watches import (
 )
 from vibe import __version__, api, runtime
 from vibe.i18n import t as i18n_t
+from vibe.i18n import normalize_language, t as i18n_t
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
@@ -336,6 +337,162 @@ def _cli_payload(kind: str, **fields) -> dict:
 
 def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
+
+
+def _memory_cli_language() -> str:
+    """Read an optional configured language without creating or migrating state."""
+
+    try:
+        config_path = paths.get_config_path()
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        language = payload.get("language") if isinstance(payload, dict) else None
+        return normalize_language(language if isinstance(language, str) else None)
+    except Exception:
+        return "en"
+
+
+def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, language: str) -> int:
+    payload = {
+        "schema_version": 1,
+        "ok": False,
+        "kind": f"memory_{operation}",
+        "code": code,
+        "error": code,
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(i18n_t("memory.cli.error", language, operation=operation, code=code), file=sys.stderr)
+    return 1
+
+
+def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, str | None]:
+    """Validate the closed controller response shape used by ``vibe memory``."""
+
+    from core.memory.types import is_memory_error_code
+
+    if not isinstance(response, dict):
+        return None, "memory_provider_response_invalid"
+    body = response.get("body")
+    if not isinstance(body, dict):
+        return None, "memory_provider_response_invalid"
+    error = body.get("error")
+    if response.get("status_code") != 200 or body.get("status") == "failed":
+        return None, error if is_memory_error_code(error) else fallback
+    return body, None
+
+
+def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> None:
+    if operation == "remember":
+        print(i18n_t("memory.cli.remembered", language))
+        return
+    if operation == "status":
+        from core.memory.presentation import memory_status_buckets
+
+        buckets = memory_status_buckets(result)
+        print(i18n_t("memory.cli.status", language, state=result.get("state", "error")))
+        print(
+            i18n_t(
+                "memory.cli.counts",
+                language,
+                syncing=buckets.syncing,
+                succeeded=buckets.succeeded,
+                unknown=buckets.unknown,
+                failed=buckets.failed,
+                dead=buckets.dead,
+                missed=buckets.missed,
+            )
+        )
+        fault_kind = result.get("processing_fault_kind")
+        if fault_kind in {"credential", "engine"}:
+            print(i18n_t(f"memory.cli.fault.{fault_kind}", language))
+        # Status is principal-less, so it no longer carries profile_warning.
+        # ``vibe memory profile`` reports an empty profile from its own result.
+        return
+
+    items = result.get("items")
+    if not isinstance(items, list) or not items:
+        print(i18n_t("memory.cli.empty", language))
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str):
+            continue
+        date = item.get("date")
+        prefix = f"{date} " if isinstance(date, str) and date else ""
+        print(f"{prefix}{text}")
+
+
+def cmd_memory(args) -> int:
+    """Present direct Memory reads from the controller's verified UDS only."""
+
+    from vibe import internal_client
+    from core.caller_context import caller_context_from_env
+
+    operation = args.memory_command
+    as_json = bool(getattr(args, "json", False))
+    language = _memory_cli_language()
+    query = ""
+    if operation not in {"status", "profile", "search", "remember"}:
+        return _print_memory_cli_error("invalid", "memory_invalid_input", as_json=as_json, language=language)
+    if operation == "search":
+        query = args.query.strip() if isinstance(args.query, str) else ""
+        if (
+            not query
+            or len(query.encode("utf-8")) > 8 * 1024
+            or not isinstance(args.limit, int)
+            or isinstance(args.limit, bool)
+            or not 1 <= args.limit <= 20
+        ):
+            return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
+    if operation == "remember":
+        query = args.text if isinstance(args.text, str) else ""
+        if not query.strip() or len(query) > 4_000:
+            return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
+    try:
+        caller = caller_context_from_env()
+        access = (
+            {"caller_session_id": caller.session_id}
+            if caller is not None
+            else {}
+        )
+        if operation == "status":
+            response = internal_client.memory_status_sync(**access)
+        elif operation == "profile":
+            response = internal_client.memory_profile_sync(**access)
+        elif operation == "search":
+            response = internal_client.memory_search_sync(query, args.limit, **access)
+        else:
+            response = internal_client.memory_remember_sync(query, **access)
+    except internal_client.InternalServerUnavailable:
+        return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json, language=language)
+
+    result, error = _memory_cli_body(response, fallback="memory_sidecar_unavailable")
+    if error is not None:
+        return _print_memory_cli_error(operation, error, as_json=as_json, language=language)
+    assert result is not None
+    if operation == "remember":
+        outcome = result.get("status")
+        if outcome not in {"accepted", "duplicate"}:
+            code = result.get("reason") or result.get("error") or "memory_store_unavailable"
+            return _print_memory_cli_error(operation, code, as_json=as_json, language=language)
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "ok": True,
+                    "kind": f"memory_{operation}",
+                    "result": result,
+                },
+                indent=2,
+            )
+        )
+    else:
+        _print_memory_cli_human(operation, result, language=language)
+    return 0
 
 
 def _add_pagination_args(parser, *, help_command: str) -> None:
@@ -11189,8 +11346,18 @@ def _write_refreshed_runtime_status() -> None:
 
 
 def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:
+    from core.memory.ui_access import generate_ui_read_secret
+
+    # This repair stopped the old service and starts a replacement, so it is the
+    # same shape ``cmd_start`` handles when it starts a service beside a
+    # surviving UI: the Memory UI read proof reaches a child only over stdin and
+    # is never persisted, so a bare CLI holds no secret to pass on and the new
+    # controller would verify with None while the live UI keeps signing with the
+    # old one. Mint a secret for the process being started and realign the UI.
+    memory_ui_secret = generate_ui_read_secret()
+    live_ui_pid = _live_ui_server_pid()
     try:
-        new_pid = runtime.start_service()
+        new_pid = runtime.start_service(memory_ui_secret=memory_ui_secret)
     except Exception as exc:
         _write_refreshed_runtime_status()
         return _doctor_repair_result(
@@ -11199,7 +11366,26 @@ def _start_service_after_repair(target: str, success_message: str, failure_messa
             f"{failure_message}: {exc}",
             stopped_pids=stopped_pids,
         )
-    runtime.write_status("running", f"pid={new_pid}", new_pid, runtime.read_status().get("ui_pid"))
+    ui_pid = runtime.read_status().get("ui_pid")
+    if live_ui_pid is not None:
+        # Remote access keeps running across the UI restart, matching cmd_start.
+        try:
+            runtime.stop_ui(stop_remote_access=False)
+            config = _ensure_config()
+            ui_pid = runtime.start_ui(
+                runtime.effective_ui_bind_host(config),
+                config.ui.setup_port,
+                memory_ui_secret=memory_ui_secret,
+            )
+        except Exception:
+            # The service repair itself succeeded; report it rather than failing
+            # the whole repair because the UI could not be realigned.
+            logger.exception(
+                "Repaired the service but could not restart the Web UI pid=%s to share the Memory UI proof secret; "
+                "Memory profile, search and clear stay unavailable until both processes restart together",
+                live_ui_pid,
+            )
+    runtime.write_status("running", f"pid={new_pid}", new_pid, ui_pid)
     return _doctor_repair_result(
         target,
         "repaired",
@@ -11568,6 +11754,17 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
+def _live_ui_server_pid() -> int | None:
+    """Return the recorded UI pid while it is still a live Avibe UI server."""
+
+    if not runtime.ui_pid_file_points_to_running_ui():
+        return None
+    try:
+        return int(paths.get_runtime_ui_pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
 def cmd_start():
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
@@ -11584,9 +11781,52 @@ def cmd_start():
     else:
         _write_status("starting")
 
-    service_pid = runtime.start_service(wait_for_ready=False)
+    from core.memory.ui_access import generate_ui_read_secret
+
+    # The Memory UI read proof is a per-launch secret: it reaches a child only
+    # over stdin and is deliberately never persisted, so this launcher can only
+    # align a pair it starts itself. It cannot read the copy a surviving process
+    # already holds. Minting a fresh secret while reusing one live process is
+    # what left Memory profile/search/clear answering memory_access_denied after
+    # a partial restart, so track which side actually started here.
+    memory_ui_secret = generate_ui_read_secret()
+    live_service_pid = runtime.resolve_service_owner_pid(include_starting=True)
+    live_ui_pid = _live_ui_server_pid()
+    service_pid = runtime.start_service(
+        wait_for_ready=False,
+        memory_ui_secret=memory_ui_secret,
+    )
+    service_reused = live_service_pid is not None and service_pid == live_service_pid
+    if service_reused:
+        # The reused service still verifies proofs with the secret it was started
+        # with. Signing with a different one would only produce requests it
+        # rejects, so leave the surviving pair's own secret authoritative.
+        ui_memory_secret = None
+    else:
+        ui_memory_secret = memory_ui_secret
+        if live_ui_pid is not None:
+            # A surviving UI signs with the previous secret, which the service
+            # started just now cannot verify. Restart it so the pair shares one
+            # secret; remote access keeps running across the UI restart.
+            runtime.stop_ui(stop_remote_access=False)
+            live_ui_pid = None
     bind_host = runtime.effective_ui_bind_host(config)
-    ui_pid = runtime.start_ui(bind_host, config.ui.setup_port)
+    ui_pid = runtime.start_ui(
+        bind_host,
+        config.ui.setup_port,
+        memory_ui_secret=ui_memory_secret,
+    )
+    if service_reused and ui_pid != live_ui_pid:
+        logger.warning(
+            "Started UI pid=%s against reused service pid=%s without a shared Memory UI proof secret; "
+            "Memory profile, search and clear stay unavailable until both processes restart together",
+            ui_pid,
+            service_pid,
+        )
+        if bool(getattr(getattr(config, "memory", None), "enabled", False)):
+            language = normalize_language(getattr(config, "language", None))
+            print(i18n_t("memory.cli.partialRestartWarning", language))
+            print("")
     service_ready = runtime.service_pid_recorded(service_pid)
     if not service_ready:
         runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
@@ -13661,6 +13901,23 @@ def build_parser():
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("check-update", help="Check for updates")
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
+    memory_parser = subparsers.add_parser("memory", help="Use local Memory through the running controller")
+    memory_subparsers = memory_parser.add_subparsers(
+        dest="memory_command",
+        metavar="{status,profile,search,remember}",
+    )
+    memory_subparsers.required = True
+    memory_status_parser = memory_subparsers.add_parser("status", help="Show Memory status")
+    memory_status_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_profile_parser = memory_subparsers.add_parser("profile", help="Show the Memory profile")
+    memory_profile_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_search_parser = memory_subparsers.add_parser("search", help="Search local Memory")
+    memory_search_parser.add_argument("query", help="Search query")
+    memory_search_parser.add_argument("--limit", type=int, default=8, help="Maximum results (1-20)")
+    memory_search_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_remember_parser = memory_subparsers.add_parser("remember", help="Queue durable personal context")
+    memory_remember_parser.add_argument("text", help="Text to remember (maximum 4,000 characters)")
+    memory_remember_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",
@@ -15228,6 +15485,8 @@ def main():
         )
     if args.command == "status":
         sys.exit(cmd_status())
+    if args.command == "memory":
+        sys.exit(cmd_memory(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
     if args.command == "screenshot":

@@ -32,6 +32,7 @@ from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
+    memory_cli_prompt_admitted,
 )
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -2179,12 +2180,18 @@ class CodexAgent(BaseAgent):
         if agent_instructions:
             instruction_parts.append(agent_instructions)
 
+        # Resolve admission once: it associates or clears this turn's Memory CLI
+        # session scope as a side effect, so a second call per turn would repeat
+        # that write.
+        memory_cli_admitted = memory_cli_prompt_admitted(self.controller, request.context)
+
         instruction_parts.append(
             build_system_prompt_injection(
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
                 include_codex_generated_images=True,
+                include_memory_cli=memory_cli_admitted,
                 avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
                 context=request.context,
                 fallback_platform=platform,
@@ -2233,8 +2240,10 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Refresh thread-level instructions for already-cached Codex threads."""
         self.ensure_agent_session_id(request)
-        caller_env = self._caller_env_for_request(request)
         developer_instructions = self._build_thread_developer_instructions(request)
+        # Building the instructions also grants/revokes the per-turn Memory CLI
+        # capability, so resolve the caller environment only after that decision.
+        caller_env = self._caller_env_for_request(request)
         git_path_state = self._git_path_state_for_request(request)
 
         if not hasattr(self, "_thread_developer_instructions"):

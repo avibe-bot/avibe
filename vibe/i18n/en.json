@@ -639,6 +639,25 @@
   "permission": {
     "adminOnly": "🔒 Only admins can change bot settings. Contact an admin if you need access."
   },
+  "memory": {
+    "cli": {
+      "error": "Memory {operation} failed: {code}",
+      "status": "Memory status: {state}",
+      "counts": "Syncing: {syncing}; succeeded: {succeeded}; result unknown: {unknown}; failed: {failed}; dead: {dead}; missed: {missed}",
+      "fault": {
+        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
+        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
+      },
+      "empty": "No memory items found.",
+      "remembered": "Memory queued.",
+      "partialRestartWarning": "Memory Settings content is unavailable: the Web UI restarted while the service kept running,\n  and their shared Memory proof exists only inside the running processes.\n  Run 'vibe stop' and then 'vibe' to restart both together."
+    },
+    "alert": {
+      "credential": "Memory processing paused at {occurred_at}: the configured model endpoint is unavailable. Check API key balance and permissions. Queued captures: {queued}.",
+      "engine": "Memory processing paused at {occurred_at}: the Memory engine reported an internal error. Try repairing the Memory runtime. Queued captures: {queued}.",
+      "recovered": "Memory processing recovered at {occurred_at}. Queued captures: {queued}."
+    }
+  },
   "language": {
     "systemDefault": "(System Default)",
     "en": "English",

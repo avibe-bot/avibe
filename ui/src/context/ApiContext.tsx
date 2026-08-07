@@ -526,6 +526,16 @@ export type ApiContextType = {
   installAgent: (name: string) => Promise<InstallResult>;
   listDependencies: () => Promise<DependenciesResult>;
   installDependency: (dep: string) => Promise<InstallResult>;
+  getMemorySettings: () => Promise<MemorySettingsResult>;
+  saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
+  getMemoryStatus: () => Promise<MemoryStatusResult>;
+  getMemoryFailures: () => Promise<MemoryFailureLogResult>;
+  getMemoryProfile: () => Promise<MemoryItemsResult>;
+  searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
+  getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
+  getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
+  clearMemory: () => Promise<MemoryClearResult>;
+  restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -1698,12 +1708,257 @@ export type DependencyItem = {
   required: boolean;
   installed: boolean;
   version: string | null;
-  status: 'ready' | 'missing' | 'upgrade_required';
+  status: 'ready' | 'missing' | 'upgrade_required' | 'unsupported' | 'error';
   reason?: string | null;
+  release_state?: 'published' | 'unavailable' | null;
   download_error?: DependencyDownloadError | null;
 };
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
+
+// Memory plugin contract: docs/plans/memory-plugin-system.md.
+// Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
+export type MemoryEndpointConfig = {
+  base_url: string | null;
+  model: string | null;
+  // Write-only: the settings GET never returns a usable key, only `has_api_key`.
+  // Typed as `null` so no caller can read a saved key back off the response.
+  api_key: null;
+  has_api_key: boolean;
+};
+
+export type MemoryProcessingConfig = {
+  llm: MemoryEndpointConfig;
+  embedding: MemoryEndpointConfig;
+};
+
+export type MemorySettings = {
+  status: 'ok';
+  enabled: boolean;
+  processing: MemoryProcessingConfig;
+};
+
+// Omitting a field keeps its current value; an explicit `api_key: null` clears it
+// (only accepted while Memory is disabled/clearing per the backend contract).
+export type MemoryEndpointPatch = {
+  base_url?: string | null;
+  model?: string | null;
+  api_key?: string | null;
+};
+
+export type MemorySettingsPatch = {
+  enabled?: boolean;
+  processing?: {
+    llm?: MemoryEndpointPatch;
+    embedding?: MemoryEndpointPatch;
+  };
+};
+
+export type MemoryFailure = { status: 'failed'; error: string };
+
+export type MemorySettingsResult =
+  | (MemorySettings & { runtime?: { ok?: boolean; [key: string]: unknown } })
+  | MemoryFailure;
+
+export type MemoryStatusState =
+  | 'disabled'
+  | 'starting'
+  | 'ready'
+  | 'syncing'
+  | 'degraded'
+  | 'down'
+  | 'clearing'
+  | 'error';
+
+// The six display buckets the backend derives from the counters below, so this
+// rule lives in exactly one place (`core/memory/presentation.py`).
+export type MemoryStatusBuckets = {
+  syncing: number;
+  succeeded: number;
+  unknown: number;
+  failed: number;
+  dead: number;
+  missed: number;
+};
+
+export type MemoryStatus = {
+  status: 'ok';
+  state: MemoryStatusState;
+  buckets: MemoryStatusBuckets;
+  pending: number;
+  processing: number;
+  awaiting_receipt: number;
+  succeeded: number;
+  receipt_unknown: number;
+  distill_failed: number;
+  dead: number;
+  missed: number;
+  queue_plaintext_bytes: number;
+  provider_disk_bytes: number;
+  last_success_at: string | null;
+  last_flush_observation: 'succeeded' | 'rejected' | 'unknown' | null;
+  last_flush_status: 'extracted' | 'no_extraction' | null;
+  last_flush_error_code: string | null;
+  last_flush_request_id: string | null;
+  last_flush_at: string | null;
+  processing_fault_kind: 'credential' | 'engine' | null;
+  processing_fault_since: string | null;
+  processing_alert_active: boolean;
+  recorder?: {
+    state: 'active' | 'degraded' | 'disabled';
+    reason: string | null;
+  };
+  error: string | null;
+  data_exists: boolean;
+};
+
+// A dependency-missing failure from the internal handler omits `status` and
+// only carries `error`; normalize both shapes at the call site.
+export type MemoryStatusResult = MemoryStatus | MemoryFailure | { error: string };
+
+export type MemoryFailureLogEntry = {
+  kind: 'delivery_abandoned' | 'distillation_rejected' | 'result_unknown';
+  occurred_at: string;
+  error_code: string | null;
+  request_id: string | null;
+  attempts: number;
+};
+
+export type MemoryFailureLogResult =
+  | { items: MemoryFailureLogEntry[]; retention_days: number }
+  | MemoryFailure
+  | { error: string };
+
+export type MemoryItemKind = 'profile' | 'episode' | 'fact';
+
+export type MemoryProfileExplicitInfo = {
+  description: string;
+  category: string | null;
+  evidence: string | null;
+};
+
+export type MemoryProfileTrait = {
+  description: string;
+  trait: string | null;
+  basis: string | null;
+  evidence: string | null;
+};
+
+export type MemoryProfile = {
+  summary: string | null;
+  explicit_info: MemoryProfileExplicitInfo[];
+  implicit_traits: MemoryProfileTrait[];
+  updated_at: string | null;
+};
+
+export type MemoryItem = {
+  kind: MemoryItemKind;
+  text: string;
+  date: string | null;
+  profile?: MemoryProfile;
+};
+
+export type MemoryItemsResult =
+  | { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null }
+  | MemoryFailure;
+
+export type MemoryLogSourceStatus = {
+  status: 'available' | 'partial' | 'unavailable';
+  reason?: string;
+};
+
+export type MemoryLogSections = {
+  everos: MemoryLogSourceStatus;
+  capture: MemoryLogSourceStatus;
+  calls: MemoryLogSourceStatus;
+};
+
+export type MemoryLogEntry = {
+  memcell_id: string;
+  project_id: string;
+  principal_id: string;
+  timestamp_ms: number;
+  preview: string;
+  message_count: number;
+  run_summary: { total: number; statuses: Record<string, number> } | null;
+  authorized_call_count: number | null;
+};
+
+export type MemoryLogListResult =
+  | {
+      status: 'ok';
+      entries: MemoryLogEntry[];
+      next_cursor: string | null;
+      sections: MemoryLogSections;
+    }
+  | MemoryFailure;
+
+export type MemoryLogCapture =
+  | { status: 'available'; delivery_states: string[]; matched_message_count: number }
+  | { status: 'unavailable'; reason: string };
+
+export type MemoryLogStep = {
+  type: 'capture' | 'memcell' | 'strategy';
+  status: string;
+  timestamp_ms?: number;
+  started_at_ms?: number;
+  finished_at_ms?: number | null;
+  memcell_id?: string;
+  run_id?: string;
+  strategy?: string;
+  relation?: 'profile_trigger' | 'run';
+  attempt?: number;
+  error?: string | null;
+  reason?: string;
+};
+
+export type MemoryProviderCall = {
+  id: string;
+  started_at_ms: number;
+  duration_ms: number;
+  kind: string;
+  stage: string;
+  model: string | null;
+  status: string;
+  error: string | null;
+  finish_reason: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  request: unknown;
+  response: unknown;
+  request_bytes: number | null;
+  response_bytes: number | null;
+  dropped_before: number;
+};
+
+export type MemoryLogCurrentState =
+  | {
+      status: 'available';
+      profile: { status: 'present' | 'missing'; updated_at_ms: number | null };
+      indexing: { status: string; updated_at_ms?: number; error?: string | null };
+      label: 'current_state';
+    }
+  | { status: 'unavailable'; reason: string };
+
+export type MemoryLogDetailResult =
+  | {
+      status: 'ok';
+      entry: Pick<MemoryLogEntry, 'memcell_id' | 'project_id' | 'principal_id' | 'timestamp_ms' | 'preview' | 'message_count'>;
+      capture: MemoryLogCapture;
+      steps: MemoryLogStep[];
+      calls: MemoryProviderCall[];
+      omitted_call_count: number;
+      omitted_step_count: number;
+      current_state: MemoryLogCurrentState;
+      sections: MemoryLogSections;
+    }
+  | MemoryFailure;
+
+export type MemoryClearResult = { status: 'completed'; epoch: number } | MemoryFailure;
+
+// Reconciliation answers the controller's ok/error shape rather than the
+// status/error one the read routes use.
+export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: false; error?: string };
 
 export type BackendRuntimeInfo = {
   ok: boolean;
@@ -2680,6 +2935,23 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     installAgent: (name) => startAndPollAgentInstall(name),
     listDependencies: () => getJson('/api/dependencies'),
     installDependency: (dep) => startAndPollDependencyInstall(dep),
+    // handleError: false — every route returns closed `{status:'failed',error}` bodies (never a
+    // thrown ApiError/toast) so the Memory page can render its own inline state per code.
+    getMemorySettings: () => getJson('/api/memory/settings', { handleError: false }),
+    saveMemorySettings: (patch) => patchJson('/api/memory/settings', patch, { handleError: false }),
+    getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
+    getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
+    getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
+    searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
+    getMemoryLog: (cursor = null, limit = 20) => {
+      const query = new URLSearchParams({ limit: String(limit) });
+      if (cursor) query.set('cursor', cursor);
+      return getJson(`/api/memory/log?${query.toString()}`, { handleError: false });
+    },
+    getMemoryLogEntry: (memcellId) =>
+      getJson(`/api/memory/log/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
+    clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
+    restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),
