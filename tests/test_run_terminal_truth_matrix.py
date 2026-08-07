@@ -774,6 +774,21 @@ def _detail_node(detail: str) -> str:
     return node_id.strip()
 
 
+def _validate_proof(proof: tuple[str, str]) -> None:
+    kind, detail = proof
+    assert kind in _PROOF_KINDS, proof
+    assert detail.strip(), proof
+
+    if kind == "covered":
+        _assert_node_exists(detail)
+    elif kind in {"shared", "defect"}:
+        _assert_node_exists(_detail_node(detail))
+    elif kind == "unproven":
+        assert "probe" in detail.lower(), proof
+    else:  # N/A
+        assert len(detail.split()) >= 4, proof
+
+
 @pytest.mark.parametrize(
     ("backend", "lane", "trigger", "outcome", "proof"),
     _CELLS,
@@ -792,19 +807,7 @@ def test_every_run_terminal_truth_cell_is_proven_or_named_as_a_gap(
     }
     assert set(RUN_TERMINAL_TRUTH_MATRIX[(lane, trigger)]) == set(OUTCOMES)
 
-    kind, detail = proof
-    assert kind in _PROOF_KINDS, proof
-    assert detail.strip(), proof
-
-    if kind == "covered":
-        _assert_node_exists(detail)
-    elif kind in {"shared", "defect"}:
-        _assert_node_exists(_detail_node(detail))
-    elif kind == "unproven":
-        # A gap is only useful if it says what would close it.
-        assert "probe" in detail.lower(), proof
-    else:  # N/A
-        assert len(detail.split()) >= 4, proof
+    _validate_proof(proof)
 
 
 def test_the_unproven_count_matches_the_checked_in_budget() -> None:
@@ -941,6 +944,8 @@ def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:
     assert set(EXACT_TURN_PROGRESS_SIGNALS) == {
         (backend, lane) for backend in BACKENDS for lane in LANES
     }
+    for proof in EXACT_TURN_PROGRESS_SIGNALS.values():
+        _validate_proof(proof)
     kinds = {kind for kind, _reason in EXACT_TURN_PROGRESS_SIGNALS.values()}
     verdict = PR7R_QUESTIONS["Q2"]["verdict"]
     if kinds == {"unproven"}:
