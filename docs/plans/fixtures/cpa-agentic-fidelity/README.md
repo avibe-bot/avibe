@@ -59,13 +59,13 @@ equivalence from parameter names alone. Loopback requests disable environment
 proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
-scope; fallback evidence must not be attributed to the primary model. The final
-The gate-complete rerun completed all eight cases with HTTP 200 and no fallback.
+scope; fallback evidence must not be attributed to the primary model. The
+gate-complete rerun completed all eight cases with HTTP 200 and no fallback.
 ID/index, lifecycle, and stream-content checks passed; the requested reasoning
-signal was absent in the Messages-to-Responses single case and in both
+signal was present in both Anthropic-to-OpenAI directions and absent in both
 OpenAI-to-Anthropic directions. The Responses-to-Messages parallel follow-up
-reached a final answer in this rerun, while the Chat-to-Messages final
-responses did not preserve the required system marker.
+reached a final answer, while the Chat-to-Messages final responses did not
+preserve the required system marker.
 
 ## S4 matrix mapping
 
@@ -77,7 +77,7 @@ success claim.
 | --- | --- |
 | Single tool call | `_validate_first`: `expected_tool_count`, `tool_names`, `tool_arguments`, `tool_ids_unique`, and protocol `stop_reason` |
 | Parallel tools | `CaseSpec.expected_tools`, `_user_prompt(True)`, and the same `_validate_first` tool invariants |
-| Multi-turn loop | `_run_case` observed `first_turn.tool_calls` plus `_validate_second`: `no_followup_tool_calls` and `tool_outputs` |
+| Multi-turn loop | `_run_case` observed `first_turn.tool_calls` plus `_validate_second`: `no_followup_tool_calls`, `tool_outputs`, and `_tool_output_pair_present` call-ID association |
 | Streaming text | `_request` strict UTF-8 and `text/event-stream` checks, `_parse_responses_stream` `stream_text_delta_count`/snapshot comparison, `_stream_order_ok`, and `stream_complete` |
 | Streaming tool fragments | `_parse_anthropic_stream`, `_parse_responses_stream`, `_parse_chat_stream`, and `_stream_order_ok` index, ID, argument-fragment, and lifecycle checks |
 | System prompt | `_system_prompt` plus `_validate_second`: `system_marker` and `system_scope` |

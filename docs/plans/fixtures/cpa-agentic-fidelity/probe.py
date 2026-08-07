@@ -129,7 +129,8 @@ def _system_prompt() -> str:
     return (
         "You are a concise tool-using assistant. Follow the requested tool calls exactly. "
         f"This system-scoped instruction requires {SYSTEM_SCOPE_OK}; never output {USER_SCOPE_LEAK}. "
-        f"After tool results, include {SYSTEM_MARKER}, {SYSTEM_SCOPE_OK}, and each returned output marker in the final text."
+        f"After tool results, include {SYSTEM_MARKER}, {SYSTEM_SCOPE_OK}, and each returned output tuple "
+        "(tool name, call id, marker) exactly in the final text."
     )
 
 
@@ -159,8 +160,18 @@ def _user_prompt(parallel: bool) -> str:
         request = "Call lookup_weather for the exact city Shanghai."
     return (
         f"{request} After tool results are returned, summarize. "
-        f"Include {USER_SCOPE_LEAK} and omit {SYSTEM_SCOPE_OK}."
+        f"Include {USER_SCOPE_LEAK} and omit {SYSTEM_SCOPE_OK}. Preserve each returned output tuple exactly."
     )
+
+
+def _tool_output(call: ToolCall) -> str:
+    return f"tool={call.name};call_id={call.call_id};marker={TOOL_OUTPUTS.get(call.name, 'TOOL_OUTPUT_MISSING')}"
+
+
+def _tool_output_pair_present(text: str, call: ToolCall) -> bool:
+    marker = TOOL_OUTPUTS.get(call.name, "TOOL_OUTPUT_MISSING")
+    segments = [segment for segment in text.splitlines() if segment.strip()] or [text]
+    return any(call.name in segment and call.call_id in segment and marker in segment for segment in segments)
 
 
 def _anthropic_payload(*, model: str, stream: bool, parallel: bool, followup: Turn | None = None) -> dict[str, Any]:
@@ -178,7 +189,7 @@ def _anthropic_payload(*, model: str, stream: bool, parallel: bool, followup: Tu
                     {
                         "type": "tool_result",
                         "tool_use_id": call.call_id,
-                        "content": TOOL_OUTPUTS.get(call.name, "TOOL_OUTPUT_MISSING"),
+                        "content": _tool_output(call),
                     }
                     for call in followup.tool_calls
                 ],
@@ -209,7 +220,7 @@ def _responses_payload(*, model: str, stream: bool, parallel: bool, followup: Tu
             {
                 "type": "function_call_output",
                 "call_id": call.call_id,
-                "output": TOOL_OUTPUTS.get(call.name, "TOOL_OUTPUT_MISSING"),
+                "output": _tool_output(call),
             }
             for call in followup.tool_calls
         )
@@ -247,7 +258,7 @@ def _chat_payload(*, model: str, stream: bool, parallel: bool, followup: Turn | 
             {
                 "role": "tool",
                 "tool_call_id": call.call_id,
-                "content": TOOL_OUTPUTS.get(call.name, "TOOL_OUTPUT_MISSING"),
+                "content": _tool_output(call),
             }
             for call in followup.tool_calls
         )
@@ -525,6 +536,10 @@ def _reasoning_text(parts: Any) -> str:
     )
 
 
+def _reasoning_item_has_signal(item: dict[str, Any]) -> bool:
+    return bool(_reasoning_text(item.get("summary")) or _reasoning_text(item.get("content")) or item.get("encrypted_content"))
+
+
 def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: int = 0, invalid_event_count: int = 0, terminal: bool | None = None) -> Turn:
     errors: list[str] = []
     content = document.get("content") if isinstance(document, dict) else None
@@ -636,8 +651,10 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
                 errors.append(error)
             calls.append(ToolCall(_required_identifier(item.get("call_id"), errors), str(item.get("name", "")), arguments))
         elif item_type == "reasoning":
-            reasoning = True
-            reasoning_parts.extend([_reasoning_text(item.get("summary")), _reasoning_text(item.get("content"))])
+            text = "".join([_reasoning_text(item.get("summary")), _reasoning_text(item.get("content"))])
+            if _reasoning_item_has_signal(item):
+                reasoning = True
+                reasoning_parts.append(text)
         elif item_type == "message":
             for part in item.get("content", []):
                 if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
@@ -668,7 +685,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             raw = copy.deepcopy(event.get("item", {}))
             key = str(raw.get("id", event.get("output_index", len(output))))
             output[key] = raw
-            if raw.get("type") == "reasoning":
+            if raw.get("type") == "reasoning" and _reasoning_item_has_signal(raw):
                 reasoning = True
         elif event_type == "response.output_item.done":
             streamed_output_seen = True
@@ -682,7 +699,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 ):
                     errors.append("stream_item_snapshot_mismatch")
                 output[key] = copy.deepcopy(raw)
-                if raw.get("type") == "reasoning":
+                if raw.get("type") == "reasoning" and _reasoning_item_has_signal(raw):
                     reasoning = True
                 elif raw.get("type") == "message":
                     for part in raw.get("content", []):
@@ -728,7 +745,8 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
         if isinstance(terminal_output, list):
             items = copy.deepcopy(terminal_output)
             reasoning = reasoning or any(
-                isinstance(item, dict) and item.get("type") == "reasoning" for item in terminal_output
+                isinstance(item, dict) and item.get("type") == "reasoning" and _reasoning_item_has_signal(item)
+                for item in terminal_output
             )
     turn = _parse_responses_document({"output": items, "status": status}, event_count=len(result.events), invalid_event_count=result.invalid_event_count, terminal=result.done_sentinel or status == "completed")
     turn.parse_errors.extend(errors)
@@ -749,6 +767,9 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
             errors.append("tool_call_invalid")
             continue
         function = raw.get("function", {})
+        if not isinstance(function, dict):
+            errors.append("tool_function_invalid")
+            continue
         arguments, error = _parse_arguments(function.get("arguments"))
         if error:
             errors.append(error)
@@ -812,6 +833,8 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             if "id" in raw:
                 if not isinstance(raw["id"], str) or not raw["id"]:
                     errors.append("tool_call_id_invalid")
+                elif call["id"] and call["id"] != raw["id"]:
+                    errors.append("tool_call_id_changed")
                 else:
                     call["id"] = raw["id"]
             function = raw.get("function", {})
@@ -876,8 +899,19 @@ def _validate_first(turn: Turn, expected_tools: tuple[str, ...], *, stream: bool
     return {"checks": checks, "stop_reason": turn.stop_reason, "tool_call_count": len(turn.tool_calls), "tool_names": names, "reasoning_present": turn.reasoning_present, "event_count": turn.event_count}
 
 
-def _validate_second(turn: Turn, expected_tools: tuple[str, ...], *, stream: bool) -> dict[str, Any]:
+def _validate_second(
+    turn: Turn,
+    expected_tools: tuple[str, ...],
+    *,
+    stream: bool,
+    expected_calls: list[ToolCall] | None = None,
+) -> dict[str, Any]:
     required_markers = [SYSTEM_MARKER, *(TOOL_OUTPUTS[name] for name in expected_tools)]
+    call_output_pairs = (
+        all(_tool_output_pair_present(turn.text, call) for call in expected_calls)
+        if expected_calls is not None
+        else all(marker in turn.text for marker in required_markers[1:])
+    )
     checks = {
         "parsed": not turn.parse_errors and turn.invalid_event_count == 0,
         "terminal": turn.terminal,
@@ -886,6 +920,7 @@ def _validate_second(turn: Turn, expected_tools: tuple[str, ...], *, stream: boo
         "system_marker": SYSTEM_MARKER in turn.text,
         "system_scope": SYSTEM_SCOPE_OK in turn.text and USER_SCOPE_LEAK not in turn.text,
         "tool_outputs": all(marker in turn.text for marker in required_markers[1:]),
+        "tool_output_call_pairs": call_output_pairs,
         "stream_complete": (not stream) or (turn.event_count > 0 and turn.terminal),
         "stream_order": (not stream) or turn.stream_order_ok,
         "stream_deadline": (not stream) or not turn.deadline_expired,
@@ -962,7 +997,7 @@ def _run_case(spec: CaseSpec) -> dict[str, Any]:
                 "checks": first["checks"],
             }
         second_turn = _parse_turn(spec.client_protocol, second_result, stream=spec.stream)
-        second = _validate_second(second_turn, spec.expected_tools, stream=spec.stream)
+        second = _validate_second(second_turn, spec.expected_tools, stream=spec.stream, expected_calls=first_turn.tool_calls)
         second["checks"]["http_success"] = 200 <= second_result.status < 300
         second["status"] = second_result.status
     checks = dict(first["checks"])

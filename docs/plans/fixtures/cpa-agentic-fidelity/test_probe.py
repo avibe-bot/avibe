@@ -103,6 +103,49 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertIn("stream_arguments_missing", turn.parse_errors)
 
+    def test_chat_stream_rejects_tool_call_id_changes(self) -> None:
+        events = [
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}}]}},
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_2", "function": {}}]}}]}},
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+        ]
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertIn("tool_call_id_changed", turn.parse_errors)
+        self.assertEqual(turn.tool_calls[0].call_id, "call_1")
+
+    def test_tool_results_must_remain_paired_with_call_ids(self) -> None:
+        calls = [
+            probe.ToolCall("call_weather", "lookup_weather", {"city": "Shanghai"}),
+            probe.ToolCall("call_time", "lookup_time", {"city": "Shanghai"}),
+        ]
+        text = "\n".join(
+            [
+                probe._tool_output(calls[0]).replace("call_weather", "call_time"),
+                probe._tool_output(calls[1]).replace("call_time", "call_weather"),
+            ]
+        )
+        turn = probe._parse_anthropic_document({"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"})
+        projection = probe._validate_second(turn, ("lookup_weather", "lookup_time"), stream=False, expected_calls=calls)
+        self.assertFalse(projection["checks"]["tool_output_call_pairs"])
+
+    def test_empty_responses_reasoning_item_is_not_a_signal(self) -> None:
+        turn = probe._parse_responses_document(
+            {"output": [{"type": "reasoning", "summary": [], "content": []}, {"type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}], "status": "completed"}
+        )
+        self.assertFalse(turn.reasoning_present)
+
+    def test_responses_encrypted_reasoning_is_a_signal(self) -> None:
+        turn = probe._parse_responses_document(
+            {"output": [{"type": "reasoning", "encrypted_content": "opaque"}], "status": "completed"}
+        )
+        self.assertTrue(turn.reasoning_present)
+
+    def test_malformed_chat_function_is_a_parse_error(self) -> None:
+        turn = probe._parse_chat_document(
+            {"choices": [{"message": {"tool_calls": [{"id": "call_1", "function": None}]}, "finish_reason": "tool_calls"}]}
+        )
+        self.assertIn("tool_function_invalid", turn.parse_errors)
+
     def test_responses_stream_requires_text_delta_for_final_text(self) -> None:
         result = probe.TransportResult(
             200,
