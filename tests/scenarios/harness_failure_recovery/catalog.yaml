@@ -2904,7 +2904,7 @@ scenarios:
     backend: shared
     test: tests/test_run_terminal_truth_matrix.py::test_no_prose_states_a_q2_cell_count_the_table_disagrees_with
   - id: HFR-197
-    name: Claude participating Run attribution is resolved per Turn
+    name: Claude receiver resolves participating Run attribution per Turn
     status: covered
     kind: observability
     layer: contract
@@ -2942,7 +2942,11 @@ scenarios:
     # Round 26 records the remaining backend boundary: that integrated receiver path is
     # Claude's. Codex still stops at registry resolution, so its direct-IM Q2 cell is open
     # until a real CodexEventHandler emit reaches the dispatcher with the accepted Run.
-    test: tests/test_run_terminal_truth_evidence_probes.py::test_claude_participating_run_attribution_is_resolved_per_turn
+    # Round 27 records the boundary one function farther out: this probe seeds
+    # _pending_requests directly rather than driving ClaudeAgent.handle_message's production
+    # enqueue. It therefore proves receiver-side adoption and settlement, not the complete
+    # Claude direct-IM path; that matrix cell is unproven until the real enqueue is driven.
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_claude_receiver_resolves_participating_run_attribution_per_turn
   - id: HFR-198
     name: a cited pytest node id must name a function pytest collects
     status: covered

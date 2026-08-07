@@ -1401,8 +1401,8 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
             "test_which_backends_attribute_a_progress_event_to_an_exact_turn",
         ),
         ("claude", "direct_im"): (
-            "covered",
-            "test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im",
+            "unproven",
+            "via Claude's production enqueue.",
         ),
         ("codex", "durable_workbench"): (
             "covered",
@@ -2023,8 +2023,8 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
     )
 
 
-def test_claude_participating_run_attribution_is_resolved_per_turn(tmp_path):
-    """HFR-197 / Q2: Claude's "and participating Runs" path.
+def test_claude_receiver_resolves_participating_run_attribution_per_turn(tmp_path):
+    """HFR-197 / Q2: Claude's receiver-side participating Runs path.
 
     Q2 asks which events can be attributed to the exact Turn AND PARTICIPATING
     RUNS. Every probe before this one answered the first half and none answered
@@ -2041,11 +2041,14 @@ def test_claude_participating_run_attribution_is_resolved_per_turn(tmp_path):
         SAME payload and looks the Runs up per Turn in the delivery store.
 
     So Run attribution is derived from Turn attribution, per emit. This probe
-    drives that claim through Claude's real receiver. A derivation can be exact at one
-    end and lossy at the other -- if the durable read were keyed by session, or
-    if the in-context list survived a Turn change, the Runs would smear across
-    Turns even though the tokens did not. Codex's direct-IM path remains open
-    until its real event handler carries the accepted Run through the dispatcher.
+    drives that claim through Claude's real receiver after seeding its pending
+    request. It does not drive ``ClaudeAgent.handle_message`` and therefore does
+    not prove the production enqueue half of the direct-IM path. A derivation
+    can be exact at one end and lossy at the other -- if the durable read were
+    keyed by session, or if the in-context list survived a Turn change, the Runs
+    would smear across Turns even though the tokens did not. Both direct-IM
+    backend cells remain open until their real enqueue/event path carries the
+    accepted Run through the dispatcher.
 
     Round 10 supplied the half round 9 faked. Parts (1) through (5) drive the
     dispatcher against a ``_Turns`` stub, which shows that the READER asks per
@@ -2628,9 +2631,9 @@ def test_claude_participating_run_attribution_is_resolved_per_turn(tmp_path):
                 "accepted_agent_run_ids": ["run-a1", "run-a2"],
             },
         )
-        # The turn admission just accepted is the pending request the receiver
-        # will FIFO-match this frame to. Queuing it is the only wiring here;
-        # the selection and the adoption are the receiver's own.
+        # Seed the pending request the receiver will FIFO-match this frame to.
+        # Selection and adoption are the receiver's own; production enqueue is
+        # deliberately outside this probe and keeps claude/direct_im unproven.
         emit_agent._pending_requests["ses-im:/w"] = [request]
         emit_agent.claude_sessions["ses-im:/w"] = _ProbeSDKStream()
 

@@ -234,7 +234,7 @@ _Q2_KEY_SPLIT = (
 )
 _Q2_RUNS = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
-    "test_claude_participating_run_attribution_is_resolved_per_turn"
+    "test_claude_receiver_resolves_participating_run_attribution_per_turn"
 )
 _Q2_RESTORED = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
@@ -1083,7 +1083,19 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # bound ``agent_runs`` row and reads the identical per-Turn attribution off
     # it. The exception is sessionless CLI dispatch, which writes no Delivery
     # and no Turn: empty attribution, and outside both lanes by definition.
-    ("claude", "direct_im"): covered(_Q2_ADMISSION),
+    # Round 27 narrows the RUN half at the next undriven boundary. HFR-197
+    # exercises the real receiver and dispatcher, but inserts the admitted
+    # request into ``_pending_requests`` itself. It therefore does not prove
+    # that Claude's production ``handle_message`` enqueue connects a direct-IM
+    # request to the receiver that emits its terminal frame.
+    ("claude", "direct_im"): unproven(
+        "Shared admission stamps an exact Turn token, and HFR-197 drives the "
+        "real Claude receiver and dispatcher only after seeding the pending "
+        "request. Probe: bind an IM-scoped Run, drive ClaudeAgent.handle_message "
+        "through its real pending-request enqueue, feed a terminal frame to the "
+        "real receiver, and assert the emitted context settles that exact Run "
+        "via Claude's production enqueue."
+    ),
     # Codex is the exception, and the first draft of this table got it wrong by
     # reading only the base-session projection. The app-server's ``item/*`` and
     # ``turn/*`` notifications carry a ``turnId`` in their params, and
@@ -1244,8 +1256,9 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "THREE of the six cells can: codex/direct_im is unproven, and the "
-            "two opencode cells are defects as of round 17. This answer said "
+            "TWO of the six cells can: claude/direct_im and codex/direct_im are "
+            "unproven, and the two opencode cells are defects as of round 17. "
+            "This answer said "
             "ALL SIX for four rounds; "
             "that wording is retracted and enrolled, and the reason it was "
             "wrong is the same reading error the rest of this answer is a "
@@ -1291,14 +1304,16 @@ PR7R_QUESTIONS: Final = {
             "it: this question asks about the exact Turn AND PARTICIPATING "
             "RUNS, every probe asserted Turn tokens, and the verdict was "
             "written as though the conjunction had been checked. It had not "
-            "been. It holds for claude on both lanes and codex on the durable "
-            "lane, and the mechanism is a derivation: "
+            "been. It holds for claude and codex on the durable lane, and the "
+            "mechanism is a derivation: "
             "``_owned_agent_run_ids`` reads ``accepted_agent_run_ids`` off the "
             "emit context, and ``_durable_accepted_agent_run_ids`` looks Runs "
             "up per ``turn_token`` from that SAME payload, so Run attribution "
-            "is exactly as exact as the Turn. HFR-197 drives the integrated "
-            "Claude receiver path, including the case that would smear Runs "
-            "across Turns if its reused context merged rather than replaced. "
+            "is exactly as exact as the Turn. HFR-197 drives the Claude "
+            "receiver and dispatcher after seeding its pending request, "
+            "including the case that would smear Runs across Turns if its "
+            "reused context merged rather than replaced. Claude's direct-IM "
+            "cell remains open because no probe drives the production enqueue; "
             "Codex's direct-IM cell remains open because its probe resolves the "
             "registry request but never drives ``CodexEventHandler`` through "
             "the dispatcher with the accepted Run. "

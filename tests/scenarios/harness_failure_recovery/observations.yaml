@@ -1699,8 +1699,8 @@ observations:
       Round 26, three findings, all accepted and none rejected. No new scenario
       id and no 168-cell budget change. HFR-198 now refuses a computed
       ``__test__`` assignment out loud instead of silently applying the name
-      rule. HFR-197 is narrowed to the integrated Claude receiver path it
-      drives, and codex/direct_im moves covered -> unproven until a real
+      rule. HFR-197 is narrowed to the Claude receiver path it drives after a
+      pending request has been seeded, and codex/direct_im moves covered -> unproven until a real
       CodexEventHandler emit carries the accepted Run through the dispatcher.
       HFR-180 is narrowed to the one production interleaving it reaches: the
       live turn is unstamped, the live-state probe reads idle, the canonical
@@ -1711,3 +1711,14 @@ observations:
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still deliberately trails this unit's
       resolver changes (HFR-OBS-028).
+  - id: HFR-OBS-052
+    area: run-terminal-truth
+    summary: >-
+      Round 27, one finding accepted and none rejected. No new scenario id and
+      no 168-cell budget change. HFR-197 now states its actual boundary: it
+      drives receiver-side adoption and settlement only after directly seeding
+      ClaudeAgent._pending_requests. Claude/direct_im moves covered -> unproven
+      until a probe drives a bound IM Run through ClaudeAgent.handle_message's
+      production enqueue and the real receiver. Durable rule: a real downstream
+      consumer does not prove the upstream producer when the fixture writes the
+      handoff state itself.

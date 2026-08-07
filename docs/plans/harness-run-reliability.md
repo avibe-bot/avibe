@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…211`, `HFR-212…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 open — Claude on both lanes and Codex on the durable lane have covered live attribution; Codex/direct-IM lacks an end-to-end backend emit, and OpenCode's restart path drops the Turn and accepted Runs. Q1/Q3/Q4/Q5 open, Q4 Run-scoped and Claude-only, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…211`, `HFR-212…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 open — only the Claude and Codex durable lanes have covered live attribution; both direct-IM lanes lack an end-to-end backend path, and OpenCode's restart path drops the Turn and accepted Runs. Q1/Q3/Q4/Q5 open, Q4 Run-scoped and Claude-only, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1395,11 +1395,12 @@ request on **both** lanes before the backend is invoked. The lane split does not
 exist. `HFR-188` now drives the real `handle_message` twice on one runtime key
 and asserts the tokens differ (per Turn, not per session) and that a pre-existing
 Workbench token is preserved. Six cells went `covered` at that round and the
-guard forced Q2 to `answered`; round 17 reopens the two opencode ones, so today
-**three cells are `covered`** and **three cells are `open`** and the same guard
-forces Q2 back to `open`. For live dispatch the inactivity timeout is no longer
-clear on attribution: Codex/direct-IM still lacks an integrated Run emit, and
-the activity timestamp remains per **session**.
+guard forced Q2 to `answered`; round 17 reopens the two opencode ones and rounds
+26–27 reopen both direct-IM cells, so today **two cells are `covered`** and
+**four cells are `open`** and the same guard forces Q2 back to `open`. For live
+dispatch the inactivity timeout is no longer clear on attribution: neither
+direct-IM backend has an integrated Run emit, and the activity timestamp remains
+per **session**.
 `HFR-191` narrows the companion over-claim: codex's `should_emit_progress` filter
 reads the single `_active_turns[base]` slot, and the runtime gate is held across
 the whole backend call, so one runtime key admits one live turn at a time. Round 8
@@ -1513,10 +1514,10 @@ conjunction had been checked. The join turns out to be real and cheap —
 `_owned_agent_run_ids` reads `accepted_agent_run_ids` off the emit context and
 `_durable_accepted_agent_run_ids` looks Runs up by that context's `turn_token`, so
 Run attribution is *derived* from Turn attribution — but cheap to verify is not
-verified. `HFR-197` drives it on all three backends, including the case that would
-smear Runs across Turns had claude's reused receiver context merged rather than
-replaced. Q2 stays `answered`; its residual is now one item, the per-session
-activity timestamp.
+verified. At that round `HFR-197` appeared to drive it on all three backends,
+including the case that would smear Runs across Turns had claude's reused
+receiver context merged rather than replaced. Round 27 retracts the direct-IM
+portion because the probe seeds Claude's pending-request handoff itself.
 
 The other two findings are guards failing their own contract. `HFR-194` reads only
 the `- PR7:` allocation line, so this document's *headline* range sat at
@@ -2318,7 +2319,8 @@ id** and no 168-cell budget change.
 1. Computed `__test__` assignments are now undecidable rather than absent: the
    citation/discovery guard fails loudly instead of falling through to a name
    rule that can advertise a node pytest skips.
-2. `HFR-197` is narrowed to the integrated Claude receiver path it drives.
+2. `HFR-197` is narrowed to the Claude receiver path it drives after a pending
+   request has been seeded.
    Codex/direct-IM moves `covered` → `unproven` until a real
    `CodexEventHandler` emit carries the accepted Run through the dispatcher.
 3. `HFR-180` is narrowed to the production fact its one interleaving reaches:
@@ -2328,6 +2330,16 @@ id** and no 168-cell budget change.
 
 The durable lesson is to narrow at the first un-driven boundary. A truthful open
 cell is evidence; an adjacent green test is not.
+
+Round 27 — one finding, **accepted**; **no new scenario id** and no 168-cell
+budget change.
+
+`HFR-197` drove Claude's real receiver and dispatcher only after inserting the
+request into `_pending_requests` itself. It therefore proves receiver-side
+adoption and settlement, not `ClaudeAgent.handle_message`'s production enqueue.
+Claude/direct-IM moves `covered` → `unproven` until a bound IM Run traverses that
+enqueue and the real receiver. The durable lesson is that a real consumer does
+not prove its producer when the fixture writes their handoff state.
 
 Question verdicts:
 
@@ -2348,9 +2360,9 @@ Question verdicts:
    reservation or backend-acceptance path would leave it green. The
    premature-success claim may be closed once an IM-lane acceptance-boundary probe
    exists — not before.
-2. **Q2 — open. Claude on both lanes and Codex on the durable lane have covered
-   live attribution; Codex/direct-IM is unproven, and OpenCode loses attribution
-   across restart.** Everything in the rest of this entry describes live
+2. **Q2 — open. Claude and Codex on the durable lane have covered live
+   attribution; both direct-IM lanes are unproven, and OpenCode loses
+   attribution across restart.** Everything in the rest of this entry describes live
    dispatch; the Codex evidence boundary and restart hole are at the end.
    Codex's `item/*` notifications carry a
    `turnId` and `_find_request_for_notification` resolves the participating
@@ -2379,8 +2391,10 @@ Question verdicts:
    attribution — `_owned_agent_run_ids` reads `accepted_agent_run_ids` off the
    emit context and `_durable_accepted_agent_run_ids` looks Runs up per
    `turn_token` — so it is exactly as exact as the Turn. `HFR-197` drives the
-   integrated Claude receiver path; Codex/direct-IM remains open because no probe
-   drives `CodexEventHandler` through the dispatcher with the accepted Run.
+   Claude receiver and dispatcher only after directly seeding its pending
+   request; Claude/direct-IM remains open because no probe drives production
+   enqueue. Codex/direct-IM remains open because no probe drives
+   `CodexEventHandler` through the dispatcher with the accepted Run.
    Retracted in round 9: codex does **not** discard its Turn signal
    at `should_emit_progress`. That claim was argued three times from the two ends
    of a mechanism without ever running the code between them; `handle_message`
