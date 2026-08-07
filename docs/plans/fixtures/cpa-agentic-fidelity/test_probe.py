@@ -504,6 +504,23 @@ class ProbeParserTests(unittest.TestCase):
         ]
         self.assertFalse(probe._stream_order_ok("responses", events))
 
+    def test_responses_stream_preserves_reasoning_delta_signal(self) -> None:
+        events = [
+            {"kind": "event", "type": "response.reasoning_summary_text.delta", "event": {"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "delta": "summary"}},
+        ]
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertTrue(turn.reasoning_present)
+        self.assertEqual(turn.reasoning_text, "summary")
+
+    def test_responses_stream_rejects_malformed_item_snapshot(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "event", "sequence": 1, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "item": None}},
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("output_item_invalid", turn.parse_errors)
+
     def test_responses_stream_requires_opening_and_terminal_envelopes(self) -> None:
         missing_opening = [
             {"kind": "event", "sequence": 0, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "item": {"id": "msg_1", "type": "message"}}},
@@ -529,6 +546,14 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(redacted.reasoning_present)
         self.assertIn("redacted_thinking_payload_missing", redacted.parse_errors)
 
+    def test_anthropic_stream_rejects_delta_block_type_mismatch(self) -> None:
+        events = [
+            {"kind": "event", "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call_1", "name": "lookup_weather"}}},
+            {"kind": "event", "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "wrong"}}},
+        ]
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertIn("stream_delta_block_type_mismatch", turn.parse_errors)
+
     def test_chat_stream_requires_assistant_role(self) -> None:
         invalid = [
             {"kind": "event", "type": None, "event": {"choices": [{"delta": {"role": "user"}}]}},
@@ -537,6 +562,16 @@ class ProbeParserTests(unittest.TestCase):
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, invalid, True, 0))
         self.assertIn("assistant_role_invalid", turn.parse_errors)
+
+    def test_chat_stream_rejects_choice_index_change(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": None, "event": {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "a"}}]}},
+            {"kind": "event", "sequence": 1, "type": None, "event": {"choices": [{"index": 1, "delta": {"content": "b"}, "finish_reason": "stop"}]}},
+            {"kind": "done", "sequence": 2, "type": None},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, False))
+        self.assertIn("choice_index_invalid", turn.parse_errors)
 
     def test_chat_stream_order_rejects_content_after_finish(self) -> None:
         allowed = [
