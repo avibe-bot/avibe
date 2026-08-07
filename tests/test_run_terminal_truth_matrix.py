@@ -37,6 +37,18 @@ def test_every_pr7r_cell_names_the_probe_that_would_close_it(
     proof: tuple[str, str],
 ) -> None:
     """HFR-180: every dimension combination remains explicit."""
+    assert set(BACKENDS) == {"claude", "codex", "opencode"}
+    assert set(LANES) == {"direct_im", "durable_workbench"}
+    assert set(TRIGGERS) == {"scheduler_cron", "scheduler_at", "manual_cli", "watch"}
+    assert set(OUTCOMES) == {
+        "success",
+        "failure",
+        "resultless_termination",
+        "user_stop",
+        "terminal_persistence_failure",
+        "pending_output_delivery",
+        "post_delivery_local_settlement_failure",
+    }
     assert set(RUN_TERMINAL_TRUTH_MATRIX) == {
         (known_backend, known_lane, known_trigger)
         for known_backend in BACKENDS

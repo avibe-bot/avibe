@@ -3,7 +3,7 @@
 Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
 PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
 PR4 (#1173) are complete. PR7R now has a conservative evidence baseline
-(`HFR-180…182`) and remains evidence-only. PR4's conditional transport-attempt
+(`HFR-180…183`) and remains evidence-only. PR4's conditional transport-attempt
 delta (PR4B) opens only if a current-master reproducer proves a missing durable
 fact.**
 
@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R**, evidence-only; baseline `HFR-180…182`, remaining cells unproven |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R**, evidence-only; baseline `HFR-180…183`, remaining cells unproven |
 
 The post-plan architecture is load-bearing:
 
