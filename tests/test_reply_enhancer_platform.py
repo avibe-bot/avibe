@@ -442,14 +442,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
     def test_memory_cli_prompt_admission_associates_and_revokes_session_scope(self):
         principal_id = "u-11111111111111111111111111111111"
         project_id = "p-22222222222222222222222222222222"
+        binding_enabled = True
+        admission = SimpleNamespace(
+            principal_for=lambda _facts: principal_id,
+            project_for=lambda _facts: project_id,
+            admits=lambda _facts: binding_enabled,
+        )
         controller = SimpleNamespace(
             config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
             _memory_scopes_by_session={},
+            _memory_cli_facts_by_session={},
             _memory_turn_facts=lambda _context: object(),
-            _memory_admission=lambda: SimpleNamespace(
-                principal_for=lambda _facts: principal_id,
-                project_for=lambda _facts: project_id,
-            ),
+            _memory_admission=lambda: admission,
         )
         controller.configure_memory_cli_session = Controller.configure_memory_cli_session.__get__(controller)
         controller.memory_scope_for_cli_session = Controller.memory_scope_for_cli_session.__get__(controller)
@@ -471,6 +475,9 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             principal_id,
         )
         self.assertEqual(controller.memory_project_for_cli_session("ses-owner"), project_id)
+
+        binding_enabled = False
+        self.assertIsNone(controller.memory_scope_for_cli_session("ses-owner"))
 
         context.platform_specific["memory_cli_admitted"] = False
         self.assertFalse(memory_cli_prompt_admitted(controller, context))

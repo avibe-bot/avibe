@@ -187,7 +187,20 @@ def test_guard_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> No
     assert "schedule:" in workflow
     assert "continue-on-error: true" in workflow
     assert "gh run download" in workflow
-    assert "memory-runtime-release-backup-${{ steps.manifest.outputs.sha256 }}" in workflow
+    assert "memory-runtime-release-backup-${{ matrix.manifest.sha256 }}" in workflow
     assert "retention-days: 90" in workflow
     assert "missing=(" in workflow
     assert "--clobber" not in workflow
+
+
+def test_guard_workflow_verifies_every_published_manifest() -> None:
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/memory-runtime-release-guard.yml").read_text(
+        encoding="utf-8"
+    )
+
+    resolution = workflow.split("- name: Resolve every published Memory Runtime manifest", 1)[1]
+    resolution = resolution.split("  guard:", 1)[0]
+    assert "manifests=" in resolution
+    assert "break" not in resolution
+    assert "fromJSON(needs.resolve_manifests.outputs.manifests)" in workflow
+    assert "matrix.manifest.release_tag" in workflow

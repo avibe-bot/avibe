@@ -230,6 +230,7 @@ class Controller:
         self._reconcile_lock: Optional[asyncio.Lock] = None
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
         self._memory_scopes_by_session: Dict[str, tuple[str, str]] = {}
+        self._memory_cli_facts_by_session: Dict[str, InboundTurnFacts] = {}
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -1478,14 +1479,20 @@ class Controller:
         caller = caller_context_from_platform_payload(payload)
         if caller is None:
             return False
+        facts_by_session = getattr(self, "_memory_cli_facts_by_session", None)
+        if not isinstance(facts_by_session, dict):
+            facts_by_session = {}
+            self._memory_cli_facts_by_session = facts_by_session
         admission = self._memory_admission()
         facts = self._memory_turn_facts(context)
         principal_id = admission.principal_for(facts) if admitted else None
         project_id = admission.project_for(facts) if admitted else None
         if principal_id is None or project_id is None:
             self._memory_scopes_by_session.pop(caller.session_id, None)
+            facts_by_session.pop(caller.session_id, None)
             return False
         self._memory_scopes_by_session[caller.session_id] = (principal_id, project_id)
+        facts_by_session[caller.session_id] = facts
         return True
 
     def memory_scope_for_cli_session(self, session_id: str) -> Optional[tuple[str, str]]:
@@ -1493,13 +1500,32 @@ class Controller:
 
         from core.memory.store import is_principal_id, is_project_id
 
-        scope = self._memory_scopes_by_session.get(str(session_id or "").strip())
+        session_key = str(session_id or "").strip()
+        scope = self._memory_scopes_by_session.get(session_key)
         if (
             isinstance(scope, tuple)
             and len(scope) == 2
             and is_principal_id(scope[0])
             and is_project_id(scope[1])
         ):
+            facts = getattr(self, "_memory_cli_facts_by_session", {}).get(session_key)
+            if facts is not None:
+                admission = self._memory_admission()
+                memory_enabled = bool(
+                    getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
+                )
+                current_scope = (
+                    admission.principal_for(facts),
+                    admission.project_for(facts),
+                )
+                if (
+                    not memory_enabled
+                    or not admission.admits(facts)
+                    or current_scope != scope
+                ):
+                    self._memory_scopes_by_session.pop(session_key, None)
+                    self._memory_cli_facts_by_session.pop(session_key, None)
+                    return None
             return scope
         return None
 
@@ -2141,6 +2167,13 @@ class Controller:
         # Reconciliation can start the sidecar, so settle it before closing the
         # runtime or it could race shutdown and leave a process behind.
         _stop_loop_coroutine(_cancel_memory_reconcile_task(), "Memory startup reconciliation")
+        async def _drain_memory_capture_tasks() -> None:
+            handler = getattr(self, "message_handler", None)
+            drain = getattr(handler, "drain_memory_capture_tasks", None)
+            if callable(drain):
+                await drain()
+
+        _stop_loop_coroutine(_drain_memory_capture_tasks(), "Memory capture tasks")
         memory_runtime = getattr(self, "memory_runtime", None)
         if memory_runtime is not None:
             _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")

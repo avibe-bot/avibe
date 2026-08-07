@@ -84,6 +84,14 @@ class MessageHandler(BaseHandler):
 
         task.add_done_callback(_on_done)
 
+    async def drain_memory_capture_tasks(self) -> None:
+        """Settle captures accepted before controller shutdown closes Memory."""
+
+        while self._memory_capture_tasks:
+            tasks = tuple(self._memory_capture_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._memory_capture_tasks.difference_update(tasks)
+
     async def handle_user_message(self, context: MessageContext, message: str):
         """Process regular human-originated messages and route to configured agent."""
         await self._handle_turn(context, message, source=self.TURN_SOURCE_HUMAN)
