@@ -51,6 +51,7 @@ from storage.models import (
     messages,
     metadata,
     session_turns,
+    show_session_events,
 )
 
 
@@ -2145,6 +2146,76 @@ def test_p1_steer_uses_persisted_dispatch_text(managers, monkeypatch) -> None:
             select(messages.c.content_text).where(messages.c.id == delivery_id)
         ).scalar_one()
     assert materialized == "display content"
+
+
+def test_steer_acceptance_materializes_message_before_show_event_link(managers) -> None:
+    """MESSAGE-DELIVERY-310: acceptance satisfies the Show event Message FK."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p1",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="show_annotation",
+                text="accepted annotation",
+            ),
+            dispatch_text="accepted annotation",
+        )
+        conn.execute(
+            show_session_events.insert().values(
+                id="show_evt_steer_acceptance",
+                session_id="ses_fsm",
+                event_type="human.annotation.created",
+                actor="human",
+                scope="page",
+                anchor_json="{}",
+                payload_json="{}",
+                transcript_text="accepted annotation",
+                message_id=None,
+                delivery_id=delivery_id,
+                created_at="2026-08-07T00:00:00+00:00",
+            )
+        )
+
+    manager._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
+
+    async def accepted(_backend, _request):
+        return steer_result(SteerOutcome.ACCEPTED)
+
+    manager._steer = accepted
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content="ignored retry payload",
+                delivery_id=delivery_id,
+            ),
+            context=_context(),
+        )
+    )
+
+    assert result.state == "accepted"
+    assert result.turn_id == turn_id
+    with engine.connect() as conn:
+        assert conn.execute(
+            select(show_session_events.c.message_id).where(
+                show_session_events.c.id == "show_evt_steer_acceptance"
+            )
+        ).scalar_one() == delivery_id
+        assert conn.execute(
+            select(messages.c.id).where(messages.c.id == delivery_id)
+        ).scalar_one() == delivery_id
 
 
 def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
