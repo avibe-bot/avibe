@@ -2,10 +2,10 @@
 
 Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
 PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
-PR4 (#1173) are complete. Only PR7R remains as the next unit, and it is
-evidence-only; its first increment is in flight (`HFR-180…211`, see §7). PR4's
-conditional transport-attempt delta (PR4B) opens only if a current-master
-reproducer proves a missing durable fact.**
+PR4 (#1173) are complete. PR7R now has a conservative evidence baseline
+(`HFR-180…182`) and remains evidence-only. PR4's conditional transport-attempt
+delta (PR4B) opens only if a current-master reproducer proves a missing durable
+fact.**
 
 This is the execution plan, not the investigation log. The original detailed
 diagnosis and its review history remain available in Git before `fe821905`.
@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…211`, `HFR-212…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Six Q2 cells are open: Claude and Codex lack end-to-end bound-Run backend handoffs, and OpenCode's restart path drops the Turn and accepted Runs. Q1/Q3/Q4/Q5 open, Q4 Run-scoped and Claude-only, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R**, evidence-only; baseline `HFR-180…182`, remaining cells unproven |
 
 The post-plan architecture is load-bearing:
 
@@ -1227,119 +1227,20 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-07) — current evidence
+#### PR7R conservative baseline (2026-08-07)
 
-PR7R's first increment occupies `HFR-180…211`; `HFR-212…219` remains
-reserved. It changes tests and this plan only.
+`tests/run_terminal_truth_evidence.py` expands the complete 3 × 2 × 4 × 7
+backend/lane/trigger/outcome product. All 168 cells are deliberately
+`unproven`: existing tests cover useful pieces, but none drives one real Run
+from the named trigger through the named backend lane to the exact terminal
+row and definition projection. The matrix names that missing probe rather than
+substituting adjacent coverage.
 
-The executable evidence is split into:
-
-- `tests/run_terminal_truth_evidence.py`: the 3 × 2 × 4 × 7 matrix,
-  question verdicts, finding ownership, and retraction ledger.
-- `tests/test_run_terminal_truth_matrix.py`: structural guards for matrix
-  completeness, pytest-collectible citations, catalog/index consistency,
-  verdict/range agreement, and retracted claims.
-- `tests/test_run_terminal_truth_evidence_probes.py`: production-boundary
-  probes for `HFR-180…183`, `HFR-188`, `HFR-191`, `HFR-195`,
-  `HFR-197`, `HFR-199`, and `HFR-205`.
-
-All 168 trigger/outcome cells are `unproven` and name the end-to-end probe
-needed to close them. Existing tests prove useful segments, but none follows a
-Run admitted by one of the four triggers through that same Run's terminal
-settlement. `UNPROVEN_BUDGET` pins this boundary.
-
-Q2 is a separate six-cell backend/lane table. Six cells are open: Claude
-and Codex have exact-Turn signals on live dispatch but no probe carries a bound
-participating Run through the production backend handoff and dispatcher;
-OpenCode loses the persisted Turn and accepted Run ids during restart context
-rebuild. Session-wide activity remains insufficient for an inactivity timeout.
-
-Current reproduced defects:
-
-- **PR7R-F1 / HFR-180:** a warm Claude request can remain unstamped while
-  session resolution waits, causing `_resolve_live_state` to select the idle
-  End route and skip canonical Stop. The probe stops before teardown acquires
-  the parked resolver's lock, so it does not claim a teardown marker, classifier
-  result, or final Run status.
-- **PR7R-F2 / HFR-181:** after a failed Codex interrupt,
-  `end_running_agent` discards `_end_codex`'s `interrupted` result and
-  reports the same successful `ended` payload as a real stop. The probe
-  establishes the reporting defect, not the Run's final status.
-
-Retraction ledger summary (the executable reasons remain in
-`RETRACTED_PHRASINGS`):
-
-- Retracted: "never overlap"; Codex submissions serialize at the lock, but the
-  backend turns may overlap until the interrupted completion arrives.
-- Retracted: "no window in which two codex turns are live"; the window exists
-  and the late-event handlers make it harmless.
-- Retracted: "attribution is thrown away"; Codex filters an interrupted turn,
-  while the session-wide activity timestamp is the actual downstream loss.
-- Retracted: "stamped by the first participant"; the append probe proves only
-  that a later participant does not restamp the Turn projection.
-- Retracted: "an ownership transfer both leave the Run ``running``"; the
-  real durable rows remain nonterminal and concretely `queued`.
-- Retracted: "no backend exposes a per-Turn progress signal"; live dispatch
-  exposes signals, but the full Turn-and-Run paths remain open.
-- Retracted: "all six cells"; the unqualified statement ignored backend
-  handoffs and OpenCode restart.
-- Retracted: "pre-terminal evidence a Turn carries"; the established Activity
-  facts are Run-scoped.
-- Retracted: "six backend/lane cells"; live signal presence did not prove bound
-  Run attribution end to end.
-- Retracted: "for codex it drops it"; the older turn is filtered after
-  interruption.
-- Retracted: "one line at the rebuild"; that restores only the OpenCode Turn,
-  not accepted Runs.
-- Retracted: "a one-line remediation"; Turn and Run restoration have different
-  owners.
-- Retracted: "Q4 asks whether a pre-terminal fact is durably recorded"; scope
-  matters because the evidence is Run-scoped, not Turn-scoped.
-- Retracted: "no longer blocked by Q2"; the generic inactivity timeout remains
-  blocked.
-- Retracted: "the yield is unconditional"; an `await` need not suspend.
-- Retracted: "the window is contention on the generation lock"; a warm CLI
-  control wait opens the window without a second contender.
-- Retracted: "can be spelled two ways"; positional sibling vectors are another
-  per-Run provenance representation.
-- Retracted: "End returns ended while the Turn is parked"; the real End blocks
-  before that result, while the route selection is what the probe establishes.
-- Retracted: "discarded live signal, not correct filtering"; the settled result
-  is correct filtering of the interrupted Codex turn.
-
-Question verdicts:
-
-1. **Q1 — open.** Durable Workbench rows remain nonterminal through reservation,
-   ownership transfer, native bind, and Turn terminalization until explicit Run
-   settlement. The direct-IM acceptance boundary remains unproven.
-2. **Q2 — open.** On live dispatch each backend exposes a Turn signal, but
-   Claude and Codex still lack end-to-end bound-Run probes on both lanes and
-   OpenCode loses attribution across restart.
-3. **Q3 — open.** A Turn context stores a flat accepted-Run list and one
-   Turn-level source. Whether scheduler and manual Runs coalesce, and whether a
-   cancellation owner joins per-Run policy, remain unproven.
-4. **Q4 — open.** Claude only has two established, run-scoped Activity facts:
-   durable pending output and durable local-settlement-only state. Turn-scoped
-   evidence and other backends remain unproven.
-5. **Q5 — open.** Health and failure streaks are bounded derived projections.
-   `last_run_at` and `last_error` are separate definition writes with an
-   unreconciled crash gap before the Run terminal CAS.
-
-Remaining evidence work:
-
-1. Drive each real trigger (`scheduler_cron`, `scheduler_at`,
-   `manual_cli`, and `watch`) and retain the created `agent_runs` row.
-2. Follow that exact Run through all seven outcomes on both lanes.
-3. Add backend-specific overrides only when those complete paths differ.
-4. Drive Claude's enqueue/receiver/dispatcher and Codex's event
-   handler/dispatcher with bound Runs.
-5. Restore OpenCode Turn and accepted-Run attribution across restart, then
-   evaluate a per-Turn activity timestamp.
-6. Probe mixed-source batch admission, Turn-scoped pre-terminal evidence, and
-   the definition-stamp/Run-settlement crash gap.
-
-- PR7: `HFR-180…211` is occupied by PR7R's first increment;
-  `HFR-212…219` is still reserved.
+The five questions therefore remain open, with Q2 additionally blocking a
+generic inactivity timeout. This reduced baseline claims no reproduced defect
+and authorizes no implementation. A later evidence increment may close a cell
+only by adding its end-to-end probe; it must not add another static model of
+pytest collection, Python binding, or prose consistency.
 
 ### After PR7R — close the claim or review the contract
 
@@ -1431,9 +1332,8 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…211` — occupied by PR7R's first increment (`HFR-188…211` were
-  taken by its round-6 through round-22 reviews); `HFR-212…219` still reserved for
-  the remaining probes listed in §7
+- PR7: `HFR-180…182` — occupied by PR7R's baseline; `HFR-183…219` remains
+  reserved for end-to-end evidence
 
 Check the catalog again immediately before coding. The highest merged ID is
 now `HFR-435`, allocated by unrelated capabilities above this plan's reserved
