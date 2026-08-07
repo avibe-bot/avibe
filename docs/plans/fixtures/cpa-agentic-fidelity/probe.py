@@ -285,6 +285,16 @@ def _request_url(client_protocol: str, path: str) -> str:
     return f"{BASE_URL}{path}"
 
 
+def _set_stream_read_timeout(response: Any, timeout: float) -> None:
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    connection_socket = getattr(raw, "_sock", None)
+    if connection_socket is not None:
+        try:
+            connection_socket.settimeout(timeout)
+        except OSError:
+            pass
+
+
 def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     """Check lifecycle ordering without depending on provider-specific chunk sizes."""
     if not events:
@@ -358,13 +368,22 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         return terminal is not None and terminal == len(events) - 1
     last_tool_index = -1
     terminal = None
+    done_seen = False
     for index, item in enumerate(events):
         if item.get("kind") == "done":
             if index != len(events) - 1:
                 return False
+            if done_seen:
+                return False
+            done_seen = True
             continue
         event = item.get("event", {})
         choices = event.get("choices", [])
+        usage = event.get("usage")
+        if terminal is not None:
+            if choices or not isinstance(usage, dict):
+                return False
+            continue
         if choices:
             choice = choices[0]
             delta = choice.get("delta", {})
@@ -375,9 +394,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 last_tool_index = max(last_tool_index, tool_index)
             if choice.get("finish_reason") is not None:
                 terminal = index
-        if terminal is not None:
-            return index == terminal
-    return terminal is not None or any(item.get("kind") == "done" for item in events)
+        elif usage is not None and not isinstance(usage, dict):
+            return False
+    return terminal is not None and (done_seen or terminal == len(events) - 1)
 
 
 def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream: bool) -> TransportResult:
@@ -390,7 +409,7 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
     request = urllib.request.Request(_request_url(client_protocol, path), body, headers, method="POST")
     started = time.monotonic()
     try:
-        with OPENER.open(request, timeout=10) as response:
+        with OPENER.open(request, timeout=STREAM_TOTAL_TIMEOUT if stream else 10) as response:
             status = response.status
             if not stream:
                 try:
@@ -403,24 +422,45 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
             event_name: str | None = None
             done = False
             invalid = [0]
-            try:
-                for raw_line in response:
-                    if time.monotonic() - started >= STREAM_TOTAL_TIMEOUT:
-                        return TransportResult(status, None, events, done, invalid[0], False, True)
-                    try:
-                        line = raw_line.decode("utf-8").rstrip("\r\n")
-                    except UnicodeDecodeError:
-                        invalid[0] += 1
-                        return TransportResult(status, None, events, done, invalid[0], False, False)
-                    if not line:
-                        done = _flush_sse(data_lines, event_name, events, invalid) or done
-                        event_name = None
-                    elif line.startswith("event:"):
-                        event_name = line[6:].strip()
-                    elif line.startswith("data:"):
-                        data_lines.append(line[5:].lstrip())
-            except (TimeoutError, socket.timeout):
-                return TransportResult(status, None, events, done, invalid[0], False, True)
+            buffer = bytearray()
+
+            def consume_line(raw_line: bytes) -> bool:
+                nonlocal event_name
+                try:
+                    line = raw_line.decode("utf-8").rstrip("\r\n")
+                except UnicodeDecodeError:
+                    invalid[0] += 1
+                    return False
+                if not line:
+                    flushed = _flush_sse(data_lines, event_name, events, invalid)
+                    event_name = None
+                    return flushed
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+                return False
+
+            while True:
+                elapsed = time.monotonic() - started
+                if elapsed >= STREAM_TOTAL_TIMEOUT:
+                    return TransportResult(status, None, events, done, invalid[0], False, True)
+                _set_stream_read_timeout(response, STREAM_TOTAL_TIMEOUT - elapsed)
+                try:
+                    chunk = response.read(1)
+                except (TimeoutError, socket.timeout):
+                    return TransportResult(status, None, events, done, invalid[0], False, True)
+                if not chunk:
+                    if buffer:
+                        done = consume_line(bytes(buffer)) or done
+                        buffer.clear()
+                    break
+                buffer.extend(chunk)
+                if chunk == b"\n":
+                    done = consume_line(bytes(buffer)) or done
+                    buffer.clear()
+                if invalid[0]:
+                    return TransportResult(status, None, events, done, invalid[0], False, False)
             done = _flush_sse(data_lines, event_name, events, invalid) or done
             return TransportResult(status, None, events, done, invalid[0], _stream_order_ok(client_protocol, events), False)
     except urllib.error.HTTPError as error:
@@ -549,28 +589,25 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
 
 
 def _parse_responses_stream(result: TransportResult) -> Turn:
-    for item in reversed(result.events):
-        event = item.get("event", {})
-        if event.get("type") in {"response.completed", "response.done"} and isinstance(event.get("response"), dict):
-            turn = _parse_responses_document(event["response"], event_count=len(result.events), invalid_event_count=result.invalid_event_count, terminal=True)
-            turn.stream_order_ok = result.stream_order_ok
-            turn.deadline_expired = result.deadline_expired
-            return turn
     output: dict[str, dict[str, Any]] = {}
     text_parts: list[str] = []
     reasoning = False
     status: str | None = None
     args_by_item: dict[str, str] = {}
+    terminal_response: dict[str, Any] | None = None
+    streamed_output_seen = False
     for item in result.events:
         event = item.get("event", {})
         event_type = event.get("type")
         if event_type == "response.output_item.added":
+            streamed_output_seen = True
             raw = copy.deepcopy(event.get("item", {}))
             key = str(raw.get("id", event.get("output_index", len(output))))
             output[key] = raw
             if raw.get("type") == "reasoning":
                 reasoning = True
         elif event_type == "response.output_item.done":
+            streamed_output_seen = True
             raw = event.get("item")
             if isinstance(raw, dict):
                 key = str(raw.get("id", event.get("output_index", len(output))))
@@ -585,8 +622,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 reasoning = True
             else:
                 text_parts.append(str(event.get("delta", "")))
-        elif event_type == "response.completed":
-            status = "completed"
+        elif event_type in {"response.completed", "response.done"}:
+            terminal_response = event.get("response") if isinstance(event.get("response"), dict) else None
+            status = str(terminal_response.get("status") or "completed") if terminal_response else "completed"
     items: list[dict[str, Any]] = []
     for key, raw in output.items():
         if raw.get("type") == "function_call" and key in args_by_item:
@@ -594,6 +632,13 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
         items.append(raw)
     if text_parts:
         items.append({"type": "message", "content": [{"type": "output_text", "text": "".join(text_parts)}]})
+    if not streamed_output_seen and not items and terminal_response is not None:
+        terminal_output = terminal_response.get("output")
+        if isinstance(terminal_output, list):
+            items = copy.deepcopy(terminal_output)
+            reasoning = reasoning or any(
+                isinstance(item, dict) and item.get("type") == "reasoning" for item in terminal_output
+            )
     turn = _parse_responses_document({"output": items, "status": status}, event_count=len(result.events), invalid_event_count=result.invalid_event_count, terminal=result.done_sentinel or status == "completed")
     turn.stream_order_ok = result.stream_order_ok
     turn.deadline_expired = result.deadline_expired
@@ -758,10 +803,13 @@ def _request_with_retries(spec: CaseSpec, payload: dict[str, Any], model: str) -
 def _run_case(spec: CaseSpec) -> dict[str, Any]:
     model = MODELS[spec.target_protocol]
     first_result, model_used, blocked = _request_with_retries(spec, _build_payload(spec, model), model)
+    fallback_used = model_used != model
     if blocked:
         return {
             "case": spec.name,
             "status": first_result.status,
+            "fallback_used": fallback_used,
+            "evidence_model_scope": "fallback" if fallback_used else "primary",
             "blocked": "relay Claude pool unavailable" if spec.target_protocol == "anthropic" else "relay upstream capacity unavailable",
             "checks": {},
         }
@@ -770,12 +818,15 @@ def _run_case(spec: CaseSpec) -> dict[str, Any]:
     first["checks"]["http_success"] = 200 <= first_result.status < 300
     second: dict[str, Any] = {"skipped": True, "checks": {"not_run": False}}
     if first_turn.tool_calls:
-        second_result, _, second_blocked = _request_with_retries(spec, _build_payload(spec, model_used, followup=first_turn), model_used)
+        second_result, second_model_used, second_blocked = _request_with_retries(spec, _build_payload(spec, model_used, followup=first_turn), model_used)
+        fallback_used = fallback_used or second_model_used != model
         if second_blocked:
             return {
                 "case": spec.name,
                 "status": first_result.status,
                 "second_status": second_result.status,
+                "fallback_used": fallback_used,
+                "evidence_model_scope": "fallback" if fallback_used else "primary",
                 "blocked": "relay Claude pool unavailable" if spec.target_protocol == "anthropic" else "relay upstream capacity unavailable",
                 "first": first,
                 "checks": first["checks"],
@@ -790,6 +841,8 @@ def _run_case(spec: CaseSpec) -> dict[str, Any]:
         "case": spec.name,
         "status": first_result.status,
         "second_status": second.get("status"),
+        "fallback_used": fallback_used,
+        "evidence_model_scope": "fallback" if fallback_used else "primary",
         "first": first,
         "second": second,
         "checks": checks,

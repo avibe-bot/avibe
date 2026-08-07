@@ -33,8 +33,10 @@ environment. It is never committed. The environment must provide
 `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, and `OPENAI_API_KEY`; the launcher
 derives the OpenAI-compatible base as the relay root plus `/v1`. It selects
 `claude-haiku-4-5` and `gpt-5.4-mini`, and configures one Claude fallback model
-for bounded 503 recovery. The values are injected into private runtime state
-and child-process environments only.
+for bounded 503 recovery. The packaged v7.2.95 manifest is selected explicitly,
+ambient manifest overrides are ignored, and the installed version is verified
+before requests begin. The values are injected into private runtime state and
+child-process environments only.
 
 The output is a compact JSON report containing case names, HTTP statuses,
 redacted semantic checks, tool names/counts, and stream event counts. Each case
@@ -54,6 +56,8 @@ Chat, it accepts either explicit `reasoning_content` or a positive standard
 equivalence from parameter names alone. Loopback requests disable environment
 proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
+Each case reports only a redacted `fallback_used` boolean and primary/fallback
+scope; fallback evidence must not be attributed to the primary model.
 
 The live evidence in the survey used the owner-provided compatible relay. Direct
 official vendor APIs were not measured. A transient `no available accounts`

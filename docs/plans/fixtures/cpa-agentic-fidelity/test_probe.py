@@ -39,6 +39,23 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
         self.assertTrue(turn.terminal)
 
+    def test_responses_stream_does_not_trust_terminal_snapshot_arguments(self) -> None:
+        result = probe.TransportResult(
+            200,
+            None,
+            [
+                {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
+                {"kind": "event", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "not-json"}},
+                {"kind": "event", "event": {"type": "response.output_item.done", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
+                {"kind": "event", "event": {"type": "response.completed", "response": {"status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
+            ],
+            False,
+            0,
+        )
+        turn = probe._parse_responses_stream(result)
+        self.assertIn("arguments_invalid_json", turn.parse_errors)
+        self.assertNotEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
+
     def test_chat_stream_reassembles_tool_fragments(self) -> None:
         events = [
             {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":'}}]}}]}},
@@ -140,6 +157,20 @@ class ProbeParserTests(unittest.TestCase):
         self.assertTrue(probe._stream_order_ok("anthropic", ordered))
         self.assertFalse(probe._stream_order_ok("anthropic", invalid))
 
+    def test_chat_stream_order_rejects_content_after_finish(self) -> None:
+        allowed = [
+            {"kind": "event", "sequence": 0, "event": {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 1, "event": {"choices": [], "usage": {"completion_tokens": 1}}},
+            {"kind": "done", "sequence": 2},
+        ]
+        invalid = [
+            allowed[0],
+            {"kind": "event", "sequence": 1, "event": {"choices": [{"delta": {"content": "late"}}]}},
+            {"kind": "done", "sequence": 2},
+        ]
+        self.assertTrue(probe._stream_order_ok("chat", allowed))
+        self.assertFalse(probe._stream_order_ok("chat", invalid))
+
     def test_protocol_stop_reasons_are_required(self) -> None:
         first = probe._parse_chat_document({"choices": [{"message": {"tool_calls": []}, "finish_reason": "stop"}]})
         projection = probe._validate_first(first, ("lookup_weather",), stream=False)
@@ -160,6 +191,44 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(projection["checks"]["stream_order"])
         self.assertFalse(projection["checks"]["stream_deadline"])
 
+    def test_stream_deadline_expires_while_partial_line_keeps_arriving(self) -> None:
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, size: int) -> bytes:
+                self.assert_size = size
+                return b"x"
+
+        class Opener:
+            def open(self, request, timeout):
+                return Response()
+
+        original_opener = probe.OPENER
+        original_timeout = probe.STREAM_TOTAL_TIMEOUT
+        original_monotonic = probe.time.monotonic
+        clock = [0.0]
+
+        def monotonic() -> float:
+            clock[0] += 0.02
+            return clock[0]
+
+        try:
+            probe.OPENER = Opener()
+            probe.STREAM_TOTAL_TIMEOUT = 0.03
+            probe.time.monotonic = monotonic
+            result = probe._request("/v1/messages", {}, client_protocol="anthropic", stream=True)
+        finally:
+            probe.OPENER = original_opener
+            probe.STREAM_TOTAL_TIMEOUT = original_timeout
+            probe.time.monotonic = original_monotonic
+        self.assertTrue(result.deadline_expired)
+
     def test_exhausted_503_is_blocked_for_openai_targets(self) -> None:
         original_request = probe._request
         original_retries = probe.MAX_503_RETRIES
@@ -176,6 +245,50 @@ class ProbeParserTests(unittest.TestCase):
             probe.MAX_503_RETRIES = original_retries
         self.assertEqual(result.status, 503)
         self.assertTrue(blocked)
+
+    def test_fallback_use_is_reported_without_model_identity(self) -> None:
+        original_request = probe._request
+        original_retries = probe.MAX_503_RETRIES
+        original_model = probe.MODELS["anthropic"]
+        original_fallback = probe.ANTHROPIC_FALLBACK_MODEL
+        calls = [0]
+
+        def fake_request(*args, **kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                return probe.TransportResult(503, None, [], False, 0)
+            if calls[0] == 2:
+                return probe.TransportResult(
+                    200,
+                    {"choices": [{"message": {"content": "", "reasoning_content": "r", "tool_calls": [{"id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}, "finish_reason": "tool_calls"}]},
+                    [],
+                    False,
+                    0,
+                )
+            return probe.TransportResult(
+                200,
+                {"choices": [{"message": {"content": f"{probe.SYSTEM_MARKER} {probe.SYSTEM_SCOPE_OK} WEATHER_OK"}, "finish_reason": "stop"}]},
+                [],
+                False,
+                0,
+            )
+
+        try:
+            probe._request = fake_request
+            probe.MAX_503_RETRIES = 1
+            probe.MODELS["anthropic"] = "primary/model"
+            probe.ANTHROPIC_FALLBACK_MODEL = "fallback/model"
+            result = probe._run_case(probe.CaseSpec("fallback", "chat", "anthropic", "/v1/chat/completions", False, False))
+        finally:
+            probe._request = original_request
+            probe.MAX_503_RETRIES = original_retries
+            probe.MODELS["anthropic"] = original_model
+            probe.ANTHROPIC_FALLBACK_MODEL = original_fallback
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual(result["evidence_model_scope"], "fallback")
+        projection = json.dumps(result)
+        self.assertNotIn("primary/model", projection)
+        self.assertNotIn("fallback/model", projection)
 
 
 if __name__ == "__main__":

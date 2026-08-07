@@ -569,8 +569,10 @@ The live run used the owner-provided OpenAI/Anthropic-compatible relay as the
 upstream for an isolated CPA v7.2.95 instance. The relay root and credentials
 were read from the local regression environment, injected into the child
 process, and never written to this repository or the report. The CPA binary was
-obtained through `vibe/model_hub_runtime/` and bound to `127.0.0.1`; no Avibe
-service, user configuration, CLI login state, or auth file was inspected.
+obtained through `vibe/model_hub_runtime/` from the repository's packaged
+manifest, with ambient manifest overrides disabled and the installed version
+asserted before the probe. It was bound to `127.0.0.1`; no Avibe service, user
+configuration, CLI login state, or auth file was inspected.
 
 Before the run, the relay's `/v1/models` returned 21 OpenAI-compatible model
 ids; `gpt-5.4-mini` was selected as the smallest listed OpenAI model. One
@@ -599,7 +601,7 @@ when both directions pass:
 | Client request | Target API-key source | Live result | Evidence |
 | --- | --- | --- | --- |
 | Anthropic Messages | OpenAI Responses | 200 for single and parallel-stream; round trips passed | Tool ids/arguments, reasoning, stop reasons, SSE ordering, system scope, and tool results passed |
-| OpenAI Responses | Anthropic Messages | 200 for single and parallel-stream; **NO-GO** | Tool and round-trip checks passed, but the requested OpenAI reasoning signal was absent in both first responses |
+| OpenAI Responses | Anthropic Messages | 200 for single and parallel-stream; **NO-GO** | The requested OpenAI reasoning signal was absent in both first responses; the post-hardening rerun also observed the parallel follow-up emit two new tool calls instead of consuming the supplied results into a final answer |
 | Anthropic Messages | OpenAI Chat Completions | 200 for single and parallel-stream; round trips passed | Tool ids/arguments, reasoning, stop reasons, SSE ordering, system scope, and tool results passed |
 | OpenAI Chat Completions | Anthropic Messages | 200 for single and parallel-stream; **NO-GO** | After the parser accepted both `reasoning_content` and standard `usage.completion_tokens_details.reasoning_tokens`, the requested reasoning signal was still absent in both first responses |
 
@@ -613,18 +615,19 @@ the agentic state transition.
 | --- | --- | --- | --- | --- |
 | Single tool call | One prompt with `lookup_weather` | Tool name, JSON arguments, call id, and terminal stop reason survive the conversion | Engine-core translator plus caller adapter | Passed in all four directions |
 | Parallel tools | One prompt explicitly naming `lookup_weather` and `lookup_time` | Both calls remain addressable and are not silently serialized or merged | Engine-core translator | Passed in all four directions |
-| Multi-turn loop | Assistant tool call followed by a tool result and a final answer | Tool call id links the result to the same call; the second turn sees the tool output | Engine-core translator plus caller adapter | Passed in all four directions |
+| Multi-turn loop | Assistant tool call followed by a tool result and a final answer | Tool call id links the result to the same call; the second turn sees the tool output | Engine-core translator plus caller adapter | Passed in three directions; Responses -> Messages passed the single case, but its parallel rerun emitted new tool calls on the follow-up |
 | Streaming text | Short streamed answer | Every data event is strict UTF-8 JSON, ordering is monotonic, and the stream terminates with the protocol's done event | Engine-core stream translator | Passed in all four streaming cases |
 | Streaming tool fragments | Stream a tool call with split arguments | Fragments reassemble into exactly one valid JSON argument object and one call id | Engine-core stream translator | Passed in all four streaming cases |
-| System prompt | System/instructions text containing a marker plus a conflicting user marker | System marker remains system-scoped and the user conflict marker is absent | Engine-core translator | Passed in all eight cases |
+| System prompt | System/instructions text containing a marker plus a conflicting user marker | System marker remains system-scoped and the user conflict marker is absent | Engine-core translator | Passed whenever a final answer was emitted; the Responses -> Messages parallel follow-up did not reach a final answer |
 | Thinking/reasoning | Anthropic `thinking` budget and OpenAI `reasoning.effort` | Requested signal is observable or an explicit loss is recorded; it is never treated as user text | Engine-core translator; upstream model semantics | Anthropic -> OpenAI present; OpenAI -> Anthropic absent, driving both pair NO-GOs |
 | Context length/truncation | Prompt with a tail marker, then increasing prefix sizes | The first rejected/truncated size and error shape are recorded; no silent loss of the tail marker is accepted | Upstream model plus engine request limits; no plugin | Not covered (optional low-cost probe) |
 
 Thinking and reasoning are deliberately treated as a fidelity question. The
 fixture sends both parameter families and accepts either Chat's explicit
 `reasoning_content` or its standard positive
-`usage.completion_tokens_details.reasoning_tokens` signal. The second live run
-still observed no positive signal in either OpenAI -> Anthropic direction.
+`usage.completion_tokens_details.reasoning_tokens` signal. The post-hardening
+live rerun still observed no positive signal in either OpenAI -> Anthropic
+direction, including the Chat direction after both signal forms were accepted.
 This report does not infer that a budget maps to an OpenAI effort level (or vice
 versa) from field-name similarity. CPA's engine-core translation may carry,
 clamp, or drop a field; the target model's own behavior determines whether the
@@ -643,7 +646,9 @@ stream case, so it is a semantic no-go rather than a transport failure.
    function tools, `reasoning: {effort: low}`, a `function_call`, and a matching
    `function_call_output`; repeat with `stream: true`. Require Anthropic
    `tool_use`/`tool_result` correlation and a final text block, then fail the
-   gate when the requested reasoning signal is absent.
+   gate when the requested reasoning signal is absent. In the parallel streamed
+   rerun, the follow-up returned two new tool calls rather than a final answer,
+   providing a second no-go reproduction for the multi-turn loop.
 2. **Chat Completions -> Messages.** POST `/v1/chat/completions` with an
    assistant `tool_calls` item and a matching `tool` result, then repeat as a
    short stream. Require an Anthropic `tool_use` block, matching `tool_result`,
@@ -671,7 +676,8 @@ closed before any network request when either vendor key, the gateway token, or
 a source-qualified model is absent, and it never logs request/response bodies,
 model prefixes, or environment values.
 
-The launcher obtains CPA through `vibe/model_hub_runtime/`, creates a private
+The launcher obtains CPA through `vibe/model_hub_runtime/`, explicitly selects
+the packaged v7.2.95 manifest, verifies the installed version, creates a private
 temporary engine state, binds CPA to `127.0.0.1`, and generates the
 source-qualified model ids from the runtime's source prefixes. Run it after
 loading the owner-provided regression environment in the shell; the keys are
@@ -680,19 +686,22 @@ into the fixture, a committed config, or this document.
 
 The probe also disables environment proxy handlers for loopback requests and
 classifies an exhausted 503 capacity response for any target as blocked; the
-Claude-only fallback model remains limited to the Anthropic target. The second
-live run completed all eight cases through the loopback CPA with HTTP 200 and
-no proxy-boundary failures.
+Claude-only fallback model remains limited to the Anthropic target. Every case
+reports a redacted `fallback_used` flag and evidence from a fallback is kept
+separate from the primary-model result. The post-hardening live rerun completed
+all eight cases through the loopback CPA with HTTP 200, `fallback_used: false`,
+and no proxy-boundary failures.
 
 ### 18. M0 conclusion and remaining coverage
 
-Both conversion pairs are **NO-GO for v2.1 adoption** on measured evidence:
-each direction preserves tool calls, parallel calls, round trips, streaming,
-stop reasons, and system scope, but the OpenAI -> Anthropic directions lose the
-requested reasoning signal. Both are classified as **engine-core** in CPA
-v7.2.95; no plugin dependency was identified, and the managed runtime keeps
-plugins disabled. This is a semantic limitation, not a syntax-conversion
-finding and does not reopen S1 section 3.
+Both conversion pairs are **NO-GO for v2.1 adoption** on measured evidence. The
+OpenAI -> Anthropic directions lose the requested reasoning signal; the latest
+Responses -> Messages parallel rerun additionally failed to consume the tool
+results into a final answer. The opposite directions preserved the measured
+tool, streaming, stop-reason, and system-scope semantics. Both pairs are
+classified as **engine-core** in CPA v7.2.95; no plugin dependency was
+identified, and the managed runtime keeps plugins disabled. This is a semantic
+limitation, not a syntax-conversion finding and does not reopen S1 section 3.
 
 Not covered: context-limit thresholds, latency/cost, OAuth or subscription
 behavior, direct official vendor APIs, and cross-vendor subscription paths. The

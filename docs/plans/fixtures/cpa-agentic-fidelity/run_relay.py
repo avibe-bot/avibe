@@ -24,6 +24,8 @@ from vibe.model_hub_runtime.supervisor import EngineSupervisor  # noqa: E402
 OPENAI_MODEL = "gpt-5.4-mini"
 ANTHROPIC_MODEL = "claude-haiku-4-5"
 ANTHROPIC_FALLBACK_MODEL = "claude-3-5-haiku-latest"
+PINNED_ENGINE_VERSION = "v7.2.95"
+PINNED_ENGINE_MANIFEST = REPO_ROOT / "vibe/model_hub_runtime/cliproxyapi_manifest.json"
 
 
 def _safe_relay_root(value: str) -> str | None:
@@ -120,12 +122,22 @@ def main() -> int:
             ]
         )
         by_id = {source.source_id: source for source in sources}
-        supervisor = EngineSupervisor(
-            installer=EngineRuntimeManager(runtime_dir=temporary / "runtime"),
-            state_store=store,
+        installer = EngineRuntimeManager(
+            runtime_dir=temporary / "runtime",
+            manifest_path=PINNED_ENGINE_MANIFEST,
+            manifest_url="",
+            offline=False,
         )
+        supervisor = EngineSupervisor(installer=installer, state_store=store)
         try:
+            if installer.contract_manifest().get("version") != PINNED_ENGINE_VERSION:
+                print(json.dumps({"ok": False, "blocked": True, "reason": "pinned CPA manifest mismatch"}, sort_keys=True))
+                return 2
             connection = supervisor.ensure_running()
+            runtime_status = installer.status()
+            if not runtime_status.get("installed") or runtime_status.get("version") != PINNED_ENGINE_VERSION:
+                print(json.dumps({"ok": False, "blocked": True, "reason": "pinned CPA runtime mismatch"}, sort_keys=True))
+                return 2
             child_env = os.environ.copy()
             child_env.update(
                 {
