@@ -327,14 +327,23 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         closed_blocks: set[int] = set()
         last_start = -1
         message_stop = None
+        message_started = False
         for index, item in enumerate(events):
             if item.get("kind") == "done":
                 continue
             event = item.get("event", {})
             event_type = event.get("type")
+            if item.get("type") != event_type:
+                return False
             if message_stop is not None:
                 return False
-            if event_type == "content_block_start":
+            if event_type == "message_start":
+                if message_started:
+                    return False
+                message_started = True
+            elif event_type == "content_block_start":
+                if not message_started:
+                    return False
                 block_index = _stream_index(event.get("index"))
                 if block_index is None:
                     return False
@@ -360,7 +369,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if open_blocks:
                     return False
                 message_stop = index
-        return message_stop is not None and message_stop == len(events) - 1
+        return message_started and message_stop is not None and message_stop == len(events) - 1
     if protocol == "responses":
         added: set[str] = set()
         closed: set[str] = set()
@@ -370,6 +379,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 continue
             event = item.get("event", {})
             event_type = event.get("type")
+            if item.get("type") != event_type:
+                return False
             if terminal is not None:
                 return False
             if event_type == "response.output_item.added":
@@ -381,6 +392,10 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             elif event_type == "response.function_call_arguments.delta":
                 item_id = str(event.get("item_id", event.get("output_index", "")))
                 if item_id not in added or item_id in closed:
+                    return False
+            elif event_type in {"response.output_text.delta", "response.reasoning_summary_text.delta"}:
+                item_id = str(event.get("item_id", event.get("output_index", "")))
+                if item_id and item_id in closed:
                     return False
             elif event_type == "response.output_item.done":
                 raw = event.get("item", {})
@@ -407,6 +422,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         event = item.get("event", {})
         choices = event.get("choices", [])
         usage = event.get("usage")
+        if item.get("type") not in {None, event.get("type")}:
+            return False
         if terminal is not None:
             if choices or not isinstance(usage, dict):
                 return False
@@ -425,7 +442,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 terminal = index
         elif usage is not None and not isinstance(usage, dict):
             return False
-    return terminal is not None and (done_seen or terminal == len(events) - 1)
+    return terminal is not None and done_seen
 
 
 def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream: bool) -> TransportResult:
@@ -565,6 +582,8 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
         elif block_type in {"thinking", "redacted_thinking"}:
             reasoning = True
             if block_type == "thinking":
+                if not isinstance(block.get("signature"), str) or not block["signature"]:
+                    errors.append("thinking_signature_missing")
                 reasoning_parts.append(str(block.get("thinking", "")))
     stop_reason = document.get("stop_reason") if isinstance(document, dict) else None
     turn = Turn("anthropic", calls, "".join(text_parts), reasoning, stop_reason, content, terminal if terminal is not None else stop_reason is not None, event_count, invalid_event_count, errors)
@@ -737,7 +756,12 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 raw["arguments"] = args_by_item[key]
         items.append(raw)
     if text_parts:
-        items.append({"type": "message", "content": [{"type": "output_text", "text": "".join(text_parts)}]})
+        reconstructed_text = "".join(text_parts)
+        message_items = [raw for raw in output.values() if raw.get("type") == "message"]
+        if message_items:
+            message_items[0]["content"] = [{"type": "output_text", "text": reconstructed_text}]
+        else:
+            items.append({"type": "message", "content": [{"type": "output_text", "text": reconstructed_text}]})
     if snapshot_text_parts and "".join(snapshot_text_parts) != "".join(text_parts):
         errors.append("stream_text_snapshot_mismatch")
     if not streamed_output_seen and not items and terminal_response is not None:
@@ -765,6 +789,9 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
     for raw in message.get("tool_calls", []) if isinstance(message, dict) else []:
         if not isinstance(raw, dict):
             errors.append("tool_call_invalid")
+            continue
+        if raw.get("type") != "function":
+            errors.append("tool_call_type_invalid")
             continue
         function = raw.get("function", {})
         if not isinstance(function, dict):
@@ -830,6 +857,9 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
                 errors.append("stream_index_invalid")
                 continue
             call = calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+            if raw.get("type") != "function":
+                errors.append("tool_call_type_invalid")
+                continue
             if "id" in raw:
                 if not isinstance(raw["id"], str) or not raw["id"]:
                     errors.append("tool_call_id_invalid")
