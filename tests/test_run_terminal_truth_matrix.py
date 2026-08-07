@@ -118,34 +118,10 @@ def _expand() -> list[tuple[str, str, str, str, tuple[str, str]]]:
 _CELLS = _expand()
 
 
-def _assert_symbol_exists(qualified: str) -> tuple[list[ast.stmt], list[ast.AST]]:
-    """Resolve a COMPLETE ``path::Class::symbol`` id, one nesting level at a time.
-
-    Returns the module's own top-level body and the whole resolved CHAIN,
-    innermost last, so a caller with a stricter contract than "the symbol
-    exists" can check the kind of what it resolved to -- and, since round 10,
-    the kinds it resolved THROUGH. Returning only the leaf was the same
-    displacement one more level out: the leaf rule got tightened and the classes
-    on the way to it stayed unexamined. The module body comes back with it
-    because collectibility is not a property of the class node alone: round 13
-    made a TestCase base something to RESOLVE, and resolving it needs the
-    module's imports and its sibling classes.
-
-    Matching only the trailing function name and walking the whole module --
-    which is what HFR-105 does, and what this guard did first -- accepts an id
-    whose class component is misspelled, renamed, or absent, as long as some
-    same-named function exists anywhere in the file. For a matrix whose entire
-    value is that its citations are real, that is the wrong failure mode: the
-    citation would stay green while pointing at a test that no longer runs.
-
-    Used for BOTH halves of the unit. Test citations were validated this way
-    from the start; finding OWNERS were not -- the guard split on ``::`` and
-    checked only that the module file existed, so
-    ``running_agents.py::end_running_agent`` stayed green through a rename and
-    the unit went on advertising a contract owner no amendment could locate.
-    Applying full validation to citations and none to owners was the same
-    asymmetry twice over, so there is now one resolver.
-    """
+def _assert_symbol_exists(
+    qualified: str, *, leaf_is_class: bool = False
+) -> tuple[list[ast.stmt], list[ast.AST]]:
+    """Resolve every component of a repo-relative ``path::Class::symbol`` id."""
     module_path, *parts = qualified.split("::")
     assert parts, qualified
     source = Path(module_path)
@@ -160,7 +136,7 @@ def _assert_symbol_exists(qualified: str) -> tuple[list[ast.stmt], list[ast.AST]
         # itself a class is allowed -- an owner may legitimately be a type.
         wanted: tuple[type[ast.AST], ...] = (
             (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            if is_leaf
+            if is_leaf and not leaf_is_class
             else (ast.ClassDef,)
         )
         match = next(
@@ -172,7 +148,7 @@ def _assert_symbol_exists(qualified: str) -> tuple[list[ast.stmt], list[ast.AST]
             None,
         )
         assert match is not None, (
-            f"{qualified}: no {'symbol' if is_leaf else 'class'} "
+            f"{qualified}: no {'symbol' if is_leaf and not leaf_is_class else 'class'} "
             f"named {name!r} at this level"
         )
         chain.append(match)
@@ -406,18 +382,11 @@ def _unittest_ancestry(
     return False
 
 
-def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | None:
-    """The static ``__test__`` value stated in ``body``, or ``None`` if it says nothing.
+_UNSET = object()
 
-    ``attribute_of`` looks for the OTHER spelling -- ``test_fn.__test__ = False``
-    written in the scope that defines ``test_fn`` -- because pytest reads one
-    attribute and does not care which statement set it.
 
-    Only a literal can be mirrored statically. A computed ``__test__`` is not
-    "no opinion": pytest evaluates it at runtime, so falling through to the
-    name rule can silently accept a node pytest skips. Refuse that undecidable
-    assignment out loud instead.
-    """
+def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> object:
+    """Return the final literal ``__test__`` value; reject computed values."""
     final_value: ast.expr | None = None
     for node in body:
         targets = (
@@ -441,13 +410,17 @@ def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | 
             if named:
                 final_value = node.value
     if final_value is None:
-        return None
+        return _UNSET
     if not isinstance(final_value, ast.Constant):
         subject = attribute_of or "module/class"
         raise AssertionError(
             f"cannot decide pytest's computed __test__ value for {subject}"
         )
-    return bool(final_value.value)
+    return final_value.value
+
+
+def _opted_out(flag: object) -> bool:
+    return flag is not _UNSET and not bool(flag)
 
 
 def _c3_merge(sequences: list[list[tuple[ast.ClassDef, tuple]]]):
@@ -516,56 +489,17 @@ def _linearized_ancestry(
     return [(node, module_body)] + merged
 
 
-def _resolved_test_flag(node: ast.ClassDef, module_body) -> bool | None:
-    """``__test__`` as pytest would READ it -- through the bases, not off the body.
-
-    Round 20. ``_test_flag`` reads one class body, and pytest reads an
-    ATTRIBUTE: ``getattr(obj, "__test__", True)`` walks the MRO, so
-    ``class TestChild(Base)`` with ``__test__ = False`` on ``Base`` is not
-    collected and neither of its methods runs. Reading only the child's own
-    body called it collectible, and both readers of this predicate -- the corpus
-    walk that discovers this unit's tests and the resolver that validates a
-    cited node id -- would then advertise those methods as executable coverage.
-    That is the same silent-citation rot the opt-out check was added to stop,
-    one attribute lookup deeper than round 14 looked.
-
-    Round 22 removes the local-only boundary this docstring used to defend with
-    ``_unittest_ancestry``'s sentence -- "a false rejection is loud while a
-    false acceptance is silent" -- which is true there and inverted here. An
-    unreadable base carrying ``__test__ = False`` makes this function answer
-    ``None``, the caller falls through to the name rule, and a ``Test*`` class
-    pytest drops WITHOUT EVEN A WARNING is reported as collectible. So bases
-    are followed across modules by ``_base_class``, and a base that is still
-    unreadable is refused out loud by ``_collectible_class`` instead of being
-    reasoned past here.
-
-    Round 25 fixes the ORDER, which rounds 20 and 22 both got wrong in the same
-    way: they walked the bases depth-first and returned the first flag found,
-    while ``getattr`` reads the C3 linearization. The two disagree exactly when
-    two bases share an ancestor -- ``Left(Common)`` and ``Right(Common)`` with
-    the flag set on ``Common`` and overridden on ``Right`` -- because the walk
-    reaches ``Common`` through ``Left`` and never examines ``Right`` at all.
-    Both directions of that disagreement were checked against this repo's
-    pytest, not reasoned: the depth-first answer accepts a class pytest drops
-    in silence, and rejects one pytest collects.
-
-    ``_defines_constructor`` deliberately keeps its depth-first walk. It mirrors
-    ``hasinit``/``hasnew``, which ask whether ANY class in the MRO supplies the
-    attribute -- an existential over the same set of ancestors, so order cannot
-    change the answer and a linearization would buy nothing. The distinction is
-    written down here because "fix the sibling too" is the tempting
-    over-correction, and round 21 already recorded how a justification travels
-    onto a shape it does not fit.
-    """
+def _resolved_test_flag(node: ast.ClassDef, module_body) -> object:
+    """Resolve ``__test__`` in Python's C3 attribute-lookup order."""
 
     line = _linearized_ancestry(node, module_body)
     if line is None:
         return None
     for cls, _body in line:
         own = _test_flag(cls.body)
-        if own is not None:
+        if own is not _UNSET:
             return own
-    return None
+    return _UNSET
 
 
 def _defines_constructor(
@@ -609,52 +543,13 @@ def _defines_constructor(
 
 
 def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
-    """pytest's own default rule, read off the AST: ``Test*`` or a TestCase base.
-
-    With no ``python_classes`` override in this repo, pytest collects a class
-    only if its name starts with ``Test`` or the unittest plugin claims it as a
-    ``TestCase`` subclass. The second half is decided by ``_unittest_ancestry``,
-    which resolves the base rather than reading its name.
-
-    Round 14 puts ``__test__`` in front of both, and it is BIDIRECTIONAL --
-    checked against this repo's pytest, not reasoned, because the finding named
-    only the opt-out and encoding half a rule is how this predicate has been
-    wrong three rounds running. ``__test__ = False`` excludes the class whatever
-    its name and whatever it inherits, unittest ancestry included.
-    ``__test__ = True`` includes one whose name says nothing -- ``class Helper``
-    with the flag really is collected -- and does NOT excuse it from the
-    constructor rule, which refuses ``Test``-named and flag-opted-in classes
-    alike.
-
-    Round 20 reads the flag through ``_resolved_test_flag`` rather than off the
-    class body, because pytest reads an attribute and attributes are inherited.
-    Round 21 does the same for the constructor rule, which round 20 left
-    reading one class body while fixing the line above it -- the whole point
-    being that pytest resolves BOTH through the MRO, so a fix that travels for
-    one attribute and not the other is half a rule twice over.
-
-    Round 22 makes the MRO travel across FILES, and adds the one answer this
-    predicate never had: "I cannot tell". Rounds 20 and 21 followed only bases
-    defined in the same module and justified the cut with ``_unittest_ancestry``
-    's sentence about false rejections being loud -- which is backwards for
-    both of them, because an unreadable base is exactly how ``__test__ = False``
-    and an inherited ``__init__`` sneak past. So bases resolve through imports
-    now, and a base that STILL resolves to nothing raises instead of being
-    guessed at: undecidable is not the same as collectible, and the whole point
-    of this predicate is that a citation may not advertise coverage pytest does
-    not run.
-    """
+    """Mirror pytest's class name, unittest, ``__test__``, and constructor rules."""
     flag = _resolved_test_flag(node, module_body)
-    if flag is False:
+    if _opted_out(flag):
         return False
     unittest_base = _unittest_ancestry(node, module_body)
-    if not (unittest_base or node.name.startswith("Test") or flag):
+    if not (unittest_base or node.name.startswith("Test") or flag is True):
         return False
-    # Only asked on the ACCEPTING side. A class this rule would exclude anyway
-    # needs no ancestry: excluding it is the loud direction -- a citation into
-    # it fails right below with "pytest does not collect class" -- and asking
-    # every helper class in the corpus to have a readable family tree would be
-    # a rule about imports, not about collection.
     stray = _unresolved_ancestry(node, module_body)
     assert not stray, (
         f"cannot decide whether pytest collects class {node.name!r}: its "
@@ -665,18 +560,67 @@ def _collectible_class(node: ast.ClassDef, module_body: list[ast.stmt]) -> bool:
         f"citing tests under this class; do not let it default to collectible"
     )
     if unittest_base:
-        # The unittest plugin claims these, constructor and all: TestCase
-        # itself defines ``__init__``, so the rule below cannot apply here.
         return True
-    # Round 12, verified against this repo's pytest rather than reasoned: a
-    # name-collected class that defines ``__init__`` or ``__new__`` is REFUSED
-    # with ``PytestCollectionWarning: cannot collect test class ... because it
-    # has a __init__ constructor``, and its tests never run. Believing the name
-    # alone would let a catalog row cite a green-looking scenario that pytest
-    # skips in silence -- the exact rot this resolver exists to stop, one
-    # attribute deeper than round 11 looked. Round 21 resolves it through the
-    # bases for the same reason round 20 resolved the flag through them.
     return not _defines_constructor(node, module_body)
+
+
+def _decorator_target(decorator: ast.expr, module_body) -> str | None:
+    expression = decorator.func if isinstance(decorator, ast.Call) else decorator
+    return _dotted_target(expression, module_body)
+
+
+def _executable_test(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    enclosing: list[ast.stmt],
+    module_body,
+) -> bool:
+    flag = _test_flag(enclosing, attribute_of=node.name)
+    if _opted_out(flag) or not (node.name.startswith("test_") or flag is True):
+        return False
+    for decorator in node.decorator_list:
+        target = _decorator_target(decorator, module_body)
+        if target in {"pytest.fixture", "pytest.mark.skip", "unittest.skip"}:
+            return False
+        if (
+            target in {"pytest.mark.skipif", "unittest.skipIf"}
+            and isinstance(decorator, ast.Call)
+            and decorator.args
+            and isinstance(decorator.args[0], ast.Constant)
+            and bool(decorator.args[0].value)
+        ):
+            return False
+    return True
+
+
+def _bound_names(node: ast.stmt) -> set[str]:
+    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+        return {node.name}
+    targets = (
+        node.targets
+        if isinstance(node, ast.Assign)
+        else [node.target]
+        if isinstance(node, ast.AnnAssign)
+        else []
+    )
+    return {target.id for target in targets if isinstance(target, ast.Name)}
+
+
+def _class_methods(node: ast.ClassDef, module_body):
+    """Methods visible on a class, with their defining class and module."""
+    line = _linearized_ancestry(node, module_body)
+    assert line is not None, f"cannot resolve MRO for {node.name!r}"
+    seen: set[str] = set()
+    for cls, defining_module in line:
+        bindings: dict[str, ast.stmt] = {}
+        for child in cls.body:
+            for name in _bound_names(child):
+                bindings[name] = child
+        for name, child in bindings.items():
+            if name not in seen and isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                yield child, cls.body, defining_module
+        seen.update(bindings)
 
 
 def _collected_tests(
@@ -684,76 +628,65 @@ def _collected_tests(
     prefix: tuple[str, ...] = (),
     module_body: list[ast.stmt] | None = None,
 ) -> list[tuple[str, ast.stmt]]:
-    """Every test callable pytest would collect from ``body``, named as pytest names it.
-
-    Module level in round 11, and applying ``_collectible_class``, because the
-    walker that discovers this unit's tests and the resolver that validates a
-    cited node id are two readings of ONE rule -- "what does pytest collect" --
-    and only the resolver got the rule. A ``class Helper`` with a ``test_x``
-    method was walked into unconditionally here, so its method was reported as a
-    discovered node; adding a catalog row for it then satisfied BOTH directions
-    of the docstring/catalog tie while pytest collected nothing.
-
-    That is round 10's lesson at the next joint out. Round 10 found a rule fixed
-    at one nesting LEVEL that did not travel to the levels above it, and fixed
-    it inside one function. The same rule then failed to travel to the other
-    CALL SITE. A predicate that encodes an external system's behaviour belongs in
-    one place with every reader going through it; two readers and one predicate
-    is the shape that produced both bugs.
-    """
-    # Round 13: the top-level call IS the module, and nested calls carry it
-    # down, because resolving a base to unittest needs the module's imports and
-    # its sibling class definitions -- neither of which is visible from a class
-    # body.
+    """Return executable pytest node suffixes discovered from an AST body."""
     module = body if module_body is None else module_body
-    # Round 14, and it is round 10's lesson at the OUTERMOST level: a module
-    # that sets ``__test__ = False`` is skipped whole, so every id in it is a
-    # citation to something that never runs. Checked here rather than reasoned
-    # about -- this repo's pytest collects nothing from such a file, not even a
-    # bare ``def test_top``.
-    if module_body is None and _test_flag(body) is False:
+    if module_body is None and _opted_out(_test_flag(body)):
         return []
     found: list[tuple[str, ast.stmt]] = []
     for node in body:
         if isinstance(node, ast.ClassDef):
             if _collectible_class(node, module):
-                found.extend(
-                    _collected_tests(node.body, prefix + (node.name,), module)
-                )
+                for method, enclosing, defining_module in _class_methods(
+                    node, module
+                ):
+                    if _executable_test(method, enclosing, defining_module):
+                        found.append(
+                            ("::".join(prefix + (node.name, method.name)), method)
+                        )
+                for child in node.body:
+                    if isinstance(child, ast.ClassDef):
+                        found.extend(
+                            _collected_tests(
+                                [child], prefix + (node.name,), module
+                            )
+                        )
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # The same bidirectional flag one scope out: ``test_fn.__test__``
-            # is written by the enclosing body, so that is where it is read.
-            flag = _test_flag(body, attribute_of=node.name)
-            if flag is False:
-                continue
-            if node.name.startswith("test_") or flag:
+            if _executable_test(node, body, module):
                 found.append(("::".join(prefix + (node.name,)), node))
     return found
 
 
 def _assert_node_exists(node_id: str) -> None:
-    """A pytest node id: the same resolution, plus what makes it a NODE id.
-
-    The shared resolver deliberately accepts a class leaf, because a finding's
-    OWNER may be a type. A pytest node id is a different thing: it has to be
-    something pytest will collect and run. Resolving one with the owner rule
-    left ``tests/foo.py::_helper`` and ``tests/foo.py::SomeClass`` green -- a
-    citation that names a real symbol which no test run ever executes, which is
-    the same failure this whole guard exists to prevent, one level in. So the
-    leaf must be a function pytest collects, and the class-leaf latitude stays
-    where it was justified.
-
-    Round 10 finished the thought. Round 9 tightened the LEAF and left every
-    class on the path to it judged by "a class with this name exists", so
-    ``tests/foo.py::Helper::test_case`` resolved even though pytest collects
-    neither ``Helper`` nor anything inside it. Same defect, same file, one
-    nesting level out -- which is why the resolver now returns the chain and
-    every non-leaf component is checked against pytest's collection rule.
-    """
+    """Require a repo test node that pytest will collect and execute."""
     assert node_id.split("::")[0].startswith("tests/"), node_id
-    module_body, chain = _assert_symbol_exists(node_id)
-    *containers, leaf = chain
-    assert _test_flag(module_body) is not False, (
+    module_path, *parts = node_id.split("::")
+    if len(parts) > 1:
+        module_body, containers = _assert_symbol_exists(
+            "::".join((module_path, *parts[:-1])), leaf_is_class=True
+        )
+        container = containers[-1]
+        assert isinstance(container, ast.ClassDef), node_id
+        resolved = next(
+            (
+                (method, enclosing, defining_module)
+                for method, enclosing, defining_module in _class_methods(
+                    container, module_body
+                )
+                if method.name == parts[-1]
+            ),
+            None,
+        )
+        assert resolved is not None, (
+            f"{node_id}: no symbol named {parts[-1]!r} on this class or its bases"
+        )
+        leaf, enclosing, defining_module = resolved
+    else:
+        module_body, chain = _assert_symbol_exists(node_id)
+        containers = []
+        leaf = chain[-1]
+        enclosing = module_body
+        defining_module = module_body
+    assert not _opted_out(_test_flag(module_body)), (
         f"{node_id}: the module sets ``__test__ = False``, so pytest skips the "
         f"whole file and nothing in it runs"
     )
@@ -769,14 +702,15 @@ def _assert_node_exists(node_id: str) -> None:
         f"{node_id}: a node id must name a test function, not a "
         f"{type(leaf).__name__.removesuffix('Def').lower()}"
     )
-    # The leaf's own ``__test__``, read from the scope that would have set it.
-    enclosing = containers[-1].body if containers else module_body
     leaf_flag = _test_flag(enclosing, attribute_of=leaf.name)
-    assert leaf_flag is not False, (
+    assert not _opted_out(leaf_flag), (
         f"{node_id}: {leaf.name!r} is opted out with ``__test__ = False``"
     )
-    assert leaf.name.startswith("test_") or leaf_flag, (
+    assert leaf.name.startswith("test_") or leaf_flag is True, (
         f"{node_id}: {leaf.name!r} is not collected by pytest"
+    )
+    assert _executable_test(leaf, enclosing, defining_module), (
+        f"{node_id}: a fixture or unconditional skip prevents this test from executing"
     )
 
 
@@ -1306,6 +1240,9 @@ def test_the_capability_index_reaches_every_module_the_catalog_cites() -> None:
         entry.get("unit_or_contract_tests") or []
     )
     cited = {row["test"].split("::")[0] for row in scenarios}
+    repo_root = Path(__file__).resolve().parents[1]
+    dangling = sorted(path for path in cited | listed if not (repo_root / path).is_file())
+    assert not dangling, f"indexed or cited evidence modules do not exist: {dangling}"
     missing = cited - listed
     assert not sorted(missing - _INDEX_DEBT), (
         f"{sorted(missing - _INDEX_DEBT)} are cited by harness_failure_recovery "
@@ -1374,6 +1311,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     module = tmp_path / "tests" / "sample_module.py"
     module.parent.mkdir(parents=True, exist_ok=True)
     module.write_text(
+        "import pytest\n"
         "import unittest\n"
         "from unittest import IsolatedAsyncioTestCase as Base\n"
         "class FakeTestCase:\n"
@@ -1450,6 +1388,13 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "    def helper(self): ...\n"
         "class TestPlainBase(PlainBase):\n"
         "    def test_case(self): ...\n"
+        "class SharedTests:\n"
+        "    def test_inherited(self): ...\n"
+        "class TestInheritedMethod(SharedTests):\n"
+        "    pass\n"
+        "class LiteralTruthyOptIn:\n"
+        "    __test__ = 1\n"
+        "    def test_case(self): ...\n"
         "class Owner:\n"
         "    def method(self): ...\n"
         "    def test_case(self): ...\n"
@@ -1469,6 +1414,10 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "def _helper(): ...\n"
         "def test_real(): ...\n"
         "async def test_async_real(): ...\n"
+        "@pytest.fixture\n"
+        "def test_fixture(): ...\n"
+        "@pytest.mark.skip(reason='never executes')\n"
+        "def test_skipped(): ...\n"
         "def test_muted(): ...\n"
         "test_muted.__test__ = False\n"
         "def plain_named(): ...\n"
@@ -1509,6 +1458,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         f"{rel}::test_async_real",
         f"{rel}::TestGood::test_case",
         f"{rel}::OwnerTests::test_case",
+        f"{rel}::TestInheritedMethod::test_inherited",
     ):
         _assert_node_exists(node_id)
     for rejected in (f"{rel}::Owner", f"{rel}::_helper"):
@@ -1518,6 +1468,11 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         # The leaf is a perfectly good test function; the container is not a
         # test class, so pytest never reaches it.
         _assert_node_exists(f"{rel}::Owner::test_case")
+    with pytest.raises(AssertionError, match="LiteralTruthyOptIn"):
+        _assert_node_exists(f"{rel}::LiteralTruthyOptIn::test_case")
+    for decorated in ("test_fixture", "test_skipped"):
+        with pytest.raises(AssertionError, match="fixture or unconditional skip"):
+            _assert_node_exists(f"{rel}::{decorated}")
 
     # Round 11: the OTHER reader of the same rule. ``_collected_tests`` walks
     # these modules to discover what has a docstring id, and it recursed into
@@ -1680,6 +1635,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "TestOverridesBase::test_case",
         "TestMroOptIn::test_case",
         "TestPlainBase::test_case",
+        "TestInheritedMethod::test_inherited",
     }, discovered
     for absent in (
         "Owner::test_case",
@@ -1694,6 +1650,9 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "TestInheritedCtor::test_case",
         "TestInheritedCtorTwoDeep::test_case",
         "TestInheritedNew::test_case",
+        "LiteralTruthyOptIn::test_case",
+        "test_fixture",
+        "test_skipped",
         "test_muted",
         "test_final_muted",
     ):
@@ -2418,16 +2377,18 @@ def _production_symbols() -> set[str]:
     """
     names: set[str] = set()
     repo_root = Path(__file__).resolve().parents[1]
-    for package in ("core", "modules", "storage"):
-        for module in (repo_root / package).rglob("*.py"):
-            names.update(
-                match.group(1).lower()
-                for match in re.finditer(
-                    r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)",
-                    module.read_text(encoding="utf-8"),
-                    re.M,
-                )
+    modules = [*repo_root.glob("*.py")]
+    for package in ("config", "core", "modules", "storage", "vibe"):
+        modules.extend((repo_root / package).rglob("*.py"))
+    for module in modules:
+        names.update(
+            match.group(1).lower()
+            for match in re.finditer(
+                r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)",
+                module.read_text(encoding="utf-8"),
+                re.M,
             )
+        )
     return names
 
 
@@ -2472,7 +2433,12 @@ def test_a_corpus_guard_is_never_credited_with_production_behaviour() -> None:
     assert "hfr-195" not in guard_ids, "HFR-195 is a codex probe, not a corpus guard"
 
     production = _production_symbols()
-    assert {"codexagent", "should_emit_progress"} <= production
+    assert {
+        "backend_model_entries",
+        "codexagent",
+        "should_emit_progress",
+        "slackconfig",
+    } <= production
 
     # Guard the guard, on the two shapes that occurred and the two that must
     # stay legal. Every fixture is CONCATENATED from a bare id and a bare
