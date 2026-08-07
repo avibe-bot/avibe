@@ -44,6 +44,7 @@ import type {
   OpencodeProviderListResult,
 } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { errorMessage } from '@/lib/errorMessage';
 
 type FilterMode = 'all' | 'configured' | 'oauth' | 'local';
 type CustomProviderAdapter = 'openai-compatible' | 'anthropic-compatible';
@@ -222,9 +223,9 @@ export const OpencodeProviderConfig: React.FC<{
         setProviders((prev) => prev ?? []);
         setProvidersError(result.message || t('settings.backends.opencodeProvidersError'));
       }
-    } catch (e: any) {
+    } catch (e) {
       setProviders((prev) => prev ?? []);
-      setProvidersError(e?.message || t('settings.backends.opencodeProvidersError'));
+      setProvidersError(errorMessage(e) || t('settings.backends.opencodeProvidersError'));
     } finally {
       setProvidersLoading(false);
     }
@@ -432,10 +433,10 @@ export const OpencodeProviderConfig: React.FC<{
         ...prev,
         [nextId]: { ...(prev[nextId] || emptyEdit()), baseUrl },
       }));
-    } catch (e: any) {
+    } catch (e) {
       updateCustomProviderDraft({
         saving: false,
-        error: e?.message || (t('settings.backends.opencodeCustomProviderSaveFailed') as string),
+        error: errorMessage(e) || (t('settings.backends.opencodeCustomProviderSaveFailed') as string),
       });
     }
   };
@@ -460,10 +461,10 @@ export const OpencodeProviderConfig: React.FC<{
       notifyOpenCodeModelOptionsChanged();
       if (expandedId === provider.id) setExpandedId(null);
       await loadProviders();
-    } catch (e: any) {
+    } catch (e) {
       updateEdit(provider.id, {
         deletingProvider: false,
-        error: e?.message || (t('settings.backends.opencodeCustomProviderRemoveFailed') as string),
+        error: errorMessage(e) || (t('settings.backends.opencodeCustomProviderRemoveFailed') as string),
       });
     }
   };
@@ -518,10 +519,10 @@ export const OpencodeProviderConfig: React.FC<{
       if (!applyMutationCatalogRefresh(result)) {
         await loadProviders();
       }
-    } catch (e: any) {
+    } catch (e) {
       updateEdit(provider.id, {
         saving: false,
-        error: e?.message || (t('settings.backends.opencodeProviderSaveFailed') as string),
+        error: errorMessage(e) || (t('settings.backends.opencodeProviderSaveFailed') as string),
       });
     }
   };
@@ -550,10 +551,10 @@ export const OpencodeProviderConfig: React.FC<{
       showToast(t('settings.backends.opencodeProviderRemoved'), 'success');
       notifyOpenCodeModelOptionsChanged();
       await loadProviders();
-    } catch (e: any) {
+    } catch (e) {
       updateEdit(provider.id, {
         removing: false,
-        error: e?.message || (t('settings.backends.opencodeProviderRemoveFailed') as string),
+        error: errorMessage(e) || (t('settings.backends.opencodeProviderRemoveFailed') as string),
       });
     }
   };
@@ -605,10 +606,10 @@ export const OpencodeProviderConfig: React.FC<{
       showToast(t('settings.backends.opencodeProviderModelSaved'), 'success');
       notifyOpenCodeModelOptionsChanged();
       await loadProviders();
-    } catch (e: any) {
+    } catch (e) {
       updateEdit(provider.id, {
         modelSaving: false,
-        error: e?.message || (t('settings.backends.opencodeProviderModelSaveFailed') as string),
+        error: errorMessage(e) || (t('settings.backends.opencodeProviderModelSaveFailed') as string),
       });
     }
   };
@@ -628,10 +629,10 @@ export const OpencodeProviderConfig: React.FC<{
       showToast(t('settings.backends.opencodeProviderModelRemoved'), 'success');
       notifyOpenCodeModelOptionsChanged();
       await loadProviders();
-    } catch (e: any) {
+    } catch (e) {
       updateEdit(provider.id, {
         removingModelId: null,
-        error: e?.message || (t('settings.backends.opencodeProviderModelRemoveFailed') as string),
+        error: errorMessage(e) || (t('settings.backends.opencodeProviderModelRemoveFailed') as string),
       });
     }
   };
@@ -678,8 +679,8 @@ export const OpencodeProviderConfig: React.FC<{
       showToast(t('settings.backends.opencodeDefaultSaved', { name: provider.name }), 'success');
       setDefaultPopoverOpen(false);
       setDefaultSearchQuery('');
-    } catch (e: any) {
-      showToast(e?.message || (t('settings.backends.opencodeDefaultSaveFailed') as string), 'error');
+    } catch (e) {
+      showToast(errorMessage(e) || (t('settings.backends.opencodeDefaultSaveFailed') as string), 'error');
     } finally {
       setSettingDefault(false);
     }

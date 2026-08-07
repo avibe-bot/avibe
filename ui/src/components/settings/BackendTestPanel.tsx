@@ -8,6 +8,7 @@ import { Select } from '@/components/ui/select';
 import { useApi } from '@/context/ApiContext';
 import type { BackendAuthTestResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { errorMessage } from '@/lib/errorMessage';
 
 type Backend = 'claude' | 'codex';
 
@@ -18,16 +19,14 @@ export type BackendTestPanelProps = {
 /**
  * Settings → Backends connectivity probe. Mirrors the ``cdTest2`` /
  * ``cxTest`` panels in ``design.pen``: sends a single ``Hi`` prompt
- * through the backend CLI so the user can confirm both the credentials
- * and the endpoint (Base URL) round-trip end-to-end. Works in both
- * OAuth and API-Key modes — the underlying CLI uses whichever auth
- * source is configured at launch.
+ * through the backend's production Agent transport so the user can
+ * confirm both the credentials and the endpoint (Base URL) round-trip
+ * end-to-end. Works in both OAuth and API-Key modes.
  *
  * The model dropdown lets the user override the backend's default
- * (important for Codex users whose ``config.toml`` selects
- * ``model_reasoning_effort=xhigh``; with the override the probe stays
- * fast). On success we echo the first content line of the model's
- * response so the user sees real output, not just a duration.
+ * (important when the configured default is unavailable or slow). On
+ * success we echo the first content line of the model's response so the
+ * user sees real output, not just a duration.
  */
 export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) => {
   const { t } = useTranslation();
@@ -103,8 +102,8 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
       } else {
         showToast(failureSentence(result), 'error');
       }
-    } catch (err: any) {
-      const fallback = { ok: false, error: err?.message || 'test_failed' } as BackendAuthTestResult;
+    } catch (err) {
+      const fallback = { ok: false, error: errorMessage(err) || 'test_failed' } as BackendAuthTestResult;
       setLastResult(fallback);
       showToast(t('settings.backends.testConnectionFailedToast', { detail: fallback.error }), 'error');
     } finally {

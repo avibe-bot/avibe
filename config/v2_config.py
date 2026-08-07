@@ -90,6 +90,11 @@ DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
+# A provider runtime can keep an accepted OpenCode prompt in retry forever without
+# surfacing a terminal message. Bound that lifecycle independently of per-request
+# HTTP timeouts; 90 minutes matches the watchdog threshold reported in #1190 and
+# remains adjustable for workloads that legitimately need longer turns.
+DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 90 * 60
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
@@ -462,6 +467,13 @@ class RuntimeConfig:
     harness_run_orphan_grace_seconds: int = DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS
     harness_run_queued_ttl_seconds: int = DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS
     harness_run_hold_ttl_seconds: int = DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS
+    # Echo the Harness-originated prompt into the IM conversation when a background
+    # task (scheduled task, watch, webhook, hook, ``vibe agent run``) starts an agent
+    # turn there. The Workbench transcript already renders that prompt from the
+    # ``harness`` Message row; an IM channel had no equivalent, so a scheduled reply
+    # arrived as an answer to a question nobody in the channel could see. Off means
+    # today's behavior (result only).
+    harness_prompt_echo: bool = True
 
 
 @dataclass
@@ -469,9 +481,9 @@ class OpenCodeConfig:
     enabled: bool = True
     cli_path: str = "opencode"
     default_agent: Optional[str] = None
-    default_model: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
+    active_turn_timeout_seconds: int = DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
     # Provider the user picked in Settings → Backends → OpenCode. The provider
     # catalog itself lives in ~/.config/opencode/opencode.json (OpenCode's own
     # state file). Stays ``None`` until the user explicitly chooses so legacy
@@ -485,7 +497,6 @@ class OpenCodeConfig:
 class ClaudeConfig:
     enabled: bool = True
     cli_path: str = "claude"
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" relies on Claude Code's own credential storage;
     # "api_key" injects ANTHROPIC_API_KEY (and optionally ANTHROPIC_BASE_URL)
@@ -510,7 +521,6 @@ class ClaudeConfig:
 class CodexConfig:
     enabled: bool = True
     cli_path: str = "codex"
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" defers to whatever ~/.codex/config.toml already
     # has (typically `auth.method = "ChatGPT"`); "api_key" writes the
@@ -681,6 +691,7 @@ class ModelHubSourceConfig:
     state: ModelHubSourceStateConfig
     models: list[ModelHubModelConfig]
     created_at: str = MODEL_HUB_LEGACY_CREATED_AT
+    last_discovered_at: Optional[str] = None
     base_url: Optional[str] = None
     experimental_consent_at: Optional[str] = None
     usage: Optional[ModelHubSourceUsageConfig] = None
@@ -723,6 +734,7 @@ class ModelHubSourceConfig:
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
         created_at = payload.get("created_at")
+        last_discovered_at = payload.get("last_discovered_at")
         if base_url is not None and not isinstance(base_url, str):
             raise ValueError("Config 'model_hub.sources.base_url' is invalid")
         if credential_ref is not None and not isinstance(credential_ref, str):
@@ -748,6 +760,10 @@ class ModelHubSourceConfig:
                 )
                 or MODEL_HUB_LEGACY_CREATED_AT
             ),
+            last_discovered_at=_validate_optional_datetime(
+                last_discovered_at,
+                "model_hub.sources.last_discovered_at",
+            ),
             base_url=base_url,
             experimental_consent_at=_validate_optional_datetime(
                 consent_at,
@@ -763,6 +779,7 @@ class ModelHubSourceConfig:
         payload = {
             "id": self.id,
             "created_at": self.created_at,
+            "last_discovered_at": self.last_discovered_at,
             "kind": self.kind,
             "vendor": self.vendor,
             "display_name": self.display_name,
@@ -1085,6 +1102,11 @@ class VibeCloudRemoteAccessConfig:
     instance_secret: str = ""
     session_secret: str = ""
     cloudflared_path: str = ""
+    transport_protocol: str = "auto"
+    auto_recovery: bool = True
+    optimization_profile: str = "balanced"
+    edge_ip_version: str = "4"
+    edge_bind_address: str = ""
     dev_login_hint: str = ""
 
 
@@ -1401,6 +1423,54 @@ class V2Config:
                 **_filter_dataclass_fields(VibeCloudRemoteAccessConfig, vibe_cloud_payload)
             ),
         )
+        remote_access.vibe_cloud.transport_protocol = str(
+            remote_access.vibe_cloud.transport_protocol or "auto"
+        ).strip().lower()
+        if remote_access.vibe_cloud.transport_protocol not in {"auto", "quic", "http2"}:
+            raise ValueError(
+                "Config 'remote_access.vibe_cloud.transport_protocol' must be 'auto', 'quic', or 'http2'"
+            )
+        raw_auto_recovery = remote_access.vibe_cloud.auto_recovery
+        if isinstance(raw_auto_recovery, str):
+            remote_access.vibe_cloud.auto_recovery = raw_auto_recovery.strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        else:
+            remote_access.vibe_cloud.auto_recovery = bool(raw_auto_recovery)
+        remote_access.vibe_cloud.optimization_profile = str(
+            remote_access.vibe_cloud.optimization_profile or "balanced"
+        ).strip().lower()
+        if remote_access.vibe_cloud.optimization_profile not in {
+            "stable",
+            "balanced",
+            "low_latency",
+        }:
+            raise ValueError(
+                "Config 'remote_access.vibe_cloud.optimization_profile' must be "
+                "'stable', 'balanced', or 'low_latency'"
+            )
+        remote_access.vibe_cloud.edge_ip_version = str(
+            remote_access.vibe_cloud.edge_ip_version or "4"
+        ).strip().lower()
+        if remote_access.vibe_cloud.edge_ip_version not in {"auto", "4", "6"}:
+            raise ValueError(
+                "Config 'remote_access.vibe_cloud.edge_ip_version' must be 'auto', '4', or '6'"
+            )
+        remote_access.vibe_cloud.edge_bind_address = str(
+            remote_access.vibe_cloud.edge_bind_address or ""
+        ).strip()
+        if remote_access.vibe_cloud.edge_bind_address:
+            try:
+                remote_access.vibe_cloud.edge_bind_address = str(
+                    ipaddress.ip_address(remote_access.vibe_cloud.edge_bind_address)
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "Config 'remote_access.vibe_cloud.edge_bind_address' must be an IP address"
+                ) from exc
 
         audio_asr_payload = payload.get("audio_asr") or {}
         if not isinstance(audio_asr_payload, dict):
@@ -1555,6 +1625,7 @@ class V2Config:
                 "harness_run_orphan_grace_seconds": self.runtime.harness_run_orphan_grace_seconds,
                 "harness_run_queued_ttl_seconds": self.runtime.harness_run_queued_ttl_seconds,
                 "harness_run_hold_ttl_seconds": self.runtime.harness_run_hold_ttl_seconds,
+                "harness_prompt_echo": self.runtime.harness_prompt_echo,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,

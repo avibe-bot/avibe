@@ -511,8 +511,9 @@ def test_turn_event_subscriber_uses_storage_context_without_payload_changes(reso
     bus = InboxEventBus()
     service.start(bus)
 
-    bus.publish("turn.start", {"session_id": session_id})
-    bus.publish("turn.end", {"session_id": session_id})
+    event = {"session_id": session_id, "turn_id": "turn-current"}
+    bus.publish("turn.start", event)
+    bus.publish("turn.end", event)
     service.stop()
     bus.publish("turn.end", {"session_id": session_id})
 
@@ -520,9 +521,10 @@ def test_turn_event_subscriber_uses_storage_context_without_payload_changes(reso
         (PRE_TURN, {"run_id": "run-event"}),
         (POST_TURN, {"message": "driving user message", "run_id": "run-event"}),
     ]
-    assert lookups[0] == (session_id, {})
-    assert lookups[1][0] == session_id
-    assert set(lookups[1][1]) == {"after"}
+    assert lookups == [
+        (session_id, {"turn_id": "turn-current"}),
+        (session_id, {"turn_id": "turn-current"}),
+    ]
 
 
 def test_turn_event_subscriber_keeps_start_message_when_next_pending_can_arrive(resolved_git, monkeypatch):
@@ -699,8 +701,8 @@ def test_agent_initiated_turn_reuses_fsm_bus_lifecycle(resolved_git, monkeypatch
         service.stop()
 
     assert lifecycle == [
-        ("turn.start", {"session_id": session_id}),
-        ("turn.end", {"session_id": session_id}),
+        ("turn.start", {"session_id": session_id, "turn_id": "turn-agent"}),
+        ("turn.end", {"session_id": session_id, "turn_id": "turn-agent"}),
     ]
     assert calls == [
         (PRE_TURN, {"run_id": None}),
@@ -760,7 +762,7 @@ def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():
     from storage import messages_service
     from storage.db import get_cached_sqlite_engine
     from storage.importer import ensure_sqlite_state
-    from storage.models import agent_sessions, messages
+    from storage.models import agent_sessions, messages, session_turns
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(primary_platform="avibe")
@@ -812,30 +814,73 @@ def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():
     assert show_git.load_turn_checkpoint_context(session_id) == TurnCheckpointContext()
 
     with get_cached_sqlite_engine().begin() as conn:
-        current = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id=session_id,
-            platform="avibe",
-            author="user",
-            message_type="user",
-            text="current driving message",
-        )
-        later = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id=session_id,
-            platform="avibe",
-            author="user",
-            message_type="pending",
-            text="later pending message",
-        )
-        conn.execute(update(messages).where(messages.c.id == current["id"]).values(created_at="2099-01-01T00:00:01+00:00"))
-        conn.execute(update(messages).where(messages.c.id == later["id"]).values(created_at="2099-01-01T00:00:02+00:00"))
+        from storage import message_deliveries
 
+        current = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=message_deliveries.new_delivery_id(),
+            session_id=session_id,
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                text="current driving message",
+            ),
+            dispatch_text="current driving message",
+            now="2099-01-01T00:00:01+00:00",
+        )
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id="turn_storage_boundary",
+            session_id=session_id,
+            backend="codex",
+            deliveries=[current],
+            dispatch_text="current driving message",
+        )
+        conn.execute(
+            update(session_turns)
+            .where(session_turns.c.id == "turn_storage_boundary")
+            .values(
+                created_at="2099-01-01T00:00:01+00:00",
+                started_at="2099-01-01T00:00:01+00:00",
+            )
+        )
+        later = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=message_deliveries.new_delivery_id(),
+            session_id=session_id,
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                text="later pending message",
+            ),
+            dispatch_text="later pending message",
+            now="2099-01-01T00:00:02+00:00",
+        )
+        assert later["message_id"] is None
+
+    current_context = show_git.load_turn_checkpoint_context(session_id)
+    assert current_context.message == "current driving message"
+    assert current_context.message_id == current["id"]
     context = show_git.load_turn_checkpoint_context(session_id, after="2099-01-01T00:00:00+00:00")
     assert context.message == "current driving message"
     assert context.message_id == current["id"]
+    exact_context = show_git.load_turn_checkpoint_context(
+        session_id,
+        turn_id="turn_storage_boundary",
+        after="2100-01-01T00:00:00+00:00",
+    )
+    assert exact_context.message == "current driving message"
+    assert exact_context.turn_id == "turn_storage_boundary"
 
 
 def test_storage_lookup_includes_harness_driving_message():
@@ -918,6 +963,83 @@ def test_storage_lookup_includes_harness_driving_message():
     assert show_git.load_turn_checkpoint_context(
         session_id, after="2099-01-01T00:00:01.500000+00:00"
     ) == TurnCheckpointContext()
+
+
+def test_storage_lookup_uses_transcript_acceptance_order():
+    from storage import messages_service
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(primary_platform="avibe")
+    session_id = "ses_acceptance_checkpoint"
+    with get_cached_sqlite_engine().begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_acceptance_checkpoint",
+            now="2026-08-04T00:00:00.000000+00:00",
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor=session_id,
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at="2026-08-04T00:00:00.000000+00:00",
+                updated_at="2026-08-04T00:00:00.000000+00:00",
+                last_active_at="2026-08-04T00:00:00.000000+00:00",
+            )
+        )
+        queued = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            message_type="user",
+            source="user",
+            text="queued input accepted last",
+        )
+        direct = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            message_type="user",
+            source="user",
+            text="direct input accepted first",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == queued["id"])
+            .values(
+                created_at="2026-08-04T00:00:01.000000+00:00",
+                delivered_at="2026-08-04T00:00:04.000000+00:00",
+            )
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == direct["id"])
+            .values(created_at="2026-08-04T00:00:02.000000+00:00")
+        )
+
+    expected = TurnCheckpointContext(
+        message="queued input accepted last",
+        message_id=queued["id"],
+    )
+    assert show_git.load_turn_checkpoint_context(session_id) == expected
+    assert show_git.load_turn_checkpoint_context(
+        session_id,
+        after="2026-08-04T00:00:03.000000+00:00",
+    ) == expected
 
 
 def test_storage_lookup_includes_annotation_driving_message():

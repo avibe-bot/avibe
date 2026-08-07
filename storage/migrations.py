@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 _MIGRATION_LOCK = threading.RLock()
 
 INITIAL_REVISION = "20260501_0001"
+# Stamp FLOOR for head-shaped unversioned databases, deliberately NOT head: after
+# `_stamp_existing_initial_schema` stamps it, `_run_migrations_locked` upgrades to head,
+# so every revision after this one replays on a schema that already looks like head.
+# Each such migration must therefore stay idempotent/replay-safe against head shape
+# (e.g. `drop index if exists` before `create index`) rather than assume a virgin table.
 LATEST_SCHEMA_REVISION = "20260622_0023"
 REMOVE_LEGACY_DEFAULT_AGENT_REVISION = "20260530_0008"
 ALLOW_DEV_STATE_MIGRATION_ENV = "AVIBE_ALLOW_DEV_STATE_MIGRATION"
@@ -48,6 +53,8 @@ HEAD_TABLES = INITIAL_TABLES | {
     "agent_runs",
     "show_pages",
     "messages",
+    "message_deliveries",
+    "session_turns",
     "agent_events",
     "show_session_events",
     "media_objects",
@@ -65,7 +72,7 @@ PRE_SHOW_SESSION_EVENTS_HEAD_TABLES = INITIAL_TABLES | {
     "show_pages",
     "messages",
 }
-HEAD_REQUIRED_COLUMNS = {
+PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS = {
     "agents": {"enabled"},
     "scope_settings": {"agent_name"},
     "agent_sessions": {"agent_id", "agent_name", "visibility", "pinned"},
@@ -103,6 +110,30 @@ HEAD_REQUIRED_COLUMNS = {
         "callback_completed_at",
         "cancel_requested",
         "cancel_requested_at",
+    },
+}
+HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
+    "agent_sessions": PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS["agent_sessions"]
+    | {
+        "composer_draft_text",
+        "composer_draft_updated_at",
+    },
+    "message_deliveries": {
+        "message_id",
+        "priority",
+        "state",
+        "dispatch_text",
+        "delivery_history_json",
+        "version",
+    },
+    "session_turns": {
+        "initial_delivery_id",
+        "state",
+        "native_turn_id",
+        "control_state",
+        "terminal_outcome",
+        "settled_by",
+        "version",
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
@@ -215,6 +246,26 @@ def background_tables_ready(db_path: Path | None = None) -> bool:
 def initialize_background_tables(db_path: Path | None = None) -> None:
     target_db = db_path or paths.get_sqlite_state_path()
     run_migrations(target_db)
+
+
+def ensure_background_indexes(db_path: Path | None = None) -> None:
+    """Repair head indexes even when the tables already pass readiness checks.
+
+    ``metadata.create_all`` can produce every required table and column without
+    the expression indexes owned by migrations 0039/0041/0042. Such a database
+    correctly skips schema migration, so store construction must still enter the
+    index repair path. Correct expression indexes are detected byte-for-byte
+    against their owning migration DDL and are not rebuilt on ordinary opens.
+    """
+
+    target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
+    if not target_db.exists():
+        return
+    with sqlite3.connect(target_db) as conn:
+        tables = _table_names(conn)
+        if {"run_definitions", "agent_runs"}.issubset(tables) and not _agent_runs_expression_indexes_ready(conn):
+            _ensure_agent_runs_expression_indexes(conn)
+            conn.commit()
 
 
 def guard_source_checkout_default_state_migration(db_path: Path) -> None:
@@ -425,7 +476,10 @@ def _head_schema_ready(conn: sqlite3.Connection, tables: set[str]) -> bool:
 def _pre_show_session_events_head_schema_ready(conn: sqlite3.Connection, tables: set[str]) -> bool:
     if not PRE_SHOW_SESSION_EVENTS_HEAD_TABLES.issubset(tables):
         return False
-    return all(required_columns.issubset(_column_names(conn, table)) for table, required_columns in HEAD_REQUIRED_COLUMNS.items())
+    return all(
+        required_columns.issubset(_column_names(conn, table))
+        for table, required_columns in PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS.items()
+    )
 
 
 def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) -> bool:
@@ -570,6 +624,7 @@ def _ensure_agents_table(conn: sqlite3.Connection, tables: set[str]) -> bool:
             source varchar not null,
             source_ref text,
             metadata_json text not null,
+            archived_at varchar,
             created_at varchar not null,
             updated_at varchar not null,
             constraint uq_agents_normalized_name unique (normalized_name)
@@ -587,6 +642,9 @@ def _repair_initial_required_columns(conn: sqlite3.Connection, tables: set[str])
         columns = _column_names(conn, "agents")
         if "enabled" not in columns:
             conn.execute('alter table "agents" add column "enabled" INTEGER not null default 1')
+            changed = True
+        if "archived_at" not in columns:
+            conn.execute('alter table "agents" add column "archived_at" VARCHAR')
             changed = True
     if "scope_settings" in tables:
         columns = _column_names(conn, "scope_settings")
@@ -628,6 +686,78 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
     conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')
+    if not _agent_runs_expression_indexes_ready(conn):
+        _ensure_agent_runs_expression_indexes(conn)
+
+
+#: The ``agent_runs`` index migrations whose DDL the head-schema repair path must also
+#: install, oldest first. 0040 is deliberately absent: 0041 drops the index 0040 created
+#: and recreates it under its own two-expression definition, so 0040's shape is never a
+#: valid end state and replaying it here would only build an index 0041 has to replace.
+_AGENT_RUNS_INDEX_REVISION_MODULES = (
+    "storage.alembic.versions.20260728_0039_agent_runs_settled_at_index",
+    "storage.alembic.versions.20260728_0041_agent_runs_owed_notice_backoff_index",
+    "storage.alembic.versions.20260729_0042_agent_runs_definition_streak_index",
+)
+#: Columns the three index expressions read. A head-shaped database has all of them, but
+#: this helper is also reached from ``_repair_head_required_columns`` on older drifted
+#: shapes, and ``create index`` on a missing column raises rather than skipping.
+_AGENT_RUNS_INDEX_COLUMNS = frozenset({"definition_id", "created_at", "completed_at", "metadata_json"})
+
+
+def _normalized_index_sql(value: object) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _agent_runs_expression_indexes_ready(conn: sqlite3.Connection) -> bool:
+    if not _AGENT_RUNS_INDEX_COLUMNS.issubset(_column_names(conn, "agent_runs")):
+        return True
+    for module_name in _AGENT_RUNS_INDEX_REVISION_MODULES:
+        revision_module = import_module(module_name)
+        row = conn.execute(
+            "select sql from sqlite_master where type = 'index' and name = ?",
+            (revision_module._INDEX,),
+        ).fetchone()
+        if row is None or _normalized_index_sql(row[0]) != _normalized_index_sql(revision_module.CREATE_INDEX_SQL):
+            return False
+    return True
+
+
+def _ensure_agent_runs_expression_indexes(conn: sqlite3.Connection) -> None:
+    """Install the 0039/0041/0042 ``agent_runs`` indexes on a head-shaped database.
+
+    ``_ensure_head_indexes`` promises that a head-shaped unversioned database ends up
+    with every index head has, and until now it silently lagged head by these three.
+    Two lanes make that gap reachable without any migration ever running: a database
+    born from ``metadata.create_all`` satisfies ``background_tables_ready`` (tables and
+    columns only — never indexes), so ``SQLiteBackgroundTaskStore`` accepts it as ready
+    and never calls ``initialize_background_tables``; and the day
+    ``LATEST_SCHEMA_REVISION`` moves past 0038 the stamp floor stops replaying them for
+    everyone. Both leave the two-second owed-notice tick, the health window and the
+    streak read scanning run history with nothing to repair them.
+
+    The DDL is IMPORTED from the revision that owns it, never retyped. The owed-notice
+    index is an expression index and SQLite matches an index expression against a query
+    expression by text, so a second copy of that string is an index that gets built and
+    silently ignored — the failure 0040 and 0041 were each written to correct. Importing
+    the revision module is the same technique ``_run_remove_legacy_default_agent_migration``
+    already uses; ``storage.background`` (which holds the query-side twins) cannot be
+    imported here because it imports this module.
+
+    Drop-then-create rather than ``create index if not exists``: a database carrying the
+    superseded 0040 shape of ``ix_agent_runs_owed_notice`` has the NAME already taken by
+    an index missing the backoff expression, and ``if not exists`` would leave that
+    weaker definition in place. Recreating unconditionally also makes the resulting
+    ``sqlite_master`` SQL byte-identical to the migration's, whichever route a database
+    took to head.
+    """
+
+    if not _AGENT_RUNS_INDEX_COLUMNS.issubset(_column_names(conn, "agent_runs")):
+        return
+    for module_name in _AGENT_RUNS_INDEX_REVISION_MODULES:
+        revision_module = import_module(module_name)
+        conn.execute(revision_module.DROP_INDEX_SQL)
+        conn.execute(revision_module.CREATE_INDEX_SQL)
 
 
 def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
@@ -646,6 +776,20 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
         )
     if "messages" not in tables:
         return
+    transcript_index = import_module(
+        "storage.alembic.versions.20260804_0046_message_transcript_order"
+    )
+    transcript_row = conn.execute(
+        "select sql from sqlite_master where type = 'index' and name = ?",
+        (transcript_index._INDEX,),
+    ).fetchone()
+    if (
+        transcript_row is None
+        or _normalized_index_sql(transcript_row[0])
+        != _normalized_index_sql(transcript_index.CREATE_INDEX_SQL)
+    ):
+        conn.execute(transcript_index.DROP_INDEX_SQL)
+        conn.execute(transcript_index.CREATE_INDEX_SQL)
     conn.execute('create index if not exists ix_messages_session_created_id on messages (session_id, created_at, id)')
     conn.execute('create index if not exists ix_messages_session_type_created_id on messages (session_id, type, created_at, id)')
     conn.execute('create index if not exists ix_messages_platform_session_created_id on messages (platform, session_id, created_at, id)')
@@ -653,29 +797,19 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
         'create index if not exists ix_messages_unread_session '
         'on messages (platform, type, author, read_at, session_id)'
     )
-    conn.execute(
-        'create index if not exists ix_messages_mark_read '
-        'on messages (session_id, author, read_at, created_at, id)'
-    )
-    conn.execute("drop index if exists ix_messages_inbox_activity")
-    conn.execute(
-        "create index ix_messages_inbox_activity "
-        "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
-    )
-    conn.execute(
-        "create index if not exists ix_messages_inbox_agent_reply "
-        "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and type in ('result', 'notify', 'error')"
-    )
-    conn.execute("drop index if exists ix_messages_inbox_user_send")
-    conn.execute(
-        "create index ix_messages_inbox_user_send "
-        "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and "
-        "((author = 'user' and type = 'user') or "
-        "(author = 'harness' and type = 'harness'))"
-    )
+    for index_name, index_sql in transcript_index._INDEX_SQL.items():
+        if index_name == transcript_index._INDEX:
+            continue
+        row = conn.execute(
+            "select sql from sqlite_master where type = 'index' and name = ?",
+            (index_name,),
+        ).fetchone()
+        if row is not None and _normalized_index_sql(row[0]) == _normalized_index_sql(
+            index_sql
+        ):
+            continue
+        conn.execute(f"drop index if exists {index_name}")
+        conn.execute(index_sql)
 
 
 def _ensure_agent_events_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
@@ -763,7 +897,7 @@ def _missing_pre_show_session_events_head_schema_description(conn: sqlite3.Conne
         if not PRE_SHOW_SESSION_EVENTS_HEAD_TABLES.issubset(tables)
         else []
     )
-    for table, required_columns in HEAD_REQUIRED_COLUMNS.items():
+    for table, required_columns in PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS.items():
         if table not in tables:
             continue
         missing_columns = required_columns - _column_names(conn, table)

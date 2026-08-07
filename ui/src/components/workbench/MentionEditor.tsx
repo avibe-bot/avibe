@@ -4,6 +4,7 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
+  useState,
   type Ref,
 } from 'react';
 import { LexicalComposer } from '@lexical/react/LexicalComposer';
@@ -51,6 +52,7 @@ import {
   voiceInsertionText,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
+import { useLatestRef } from '@/lib/useLatestRef';
 
 export type AgentSearchResult = {
   name: string;
@@ -398,8 +400,7 @@ function EditablePlugin({ disabled }: { disabled: boolean }) {
 // command registers once per editor and never churns on the composer's renders.
 function PasteFilesPlugin({ onPasteFiles }: { onPasteFiles?: (files: File[]) => void }) {
   const [editor] = useLexicalComposerContext();
-  const handlerRef = useRef(onPasteFiles);
-  handlerRef.current = onPasteFiles;
+  const handlerRef = useLatestRef(onPasteFiles);
   useEffect(
     () =>
       editor.registerCommand(
@@ -725,7 +726,12 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     [onSearchAgents, onSearchSessions],
   );
 
-  const initialConfig = useRef({
+  // Lexical reads `initialConfig` once, at mount; a fresh object on later
+  // renders would be ignored anyway. A lazy `useState` initializer is the
+  // render-safe way to spell "compute once per instance" — `useRef({…}).current`
+  // rebuilt the object on every render only to throw it away, and reading
+  // `.current` during render is what `react-hooks/refs` warns about.
+  const [initialConfig] = useState(() => ({
     namespace: 'avibe-mention-composer',
     theme: { beautifulMentions: MENTION_THEME },
     nodes: [BeautifulMentionNode],
@@ -734,7 +740,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       // Surface in dev; never throw out of the editor and wipe the box.
       console.error('[MentionEditor]', error);
     },
-  }).current;
+  }));
 
   return (
     <div className={cn('relative', className)}>

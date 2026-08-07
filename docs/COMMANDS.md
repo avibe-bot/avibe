@@ -720,14 +720,18 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
+# Agent task, and a command task that escalates to an Agent on failure
 vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <expr> | --at <timestamp>) (--message <text> | --message-file <file>) [options]
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <expr> | --at <timestamp>) (--shell <cmd> | -- <argv>...) --on-failure agent [options]
+
+# Pure command task: no Agent, and therefore no session target
+vibe task add (--cron <expr> | --at <timestamp>) (--shell <cmd> | -- <argv>...) [options]
 ```
 
 Important options:
 
 - `--name`
 - `--session-id`
-- `--send-now`
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
@@ -737,7 +741,21 @@ Important options:
 - `--at`
 - `--message`
 - `--message-file`
+- `--shell`
+- `--on-failure {none,agent}`
+- `--timeout <seconds>`
+- `--cwd <dir>`
 - `--timezone`
+
+A command task (`--shell` or a trailing `-- <argv>`) runs with no Agent turn and
+takes no session, scope, or agent flags unless `--on-failure agent` is set.
+`--timeout` bounds each command run (default 21600 seconds, `0` = no timeout).
+`--cwd` is where the command runs; with `--on-failure agent` bound to an existing
+Session it means only that, and the escalation Session keeps its own working
+directory. With `--create-session` / `--create-session-per-run` it places that
+Session too. Without it, a Session-bound command follows that Session's directory
+— read live at fire time — and every other command records the directory you ran
+`vibe task add` from. See `docs/CLI.md` for the full rules.
 
 ### `vibe task update`
 
@@ -760,7 +778,16 @@ Important options:
 - `--at`
 - `--message`
 - `--message-file`
+- `--shell`
+- `--timeout <seconds>`
+- `--cwd <dir>`
 - `--timezone`
+
+Switching a task between message and command form, or changing `--on-failure`,
+is rejected with `task_mode_immutable` — remove the task and recreate it. `--cwd`
+repoints a command task's working directory without touching the Session it
+escalates to; on a message task it is still refused once the target Session
+exists.
 
 ### `vibe task list`
 
@@ -874,13 +901,12 @@ with `run_id` / `session_id`, and uses the callback policy to deliver the final
 result later. Use `--sync` only when the terminal should wait for completion.
 `--async` is still accepted for older scripts but is no longer required.
 
-With an existing `--session-id`, `--send-now` first persists the Agent Run and
-then reuses Workbench's Session-level interrupt-and-flush transition. It stops
-the active turn through the shared Stop path and dispatches the existing FIFO
-queue head as a new turn. It does not provide same-turn steering or queue
-reordering; a refused interrupt leaves the Run queued. The command response
-includes `delivery_intent`, and `vibe runs show <run-id>` exposes the durable
-`metadata.delivery_outcome` after the controller consumes the request.
+With an existing `--session-id`, the default is P1: steer the new Run into an
+active native Turn, start it when idle, or move the same Delivery to P3 after a
+definitive refusal/not-active receipt. `--queue` selects P3 without attempting a
+steer. `--send-now` persists the new Run at P3, then promotes the exact FIFO head
+through P1, so it neither stops the active Turn nor jumps older work. `vibe
+session send-now` performs that exact-head promotion without adding a message.
 
 `--fork-session <session_id>` creates a new Agent Session by forking the source
 Session's native backend context. It is for alternate investigations or

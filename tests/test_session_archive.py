@@ -18,12 +18,20 @@ from config import paths
 from core.scheduled_tasks import resolve_session_id_target
 from core.show_pages import ShowPageError, ShowPageStore
 from core.show_session_events import ShowSessionEventError, ShowSessionEventStore
-from storage import messages_service
+from storage import message_deliveries, messages_service
 from storage import vault_service as vs
 from storage import workbench_sessions_service as wss
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_runs, agent_sessions, messages, run_definitions, show_pages, vault_grants, vault_requests
+from storage.models import (
+    agent_runs,
+    agent_sessions,
+    message_deliveries as delivery_rows,
+    run_definitions,
+    show_pages,
+    vault_grants,
+    vault_requests,
+)
 from storage.vault_crypto import Sealed
 from storage.session_reclaim import session_teardown_context
 from storage.sessions_service import SQLiteSessionsService
@@ -57,13 +65,21 @@ def _insert_def(conn, *, def_id: str, session_id: str, definition_type: str, del
     )
 
 
-def _insert_run(conn, *, run_id: str, session_id: str, status: str) -> None:
+def _insert_run(
+    conn,
+    *,
+    run_id: str,
+    session_id: str,
+    status: str,
+    delivery_id: str | None = None,
+) -> None:
     conn.execute(
         agent_runs.insert().values(
             id=run_id,
             run_type="agent",
             status=status,
             session_id=session_id,
+            delivery_id=delivery_id,
             cancel_requested=0,
             created_at=NOW,
             updated_at=NOW,
@@ -234,6 +250,71 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         assert request_statuses[other_req["id"]] == "pending"
 
 
+def test_hfr_287_new_session_teardown_publishes_run_updates_after_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from storage import background
+
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    published: list[tuple[set[str], dict[str, tuple[str, bool]]]] = []
+    try:
+        session_id = _bind_session(
+            service,
+            channel="C_NEW_WAKE",
+            anchor="slack_new_wake",
+            native="native-new-wake",
+        )
+        with service.engine.begin() as conn:
+            _insert_run(
+                conn,
+                run_id="run-running",
+                session_id=session_id,
+                status="running",
+            )
+            _insert_run(
+                conn,
+                run_id="run-queued",
+                session_id=session_id,
+                status="queued",
+            )
+
+        def _capture(rows) -> None:  # noqa: ANN001
+            with service.engine.connect() as conn:
+                committed = {
+                    str(row.id): (str(row.status), bool(row.cancel_requested))
+                    for row in conn.execute(
+                        select(
+                            agent_runs.c.id,
+                            agent_runs.c.status,
+                            agent_runs.c.cancel_requested,
+                        ).where(
+                            agent_runs.c.id.in_(("run-running", "run-queued"))
+                        )
+                    )
+                }
+            published.append(({str(row["id"]) for row in rows}, committed))
+
+        monkeypatch.setattr(background, "_publish_run_rows_updated", _capture)
+
+        assert service.delete_agent_sessions(
+            scope_key="slack::channel::C_NEW_WAKE",
+            agent_name="claude",
+        ) == 1
+    finally:
+        service.close()
+
+    assert published == [
+        (
+            {"run-running", "run-queued"},
+            {
+                "run-running": ("running", True),
+                "run-queued": ("canceled", True),
+            },
+        )
+    ]
+
+
 def test_archive_release_vault_scopes_runs_in_threadpool(monkeypatch) -> None:
     from vibe import api, ui_server
 
@@ -318,9 +399,9 @@ def test_resolve_session_id_target_rejects_archived(tmp_path: Path) -> None:
 def _pending_ids(conn, session_id: str) -> list[str]:
     return list(
         conn.execute(
-            select(messages.c.id)
-            .where(messages.c.session_id == session_id)
-            .where(messages.c.type == messages_service.PENDING_TYPE)
+            select(delivery_rows.c.id)
+            .where(delivery_rows.c.session_id == session_id)
+            .where(delivery_rows.c.state == "reserved")
         ).scalars()
     )
 
@@ -338,33 +419,58 @@ def test_archive_clears_queued_and_pending_messages(tmp_path: Path) -> None:
 
     engine = create_sqlite_engine(db_path)
     with engine.begin() as conn:
-        messages_service.enqueue_queued(conn, scope_id=scope_id, session_id=sid, text="q1")
-        messages_service.enqueue_queued(conn, scope_id=scope_id, session_id=sid, text="q2")
-        # A send mid-dispatch reserved its row as ``pending``; the user also has a
-        # saved composer draft.
-        messages_service.append(
+        queued_run_delivery = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id=sid,
-            platform="avibe",
-            author="user",
-            message_type=messages_service.PENDING_TYPE,
-            text="reserved",
+            text="q1",
         )
-        messages_service.set_draft(conn, scope_id=scope_id, session_id=sid, text="half-typed")
+        message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=sid, text="q2")
+        _insert_run(
+            conn,
+            run_id="run_delivery_archive",
+            session_id=sid,
+            status="running",
+            delivery_id=str(queued_run_delivery["id"]),
+        )
+        # A send mid-dispatch reserved its row as ``pending``; the user also has a
+        # saved composer draft.
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_reserved_archive",
+            session_id=sid,
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=sid,
+                platform="avibe",
+                author="user",
+                source="user",
+                text="reserved",
+            ),
+            dispatch_text="reserved",
+        )
+        message_deliveries.set_draft(conn, sid, "half-typed")
     with engine.connect() as conn:
-        assert len(messages_service.list_queued(conn, sid)) == 2
+        assert len(message_deliveries.list_queued(conn, sid)) == 2
         assert len(_pending_ids(conn, sid)) == 1
-        assert messages_service.get_draft(conn, sid)
+        assert message_deliveries.get_draft(conn, sid)
         # Queued prompts are surfaced in the reclaim preview (not silently dropped).
         assert wss.count_bound_resources(conn, sid)["queued"] == 2
 
     with engine.begin() as conn:
         wss.archive_session(conn, sid)
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, sid) == []
+        assert message_deliveries.list_queued(conn, sid) == []
         assert _pending_ids(conn, sid) == []
-        assert not messages_service.get_draft(conn, sid)
+        assert not message_deliveries.get_draft(conn, sid)
+        archived_run = conn.execute(
+            select(agent_runs).where(agent_runs.c.id == "run_delivery_archive")
+        ).mappings().one()
+        assert archived_run["status"] == "canceled"
+        assert archived_run["cancel_requested"] == 1
+        assert archived_run["completed_at"] is not None
 
 
 def test_archived_show_page_cannot_be_republished(monkeypatch, tmp_path: Path) -> None:
@@ -476,6 +582,64 @@ def test_archived_session_excluded_from_inbox(monkeypatch, tmp_path: Path) -> No
         feed = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"]
         assert all(s["session_id"] != sid for s in feed)
         assert sid not in messages_service.unread_counts_by_session(conn, platform="avibe")
+
+
+def test_the_reserved_workspace_notice_session_cannot_be_archived(tmp_path: Path) -> None:
+    """Archive is terminal, so it must not be reachable for the notice fallback row.
+
+    D5 rung (5) resolves to a reserved workspace-notifications session
+    (``storage.agent_session_rows.resolve_workspace_notice_session``). That row is
+    ``foreground`` on purpose — ``background`` is filtered out of
+    ``list_inbox_sessions``, which would hide the very notice the rung exists to show
+    — so it appears in ordinary session lists and is ONE CLICK from this function.
+
+    Archiving it is the worst reachable outcome in the whole ladder, and it is silent:
+    ``persist_agent_message``'s ``_session_row`` has no status filter, so a later
+    notice still WRITES its row and still earns its persisted receipt, so the rung
+    ACKS and the notice is marked ``sent`` — while ``list_inbox_sessions`` excludes
+    archived sessions, so there is no card, no ``inbox.session.updated`` and no push.
+    Every subsequent caller-less failure would be recorded as delivered into a surface
+    nothing displays, permanently. That is D1 broken again by D1's own fix.
+
+    Two independent defences, and this is the first: refuse at the door. The second is
+    ``resolve_workspace_notice_session``'s heal, pinned by
+    ``test_an_archived_workspace_notice_session_heals_instead_of_swallowing_the_notice``,
+    which covers a row archived out of band or before this guard existed.
+    """
+    from storage.agent_session_rows import (
+        WORKSPACE_NOTICE_SESSION_ID,
+        resolve_workspace_notice_session,
+    )
+
+    db_path = tmp_path / "vibe.sqlite"
+    engine = create_sqlite_engine(db_path)
+    SQLiteSessionsService(db_path).close()  # create_all
+    with engine.begin() as conn:
+        reserved = resolve_workspace_notice_session(conn, title="Workspace notifications")
+    assert reserved == WORKSPACE_NOTICE_SESSION_ID
+
+    with engine.begin() as conn:
+        with pytest.raises(PermissionError) as exc:
+            wss.archive_session(conn, reserved)
+    # A machine code, because the localized copy lives in ``vibe/i18n`` at the HTTP
+    # boundary where the language is known — storage carries no user-facing text.
+    assert getattr(exc.value, "code", None) == "reserved_session"
+
+    with engine.connect() as conn:
+        assert wss.is_session_archived(conn, reserved) is False, (
+            "the refusal has to leave the row usable, not half-torn-down"
+        )
+    # And an ordinary session is unaffected: the guard is keyed on the reserved
+    # identity, not on "looks like a notification session".
+    service = SQLiteSessionsService(db_path)
+    try:
+        ordinary = _bind_session(service, channel="C9", anchor="slack_C9", native="nat1")
+    finally:
+        service.close()
+    with engine.begin() as conn:
+        wss.archive_session(conn, ordinary)
+    with engine.connect() as conn:
+        assert wss.is_session_archived(conn, ordinary) is True
 
 
 def test_is_session_archived_flag(tmp_path: Path) -> None:

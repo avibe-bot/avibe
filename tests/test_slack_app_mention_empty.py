@@ -1,4 +1,4 @@
-import importlib.util
+import importlib
 import sys
 import types
 import unittest
@@ -118,6 +118,14 @@ class _ResponseLike:
 
 
 class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
+    def test_loader_preserves_the_canonical_slack_module(self):
+        canonical = sys.modules["modules.im.slack"]
+
+        loaded_class = _load_local_slack_bot()
+
+        self.assertIs(sys.modules["modules.im.slack"], canonical)
+        self.assertIs(loaded_class, canonical.SlackBot)
+
     async def test_empty_app_mention_dispatches_empty_message_for_start_menu(self):
         slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
         received = {}

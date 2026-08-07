@@ -1,0 +1,503 @@
+version: 1
+capability: harness_command_task
+observations:
+  - id: OBS-HARNESS-COMMAND-TASK-001
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-019
+    summary: A command Run recorded its exit code and output but never the command it ran, so every reader had to go back to a mutable definition.
+    previous_assumption: The definition is a good enough source for "what did this run execute", because a task's command rarely changes.
+    observed_behavior: Failure notices drain asynchronously, so an edited definition made the notice name a command that never ran, and a removed one made it name nothing at all.
+    required_updates:
+      - stamp an immutable {shell, argv} snapshot into the Run's own metadata at enqueue
+      - build that snapshot inside the transactional SQLite enqueue from the authoritative run_definitions row, not from a caller argument the writer then discards
+      - read the snapshot first in the notice body and the Workbench Run detail, falling back to the definition only for pre-snapshot rows
+  - id: OBS-HARNESS-COMMAND-TASK-002
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-013
+      - SCT-020
+    summary: Whether an in-flight Run was a command was decided by asking the live definition store.
+    previous_assumption: A Run's definition is still present for as long as the Run is in flight.
+    observed_behavior: remove_task drops the definition immediately and leaves the Run alive, which is exactly how a user reacts to a misbehaving command; the cancellation was then classified as an Agent turn and ignored, and the child ran on to its --timeout (six hours by default).
+    required_updates:
+      - classify an in-flight execution from data fixed for the life of the fire (the Run's command snapshot)
+      - keep the live-definition lookup only as the fallback for Runs enqueued before the snapshot existed
+  - id: OBS-HARNESS-COMMAND-TASK-003
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-017
+      - SCT-021
+    summary: last_exit_code survived fires that produced no exit status of their own.
+    previous_assumption: Writing the column only when a value exists is the safe default, because a message task has no code and must not blank a command's.
+    observed_behavior: A fire that never spawned, and later a fire cancelled or interrupted mid-flight, both left the previous fire's code on the row, so the task pane read "exited 7" beside a run that never produced a 7.
+    required_updates:
+      - give the command fire's own stamp authority over the column, None included
+      - extend that authority to the terminal projection lane, which settles cancelled and shutdown-interrupted command fires
+      - leave the column alone for every non-command lane
+  - id: OBS-HARNESS-COMMAND-TASK-004
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-022
+    summary: The outcome text a command fire generates is user-visible copy, not an internal log line.
+    previous_assumption: last_error is diagnostic detail, so an f-string is fine.
+    observed_behavior: The generated English sentence is stored and then rendered verbatim inside otherwise-translated failure notices, vibe task list, and the Workbench.
+    required_updates:
+      - route every generated command outcome through vibe/i18n/
+      - keep the untranslatable parts (a worker's own stderr, the configured path) inside the localized template
+  - id: OBS-HARNESS-COMMAND-TASK-005
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-023
+    summary: A command child was reachable only through the coroutine awaiting it, which a crash never runs.
+    previous_assumption: Every stop of a command fire arrives as a CancelledError on the awaiting coroutine, which the runner turns into a tree teardown.
+    observed_behavior: SIGKILL and a process crash deliver no CancelledError at all, so the isolated supervisor and the backup or migration under it kept running unowned; nothing on disk named that child, so the restart could not find it even in principle, and the next cron fire started a second one beside it.
+    required_updates:
+      - persist the worker identity on the Run via on_spawn and clear it when the child is reaped
+      - reap surviving workers at startup, before recover_processing settles the very rows the identity is stored on
+      - authorise the kill by process identity (start time plus inherited marker), never by pid alone, because the number is recycled across a crash
+      - share the identity serialize/parse helpers with the watch lane instead of copying them
+  - id: OBS-HARNESS-COMMAND-TASK-006
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-024
+    summary: Exit code 124 was read as proof that the scheduler timed the command out.
+    previous_assumption: 124 is the runner's timeout code, so a row carrying it timed out.
+    observed_behavior: A --shell script that wraps its own work in timeout exits 124 by itself, and the UI then told the user to raise a limit that was never reached; separately, a float --timeout was rendered through int(), so a 0.5s limit read as "timed out after 0 second(s)" and hid the setting that had to change.
+    required_updates:
+      - record on the definition that the SCHEDULER is what stopped the command, and let that flag outrank the exit code in both directions
+      - keep 124-implies-timeout only as the fallback for rows written before the flag existed
+      - state the limit as the user configured it, without truncating a sub-second value to zero
+  - id: OBS-HARNESS-COMMAND-TASK-007
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-025
+    summary: The supervisor's protocol error lines were surfaced to the user verbatim.
+    previous_assumption: A spawn failure is an internal fault, so the worker's stderr is a diagnostic that only developers read.
+    observed_behavior: The line reached the failure notice and vibe task list unchanged, so a mistyped executable read as a machine token rather than a sentence, and it stayed English inside otherwise-translated copy.
+    required_updates:
+      - decode the worker's error line into a localized sentence through vibe/i18n/
+      - keep that decoding beside the protocol that emits it (core/watch_worker.py) so both lanes share one mapping
+  - id: OBS-HARNESS-COMMAND-TASK-008
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-026
+      - SCT-027
+    summary: The escalation Agent turn and the stamp that suppresses the failure notice were two separate commits.
+    previous_assumption: A fire that reaches the settle still owns its outcome, so stamping and enqueueing in sequence is equivalent to doing both.
+    observed_behavior: A cancel or reclaim landing between them produced either an Agent turn for a job the user had just stopped, or a stamped suppression with no report at all; the second is the unrecoverable half, because nothing later re-derives that a notice was owed.
+    required_updates:
+      - commit the stamp and the escalation enqueue in one transaction, guarded by compare-and-set preconditions on the binding and the uncancelled run id
+      - bias the surviving crash window toward BOTH reports rather than neither
+      - re-arm the owed notice when a session teardown cancels an escalation that had already suppressed one
+  - id: OBS-HARNESS-COMMAND-TASK-009
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-029
+    summary: The startup reap cleared a worker's durable identity even when the kill came back unconfirmed.
+    previous_assumption: A teardown either kills the process or the process is already gone, so the record is spent either way.
+    observed_behavior: >-
+      An unconfirmed kill is neither -- a task wedged in uninterruptible I/O outlives
+      SIGKILL, and a group whose leader moved cannot be signalled at all. The run is the
+      only place the identity is written and recover_processing settles it moments later,
+      so the surviving backup or migration became permanently unfindable; not just
+      unkilled, but unkillable by any future pass.
+    required_updates:
+      - distinguish "not confirmed" from "already gone" by re-inspecting the identity before discarding it
+      - keep the record and leave the run running so the next start can retry, since only running rows are scanned
+      - bound the retries, because an unconditional retry holds a run running for the life of the install
+  - id: OBS-HARNESS-COMMAND-TASK-010
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-030
+    summary: >-
+      The run row a stamp authorises was composed from the definition as the executor
+      claimed it, and inserted unchanged however long later.
+    previous_assumption: >-
+      An Agent rename rewrites every reference that matters, so a queued turn always
+      names an Agent that exists.
+    observed_behavior: >-
+      The rewrite covers definitions and ACTIVE runs; a row still being composed is
+      neither, and a command task's composition window is the whole runtime of the
+      command. The escalation was inserted naming an Agent the catalog no longer had, so
+      it could never be claimed -- while the notice its own stamp suppressed was already
+      gone. Neither report, which is the one outcome the invariant exists to rule out.
+    required_updates:
+      - read the Agent from the definition values written in the SAME transaction, not from the caller's older snapshot
+      - resolve that name to the catalog's durable agent id so the next rename cannot reopen the window
+      - hold the write lock, because this transaction now reads the Agent catalog a concurrent rename rewrites
+      - leave a removed Agent's spelling alone rather than inventing an identity, and apply the same fix to the watch lane's completion hook
+  - id: OBS-HARNESS-COMMAND-TASK-011
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-031
+    summary: >-
+      The liveness check in front of the reap read "I could not look" as "nothing is
+      there".
+    previous_assumption: >-
+      inspect_process_identity returning None means the pid is empty, so the record
+      naming that process is spent.
+    observed_behavior: >-
+      It returns None for an unreadable process too -- an exhausted fd table, a /proc
+      read losing a race, a platform refusing create_time. Startup is exactly when
+      those are likeliest, and the answer skipped the kill AND cleared the record, so
+      the fix for OBS-009 never engaged: the surviving backup became unfindable by
+      every later start, and the next fire could run beside it.
+    required_updates:
+      - split the probe into three answers at the primitive, beside the group-level status that already has them
+      - let only an empty pid retire the record, before the kill and after an unconfirmed one
+      - never signal a pid whose identity could not be read, since that is the coin flip the identity check exists to refuse
+      - keep the bounded retry as the cap, so a probe that never recovers cannot hold a run running for the life of the install
+  - id: OBS-HARNESS-COMMAND-TASK-012
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-032
+    summary: >-
+      The reap asked whether the supervisor pid was occupied and treated a free one as
+      a reaped tree.
+    previous_assumption: >-
+      The supervisor is the tree's only handle, so an empty pid means everything under
+      it is gone too.
+    observed_behavior: >-
+      A worker spawned with start_new_session LEADS the group pgid == pid, and on POSIX
+      that group outlives its leader: kill the supervisor alone -- the OOM killer
+      picking the parent, a fault in its own code -- and the command keeps running in a
+      group nothing else names. Clearing command_worker there let recover_processing
+      settle the row, so the survivor ran to completion unowned and the next fire
+      started a second one beside it. The watch lane already walked the surviving group;
+      the command lane stopped at the pid.
+    required_updates:
+      - after the leader is gone, walk the group it led before calling the tree dead
+      - own that walk (leader, then group) in core/process_isolation.py so both worker lanes answer it the same way, rather than copying the watch lane's inline logic
+      - keep the record when the group exists but its members cannot be identified, since refusing to signal is not proof of absence
+      - retire the record only for a mismatched group, which is a recycled pgid rather than the tracked tree
+  - id: OBS-HARNESS-COMMAND-TASK-013
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-033
+    summary: >-
+      The compare-and-set that refuses an escalation for a stopped fire could only see
+      the stops that existed when it committed.
+    previous_assumption: >-
+      Re-reading the cancellation server-side inside the stamp transaction settles the
+      question for the whole fire.
+    observed_behavior: >-
+      cancel_run on a running fire writes only a flag, and the flag can land after
+      mark_task_result has returned. settle_run_terminal then re-reads it and normalizes
+      the fire to canceled while the escalation that transaction committed sits queued
+      and claimable, so the user stops a job and the job answers by starting an Agent --
+      OBS-008's defect one lane further along.
+    required_updates:
+      - retract the queued escalation from whoever settles the fire canceled, found by run_type plus parent_run_id rather than from a local id a CancelledError can skip
+      - key it on the status ACTUALLY written, since a service shutdown cancels the same coroutine and settles interrupted, where the report is still owed
+      - owe neither report, because canceled means the user asked this fire to stop and a stopped fire owes no notice; the landed stamp still records the failure on the definition
+      - keep the enqueue in the stamp's transaction rather than merging it into the settlement, which would reopen the window OBS-008 closed
+  - id: OBS-HARNESS-COMMAND-TASK-014
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-034
+    summary: >-
+      Withdrawing the escalation of a stopped fire assumed the row was still queued when
+      the settlement reached it.
+    previous_assumption: >-
+      cancel_run is enough to take an escalation back, because it is the same call the
+      user's own vibe runs cancel makes.
+    observed_behavior: >-
+      On a run the dispatch loop has already claimed, cancel_run writes only
+      cancel_requested, and nothing watches that flag for a turn:
+      _propagate_requested_cancellations observes command fires only, and the CLI's live
+      stop is gated on run_type == "agent_run". The escalation becomes claimable the
+      moment the stamp commits, which is several awaits before the settlement that
+      retracts it, so a stopped command could still answer by launching an Agent and
+      running it to completion.
+    required_updates:
+      - ask the question at the CLAIM, from the parent fire's row, inside the transaction that would otherwise start the work
+      - key it on the fire's cancel_requested as well as a written canceled, since the flag is set the instant the user asks
+      - hold the writer before those reads, because the claim now decides on a row another connection writes
+      - leave a shutdown-interrupted fire's escalation claimable, because there the report is still owed
+      - keep the retraction as the other half rather than replacing it, so a row that is never claimed is settled rather than left queued
+  - id: OBS-HARNESS-COMMAND-TASK-015
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-036
+    summary: >-
+      The startup reap reported "I could not enumerate the workers" as "there are no
+      workers to protect".
+    previous_assumption: >-
+      Returning an empty skip set when the enumeration fails is a safe degradation,
+      because the pass simply killed nothing that start.
+    observed_behavior: >-
+      The empty set is not read as "nothing was killed", it is read as "settle
+      everything": recover_processing runs on the very next line, and because
+      command_worker is readable only while a row is running, one momentary read failure
+      terminalizes every live backup and deployment's row and unnames all of them
+      permanently -- OBS-011's category error one layer up, with the whole host in scope.
+    required_updates:
+      - make the settle pass read the record off the row it is about to settle, inside the same transaction, rather than trusting a set computed by a separate query
+      - let the reap communicate by writing: cleared once a process is proven dead or the retries are spent, left in place on every maybe, including the maybe where it never looked
+      - do not fail startup and do not skip the settle pass, since both strand every other interrupted run type as running
+      - charge nothing against the attempt cap for a start that never attempted a kill
+      - tolerate a single row's inspection raising, so the rows after it are still examined and the settle pass still runs
+  - id: OBS-HARNESS-COMMAND-TASK-016
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-035
+    summary: >-
+      The runner reaped its process tree on the two failures it named and on no others.
+    previous_assumption: >-
+      Cancellation and timeout are the ways a supervised command ends badly, so handling
+      those two covers teardown.
+    observed_behavior: >-
+      Any other exception after the spawn -- an OSError draining a capped stream, a
+      reader failing while its twin still runs, a fault between the handshake and the
+      collector -- propagated with the supervisor and the command under it still running.
+      The scheduled-task caller then catches it as a failed fire and clears
+      command_worker in its own finally, on the documented assumption that the runner
+      already reaped the tree, so the survivor became an orphan nothing can name.
+    required_updates:
+      - add a catch-all that cancels the readers and reaps the tree before re-raising, so no exit from the post-spawn block leaves the tree alive
+      - skip the reap when the supervisor is already collected, because a second consumer on those streams is its own defect
+      - never let a failing teardown replace the original exception, which is the failure worth reporting
+  - id: OBS-HARNESS-COMMAND-TASK-017
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-037
+    summary: >-
+      The worker stamp was best-effort at the one moment it could be enforced for free.
+    previous_assumption: >-
+      Recording the worker is bookkeeping for a crash that may never happen, so a store
+      hiccup must never turn a command that ran fine into a reported failure.
+    observed_behavior: >-
+      That reasoning holds for CLEARING the record and fails for writing it. A stamp that
+      does not land leaves the fire running a backup or deployment with nothing on disk
+      naming it, which is the unfindable-orphan state the rest of this family exists to
+      prevent, reached before any record existed. And the cost of refusing is almost
+      nothing at that point: the supervisor is blocked reading its spec off stdin, so the
+      user's command has not started.
+    required_updates:
+      - fail the fire when a captured identity cannot be persisted, including when the stamp returns False because the row is no longer running
+      - do NOT refuse when the identity could not be captured, since the dominant cause is a supervisor that already exited and no persisted record can be trusted for a process that could not be inspected
+      - call on_spawn inside the runner's protected block, so a refusing callback reaps the tree instead of leaking the orphan it is protecting against
+      - keep the clear path best-effort, because the record it removes protects nothing and a leftover record is dropped by the next start anyway
+  - id: OBS-HARNESS-COMMAND-TASK-018
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-038
+    summary: >-
+      "One string convention per outcome channel" was the wrong line to draw.
+    previous_assumption: >-
+      The run's ``error`` column carries plain operator text in this module -- ``str(exc)``,
+      a worker's stderr, a pause reason -- so a generated refusal sentence should match
+      that convention rather than split the channel between translated and untranslated
+      values.
+    observed_behavior: >-
+      The channel was already mixed, and correctly so: the command lane fills the very
+      same ``error`` from ``harness.command.timedOut`` / ``exited``, and the settlement
+      reasons in ``core/run_settlement.py`` are translated for exactly this reason. The
+      real line is between copy WE compose and text we merely quote; a hard-coded English
+      refusal handed a Chinese install a mixed-language failure in the Harness detail pane
+      and the failure notice.
+    required_updates:
+      - translate the refused-terminal-stamp sentence through vibe/i18n on both call sites
+      - keep quoted material (str(exc), worker stderr) untranslated, since nobody here authored it
+      - guard both refusal keys with a resolution test that also fails if zh.json is filled with the English string
+  - id: OBS-HARNESS-COMMAND-TASK-019
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-039
+      - SCT-025
+    summary: >-
+      Decoding the supervisor's error line fixed the sentence and left the number lying.
+    previous_assumption: >-
+      A worker that accepted the spec and then failed to spawn is reported once the raw
+      protocol JSON on its stderr is turned into a sentence; the exit status travelling
+      beside it is just the runner's report of what the process returned.
+    observed_behavior: >-
+      That status is the SUPERVISOR's -- ``main()`` returns 1 for both of its own failures
+      -- and this lane publishes it as a fact about the user's command: "Exit code: 1" in
+      the failure notice and the Agent escalation prompt, ``last_exit_code`` on the
+      definition, an ``exit_code`` in the run row ``vibe runs show`` prints. The message
+      then said "Command exited with status 1" and "Command supervisor failed" in one
+      breath, for a command that never started.
+    required_updates:
+      - decode the worker error line rather than sniffing it, and leave the command exit code unset for that outcome
+      - report it with the supervisor sentence alone, the way the handshake failure already does
+      - keep a real command's status intact, since blanking every failing fire's exit code would be the worse defect
+      - leave the watch lane's exit code alone, where a cycle status drives retry_exit_codes and there is no "no status" to spell
+  - id: OBS-HARNESS-COMMAND-TASK-020
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-040
+      - SCT-036
+    summary: >-
+      A rule enforced only in memory is suspended by the crash it exists to survive.
+    previous_assumption: >-
+      Keying a command fire on its definition is enough to serialize a fire against
+      itself, so one definition can never have two copies of its command running.
+    observed_behavior: >-
+      That key lives in ``self._inflight_sessions``, which a restart empties. The retained
+      worker record is the durable statement that a copy may still be running, and nothing
+      on the dispatch path read it: after the crash that leaves a backup's tree alive, the
+      next tick of the same cron claimed a fire and spawned a second writer over the same
+      dataset -- while the first copy's record sat one table away naming it.
+    required_updates:
+      - read the durable record on the dispatch path, scoped to the firing definition
+      - defer on "cannot tell" as well as on "still there", since proceeding is the same wager either way
+      - look without signalling, because the record exists so a later pass can kill that tree
+      - release the definition and retire the record the moment the earlier worker is proven gone
+      - requeue rather than drop the deferred fire, and record the skip so the row never looks sweepable
+  - id: OBS-HARNESS-COMMAND-TASK-021
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-041
+      - SCT-036
+    summary: >-
+      "I could not write" is not "there is nothing to protect" either.
+    previous_assumption: >-
+      The retain path's return value reports whether the record was retained, so a failed
+      re-stamp of the attempt count is honestly reported as a retention that did not
+      happen.
+    observed_behavior: >-
+      The caller's next line clears the record on that answer, so a locked database during
+      a bookkeeping write discarded the only durable name of a process that had just been
+      shown NOT dead -- the same category error as SCT-031 and SCT-036, now in the write
+      rather than the read. The already-stored record was never touched by the failed
+      write, so the give-up answer was not even accurate.
+    required_updates:
+      - keep the record when the write fails, and log it at warning rather than debug
+      - reserve the give-up answer for a spent attempt cap or a row that is no longer running
+      - charge the attempt cap only for attempts that were actually stored
+  - id: OBS-HARNESS-COMMAND-TASK-022
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-042
+      - SCT-040
+    summary: >-
+      A guard that filters on a field is only as strong as the weakest backend that fills it.
+    previous_assumption: >-
+      Adding the definition id to the SQLite query gave the new single-flight check what it
+      needs, since that is the backend a real install runs on.
+    observed_behavior: >-
+      The file backend answers the same method and omitted the field, so every one of its
+      records matched no definition -- and the absence reads as permission, not as caution:
+      the fire concluded no worker of its own was running and started a second copy. The
+      association was there all along under the older name the SQLite column was renamed
+      away from.
+    required_updates:
+      - normalize the field at the store boundary so both backends answer the same contract
+      - say in the docstring why the field is required, not merely that it is returned
+      - assert the contract on both backends in one test, since a reader cannot tell them apart
+  - id: OBS-HARNESS-COMMAND-TASK-023
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-044
+      - SCT-040
+    summary: >-
+      Moving a transition earlier orphans whatever used to follow it.
+    previous_assumption: >-
+      Clearing the worker record on proof of death was enough, because that is exactly what
+      the startup reap does and the settle pass runs right after it.
+    observed_behavior: >-
+      Right after it, at startup, and nowhere else. Proving the death mid-life released the
+      definition with no pass left to close the run: ``recover_processing`` runs once and
+      skips any row still naming a worker, and the stale-run sweep only classifies orphans
+      of ``run_type == "agent_run"``. The fire stayed ``running`` until the next restart
+      while the command it described was long over, and its interruption was never reported.
+    required_updates:
+      - settle the recovered run in the same step that releases its definition
+      - reuse the startup pass's cause so one interruption is not reported two ways
+      - keep the settle best-effort: closing the previous fire must not block the next one
+  - id: OBS-HARNESS-COMMAND-TASK-024
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-043
+    summary: >-
+      A helper that resolves a null to a default answers a question that was never asked.
+    previous_assumption: >-
+      Rendering every task through the same routing fields is neutral: a command task simply
+      shows the defaults it would inherit.
+    observed_behavior: >-
+      Those defaults are claims. A command with ``--on-failure none`` has no Agent, no
+      session and no delivery at all, and the pane asserted all three -- contradicting the
+      on-failure field directly below it. The fix cannot key on the kind either, since a
+      command that escalates or that was created inside a conversation routes through
+      exactly those fields.
+    required_updates:
+      - show the routing fields only when something in them is actually bound
+      - state in the test which bindings must keep them visible, not only which hide them
+      - treat a "sensible default" label on an absent binding as a fabricated fact
+  - id: OBS-HARNESS-COMMAND-TASK-025
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-045
+    summary: >-
+      A catch-all clause does not catch its own siblings, so the specialized handlers were
+      left with no backstop at all.
+    previous_assumption: >-
+      Adding a final ``except BaseException`` that reaps the tree covers every way out of the
+      block, including the cancellation and timeout clauses above it.
+    observed_behavior: >-
+      An exception raised inside an ``except`` clause propagates past its siblings. The
+      teardown those two clauses run drains pipes and can itself fail, so the two paths that
+      were supposed to be the safe ones were the only ones with no backstop -- and the
+      caller clears the worker record the moment they raise.
+    required_updates:
+      - make teardown failure-tolerant rather than adding another handler that can also fail
+      - fall back to a synchronous group kill, since a cancellation leaves nothing awaitable
+      - never let a failed teardown replace the outcome its handler owes the caller
+  - id: OBS-HARNESS-COMMAND-TASK-026
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-046
+    summary: >-
+      A capability probe used as a guard turns "this store cannot do it" into "this store
+      does not need it".
+    previous_assumption: >-
+      Asking ``supports_guarded_settlement()`` and returning early is the safe way to use a
+      writer only one backend has.
+    observed_behavior: >-
+      The early return skipped the settle entirely on the file store, while the surrounding
+      work -- clearing the worker record, releasing the definition, starting the next fire --
+      went ahead. The backend that could not settle was the backend that leaked a ``running``
+      run for a command that was over.
+    required_updates:
+      - put the per-run settle behind one store method that both backends answer
+      - share the file store's terminal write between the startup pass and the per-run settle
+      - reserve capability probes for callers that have a real alternative, not for skipping work
+  - id: OBS-HARNESS-COMMAND-TASK-027
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-047
+      - SCT-048
+    summary: >-
+      One ``cwd`` field answered two different questions, and declining to answer the Session's
+      half silently unanswered the command's.
+    previous_assumption: >-
+      A definition's ``cwd`` describes the Session it will create, so a policy whose Session
+      does not exist yet correctly stores nothing.
+    observed_behavior: >-
+      A command fires on the next tick and has no Agent turn to inherit a directory from, so
+      the stored ``None`` fell through to the ``~/.avibe`` fallback: relative commands failed
+      and relative writes landed in persisted product state. The invocation directory was
+      available at creation time and thrown away.
+    required_updates:
+      - record the command's directory at creation without pinning the Session escalation creates
+      - resolve the runtime default workdir at fire time for definitions creation cannot reach
+      - keep the product state directory as a last resort nothing normally reaches
+  - id: OBS-HARNESS-COMMAND-TASK-028
+    scenario: SCT-049
+    summary: >-
+      An in-flight correction is only as durable as the write that publishes it, and one
+      backend published from a copy taken before the correction existed.
+    previous_assumption: >-
+      Re-stamping the executed command on the running row makes every later reader of that
+      run see it, on either store.
+    observed_behavior: >-
+      The file backend's completion rebuilt the terminal payload from the caller's
+      enqueue-time request, so the re-stamp -- and every other in-flight write -- was
+      dropped at the moment the run became readable as a result. SQLite settles the row the
+      metadata already sits on and carried it forward for free, hiding the asymmetry.
+    required_updates:
+      - compose the file backend's terminal payload from the durable in-flight state
+      - keep the caller's outcome facts authoritative over what the row already held
+      - assert on both stores in one test, since a reader cannot tell which one answered

@@ -12,8 +12,8 @@
 #
 # CI may pass a shard index and total shard count to split the file list across
 # multiple runners while preserving the one-process-per-file isolation. Shards
-# are assigned by a deterministic file-size/test-count heuristic instead of by
-# sorted-list modulo so large test modules are spread more evenly.
+# use the checked-in per-file timing snapshot when available and fall back to a
+# deterministic file-size/test-count estimate for new or missing files.
 #
 # Excludes ``tests/e2e`` (Docker) and the ``integration`` marker (Docker +
 # platform tokens) — those run in dedicated jobs. ``-p no:randomly`` keeps a
@@ -63,62 +63,7 @@ fi
 PYTEST=("$PYTHON_BIN" -m pytest)
 
 select_unit_test_files() {
-  "$PYTHON_BIN" - "$SHARD_INDEX" "$SHARD_TOTAL" <<'PY'
-from __future__ import annotations
-
-import re
-import sys
-from pathlib import Path
-
-shard_index = int(sys.argv[1])
-shard_total = int(sys.argv[2])
-
-files = sorted(
-    path
-    for path in Path("tests").rglob("test_*.py")
-    if "tests/e2e/" not in path.as_posix()
-)
-
-
-def estimate_weight(path: Path) -> int:
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    line_count = text.count("\n") + 1
-    test_count = len(re.findall(r"^\s*(?:async\s+def|def)\s+test_", text, re.MULTILINE))
-    class_count = len(re.findall(r"^\s*class\s+Test", text, re.MULTILINE))
-    return max(1, line_count + (test_count * 20) + (class_count * 60))
-
-
-weighted_files = [(estimate_weight(path), path.as_posix()) for path in files]
-shards: list[dict[str, object]] = [
-    {"weight": 0, "files": []}
-    for _ in range(shard_total)
-]
-
-for weight, file_path in sorted(weighted_files, key=lambda item: (-item[0], item[1])):
-    target = min(
-        range(shard_total),
-        key=lambda index: (
-            shards[index]["weight"],
-            len(shards[index]["files"]),  # type: ignore[arg-type]
-            index,
-        ),
-    )
-    shards[target]["weight"] = int(shards[target]["weight"]) + weight
-    shard_files = shards[target]["files"]
-    assert isinstance(shard_files, list)
-    shard_files.append(file_path)
-
-selected_files = sorted(shards[shard_index]["files"])
-print(
-    "Planned "
-    f"{len(files)} unit test file(s) across {shard_total} shard(s); "
-    f"shard {shard_index} has {len(selected_files)} file(s), "
-    f"estimated weight {shards[shard_index]['weight']}.",
-    file=sys.stderr,
-)
-for file_path in selected_files:
-    print(file_path)
-PY
+  "$PYTHON_BIN" scripts/ci_unit_test_shards.py "$SHARD_INDEX" "$SHARD_TOTAL"
 }
 
 failed=""

@@ -3,23 +3,30 @@ import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
+import { Archive } from 'lucide-react';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
-import type { VaultRequest, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
-import { ToastProvider } from '../../context/ToastContext';
+import zh from '../../i18n/zh.json';
+import { selectApiErrorFields } from '../../context/apiErrorParse';
+import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import { ToastProvider } from '../../context/ToastProvider';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
-import { ChatHeaderBar, MessageRow } from './ChatPage';
+import { ChatHeaderBar, MessageRow, ThinkingBubble } from './ChatPage';
+import { sessionAgentDisplayName } from './sessionAgentName';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
 import {
+  archiveRequestIsLive,
   isSessionArchivedConflict,
   isSessionArchivedError,
   isSessionReadOnly,
   isShowPageActive,
   markSessionArchived,
+  sessionReadOnlyReason,
   showPageControlActions,
   transcriptSelectionActions,
+  WORKSPACE_NOTICE_SESSION_ID,
 } from './sessionArchived';
 import { SecretRequestCard } from '../ui/secret-request-card';
 
@@ -63,6 +70,21 @@ const session = (over: Partial<WorkbenchSession> = {}): WorkbenchSession =>
     metadata: {},
     ...over,
   }) as WorkbenchSession;
+
+const archivedPm = {
+  id: 'agt-pm',
+  name: '_pm-8dd7',
+  display_name: 'pm',
+  description: null,
+  backend: 'codex',
+  model: null,
+  reasoning_effort: null,
+  enabled: false,
+  archived: true,
+  archived_at: '2026-07-31T14:00:00Z',
+  source: 'user',
+  updated_at: '2026-07-31T14:00:00Z',
+} satisfies VibeAgentBrief;
 
 // An agent reply carrying a quick-reply group, which is the transcript control
 // that POSTs a new message when clicked.
@@ -204,6 +226,37 @@ describe('read-only transcript withdraws session writes', () => {
   });
 });
 
+describe('archived Agent display names', () => {
+  it('keeps the display name when a mounted catalog still has the pre-archive name', () => {
+    const staleCatalogAgent = { ...archivedPm, name: 'pm' };
+    const archivedSession = session({ agent_id: archivedPm.id, agent_name: archivedPm.name });
+
+    expect(sessionAgentDisplayName(archivedSession, [staleCatalogAgent])).toBe('pm');
+  });
+
+  it('uses the catalog display name in thinking and transcript bubbles', () => {
+    const archivedSession = session({ agent_name: archivedPm.name });
+    const displayName = archivedPm.display_name;
+
+    const thinking = render(
+      <ThinkingBubble session={archivedSession} agentDisplayName={displayName} />,
+    );
+    const message = render(
+      <MessageRow
+        message={agentWithQuickReplies()}
+        session={archivedSession}
+        agentDisplayName={displayName}
+        messageFontSize={13}
+      />,
+    );
+
+    expect(thinking).toContain('>pm</span>');
+    expect(message).toContain('>pm</span>');
+    expect(thinking).not.toContain(archivedPm.name);
+    expect(message).not.toContain(archivedPm.name);
+  });
+});
+
 // ── Codex review #3 (ChatPage.tsx:2540) ───────────────────────────────────────
 // The previous round kept the Show Page toggle and the Share control on the
 // theory that the store already refuses archived mutations. That is the
@@ -275,7 +328,7 @@ describe('read-only header withdraws the Show Page controls', () => {
           disable: () => undefined,
           setMode: () => undefined,
         }}
-        readOnly
+        readOnlyReason="archived"
       />,
     );
     // The header did render (so the absences below are not a blank component).
@@ -289,6 +342,51 @@ describe('read-only header withdraws the Show Page controls', () => {
     // The title is static text, not a click-to-edit button (round-two behaviour,
     // re-asserted here so the header render is checked as a whole).
     expect(countButtons(markup)).toBe(1); // just Back
+  });
+
+  it('withdraws the session ⋯ menu on a read-only header even if actions are passed', () => {
+    // useSessionActions already returns an empty list for a read-only session, so
+    // this pins the second half: pin / rename / fork / hide / archive are all
+    // refused server-side (409 archived / 403 reserved_session), so the header must
+    // not mount a trigger for them. The trigger is the only new button in the
+    // cluster, hence the same Back-only count as above.
+    const markup = render(
+      <ChatHeaderBar
+        session={session({ status: 'archived' })}
+        agents={[]}
+        defaultAgentName={null}
+        onPatch={async () => undefined}
+        onBack={() => undefined}
+        working={false}
+        showPageMode={false}
+        showPageBusy={false}
+        onToggleShowPage={() => undefined}
+        onPrepareShowPageLaunch={async () => false}
+        annotation={{
+          state: null,
+          iframeRef: { current: null },
+          handleIframeLoad: () => undefined,
+          enable: () => undefined,
+          disable: () => undefined,
+          setMode: () => undefined,
+        }}
+        readOnlyReason="archived"
+        sessionActions={[
+          {
+            id: 'archive',
+            group: 'lifecycle',
+            icon: Archive,
+            label: en.workbench.sessionArchive,
+            danger: true,
+            onSelect: () => undefined,
+          },
+        ]}
+      />,
+    );
+    expect(markup).toContain('Model Hub');
+    expect(markup).not.toContain(en.workbench.sessionActions);
+    expect(markup).not.toContain(en.workbench.sessionArchive);
+    expect(countButtons(markup)).toBe(1); // still just Back
   });
 });
 
@@ -411,7 +509,7 @@ describe('archived conflicts converge whatever the verb', () => {
           disable: () => undefined,
           setMode: () => undefined,
         }}
-        readOnly
+        readOnlyReason="archived"
       />,
     );
     expect(markup).toContain('Model Hub');
@@ -425,6 +523,177 @@ describe('archived conflicts converge whatever the verb', () => {
     expect(en.chat.archived.editBlocked).toBeTruthy();
     expect(en.chat.archived.sendBlocked).toBeTruthy();
     expect(en.chat.archived.editBlocked).not.toBe(en.chat.archived.sendBlocked);
+  });
+});
+
+// ── Codex review round 15 (storage/messages_service.py:1207) ──────────────────
+// The reserved workspace-notifications session is ``visibility === 'system'``, which
+// admits it to the Inbox on purpose — so its card is a clickable chat. Archive was the
+// only read-only reason the chat surface knew, so that card opened a fully writable
+// composer into a row the runtime owns ("no backend and no turns"): typing into it
+// dispatched a real agent turn and mixed conversation into the failure-notice
+// transcript. The server now answers ``403 reserved_session`` there; this pins the
+// client half — the affordances go, and the copy does NOT claim the row is archived.
+describe('a runtime-owned system session is read-only for its own reason', () => {
+  const systemSession = () => session({ visibility: 'system', agent_name: null, agent_backend: '' });
+
+  it('reads read-only from the visibility projection, not from the status', () => {
+    expect(sessionReadOnlyReason(session())).toBeNull();
+    expect(isSessionReadOnly(session())).toBe(false);
+
+    const owned = systemSession();
+    expect(owned.status).toBe('active'); // NOT archived — the point of the reason
+    expect(sessionReadOnlyReason(owned)).toBe('system');
+    expect(isSessionReadOnly(owned)).toBe(true);
+
+    // The two assignable visibilities stay ordinary chats. ``background`` is hidden
+    // from lists but is still the USER's session and still accepts turns.
+    expect(sessionReadOnlyReason(session({ visibility: 'background' }))).toBeNull();
+    expect(sessionReadOnlyReason(session({ visibility: 'foreground' }))).toBeNull();
+    // A payload from an older client that predates the field is not read-only.
+    expect(sessionReadOnlyReason(session({ visibility: undefined }))).toBeNull();
+    expect(sessionReadOnlyReason(null)).toBeNull();
+    // Terminal lifecycle outranks ownership when a system row is somehow archived.
+    expect(sessionReadOnlyReason(session({ visibility: 'system', status: 'archived' }))).toBe('archived');
+  });
+
+  it('recognizes the reserved session by IDENTITY when its visibility has drifted', () => {
+    // The server's ``session_is_runtime_owned`` is two tests OR'd: the visibility
+    // projection AND the reserved identity, because the reserved row heals its
+    // visibility only lazily — on the next notice. Between an out-of-band update
+    // and that heal, the Inbox (which admits foreground) still reaches the row as
+    // ``foreground``; a visibility-only client predicate would render the
+    // composer, route picker and fork controls just to collect
+    // ``403 reserved_session`` on every one. Identity must lock it alone.
+    const drifted = session({
+      id: WORKSPACE_NOTICE_SESSION_ID,
+      visibility: 'foreground',
+      agent_name: null,
+      agent_backend: '',
+    });
+    expect(drifted.status).toBe('active');
+    expect(sessionReadOnlyReason(drifted)).toBe('system');
+    expect(isSessionReadOnly(drifted)).toBe(true);
+    // And the identity constant mirrors the server's, character for character —
+    // a drifted copy of THIS string is the whole point of the check.
+    expect(WORKSPACE_NOTICE_SESSION_ID).toBe('ses-workspace-notices');
+    // An ordinary foreground session with an ordinary id stays writable.
+    expect(sessionReadOnlyReason(session({ id: 'sesordinary01', visibility: 'foreground' }))).toBeNull();
+  });
+
+  it('withdraws every session write the same way archive does', () => {
+    // One reason feeds all of them, so the transcript/Show Page/header affordances
+    // cannot diverge per reason — this is what makes the new reason safe by
+    // construction rather than by auditing each site.
+    const readOnly = isSessionReadOnly(systemSession());
+    expect(readOnly).toBe(true);
+    expect(transcriptSelectionActions(systemSession(), readOnly)).toEqual({
+      quote: false,
+      askInNew: false,
+    });
+    expect(showPageControlActions(readOnly, true)).toEqual({
+      visualize: false,
+      share: false,
+      annotate: false,
+    });
+    expect(isShowPageActive(readOnly, true)).toBe(false);
+  });
+
+  it('renders a System badge and no invented agent route', () => {
+    const markup = render(
+      <ChatHeaderBar
+        session={systemSession()}
+        agents={[]}
+        defaultAgentName="claude"
+        onPatch={async () => undefined}
+        onBack={() => undefined}
+        working={false}
+        showPageMode={false}
+        showPageBusy={false}
+        onToggleShowPage={() => undefined}
+        annotation={{
+          state: null,
+          iframeRef: { current: null },
+          handleIframeLoad: () => undefined,
+          enable: () => undefined,
+          disable: () => undefined,
+          setMode: () => undefined,
+        }}
+        readOnlyReason="system"
+      />,
+    );
+    expect(markup).toContain('Model Hub'); // the header did render
+    expect(markup).toContain(en.common.systemSession);
+    // It is not archived, so it must not say so...
+    expect(markup).not.toContain(en.common.archived);
+    // ...and it has no backend, so the default agent's name must not be borrowed as
+    // this session's route (the archived header's fallback would have printed it).
+    expect(markup).not.toContain('claude');
+    expect(markup).not.toContain(en.newSession.defaultAgent);
+    // Same withdrawn cluster as the archived header: Back only.
+    expect(countButtons(markup)).toBe(1);
+    expect(markup).not.toContain('Visualize');
+    expect(markup).not.toContain('Share');
+  });
+
+  it('tells the composer what this session receives instead of calling it archived', () => {
+    const markup = render(
+      <Composer
+        onSend={() => undefined}
+        onStop={() => undefined}
+        disabled
+        placeholder={en.chat.compose.placeholderSystem}
+      />,
+    );
+    expect(markup).toContain(en.chat.compose.placeholderSystem);
+    expect(markup).not.toContain(en.chat.compose.placeholderArchived);
+    // Inert, exactly like the archived composer.
+    expect(countDisabledButtons(markup)).toBe(countButtons(markup));
+  });
+
+  it('reports the coded 403 as a sentence, not as "[object Object]"', () => {
+    // The composer is inert, so this body is only reachable from a client whose loaded
+    // payload predates ``visibility`` (the field is optional for exactly that reason) —
+    // which is precisely the case that must not render an object cast to a string. The
+    // send path uses a RAW apiFetch, so ``handleApiError`` never runs and the branch has
+    // to apply the shared selector itself.
+    const coded = {
+      ok: false,
+      code: 'reserved_session',
+      message: 'This session only receives Avibe’s workspace failure notifications.',
+      error: {
+        code: 'reserved_session',
+        message: 'This session only receives Avibe’s workspace failure notifications.',
+      },
+    };
+    const parsed = selectApiErrorFields(coded, 'HTTP 403');
+    expect(parsed?.code).toBe('reserved_session');
+    expect(parsed?.fallback).toBe(coded.message);
+    expect(String(parsed?.fallback)).not.toBe('[object Object]');
+    // The pre-fix expression, kept as the refutation.
+    expect(String(coded.error)).toBe('[object Object]');
+    // A flat legacy body still resolves to its sentence, so the branch is unchanged
+    // for every route that has not adopted the coded shape.
+    expect(selectApiErrorFields({ error: 'text or content is required' }, 'HTTP 400')?.fallback).toBe(
+      'text or content is required',
+    );
+  });
+
+  it('has its own copy in both bundles, distinct from the archived wording', () => {
+    // A read-only reason with borrowed copy is the defect this reason exists to avoid:
+    // "This session is archived" is false on a row that was never archived.
+    for (const bundle of [en, zh]) {
+      expect(bundle.chat.compose.placeholderSystem).toBeTruthy();
+      expect(bundle.chat.compose.placeholderSystem).not.toBe(bundle.chat.compose.placeholderArchived);
+      expect(bundle.common.systemSession).toBeTruthy();
+      expect(bundle.common.systemSession).not.toBe(bundle.common.archived);
+      // The machine code the server's 403 carries, for a client that surfaces it
+      // through the shared ``errors.<code>`` resolution.
+      expect(bundle.errors.reserved_session).toBeTruthy();
+    }
+    // en/zh parity: the Chinese bundle must not be the English string.
+    expect(zh.chat.compose.placeholderSystem).not.toBe(en.chat.compose.placeholderSystem);
+    expect(zh.common.systemSession).not.toBe(en.common.systemSession);
   });
 });
 
@@ -532,6 +801,78 @@ describe('read-only transcript locks the secret-request cards', () => {
   });
 });
 
+describe('Agent result metrics tail', () => {
+  const footer = '✅ ⏱️ 5s · 🪙 1.2k tok';
+  const displayedFooter = '⏱️ 5s · 🪙 1.2k tok';
+
+  it('renders structured duration and token usage once, after the timestamp', () => {
+    const markup = render(
+      <MessageRow
+        message={agentWithQuickReplies({ result_footer: footer })}
+        session={session()}
+        messageFontSize={13}
+      />,
+    );
+
+    expect(markup).not.toContain(footer);
+    expect(markup.split(displayedFooter)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
+    expect(markup).toContain(
+      'opacity-0 transition-opacity duration-150 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100',
+    );
+    expect(markup).toContain('flex-wrap');
+  });
+
+  it('moves a legacy folded footer out of the Markdown body', () => {
+    const legacy = {
+      ...agentWithQuickReplies(),
+      text: `Answer body\n\n${footer}`,
+      content: {},
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={legacy} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup).toContain('Answer body');
+    expect(markup).not.toContain(footer);
+    expect(markup.split(displayedFooter)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
+  });
+
+  it('renders a footer-only completion in metadata without an empty bubble', () => {
+    const footerOnly = {
+      ...agentWithQuickReplies(),
+      text: footer,
+      content: {},
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={footerOnly} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup).not.toContain(footer);
+    expect(markup.split(displayedFooter)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
+    expect(markup).not.toContain('vr-markdown--inherit-size');
+  });
+
+  it('removes a legacy folded footer from an error status pill', () => {
+    const legacyError = {
+      ...agentWithQuickReplies(),
+      type: 'error',
+      text: `Failed to finish\n\n${footer}`,
+      content: {},
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={legacyError} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup).toContain('Failed to finish');
+    expect(markup).not.toContain(footer);
+    expect(markup.split(displayedFooter)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
+  });
+});
+
 describe('agent-authored local file links', () => {
   const linkedMessage = (author: 'agent' | 'user'): WorkbenchMessage => ({
     ...agentWithQuickReplies(),
@@ -619,5 +960,23 @@ describe('agent-authored local file links', () => {
     expect(markup.match(/data-local-file-link/g)).toHaveLength(1);
     expect(markup).toContain('href="/tmp/report.md"');
     expect(markup).not.toContain('href="/tmp/preview.png"');
+  });
+});
+
+// ── Codex review round 2 (useSessionActions.tsx:216) ─────────────────────────
+// The archive confirm dialog is owned by a hook instance that OUTLIVES the session
+// it was opened for: ChatPage is reused across session ids. Stored as a bare `open`
+// boolean, a request for A was inherited by B — the dialog re-appeared already open,
+// re-pointed, one Enter from archiving the wrong session.
+describe('a pending archive request belongs to one session', () => {
+  it('is live only while the target is still the session it was requested for', () => {
+    expect(archiveRequestIsLive('ses_a', 'ses_a')).toBe(true);
+    // Navigated on, or the row moved: B must not inherit A's request.
+    expect(archiveRequestIsLive('ses_a', 'ses_b')).toBe(false);
+    // The target went read-only mid-flight (another tab archived it) or unloaded.
+    expect(archiveRequestIsLive('ses_a', null)).toBe(false);
+    // Nothing requested: an existing target never opens the dialog by itself.
+    expect(archiveRequestIsLive(null, 'ses_a')).toBe(false);
+    expect(archiveRequestIsLive(null, null)).toBe(false);
   });
 });

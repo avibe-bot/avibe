@@ -15,12 +15,13 @@
 // indented to match the frame. The sm+ layout is byte-for-byte the desktop
 // frame, so the fixed-width chip columns still align down the list.
 import * as React from 'react';
-import { LogIn, Plus } from 'lucide-react';
+import { LogIn, Plus, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { formatRelativeTime } from '@/lib/relativeTime';
 import { BillingChip, ExperimentalChip, StateChip } from './chips';
 import { SupplyTooltip } from './SupplyTooltip';
 import { SourceRowMenu, type RaisedRepair } from './SourceRowMenu';
@@ -120,13 +121,16 @@ const StateCell: React.FC<{ source: Source }> = ({ source }) => (
 
 export const SourceRow: React.FC<{
   source: Source;
-  /** Re-fetch after a row action (rename / re-discover / delete). */
+  /** Re-fetch after a row action (rename / delete). */
   onChanged: () => void;
+  onRefresh: (source: Source) => void;
+  refreshing: boolean;
+  refreshDisabled: boolean;
   /** Open a repair journey the page hosts — see SourceRowMenu's `onRepair`. */
   onRepair?: (source: Source, kind: RaisedRepair) => void;
   /** Open the shared manual-model action with this source preselected. */
   onAddModel: (source: Source) => void;
-}> = ({ source, onChanged, onRepair, onAddModel }) => {
+}> = ({ source, onChanged, onRefresh, refreshing, refreshDisabled, onRepair, onAddModel }) => {
   const { t } = useTranslation();
   const { Icon, accent } = sourceVisual(source);
   const subline = useSubline(source);
@@ -189,15 +193,48 @@ export const SourceRow: React.FC<{
           slot because a stopped row puts its one-tap remedy beside the ⋯ — both
           come from the menu component, which owns the actions. */}
       <div className="order-2 flex shrink-0 items-center gap-1.5 sm:order-3">
-        <SourceRowMenu source={source} onChanged={onChanged} onRepair={onRepair} />
+        <SourceRowMenu
+          source={source}
+          onChanged={onChanged}
+          onRefresh={onRefresh}
+          refreshing={refreshing}
+          refreshDisabled={refreshDisabled}
+          onRepair={onRepair}
+        />
       </div>
       </div>
 
       <div className="flex flex-col gap-2 border-t border-border/70 bg-foreground/[0.012] px-4 py-3 sm:px-5">
         <div className="flex items-center justify-between gap-3">
-          <span className="text-[11px] font-semibold text-muted">
-            {t('settings.models.sources.modelCount', { count: source.models.length })}
-          </span>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+            <span className="text-[11px] font-semibold text-muted">
+              {t('settings.models.sources.modelCount', { count: source.models.length })}
+            </span>
+            <span className="text-[10.5px] text-muted">
+              {source.last_discovered_at
+                ? t('settings.models.sources.lastDiscovery', {
+                    time: formatRelativeTime(source.last_discovered_at, t),
+                  })
+                : t('settings.models.sources.neverDiscovered')}
+            </span>
+            {source.supply_channel === 'hub' && (
+              <button
+                type="button"
+                onClick={() => onRefresh(source)}
+                disabled={refreshDisabled}
+                aria-busy={refreshing}
+                aria-label={t(
+                  refreshing
+                    ? 'settings.models.sourceActions.refreshing'
+                    : 'settings.models.sourceActions.refresh',
+                ) as string}
+                title={t('settings.models.sourceActions.refresh') as string}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                <RefreshCw className={cn('size-3.5', refreshing && 'animate-spin')} />
+              </button>
+            )}
+          </div>
           {source.kind === 'api_key' && (
             <button
               type="button"

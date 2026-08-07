@@ -76,7 +76,6 @@ def test_public_surface_is_stable():
         "is_session_archived",
         "list_sessions",
         "list_sessions_page",
-        "reset_running_agent_status",
         "set_agent_status",
         "touch_session",
         "update_session",
@@ -89,6 +88,10 @@ def test_public_surface_is_stable():
         "SessionArchivedError",
         # Localized user-facing copy for that guard's 409 body:
         "session_archived_message",
+        # Reserved-row guard raised by archive_session for the workspace-notifications
+        # session (D5 rung (5)'s home): archive is terminal, and archiving that row
+        # would silently swallow every later caller-less failure notice.
+        "ReservedSessionError",
     }
     assert set(sessions_service.__all__) == expected | {"SESSION_ARCHIVED_I18N_KEY"}
     for name in expected:
@@ -110,7 +113,6 @@ def test_each_workbench_function_delegates_to_storage():
         "get_session",
         "is_session_archived",
         "list_sessions",
-        "reset_running_agent_status",
         "set_agent_status",
         "touch_session",
         "update_session",
@@ -563,22 +565,6 @@ def test_set_agent_status_rejects_unknown_value(isolated_state):
         assert sessions_service.get_session(conn, sid)["agent_status"] == "idle"
 
 
-def test_reset_running_agent_status_clears_only_running(isolated_state):
-    """Startup recovery: stale ``running`` → ``idle``; failed/idle untouched."""
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = _seed_avibe_scope(conn)
-        running = sessions_service.create_session(conn, scope_id=scope_id, agent_backend="claude")["id"]
-        failed = sessions_service.create_session(conn, scope_id=scope_id, agent_backend="claude")["id"]
-        sessions_service.set_agent_status(conn, running, "running")
-        sessions_service.set_agent_status(conn, failed, "failed")
-        reset = sessions_service.reset_running_agent_status(conn)
-    assert reset == 1
-    with engine.connect() as conn:
-        assert sessions_service.get_session(conn, running)["agent_status"] == "idle"
-        assert sessions_service.get_session(conn, failed)["agent_status"] == "failed"
-
-
 def _bind_native(conn, session_id: str, native_id: str = "native-1") -> None:
     """Simulate the first turn's native bind (``bind_agent_session_by_id``)."""
     conn.execute(
@@ -716,14 +702,11 @@ def test_update_session_running_turn_locks_agent_less_session_too(isolated_state
         assert sessions_service.get_session(conn, sid)["agent_backend"] == "codex"
 
 
-def test_update_session_backend_switch_loses_race_with_native_bind(isolated_state):
-    """The lock guard is read-then-write and the first turn's native bind can
-    commit in between (the SELECT runs before the UPDATE takes the write lock).
-    The UPDATE re-asserts the lock in its WHERE predicate, so a cross-backend
-    switch that loses the race raises instead of stamping a backend that
-    mismatches the backend owning the just-bound native."""
+def test_update_session_backend_switch_reserves_writer_before_decision(isolated_state):
+    """A route edit and first native bind are serialized before the decision read."""
 
     from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -733,29 +716,33 @@ def test_update_session_backend_switch_loses_race_with_native_bind(isolated_stat
         )["id"]
 
     bind_engine = create_sqlite_engine()
-    fired = {"done": False}
+    race = {"fired": False, "blocked": False}
 
-    def bind_native_before_update(_conn, _cursor, statement, _params, _context, _executemany):
-        # Right before update_session's UPDATE executes — i.e. AFTER its lock
-        # check read "no native yet" — land the first turn's native bind on a
-        # separate connection, exactly the racing interleave.
-        if fired["done"] or not statement.lstrip().upper().startswith("UPDATE AGENT_SESSIONS"):
+    def bind_native_after_read(_conn, _cursor, statement, _params, _context, _executemany):
+        if race["fired"] or not statement.lstrip().upper().startswith("SELECT AGENT_SESSIONS.ID"):
             return
-        fired["done"] = True
-        with bind_engine.begin() as bind_conn:
-            _bind_native(bind_conn, sid)
+        race["fired"] = True
+        try:
+            with bind_engine.begin() as bind_conn:
+                bind_conn.exec_driver_sql("PRAGMA busy_timeout = 1")
+                _bind_native(bind_conn, sid)
+        except OperationalError as exc:
+            race["blocked"] = "database is locked" in str(exc)
 
-    event.listen(engine, "before_cursor_execute", bind_native_before_update)
+    event.listen(engine, "after_cursor_execute", bind_native_after_read)
     try:
         with engine.begin() as conn:
-            with pytest.raises(sessions_service.SessionBackendLockedError):
-                sessions_service.update_session(conn, sid, agent_backend="codex", agent_name="codex")
+            sessions_service.update_session(conn, sid, agent_backend="codex", agent_name="codex")
     finally:
-        event.remove(engine, "before_cursor_execute", bind_native_before_update)
+        event.remove(engine, "after_cursor_execute", bind_native_after_read)
 
-    assert fired["done"], "race interleave never triggered — test setup is broken"
+    assert race == {"fired": True, "blocked": True}
+    with bind_engine.begin() as bind_conn:
+        _bind_native(bind_conn, sid)
     with engine.connect() as conn:
-        assert sessions_service.get_session(conn, sid)["agent_backend"] == "claude"
+        session = sessions_service.get_session(conn, sid)
+        assert session["agent_backend"] == "codex"
+        assert session["native_session_id"] == "native-1"
 
 
 def test_update_session_legacy_blank_backend_keeps_initial_pin_escape(isolated_state):

@@ -198,7 +198,11 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
       <div className="flex flex-col gap-1">
         <div className="text-[16px] font-bold text-foreground">{nodeDisplayTitle(node)}</div>
         <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
-          {node.agent_name && <span className="font-medium text-foreground">{node.agent_name}</span>}
+          {(node.agent_display_name || node.agent_name) && (
+            <span className="font-medium text-foreground">
+              {node.agent_display_name || node.agent_name}
+            </span>
+          )}
           {node.agent_backend && (
             <span className="rounded border border-border-strong bg-foreground/[0.04] px-1 font-mono text-[9px] font-bold uppercase">
               {node.agent_backend}

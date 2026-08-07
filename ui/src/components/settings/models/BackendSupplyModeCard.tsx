@@ -189,12 +189,9 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
             backend: t(`settings.models.backends.${backend}`, { defaultValue: backend }),
           }) as string}
         >
-          {/* The banner asks the supply question, not the pin question: a Hub
-              backend with no pinned model has `current: null` and is perfectly
-              healthy, so keying the warning off that field warned the wrong
-              people — and reassured the interrupted ones with a Direct fallback
-              that does not exist. `fixHint` is appended only where a human can
-              actually do something; a cooling source needs no instructions. */}
+          {/* The banner asks the supply question. `fixHint` is appended only
+              where a human can actually do something; a cooling source needs
+              no instructions. */}
           {mode === 'hub' && isSupplyWarning(hubOutcome) && (
             <div className="flex items-start gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5 text-[12px] leading-relaxed text-foreground">
               <Info className="mt-0.5 size-3.5 shrink-0 text-gold" />

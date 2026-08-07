@@ -9,16 +9,60 @@
 // transcript must stay fully readable while every mutating affordance is
 // withdrawn — hidden, not left clickable-and-erroring.
 //
+// Archive is no longer the ONLY read-only reason: a ``visibility === 'system'``
+// session is a row the RUNTIME owns (today the workspace-notifications session
+// that harness failure notices fall back to — "no backend and no turns"). It is
+// admitted to the Inbox on purpose, so its card is a clickable chat, and
+// ``POST /api/sessions/<id>/messages`` answers ``403 {"code":
+// "reserved_session"}`` there. Same shape as archive, different sentence — hence
+// a read-only REASON rather than a second boolean.
+//
 // These live beside ChatPage rather than inside it (the harnessRuns.ts pattern)
 // so the decisions are unit-tested without mounting a 3000-line component — the
 // page just reads the answers.
 import type { WorkbenchSession } from '../../context/ApiContext';
 
+/** The reserved workspace-notifications session's id — the server's
+ *  ``WORKSPACE_NOTICE_SESSION_ID`` (``storage/agent_session_rows.py``), whose primary
+ *  key is deliberately outside ``SESSION_ID_ALPHABET`` so no ordinary session can ever
+ *  collide with it. Mirrored here because the server's ``session_is_runtime_owned``
+ *  refuses this row by IDENTITY as well as by visibility, and the UI must reach the
+ *  same answer from the same two tests. */
+export const WORKSPACE_NOTICE_SESSION_ID = 'ses-workspace-notices';
+
+/** Why the chat surface is read-only, or ``null`` when it is writable.
+ *
+ *  ``archived`` is checked FIRST: it is the terminal lifecycle state, so it wins over
+ *  ownership if a system row is ever also archived (the reserved row heals itself back
+ *  out of that, but only on the next notice).
+ *
+ *  ``system`` is TWO TESTS, OR'd, mirroring the server's
+ *  ``session_is_runtime_owned``: the ``visibility`` projection (so a future
+ *  system-owned row inherits the lock), and the reserved IDENTITY — which covers the
+ *  states where the projection is momentarily wrong. The reserved row heals lazily,
+ *  on the next notice, so a drifted ``foreground`` copy of it stays reachable through
+ *  the Inbox in the meantime; without the identity half the composer, route picker
+ *  and fork controls would render there just to collect ``403 reserved_session``. */
+export type SessionReadOnlyReason = 'archived' | 'system';
+
+export const sessionReadOnlyReason = (
+  session: WorkbenchSession | null,
+): SessionReadOnlyReason | null => {
+  if (!session) return null;
+  if (session.status === 'archived') return 'archived';
+  if (session.visibility === 'system' || session.id === WORKSPACE_NOTICE_SESSION_ID) {
+    return 'system';
+  }
+  return null;
+};
+
 /** One predicate owns "this session can never accept another write", so the
  *  composer, header, transcript, queue strip and vault cards all derive the same
- *  fact instead of each site re-deriving it. */
+ *  fact instead of each site re-deriving it. Derived from the reason so a new reason
+ *  locks every one of those affordances by construction, and only the COPY has to
+ *  learn about it. */
 export const isSessionReadOnly = (session: WorkbenchSession | null): boolean =>
-  session?.status === 'archived';
+  sessionReadOnlyReason(session) !== null;
 
 /** A ``409 {"code": "session_archived"}`` from any session-scoped write is the
  *  server stating this row is archived. Same shape for the messages POST and the
@@ -44,6 +88,24 @@ export const markSessionArchived = (
   sessionId: string,
 ): WorkbenchSession | null =>
   prev && prev.id === sessionId && prev.status !== 'archived' ? { ...prev, status: 'archived' } : prev;
+
+/** Whether a pending archive request still belongs to the session in front of the
+ *  user — i.e. whether the confirm dialog may be open.
+ *
+ *  The archive request outlives no session but its own. ``ChatPage`` (and the hook
+ *  that owns this state) is REUSED across session ids — a route param change, not a
+ *  remount — so a request stored as a bare ``open`` boolean is inherited: open the
+ *  dialog for A, have A go read-only mid-flight (another tab archived it, SSE
+ *  converges) or simply navigate to B, and the dialog re-appears already open and
+ *  re-pointed at B, one Enter away from archiving the wrong session (Codex).
+ *
+ *  Storing the requested ID and comparing it here closes that by construction: the
+ *  dialog can only be open for the session the user actually asked about, and a
+ *  target that moved or disappeared cannot inherit the request. */
+export const archiveRequestIsLive = (
+  requestedSessionId: string | null,
+  targetSessionId: string | null,
+): boolean => requestedSessionId !== null && requestedSessionId === targetSessionId;
 
 /** Which text-selection actions the transcript offers.
  *

@@ -303,6 +303,34 @@ async def reconcile_agent_backends(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def test_backend_auth(
+    backend: str,
+    *,
+    model: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """Run a Settings connection probe on the controller-owned Agent runtime."""
+
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    payload: dict[str, Any] = {"backend": backend}
+    if model:
+        payload["model"] = model
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            resp = await client.post("/internal/backend-auth/test", json=payload)
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
 async def reconcile_memory(
     *,
     socket_path: Optional[Path] = None,
@@ -727,7 +755,12 @@ async def end_running_agent(payload: dict[str, Any], *, socket_path: Optional[Pa
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def send_now(session_id: str, *, socket_path: Optional[Path] = None) -> dict[str, Any]:
+async def send_now(
+    session_id: str,
+    *,
+    expected_delivery_id: str | None = None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
     """Ask the controller to run a session's send-while-busy queue immediately
     ("立即发送"): interrupt any running turn + flush the queue. Returns
     ``{status_code, body}``; raises ``InternalServerUnavailable`` on socket
@@ -745,7 +778,14 @@ async def send_now(session_id: str, *, socket_path: Optional[Path] = None) -> di
             # slow-but-successful interrupt isn't read-timed-out.
             timeout=httpx.Timeout(30.0, connect=1.0),
         ) as client:
-            resp = await client.post(f"/internal/send-now/{session_id}")
+            resp = await client.post(
+                f"/internal/send-now/{session_id}",
+                params=(
+                    {"expected_delivery_id": expected_delivery_id}
+                    if expected_delivery_id
+                    else None
+                ),
+            )
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}

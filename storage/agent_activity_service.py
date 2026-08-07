@@ -3,20 +3,23 @@
 Composes the two persisted trace sources into per-turn groups:
 
 * interim ``assistant`` messages (``messages`` table, ``type='assistant'``), and
-* ``tool_call`` events (``agent_events`` table, ``event_type='tool_call'``).
+* activity and migrated terminal events from ``agent_events``.
 
-A *turn* is bounded by transcript markers rather than an id: it ends at the
-agent's terminal reply (``result`` / ``error`` / backend-failure ``notify``) or,
-when the user starts a new turn without one, is reported as ``interrupted``.
-Grouping is chronological because ``messages`` carries no ``turn_id`` (only
-``agent_events`` does). Both tables persist WHOLE-SECOND ``...Z`` ``created_at``,
-which cannot order same-second rows — but both also mint ids with a MICROSECOND
-clock prefix (``<pfx>_<15-hex microsecond epoch><uuid8>``), so the merge sorts by
+A *turn* ends at the agent's terminal reply (``result`` / ``error`` /
+backend-failure ``notify``) or, when a new turn starts without one, is reported
+as ``interrupted``. Durable input roles and start boundaries come from the
+Delivery-to-Turn ownership graph: an initial Delivery opens its accepted Turn,
+while accepted steer participants remain inside that Turn. Legacy/non-durable
+rows fall back to transcript chronology. Message/event rows persist whole-second
+``created_at``, but both also mint ids with a MICROSECOND clock prefix
+(``<pfx>_<15-hex microsecond epoch><uuid8>``), so the merge sorts by
 that decoded microsecond, recovering the true emission order ACROSS tables (a fast
 turn's tool call before its same-second terminal; one turn's terminal before the
-next turn's same-second opener). A phase tiebreak (turn-start < activity <
-terminal) only applies when the microsecond can't be decoded (format drift), and
-the whole-second ``created_at`` still bounds the event scan.
+next turn's same-second opener). Durable Turn terminals retain their own
+subsecond timestamp because they do not have a clock-bearing id. A phase
+tiebreak (turn-start < activity < terminal) only applies when the microsecond
+can't be decoded (format drift), and the whole-second ``created_at`` still
+bounds the event scan.
 
 Each group is keyed by the id of its first activity row (stable across summary
 and detail reads). ``anchor_message_id`` is the transcript message the chip
@@ -34,8 +37,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from sqlalchemy import func, select
+
 from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
+from storage.models import message_deliveries, session_turns
 from vibe.message_types import spec_for, types_with
 
 # Bound the scan. The Chat retains ~300 recent messages and pages older on
@@ -110,7 +116,7 @@ def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
     Terminals: a visible ``result``/``error`` reply, a ``backend_failure`` ``notify``
     diagnostic, OR — when the turn produced nothing user-visible (a ``<silent>``-
     stripped/empty final, or a reply-less bookkeeping turn) — the invisible ``silent``
-    marker persisted at the delivery chokepoint. Only cancel/Stop (no terminal at all)
+    event persisted at the delivery chokepoint. Only cancel/Stop (no terminal at all)
     stays ``interrupted``.
 
     A PLAIN ``notify`` is deliberately NOT terminal: agents emit mid-turn notify rows
@@ -126,6 +132,23 @@ def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
         spec["activityRole"] == "terminal"
         or (metadata or {}).get("event") in spec["terminalWhenEvents"]
     )
+
+
+def _outcome_status(terminal_outcome: Any) -> str:
+    """Render a stored terminal outcome as an activity-group status.
+
+    One mapper for both boundary kinds — the durable Turn row and the IM
+    ``silent_terminal`` trace that stands in for one — so a settlement never means
+    two different things depending on which surface recorded it. A turn that was
+    canceled or never written its outcome is ``interrupted``, not ``done``: it
+    ended without producing an answer, and the group chip should say so.
+    """
+
+    if terminal_outcome == "failed":
+        return "failed"
+    if terminal_outcome in {"canceled", "not_written"}:
+        return "interrupted"
+    return "done"
 
 
 def _terminal_status(msg_type: Any, metadata: Optional[dict] = None) -> str:
@@ -162,6 +185,15 @@ def _emit_micros(row_id: Optional[str], ts: datetime) -> int:
     return int(ts.timestamp() * 1_000_000)
 
 
+def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
+    metadata = event.get("metadata") or {}
+    legacy_message_id = metadata.get("legacy_message_id")
+    return _emit_micros(
+        str(legacy_message_id) if legacy_message_id else event.get("id"),
+        ts,
+    )
+
+
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
     """Merge the recent tail of relevant messages + tool-call events into one
     chronologically-ordered list of classified items."""
@@ -175,10 +207,43 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     events = agent_events_service.list_session_events(
         conn,
         session_id=session_id,
-        event_types=("tool_call",),
+        event_types=("tool_call", "silent_terminal"),
         limit=EVENT_SCAN_LIMIT,
         newest_first=True,
     )
+    message_ids = tuple(
+        str(message["id"])
+        for message in msgs
+        if message.get("id") is not None
+    )
+    accepted_roles: dict[str, dict[str, Any]] = {}
+    if message_ids:
+        rows = conn.execute(
+            select(
+                message_deliveries.c.message_id,
+                message_deliveries.c.id.label("delivery_id"),
+                message_deliveries.c.materialized_at,
+                session_turns.c.initial_delivery_id,
+                session_turns.c.started_at,
+                session_turns.c.created_at.label("turn_created_at"),
+            )
+            .select_from(
+                message_deliveries.join(
+                    session_turns,
+                    session_turns.c.id == message_deliveries.c.turn_id,
+                )
+            )
+            .where(message_deliveries.c.state == "accepted")
+            .where(message_deliveries.c.message_id.in_(message_ids))
+        ).mappings()
+        for row in rows:
+            if row["message_id"] is None:
+                continue
+            key = str(row["message_id"])
+            candidate = dict(row)
+            current = accepted_roles.get(key)
+            if current is None or candidate["delivery_id"] == candidate["initial_delivery_id"]:
+                accepted_roles[key] = candidate
 
     items: list[dict[str, Any]] = []
     for msg in msgs:
@@ -186,21 +251,40 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         author = msg.get("author")
         metadata = msg.get("metadata") or {}
         activity_role = spec_for(mtype if isinstance(mtype, str) else "")["activityRole"]
+        accepted_role = accepted_roles.get(str(msg.get("id") or ""))
         if _is_terminal(mtype, author, metadata):
             kind = "terminal"
         elif activity_role == "turn_start":
-            kind = "turn_start"
+            kind = (
+                "turn_start"
+                if accepted_role is None
+                or accepted_role["delivery_id"]
+                == accepted_role["initial_delivery_id"]
+                else "ignore"
+            )
         elif activity_role == "activity":
             kind = "activity"
         else:
             kind = "ignore"
-        mts = _parse_ts(msg.get("created_at"))
+        created_at = msg.get("created_at")
+        if kind == "turn_start" and accepted_role is not None:
+            created_at = (
+                accepted_role.get("started_at")
+                or accepted_role.get("materialized_at")
+                or accepted_role.get("turn_created_at")
+                or created_at
+            )
+        mts = _parse_ts(created_at)
         items.append(
             {
                 "ts": mts,
-                "sort": _emit_micros(msg.get("id"), mts),
+                "sort": (
+                    int(mts.timestamp() * 1_000_000)
+                    if accepted_role is not None and kind == "turn_start"
+                    else _emit_micros(msg.get("id"), mts)
+                ),
                 "rank": _PHASE_RANK[kind],
-                "created_at": msg.get("created_at"),
+                "created_at": created_at,
                 "kind": kind,
                 "id": msg.get("id"),
                 "mtype": mtype,
@@ -210,7 +294,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 # so a group closing on it must anchor to the (visible) turn trigger
                 # rather than the marker itself; ``terminal_status`` is resolved here so
                 # ``notify`` failure/normal is decided with its metadata in hand.
-                "is_silent": mtype == messages_service.SILENT_TYPE,
+                "is_silent": False,
                 "terminal_status": _terminal_status(mtype, metadata) if kind == "terminal" else None,
             }
         )
@@ -224,8 +308,32 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     oldest_msg_sort = min((item["sort"] for item in items), default=None)
     for event in events:
         event_ts = _parse_ts(event.get("created_at"))
-        event_sort = _emit_micros(event.get("id"), event_ts)
+        event_sort = _event_emit_micros(event, event_ts)
         if oldest_msg_sort is not None and event_sort < oldest_msg_sort:
+            continue
+        if event.get("event_type") == "silent_terminal":
+            terminal_outcome = (event.get("metadata") or {}).get(
+                "terminal_outcome"
+            )
+            items.append(
+                {
+                    "ts": event_ts,
+                    "sort": event_sort,
+                    "rank": _PHASE_RANK["terminal"],
+                    "created_at": event.get("created_at"),
+                    "kind": "terminal",
+                    "id": event.get("id"),
+                    "mtype": "silent_terminal",
+                    "row_kind": "turn_terminal",
+                    "text": None,
+                    "is_silent": True,
+                    # Same mapping as the durable-Turn branch below, because the
+                    # silent marker IS the IM stand-in for one: a turn the service
+                    # retired writes ``canceled`` here too, and rendering that as a
+                    # green ``done`` would claim an answer that was never produced.
+                    "terminal_status": _outcome_status(terminal_outcome),
+                }
+            )
             continue
         items.append(
             {
@@ -238,6 +346,38 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "mtype": "tool_call",
                 "row_kind": "tool_call",
                 "text": event.get("text") if include_text else None,
+            }
+        )
+    for turn in conn.execute(
+        select(
+            session_turns.c.id,
+            session_turns.c.terminal_outcome,
+            session_turns.c.terminal_at,
+        )
+        .where(session_turns.c.session_id == session_id)
+        .where(session_turns.c.state == "terminal")
+        .where(session_turns.c.terminal_outcome != "not_written")
+        .where(session_turns.c.terminal_at.is_not(None))
+        .order_by(
+            func.julianday(session_turns.c.terminal_at).desc(),
+            session_turns.c.id.desc(),
+        )
+        .limit(MESSAGE_SCAN_LIMIT)
+    ).mappings():
+        terminal_ts = _parse_ts(turn["terminal_at"])
+        items.append(
+            {
+                "ts": terminal_ts,
+                "sort": int(terminal_ts.timestamp() * 1_000_000),
+                "rank": _PHASE_RANK["terminal"],
+                "created_at": turn["terminal_at"],
+                "kind": "terminal",
+                "id": f"turn-terminal:{turn['id']}",
+                "mtype": "turn_terminal",
+                "row_kind": "turn_terminal",
+                "text": None,
+                "is_silent": True,
+                "terminal_status": _outcome_status(turn["terminal_outcome"]),
             }
         )
     # Sort by decoded emission microsecond (true cross-table order); the phase rank

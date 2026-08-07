@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from storage import message_deliveries as delivery_store
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
 
 
@@ -350,6 +352,56 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._restart_for_auth_refresh_locked.assert_not_awaited()
         manager._start_server.assert_not_awaited()
 
+    async def test_ensure_running_retires_generation_before_process_replacement(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        events = []
+        manager._runtime_generation_token = (111, 1.0)
+        manager.set_runtime_activation_retire(
+            lambda force: events.append(("retire", force)) or True
+        )
+        manager._is_healthy = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._is_port_available = lambda: True  # type: ignore[method-assign]
+        manager._start_server = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda: events.append(("start", True))
+        )
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            await manager.ensure_running()
+
+        self.assertEqual(events, [("retire", True), ("start", True)])
+
+    async def test_ensure_running_retires_generation_when_adopted_pid_changes(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        retired = []
+        manager._runtime_generation_token = (111, 1.0)
+        manager.set_runtime_activation_retire(
+            lambda force: retired.append(force) or True
+        )
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 222,
+            "port": 4096,
+            "started_at": 2.0,
+            "caller_context_path": manager._caller_context_path(),
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            await manager.ensure_running()
+
+        self.assertEqual(retired, [True])
+        self.assertEqual(manager._runtime_generation_token, (222, 2.0))
+
     async def test_prompt_async_percent_encodes_directory_header(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()
@@ -418,6 +470,50 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake_session.posts), 1)
         body = fake_session.posts[0]["json"]
         self.assertEqual(body["tools"], {"question": False})
+
+    async def test_prompt_async_uses_opencode_native_attempt_part(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        fake_session = _FakeSession()
+
+        async def _fake_get_http_session():
+            return fake_session
+
+        manager._get_http_session = _fake_get_http_session  # type: ignore[method-assign]
+
+        await manager.prompt_async(
+            session_id="ses-1",
+            directory="/tmp/work",
+            text="hello",
+            attempt_id="atm_1234567890abcdef1234567890abcdef",
+        )
+
+        body = fake_session.posts[0]["json"]
+        self.assertNotIn("messageID", body)
+        self.assertEqual(
+            body["parts"],
+            [
+                {
+                    "type": "text",
+                    "text": "hello",
+                    "id": "prt_1234567890abcdef1234567890abcdef",
+                }
+            ],
+        )
+
+    def test_durable_attempt_maps_to_opencode_part_evidence(self):
+        attempt_id = delivery_store.new_attempt_id()
+
+        self.assertRegex(attempt_id, r"^atm_[0-9a-f]{32}$")
+        self.assertEqual(
+            SERVER_MODULE.native_part_id_for_attempt(attempt_id),
+            f"prt_{attempt_id.removeprefix('atm_')}",
+        )
+
+    def test_unreleased_ordered_attempt_identity_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SERVER_MODULE.native_part_id_for_attempt(
+                "atm_1234567890000123456789abcd"
+            )
 
     async def test_prompt_async_exposes_definitive_http_rejection(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

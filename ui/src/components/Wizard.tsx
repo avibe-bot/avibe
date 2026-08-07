@@ -84,7 +84,6 @@ const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
       enabled: data.agents?.opencode?.enabled ?? true,
       cli_path: data.agents?.opencode?.cli_path || 'opencode',
       default_agent: data.opencode_default_agent ?? data.agents?.opencode?.default_agent ?? null,
-      default_model: data.opencode_default_model ?? data.agents?.opencode?.default_model ?? null,
       default_reasoning_effort: data.opencode_default_reasoning_effort ?? data.agents?.opencode?.default_reasoning_effort ?? null,
     },
     claude: {
@@ -92,14 +91,12 @@ const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
       ...data.agents?.claude,
       enabled: data.agents?.claude?.enabled ?? true,
       cli_path: data.agents?.claude?.cli_path || 'claude',
-      default_model: data.claude_default_model ?? data.agents?.claude?.default_model ?? null,
     },
     codex: {
       // Preserve existing codex config
       ...data.agents?.codex,
       enabled: data.agents?.codex?.enabled ?? false,
       cli_path: data.agents?.codex?.cli_path || 'codex',
-      default_model: data.codex_default_model ?? data.agents?.codex?.default_model ?? null,
     },
   },
   // Preserve gateway config entirely

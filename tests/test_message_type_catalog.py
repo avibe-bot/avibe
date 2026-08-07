@@ -15,7 +15,6 @@ from vibe.message_types import (
     input_author_type_pairs,
     spec_for,
     types_with,
-    types_without,
 )
 
 
@@ -46,11 +45,31 @@ def _catalog_types() -> tuple[str, ...]:
     return tuple(_catalog_document()["types"])
 
 
-def _sequence_params(statement: Any) -> set[tuple[str, ...]]:
+def _message_type_sequences(statement: Any) -> set[tuple[str, ...]]:
+    """Every message-TYPE set a query binds, i.e. each expanding IN/NOT IN over
+    ``messages.c.type``.
+
+    Scoped to that column by bound-parameter NAME: SQLAlchemy names an expanding
+    parameter after the column it compares, so ``messages.c.type.in_(...)`` binds
+    ``type_1``, ``type_2``, … and no other column in these queries compiles to that
+    prefix. The scoping is the point — this module's contract is the message-type
+    catalog, and these queries also bind sequences over OTHER columns whose contents
+    are somebody else's decision:
+
+    ``list_inbox_sessions`` / ``unread_counts`` / ``unread_counts_by_session`` now also
+    bind ``agent_sessions.c.visibility`` (``INBOX_SESSION_VISIBILITIES`` ==
+    ``('foreground', 'system')``) since the reserved workspace-notifications row became
+    a ``system`` surface — a session-projection decision pinned by
+    ``tests/test_workspace_system_session.py``. Collecting every sequence indiscriminately
+    made that legitimate change fail three catalog assertions, which says the filter
+    belongs here rather than in the expectations: adding the visibility tuple to each
+    expected set would have this module re-pin a contract it does not own (and go red
+    again on the next non-type IN-list).
+    """
     return {
         tuple(value)
-        for value in statement.compile().params.values()
-        if isinstance(value, (list, tuple))
+        for name, value in statement.compile().params.items()
+        if isinstance(value, (list, tuple)) and (name == "type" or name.startswith("type_"))
     }
 
 
@@ -78,28 +97,28 @@ def test_searchable_types_match_current_default_query() -> None:
 
     expected = ("user", "harness", "annotation", "result")
     assert types_with("searchable") == expected
-    assert _sequence_params(connection.statements[-1]) == {expected}
+    assert _message_type_sequences(connection.statements[-1]) == {expected}
 
 
 def test_inbox_activity_types_match_current_constant() -> None:
-    expected = ("queued", "draft", "pending", "harness_dedupe", "silent")
-    assert types_without("inboxActivity") == expected
-    assert messages_service.NON_CONVERSATION_TYPES == expected
+    expected = ("user", "harness", "annotation", "result", "notify", "error", "assistant")
+    assert types_with("inboxActivity") == expected
+    assert messages_service.INBOX_ACTIVITY_TYPES == expected
 
 
 def test_inbox_preview_and_settlement_types_match_current_query() -> None:
     connection = _CaptureConnection()
     messages_service.list_inbox_sessions(connection)
-    current_query_sets = _sequence_params(connection.statements[-1])
+    current_query_sets = _message_type_sequences(connection.statements[-1])
 
     expected_preview = ("result", "notify", "error")
-    expected_settlement = ("result", "notify", "error", "silent")
+    expected_settlement = ("result", "notify", "error")
     expected_unread = ("result",)
     assert types_with("inboxPreview") == expected_preview
     assert types_with("inboxSettlesReply") == expected_settlement
     assert types_with("unread") == expected_unread
     assert current_query_sets == {
-        messages_service.NON_CONVERSATION_TYPES,
+        messages_service.INBOX_ACTIVITY_TYPES,
         expected_preview,
         expected_settlement,
         expected_unread,
@@ -116,7 +135,7 @@ def test_unread_types_match_current_queries(query: Any) -> None:
 
     expected = ("result",)
     assert types_with("unread") == expected
-    assert _sequence_params(connection.statements[-1]) == {expected}
+    assert _message_type_sequences(connection.statements[-1]) == {expected}
 
 
 def test_input_turn_pairs_match_current_constant() -> None:
@@ -142,7 +161,6 @@ def test_annotation_catalog_contract_is_explicit() -> None:
         "unread": False,
         "webPush": False,
         "webPushWhenEvents": (),
-        "acceptedReservation": True,
         "render": "annotation",
     }
 
@@ -160,7 +178,6 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
         "result",
         "notify",
         "error",
-        "silent",
         "assistant",
     )
     assert derived_relevant == set(expected_relevant)

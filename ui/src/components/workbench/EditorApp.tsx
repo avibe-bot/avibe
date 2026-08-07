@@ -8,6 +8,7 @@ import { MAX_RESTORED_TABS, WINDOW_RESTORE_PARAM } from '../../lib/workbenchPers
 import { FilesApiError, contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind } from '../../lib/filePreview';
 import { adjustEditorFontSize, resetEditorFontSize } from '../../lib/editorFontSize';
+import { IS_APPLE } from '../../lib/platform';
 import { forgetRecentFile, loadEditorRecents, recentPathLabel, rememberRecentFile, rememberRecentFolder, removeRecentFile, type EditorRecents, type RecentFile } from '../../lib/editorRecents';
 import { FileTree } from './FileTree';
 import { FilePreview } from '../ui/file-preview';
@@ -76,10 +77,6 @@ type RecentOpenResult = 'opened' | 'gone' | 'unavailable';
 // (Monaco's detected insertSpaces / tabSize). Stored per tab so switching tabs shows the target
 // file's real values immediately, without waiting for its cursor to move.
 type PaneStatus = { line: number; col: number; insertSpaces: boolean; tabSize: number };
-
-const IS_APPLE =
-  typeof navigator !== 'undefined' &&
-  /Mac|iP(hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
 
 type FontZoom = 'in' | 'out' | 'reset';
 function fontZoomIntent(e: KeyboardEvent): FontZoom | null {

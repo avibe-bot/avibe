@@ -42,6 +42,48 @@ def get_claude_client_pid(client: object | None) -> int | None:
     return pid if isinstance(pid, int) and pid > 0 else None
 
 
+def get_claude_client_returncode(client: object | None) -> int | None:
+    """Return the Claude CLI exit code once its subprocess has terminated."""
+    transport = getattr(client, "_transport", None)
+    process = getattr(transport, "_process", None)
+    returncode = getattr(process, "returncode", None)
+    if isinstance(returncode, bool) or not isinstance(returncode, int):
+        return None
+    return returncode
+
+
+def claude_process_exit_reason(returncode: int) -> str:
+    """Format a subprocess exit code for logs and user-facing diagnostics."""
+    if returncode < 0:
+        signal_number = -returncode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"signal {signal_number}"
+        return f"{signal_name} (signal {signal_number})"
+    return f"exit code {returncode}"
+
+
+def claude_process_exit_reason_i18n(returncode: int) -> tuple[str, dict[str, str | int]]:
+    """Return the i18n key and values for a user-facing exit reason."""
+    if returncode < 0:
+        signal_number = -returncode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"SIG{signal_number}"
+        return "error.claudeProcessSignal", {"signal": signal_name, "number": signal_number}
+    return "error.claudeProcessExitCode", {"code": returncode}
+
+
+def get_claude_client_stderr_tail(client: object | None) -> str:
+    """Return the stderr ring buffer captured for a Claude SDK client."""
+    lines = getattr(client, "_vibe_stderr_lines", None)
+    if not isinstance(lines, (list, tuple)):
+        return ""
+    return "\n".join(str(line).strip() for line in lines if str(line).strip())
+
+
 def _process_start_time(pid: int) -> float | None:
     try:
         result = subprocess.run(
@@ -315,6 +357,7 @@ async def reap_duplicate_claude_resume_processes(
     native_session_id: str | None,
     *,
     keep_pid: int | None = None,
+    exclude_pids: set[int] | None = None,
     cli_path: str | None = None,
     logger: logging.Logger,
     terminate_timeout: float = 2.0,
@@ -324,6 +367,14 @@ async def reap_duplicate_claude_resume_processes(
     This is intentionally conservative: it only matches a full ``--resume`` id
     and only reaps when more than one matching process exists, or when the
     caller no longer has a tracked PID to keep.
+
+    A native session id is stable and reused across reconnects, so a matching
+    process may belong to a *newer* client for the same session rather than to
+    a leaked generation. ``keep_pid`` alone cannot express that: cleanup paths
+    that do not run from the receiver task pass ``keep_pid=None``, which drops
+    the duplicate guard entirely. ``exclude_pids`` carries the stronger
+    invariant — never signal a pid (or descendant of a pid) owned by a client
+    that is still registered — and holds regardless of the initiating path.
     """
     if not native_session_id or os.name == "nt":
         return 0
@@ -334,6 +385,19 @@ async def reap_duplicate_claude_resume_processes(
         logger.debug("Failed to read process table for Claude duplicate cleanup", exc_info=True)
         return 0
 
+    children = _build_children_map(all_rows)
+    protected_pids: set[int] = {
+        pid for pid in (exclude_pids or set()) if isinstance(pid, int) and pid > 0
+    }
+    for pid in list(protected_pids):
+        protected_pids.update(_descendant_pids(all_rows, pid, children))
+
+    # Protected rows stay in ``matches`` so the duplicate guard below can still
+    # see them: they are evidence that the session really is running more than
+    # one resume process. Dropping them here instead would let a keep_pid that
+    # has already left the process table hide a genuine orphan behind a single
+    # surviving owned replacement — one scoped match, guard satisfied, orphan
+    # left alive. Ownership decides what gets *signalled*, not what counts.
     matches = [
         row
         for row in all_rows
@@ -346,27 +410,32 @@ async def reap_duplicate_claude_resume_processes(
 
     keep_pid = keep_pid if isinstance(keep_pid, int) and keep_pid > 0 else None
     scoped_matches = _same_runtime_rows(all_rows, matches, keep_pid=keep_pid)
-    target_rows = [row for row in scoped_matches if row.pid != keep_pid]
     if keep_pid is not None and len(scoped_matches) <= 1:
         return 0
+    target_rows = [
+        row for row in scoped_matches if row.pid != keep_pid and row.pid not in protected_pids
+    ]
     if not target_rows:
         return 0
 
     target_pids = {row.pid for row in target_rows}
     for row in target_rows:
-        target_pids.update(_descendant_pids(all_rows, row.pid))
+        target_pids.update(_descendant_pids(all_rows, row.pid, children))
     target_pids.discard(os.getpid())
     if keep_pid is not None:
         target_pids.discard(keep_pid)
+    target_pids -= protected_pids
 
     if not target_pids:
         return 0
 
     logger.warning(
-        "Reaping %d duplicate Claude resume process(es) for native session %s (keep_pid=%s)",
+        "Reaping %d duplicate Claude resume process(es) for native session %s "
+        "(keep_pid=%s, owned_pids_protected=%d)",
         len(target_pids),
         native_session_id,
         keep_pid,
+        len(protected_pids),
     )
     return await _reap_pid_set(target_pids, terminate_timeout=terminate_timeout, logger=logger)
 

@@ -47,6 +47,10 @@ ReclaimMode = Literal["delete", "pause"]
 #: workdir / agent / model forward instead of resetting to scope defaults.
 SESSION_SETTINGS_SNAPSHOT_KEY = "session_settings_snapshot"
 
+#: Compare-and-set marker stamped when Agent rename/archive rewrites a
+#: definition's direct or snapshotted Agent reference.
+DEFINITION_AGENT_BINDING_REVISION_KEY = "_avibe_agent_binding_revision"
+
 #: Durable SESSION-metadata key listing the settings this session pins
 #: EXPLICITLY, so a stored NULL can be told apart from an absent value.
 #:
@@ -117,6 +121,29 @@ def current_reclaim_ledger() -> list[dict[str, Any]] | None:
     """The active teardown ledger, or ``None`` when nothing is collecting."""
 
     return _teardown_ledger.get()
+
+
+def retire_session_delivery_owners(
+    conn: Connection,
+    session_id: str,
+) -> dict[str, Any]:
+    """Retire proven-unwritten Deliveries and cancel their Runs atomically."""
+
+    from storage import message_deliveries as delivery_store
+    from storage.background import (
+        cancel_agent_runs_for_retired_deliveries_in_connection,
+    )
+
+    retired = delivery_store.retire_for_archive(conn, session_id)
+    canceled_run_ids = cancel_agent_runs_for_retired_deliveries_in_connection(
+        conn,
+        session_id=session_id,
+        delivery_ids=list(retired.get("delivery_ids") or []),
+    )
+    return {
+        **retired,
+        "canceled_run_ids": canceled_run_ids,
+    }
 
 
 @contextmanager

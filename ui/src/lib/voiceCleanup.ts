@@ -1,8 +1,5 @@
-import { avibeFetch } from './avibeFetch';
-
 export const VOICE_CONTEXT_BEFORE_CHARS = 500;
 export const VOICE_CONTEXT_AFTER_CHARS = 200;
-export const VOICE_CLEANUP_TIMEOUT_MS = 35_000;
 
 export type VoiceInsertionSnapshot = {
   text: string;
@@ -17,23 +14,6 @@ export type VoiceInsertionSnapshot = {
 type VoiceInsertionBoundaries = {
   left?: string;
   right?: string;
-};
-
-type VoiceCleanupFetch = (
-  path: string,
-  init?: RequestInit,
-) => Promise<Response>;
-
-type VoiceCleanupDependencies = {
-  cloudFetch?: VoiceCleanupFetch;
-  timeoutMs?: number;
-  signal?: AbortSignal;
-};
-
-export type VoiceCleanupResult = {
-  text: string;
-  outcome: 'success' | 'fallback';
-  elapsedMs: number;
 };
 
 const boundedSelection = (text: string, start: number, end: number): [number, number] => {
@@ -159,68 +139,4 @@ export const applyVoiceInsertion = (
   const insertion = voiceInsertionText(currentText, snapshot, transcript);
   if (insertion === null) return null;
   return `${currentText.slice(0, snapshot.start)}${insertion}${currentText.slice(snapshot.end)}`;
-};
-
-const timeoutSignal = (durationMs: number, externalSignal?: AbortSignal) => {
-  const controller = new AbortController();
-  const abortFromExternal = () => controller.abort(externalSignal?.reason);
-  if (externalSignal?.aborted) {
-    abortFromExternal();
-  } else {
-    externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
-  }
-  const timer = globalThis.setTimeout(
-    () => controller.abort(new DOMException('voice cleanup timed out', 'TimeoutError')),
-    durationMs,
-  );
-  return {
-    signal: controller.signal,
-    cancel: () => {
-      globalThis.clearTimeout(timer);
-      externalSignal?.removeEventListener('abort', abortFromExternal);
-    },
-  };
-};
-
-// Cleanup is deliberately best-effort. Raw ASR text remains usable when an old
-// cloud deployment lacks the endpoint or the small editing model is unavailable.
-export const cleanupVoiceTranscript = async (
-  transcript: string,
-  snapshot: VoiceInsertionSnapshot,
-  dependencies: VoiceCleanupDependencies = {},
-): Promise<VoiceCleanupResult> => {
-  const startedAt = Date.now();
-  const result = (text: string, outcome: VoiceCleanupResult['outcome']): VoiceCleanupResult => ({
-    text,
-    outcome,
-    elapsedMs: Date.now() - startedAt,
-  });
-  const request = timeoutSignal(
-    dependencies.timeoutMs ?? VOICE_CLEANUP_TIMEOUT_MS,
-    dependencies.signal,
-  );
-  try {
-    const response = await (dependencies.cloudFetch ?? avibeFetch)(
-      '/api/cloud/voice/cleanup',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          transcript,
-          before: snapshot.before,
-          after: snapshot.after,
-        }),
-        signal: request.signal,
-      },
-    );
-    if (!response.ok) return result(transcript, 'fallback');
-    const payload = await response.json().catch(() => null) as { text?: unknown } | null;
-    if (typeof payload?.text !== 'string') return result(transcript, 'fallback');
-    if (payload.text !== '' && !payload.text.trim()) return result(transcript, 'fallback');
-    return result(payload.text, 'success');
-  } catch {
-    return result(transcript, 'fallback');
-  } finally {
-    request.cancel();
-  }
 };

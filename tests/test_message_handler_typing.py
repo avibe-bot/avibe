@@ -214,7 +214,13 @@ class _StubController:
     def resolve_agent_for_context(self, context):
         return "codex"
 
-    def resolve_vibe_agent_for_context(self, context, override_agent_name=None, required=False):
+    def resolve_vibe_agent_for_context(
+        self,
+        context,
+        override_agent_id=None,
+        override_agent_name=None,
+        required=False,
+    ):
         if override_agent_name:
             return type(
                 "VibeAgent",
@@ -275,6 +281,190 @@ class _StubSessionHandler:
 
 
 class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_im_human_input_enters_delivery_owner_before_backend(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        controller.settings_manager.sessions.try_record_processed_message = Mock()
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._admit_human_delivery = AsyncMock(return_value=True)
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(
+            return_value="[metadata]\nhello"
+        )
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "hello")
+
+        handler._admit_human_delivery.assert_awaited_once()
+        assert (
+            handler._admit_human_delivery.await_args.kwargs["dispatch_text"]
+            == "[metadata]\nhello"
+        )
+        controller.settings_manager.sessions.try_record_processed_message.assert_not_called()
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_explicit_opencode_subagent_uses_new_turn_delivery_intent(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        server = types.SimpleNamespace(
+            ensure_running=AsyncMock(),
+            get_available_agents=AsyncMock(return_value=[{"name": "reviewer"}]),
+        )
+        controller.agent_service.agents = {
+            "opencode": types.SimpleNamespace(
+                _get_server=AsyncMock(return_value=server)
+            )
+        }
+        controller.get_cwd = Mock(return_value="/tmp")
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=types.SimpleNamespace(
+                id="agent-opencode",
+                name="opencode",
+                backend="opencode",
+                model=None,
+                reasoning_effort=None,
+                system_prompt=None,
+            )
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._admit_human_delivery = AsyncMock(return_value=True)
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="check this")
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-subagent",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "reviewer: check this")
+
+        call = handler._admit_human_delivery.await_args.kwargs
+        self.assertEqual(call["delivery_intent"], "queue")
+        self.assertEqual(
+            call["admission_context"]["message_handler_route"]["subagent_name"],
+            "reviewer",
+        )
+        self.assertEqual(
+            call["admission_context"]["message_handler_route"]["base_session_id"],
+            "base-session",
+        )
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_duplicate_im_attachment_skips_download_before_admission(self):
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=True)
+        handler._process_file_attachments = AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-attachment-retry",
+            platform="slack",
+            files=[
+                FileAttachment(
+                    name="report.pdf",
+                    mimetype="application/pdf",
+                    url="https://files.example/report.pdf",
+                )
+            ],
+        )
+
+        await handler.handle_user_message(context, "review this")
+
+        handler._process_file_attachments.assert_not_awaited()
+        controller.session_turns.deliver.assert_not_awaited()
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_inline_stop_uses_durable_empty_p0_owner(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        cancel = AsyncMock(return_value={"ok": True, "status": "cancel_requested"})
+        controller.session_turns = types.SimpleNamespace(
+            deliver=AsyncMock(),
+            cancel=cancel,
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            thread_id="T1",
+            message_id="m-stop",
+            platform="slack",
+            platform_specific={
+                "agent_session_id": "ses-durable",
+                "control_text": "stop",
+            },
+        )
+
+        await handler.handle_user_message(context, "stop")
+
+        cancel.assert_awaited_once_with("ses-durable")
+        self.assertEqual(controller.agent_service.stop_requests, [])
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_retried_inline_stop_cannot_cancel_a_newer_turn(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        cancel = AsyncMock(return_value={"ok": True, "status": "cancel_requested"})
+        controller.session_turns = types.SimpleNamespace(
+            deliver=AsyncMock(),
+            cancel=cancel,
+        )
+        controller.settings_manager.sessions.try_record_processed_message = Mock(
+            side_effect=[True, False]
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            thread_id="T1",
+            message_id="m-stop-retry",
+            platform="slack",
+            platform_specific={
+                "agent_session_id": "ses-durable",
+                "control_text": "stop",
+            },
+        )
+
+        await handler.handle_user_message(context, "stop")
+        await handler.handle_user_message(context, "stop")
+
+        cancel.assert_awaited_once_with("ses-durable")
+        self.assertEqual(controller.agent_service.stop_requests, [])
+        self.assertEqual(controller.agent_service.requests, [])
+
     async def test_pre_request_failure_uses_plain_terminal_output(self):
         controller = _StubController(
             platform="slack",
@@ -669,6 +859,167 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         agent_name, _ = controller.agent_service.requests[0]
         self.assertEqual(agent_name, "codex")
+
+    async def test_existing_im_thread_resolves_agent_by_stable_id(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.settings_manager.sessions.find_session_for_anchor = lambda *_args: {
+            "id": "ses_preserved",
+            "agent_id": "agent-original",
+            "agent_name": "pm",
+            "agent_backend": "claude",
+            "visibility": "foreground",
+        }
+        observed = {}
+
+        def _resolve_agent(
+            _context,
+            *,
+            override_agent_id=None,
+            override_agent_name=None,
+            required=False,
+        ):
+            observed.update(
+                agent_id=override_agent_id,
+                agent_name=override_agent_name,
+                required=required,
+            )
+            return type(
+                "VibeAgent",
+                (),
+                {
+                    "id": "agent-original",
+                    "name": "_pm-ab12",
+                    "backend": "claude",
+                    "model": "claude-opus",
+                    "reasoning_effort": None,
+                    "system_prompt": None,
+                },
+            )()
+
+        controller.resolve_vibe_agent_for_context = _resolve_agent
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "continue")
+
+        self.assertEqual(
+            observed,
+            {
+                "agent_id": "agent-original",
+                "agent_name": "pm",
+                "required": True,
+            },
+        )
+        agent_name, request = controller.agent_service.requests[0]
+        self.assertEqual(agent_name, "claude")
+        self.assertEqual(request.vibe_agent_id, "agent-original")
+        self.assertEqual(request.vibe_agent_name, "_pm-ab12")
+
+    async def test_unusable_durable_session_agent_does_not_fallback_to_backend(self):
+        controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
+        observed = {}
+
+        def _reject_archived_agent(
+            _context,
+            *,
+            override_agent_id=None,
+            override_agent_name=None,
+            required=False,
+        ):
+            observed.update(
+                agent_id=override_agent_id,
+                agent_name=override_agent_name,
+                required=required,
+            )
+            raise ValueError("archived Agent is disabled")
+
+        controller.resolve_vibe_agent_for_context = _reject_archived_agent
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="workbench",
+            channel_id="ses_archived",
+            message_id="m1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_target": {
+                    "id": "ses_archived",
+                    "agent_id": "agent-archived",
+                    "agent_name": "_worker-ab12",
+                    "agent_backend": "codex",
+                }
+            },
+        )
+
+        await handler.handle_user_message(context, "continue")
+
+        self.assertEqual(
+            observed,
+            {
+                "agent_id": "agent-archived",
+                "agent_name": "_worker-ab12",
+                "required": True,
+            },
+        )
+        self.assertEqual(controller.agent_service.requests, [])
+        self.assertTrue(
+            any("archived Agent is disabled" in text for _, text in controller.im_client.sent_messages)
+        )
+
+    async def test_unusable_persisted_scope_agent_does_not_fallback_to_backend(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.settings_manager.routing = type(
+            "Routing",
+            (),
+            {"agent_name": "_worker-ab12"},
+        )()
+        observed = {}
+
+        def _reject_archived_agent(
+            _context,
+            *,
+            override_agent_id=None,
+            override_agent_name=None,
+            required=False,
+        ):
+            observed.update(
+                agent_id=override_agent_id,
+                agent_name=override_agent_name,
+                required=required,
+            )
+            raise ValueError("archived scope Agent is disabled")
+
+        controller.resolve_vibe_agent_for_context = _reject_archived_agent
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+            platform_specific={"agent_run_target": {"agent_backend": "codex"}},
+        )
+
+        await handler.handle_user_message(context, "start a new thread")
+
+        self.assertEqual(
+            observed,
+            {
+                "agent_id": None,
+                "agent_name": None,
+                "required": True,
+            },
+        )
+        self.assertEqual(controller.agent_service.requests, [])
+        self.assertTrue(
+            any("archived scope Agent is disabled" in text for _, text in controller.im_client.sent_messages)
+        )
 
     async def test_existing_session_backend_does_not_attach_default_vibe_agent_metadata(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
@@ -1090,6 +1441,27 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "boom")
         self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: boom")])
+
+    async def test_durable_scheduled_turn_does_not_mirror_before_acceptance(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C1",
+            message_id="watch:native-1",
+            platform="slack",
+            platform_specific={
+                "delivery_id": "msg_delivery_1",
+                "delivery_ids": ["msg_delivery_1"],
+            },
+        )
+
+        with patch("core.message_mirror.mirror_harness_inbound") as mirror:
+            await handler.handle_scheduled_message(context, "hello")
+
+        mirror.assert_not_called()
+        self.assertEqual(len(controller.agent_service.requests), 1)
 
     async def test_resume_session_callback_preserves_platform(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)

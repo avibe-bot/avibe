@@ -36,6 +36,8 @@ from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_REFUSED_CONCURRENT_TURN,
 )
+from core.message_context import resolve_turn_sink_key
+from core.native_dispatch_phase import backend_dispatch_attempted
 from modules.im import MessageContext
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
@@ -70,6 +72,7 @@ class TurnDispatchOutcome:
 
     error: Optional[str]
     settled_by: Optional[str]
+    backend_dispatch_attempted: Optional[bool] = None
 
 
 async def dispatch_turn(
@@ -79,6 +82,7 @@ async def dispatch_turn(
     *,
     source: str = SOURCE_HUMAN,
     on_chunk: Optional[ChunkCallback] = None,
+    logical_turn_id: str | None = None,
 ) -> Optional[str]:
     """Run one agent turn for ``context`` and return the primary message id.
 
@@ -92,6 +96,7 @@ async def dispatch_turn(
         text,
         source=source,
         on_chunk=on_chunk,
+        logical_turn_id=logical_turn_id,
     )
     return outcome.error
 
@@ -103,6 +108,7 @@ async def dispatch_turn_with_outcome(
     *,
     source: str = SOURCE_HUMAN,
     on_chunk: Optional[ChunkCallback] = None,
+    logical_turn_id: str | None = None,
 ) -> TurnDispatchOutcome:
     """Run one agent turn for ``context`` and report how its waiter was released.
 
@@ -130,9 +136,16 @@ async def dispatch_turn_with_outcome(
 
     if on_chunk is None:
         # IM / CLI: fire-and-forget; no live stream to hold open.
-        return TurnDispatchOutcome(error=await _run(), settled_by=None)
+        return TurnDispatchOutcome(
+            error=await _run(),
+            settled_by=None,
+            backend_dispatch_attempted=backend_dispatch_attempted(context),
+        )
 
-    session_key = controller._get_session_key(context)
+    # Thread-scoped, NOT ``_get_session_key`` (channel-scoped): this gate refuses
+    # a turn when the slot is taken, so a channel-wide key made one busy Telegram
+    # forum topic / Slack thread refuse every sibling thread's turn.
+    session_key = resolve_turn_sink_key(controller, context)
     if controller.get_turn_sink(session_key) is not None:
         # Serialize per session. A streaming turn is already in flight for
         # this session (a second browser tab, or a resend before the first
@@ -146,14 +159,25 @@ async def dispatch_turn_with_outcome(
         # settlement — report it directly. A caller holding a durable record (an
         # ``agent_runs`` row) must settle it: this turn never reached a backend, so
         # no terminal result will ever arrive for it.
-        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_REFUSED_CONCURRENT_TURN)
+        return TurnDispatchOutcome(
+            error=None,
+            settled_by=SETTLED_BY_REFUSED_CONCURRENT_TURN,
+            backend_dispatch_attempted=False,
+        )
     # Tag this turn with a unique token, stamped into the context the agent
     # receiver will carry. ``_stream_chunk`` only forwards an emit to the sink
     # when the emit's context token matches the registered sink's token, so a
     # late straggler emit from a PREVIOUS (stopped / timed-out) turn can't
     # cross-feed into this turn's live stream or prematurely complete it.
     # Fail-open: emits without a token still flow (byte-identical to before).
-    turn_token = uuid.uuid4().hex
+    existing_turn_token = str(
+        (context.platform_specific or {}).get("turn_token") or ""
+    ).strip()
+    turn_token = (
+        str(logical_turn_id or "").strip()
+        or existing_turn_token
+        or uuid.uuid4().hex
+    )
     if context.platform_specific is None:
         context.platform_specific = {}
     context.platform_specific["turn_token"] = turn_token
@@ -181,7 +205,11 @@ async def dispatch_turn_with_outcome(
         settled_by = SETTLED_BY_NO_TERMINAL_RESULT
         if isinstance(sink, dict) and sink.get("done_event") is done:
             settled_by = str(sink.get("settled_by") or SETTLED_BY_NO_TERMINAL_RESULT)
-        return TurnDispatchOutcome(error=result, settled_by=settled_by)
+        return TurnDispatchOutcome(
+            error=result,
+            settled_by=settled_by,
+            backend_dispatch_attempted=backend_dispatch_attempted(context),
+        )
     finally:
         # Pass our own done event so a turn that was superseded by a newer
         # concurrent turn doesn't evict the newer turn's sink on cleanup.

@@ -89,12 +89,19 @@ describe('nodeDisplayTitle', () => {
   it('prefers the title, else agent + session suffix', () => {
     expect(nodeDisplayTitle(node('ses_abc', { title: 'Root' }))).toBe('Root');
     expect(nodeDisplayTitle(node('ses_123456', { title: null, agent_name: 'pm' }))).toBe('pm · 123456');
+    expect(nodeDisplayTitle(node('ses_123456', {
+      title: null,
+      agent_name: '_pm-8dd7',
+      agent_display_name: 'pm',
+    }))).toBe('pm · 123456');
   });
 });
 
 describe('statusMeta / isBackground', () => {
   it('maps status to tone + glyph', () => {
     expect(statusMeta('active').glyph).toBe('dot');
+    expect(statusMeta('active').dotClass).toBe('bg-mint');
+    expect(statusMeta('idle')).toMatchObject({ tone: 'muted', dotClass: 'bg-muted', glyph: 'dot' });
     expect(statusMeta('succeeded').glyph).toBe('check');
     expect(statusMeta('failed').glyph).toBe('cross');
     expect(statusMeta('failed').tone).toBe('destructive');

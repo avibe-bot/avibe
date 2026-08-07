@@ -47,6 +47,7 @@ const source = (over: Partial<Source> = {}): Source => ({
   billing: 'metered',
   credential_ref: 'cred_a',
   state: { status: 'active' },
+  last_discovered_at: null,
   models: [],
   ...over,
 });
@@ -124,7 +125,7 @@ describe('repairAction — the one tap a stopped row offers (SourceRowMenu)', ()
   });
 
   it('offers nothing to a native source with an upstream cause', () => {
-    // Nothing to re-discover (`POST …/test` rejects native), and NOT the re-login
+    // Nothing to re-discover (`POST …/refresh` rejects native), and NOT the re-login
     // that the unclassified case below gets: a native re-login invalidates the
     // working sign-in up front, so offering it for 账号被封 would charge the user
     // that price for a blocker it cannot clear. This is rule 3's boundary.
@@ -167,8 +168,8 @@ describe('model-row repair routing', () => {
     const page = readFileSync(join(here, 'SettingsModelsPage.tsx'), 'utf8');
 
     expect(card).toMatch(/repair\?\.kind === 'retest'[\s\S]*?onRetest\(repair\.source\)/);
-    expect(page).toMatch(/const retestSource = async \(source: Source\)[\s\S]*?modelsApi\.testSource\(source\.id\)/);
-    expect(page).toMatch(/onRetest=\{\(source\) => void retestSource\(source\)\}/);
+    expect(page).toMatch(/const refreshSource = async \(source: Source\)[\s\S]*?modelsApi\.refreshSource\(source\.id\)/);
+    expect(page).toMatch(/onRetest=\{\(source\) => void refreshSource\(source\)\}/);
   });
 });
 
@@ -341,7 +342,7 @@ const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   mode: 'hub',
   menu_kind: 'fixed',
   sources: { policy: 'follow', order: ['src_a'] },
-  current: { model_id: 'claude-opus-4-6', source_id: 'src_a', channel: 'hub' },
+  supply_status: 'ok',
   ...over,
 });
 
@@ -359,26 +360,6 @@ const probe = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   via_mapping: false,
   error: null,
   ...over,
-});
-
-describe('dryRunPlan — whether 试跑 has anything to run (SourceOrderDrawer)', () => {
-  it('probes an Agent with a resolved chain head', () => {
-    expect(dryRunPlan(agent())).toEqual({ kind: 'probe', backend: 'claude' });
-    expect(dryRunPlan(agent({ backend: 'codex' }))).toEqual({ kind: 'probe', backend: 'codex' });
-  });
-
-  it('runs nothing in direct mode', () => {
-    // AC-7: the route refuses with `direct_mode`, because there is no `src_*`
-    // identity to report a turn against.
-    expect(dryRunPlan(agent({ mode: 'direct', sources: null, current: null }))).toEqual({ kind: 'none' });
-  });
-
-  it('runs nothing when there is no head', () => {
-    // A null `current` IS waiting/interrupted. The page already says so with the
-    // remedy attached; a probe would only re-report it as a failure the user has
-    // to re-read.
-    expect(dryRunPlan(agent({ current: null, supply_status: 'interrupted' }))).toEqual({ kind: 'none' });
-  });
 });
 
 describe('dryRunChainKey — which edits make a 试跑 report stop being about anything', () => {
@@ -443,13 +424,10 @@ describe('dryRunChainKey — which edits make a 试跑 report stop being about a
   });
 
   it('holds still for everything the server derives from those', () => {
-    // The trap this key exists inside: a failing 试跑 cools its own head down and
-    // the re-read it owes then moves `agent.current`, the rollup, and the source
-    // health behind it. Key on any of those and the failing run is the one whose
-    // answer erases itself. The head moving is what a failing report is FOR.
+    // A failing 试跑 cools its own head down, moving the rollup and source health.
+    // Neither is a selection/config fact.
     const same = key();
-    expect(key({ current: { model_id: 'glm-5.2', source_id: 'src_b', channel: 'hub' } })).toBe(same);
-    expect(key({ current: null, supply_status: 'interrupted' })).toBe(same);
+    expect(key({ supply_status: 'interrupted' })).toBe(same);
     expect(key({ supply_status: 'degraded' })).toBe(same);
   });
 
@@ -602,7 +580,7 @@ describe('dryRunOutcome — what the per-model probe came back with', () => {
   });
 
   it('falls back to the id when the source is gone', () => {
-    // Same tolerance `chainChips` keeps: an id that no longer resolves is still
+    // Same tolerance the source rows keep: an id that no longer resolves is still
     // more informative than an empty name.
     expect(dryRunOutcome(probe({ source_id: 'src_gone' }), [])).toEqual({
       kind: 'ok',
@@ -877,10 +855,10 @@ describe('dryRunRowView — a report that outlives the chain it was about', () =
   it('keeps the answer on screen after 试跑 itself took the head away', () => {
     // The case the row creates: probing the chain's last runnable source and
     // failing cools that source down, so the re-read `probeWroteState` demands
-    // comes back with `current: null` — and the plan the row is drawn from turns
-    // `none` under the sentence the click just produced. Dropping it there would
+    // comes back interrupted — and the plan the row is drawn from turns `none`
+    // under the sentence the click just produced. Dropping it there would
     // make the failing run the only one whose answer flashes past.
-    const headless = dryRunPlan(agent({ current: null, supply_status: 'interrupted' }));
+    const headless = dryRunPlan(agent({ supply_status: 'interrupted' }));
 
     expect(dryRunRowView(headless, { ...idle, line: 'Key A 没跑通' })).toEqual({
       backend: null,
@@ -893,7 +871,7 @@ describe('dryRunRowView — a report that outlives the chain it was about', () =
     // Direct mode, or a chain that was already stopped when the drawer opened. The
     // page states that one level up with the remedy attached; an empty row here, or
     // a disabled button, would only repeat it.
-    expect(dryRunRowView(dryRunPlan(agent({ mode: 'direct', sources: null, current: null })), idle)).toEqual({
+    expect(dryRunRowView(dryRunPlan(agent({ mode: 'direct', sources: null })), idle)).toEqual({
       backend: null,
       enabled: false,
       report: false,

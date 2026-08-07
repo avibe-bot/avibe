@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
-from sqlalchemy import Connection, case, func, or_, select
+from sqlalchemy import Connection, and_, case, func, literal_column, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -30,7 +30,10 @@ from storage.agent_session_rows import (
 )
 from storage.models import (
     agents,
+    agent_runs,
     agent_sessions,
+    message_deliveries,
+    messages,
     metadata,
     run_definitions,
     runtime_records,
@@ -45,13 +48,103 @@ from storage.session_reclaim import (
     reclaim_bound_definitions,
     reclaim_ledger_transaction,
     reconcile_explicit_overrides,
+    retire_session_delivery_owners,
 )
 from storage.settings_service import make_scope_id, upsert_scope
+from storage import message_deliveries as delivery_store
+
+
+_RUNTIME_RECORD_ROWID = literal_column("runtime_records.rowid")
 
 SESSIONS_LAST_ACTIVITY_KEY = "sessions_last_activity"
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 
 logger = logging.getLogger(__name__)
+
+
+def _publish_definition_reclaim_hint() -> None:
+    """Wake both definition owners after a committed Session teardown."""
+
+    try:
+        from core.inbox_events import publish_definitions_updated
+
+        publish_definitions_updated(definition_type="scheduled")
+        publish_definitions_updated(definition_type="watch")
+    except Exception:
+        logger.debug("session definition reclaim wake failed", exc_info=True)
+
+
+def _require_enabled_agent_identity(
+    conn: Connection,
+    *,
+    agent_id: str | None,
+    agent_name: str | None,
+) -> None:
+    cleaned_id = str(agent_id or "").strip()
+    cleaned_name = str(agent_name or "").strip()
+    if not cleaned_id or not cleaned_name:
+        raise ValueError("an enabled Agent identity is required for this session")
+    row = conn.execute(
+        select(agents.c.id)
+        .where(agents.c.id == cleaned_id)
+        .where(agents.c.name == cleaned_name)
+        .where(agents.c.enabled == 1)
+        .where(agents.c.archived_at.is_(None))
+        .limit(1)
+    ).first()
+    if row is None:
+        raise ValueError(
+            f"agent '{cleaned_name}' was archived, disabled, renamed, or replaced before session creation"
+        )
+
+
+def _require_agent_reference_identity(
+    conn: Connection,
+    *,
+    expected_agent_id: str | None,
+) -> dict[str, str]:
+    cleaned_id = str(expected_agent_id or "").strip()
+    if not cleaned_id:
+        raise ValueError("an Agent identity is required for this session reference")
+    row = conn.execute(
+        select(
+            agents.c.id,
+            agents.c.name,
+            agents.c.backend,
+            agents.c.enabled,
+            agents.c.archived_at,
+            agents.c.metadata_json,
+        )
+        .where(agents.c.id == cleaned_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        raise ValueError(f"agent reference '{cleaned_id}' no longer exists")
+    from core.vibe_agents import agent_reference_is_usable
+
+    if not agent_reference_is_usable(
+        enabled=bool(row["enabled"]),
+        archived_at=row["archived_at"],
+        metadata=_json_loads(row["metadata_json"], {}),
+    ):
+        raise ValueError(f"agent reference '{row['name']}' is disabled")
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "backend": str(row["backend"]),
+    }
+
+
+def _catalog_agent_name_value(agent_id: str | None, fallback_name: str) -> Any:
+    """Resolve an Agent's current routing name in the statement that persists it."""
+
+    cleaned_id = str(agent_id or "").strip()
+    if not cleaned_id:
+        return fallback_name
+    return func.coalesce(
+        select(agents.c.name).where(agents.c.id == cleaned_id).limit(1).scalar_subquery(),
+        fallback_name,
+    )
 
 
 def _set_native_once(conn: Connection, row_id: str, encoded_session_id: str) -> bool:
@@ -80,6 +173,23 @@ def _set_native_once(conn: Connection, row_id: str, encoded_session_id: str) -> 
 _BACKEND_LABELS = {"claude": "Claude", "codex": "Codex", "opencode": "OpenCode"}
 
 
+def session_agent_display_label(row: Mapping[str, Any]) -> str | None:
+    agent_name = str(row["agent_name"] or "").strip()
+    catalog_name = str(row["catalog_agent_name"] or "").strip()
+    if row["catalog_agent_archived_at"]:
+        try:
+            metadata_json = json.loads(row["catalog_agent_metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            metadata_json = {}
+        archive = metadata_json.get("_avibe_archive") if isinstance(metadata_json, dict) else None
+        if isinstance(archive, dict):
+            original_name = str(archive.get("original_name") or "").strip()
+            if original_name:
+                return original_name
+    backend = str(row["agent_backend"] or "").strip()
+    return catalog_name or agent_name or _BACKEND_LABELS.get(backend, backend or None)
+
+
 def read_session_display_meta(
     session_ids: list[str], *, db_path: Path | None = None
 ) -> dict[str, dict[str, str | None]]:
@@ -103,10 +213,25 @@ def read_session_display_meta(
                         agent_sessions.c.title,
                         agent_sessions.c.agent_name,
                         agent_sessions.c.agent_backend,
+                        agents.c.name.label("catalog_agent_name"),
+                        agents.c.archived_at.label("catalog_agent_archived_at"),
+                        agents.c.metadata_json.label("catalog_agent_metadata_json"),
                         scopes.c.platform,
                     )
                     .select_from(
-                        agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+                        agent_sessions
+                        .join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+                        .join(
+                            agents,
+                            or_(
+                                agents.c.id == agent_sessions.c.agent_id,
+                                and_(
+                                    agent_sessions.c.agent_id.is_(None),
+                                    agents.c.name == agent_sessions.c.agent_name,
+                                ),
+                            ),
+                            isouter=True,
+                        )
                     )
                     .where(agent_sessions.c.id.in_(ids))
                 )
@@ -119,9 +244,7 @@ def read_session_display_meta(
     for row in rows:
         title = str(row["title"] or "").strip() or None
         platform = str(row["platform"] or "").strip() or None
-        agent_name = str(row["agent_name"] or "").strip()
-        backend = str(row["agent_backend"] or "").strip()
-        agent = agent_name or _BACKEND_LABELS.get(backend, backend or None)
+        agent = session_agent_display_label(row)
         meta[str(row["id"])] = {"title": title, "platform": platform, "agent": agent}
     return meta
 
@@ -196,10 +319,28 @@ class SQLiteSessionsService:
         workdir: str | None = None,
         visibility: str = "foreground",
         metadata: dict[str, Any] | None = None,
+        require_enabled_agent: bool = False,
+        expected_reference_agent_id: str | None = None,
     ) -> str | None:
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
         with self.engine.begin() as conn:
+            if require_enabled_agent:
+                reserve_write_lock(conn)
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                )
+            elif expected_reference_agent_id is not None:
+                reserve_write_lock(conn)
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                agent_id = identity["id"]
+                agent_name = identity["name"]
+                backend = identity["backend"]
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return None
@@ -233,11 +374,29 @@ class SQLiteSessionsService:
         workdir: str | None = None,
         visibility: str = "background",
         metadata: dict[str, Any] | None = None,
+        require_enabled_agent: bool = False,
+        expected_reference_agent_id: str | None = None,
     ) -> str:
         """Reserve a session with no Scope and its own lazy Show workspace."""
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
         with self.engine.begin() as conn:
+            if require_enabled_agent:
+                reserve_write_lock(conn)
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                )
+            elif expected_reference_agent_id is not None:
+                reserve_write_lock(conn)
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                agent_id = identity["id"]
+                agent_name = identity["name"]
+                backend = identity["backend"]
             session_id = new_session_id(conn)
             resolved_workdir = normalize_workdir(workdir)
             if resolved_workdir is None:
@@ -310,7 +469,11 @@ class SQLiteSessionsService:
         row = self.get_agent_session_by_id(str(session_id))
         if row is None:
             return False
-        with reclaim_ledger_transaction(), self.engine.begin() as conn:
+        from storage.background import run_update_event_transaction
+
+        with reclaim_ledger_transaction(), run_update_event_transaction(
+            self.engine
+        ) as conn:
             reserve_write_lock(conn)
             deleted = _delete_agent_session_rows(
                 conn,
@@ -520,6 +683,11 @@ class SQLiteSessionsService:
     ) -> str | None:
         """Bind a backend-native session id to the stable Vibe session row."""
         now = _utc_now_iso()
+        persisted_agent_name = (
+            _catalog_agent_name_value(vibe_agent_id, vibe_agent_name)
+            if vibe_agent_name is not None
+            else None
+        )
         with self.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
@@ -546,7 +714,7 @@ class SQLiteSessionsService:
                     native_session_id=encoded_session_id,
                     workdir=requested_workdir,
                     agent_id=vibe_agent_id,
-                    agent_name=vibe_agent_name,
+                    agent_name=persisted_agent_name,
                     model=None,
                     reasoning_effort=None,
                     metadata={"legacy_scope_key": str(scope_key)},
@@ -585,7 +753,14 @@ class SQLiteSessionsService:
             if vibe_agent_id is not None:
                 values["agent_id"] = vibe_agent_id
             if vibe_agent_name is not None:
-                values["agent_name"] = vibe_agent_name
+                values["agent_name"] = (
+                    case(
+                        (agent_sessions.c.agent_id == vibe_agent_id, agent_sessions.c.agent_name),
+                        else_=persisted_agent_name,
+                    )
+                    if vibe_agent_id is not None
+                    else persisted_agent_name
+                )
             # WRITE-ONCE: a row's native_session_id is bound exactly once and never
             # changed. Never let a recapture, fork, subagent, or any fallback
             # overwrite an existing native (product invariant — one agent session ↔
@@ -716,7 +891,15 @@ class SQLiteSessionsService:
         if vibe_agent_id is not None:
             values["agent_id"] = vibe_agent_id
         if vibe_agent_name is not None:
-            values["agent_name"] = vibe_agent_name
+            persisted_agent_name = _catalog_agent_name_value(vibe_agent_id, vibe_agent_name)
+            values["agent_name"] = (
+                case(
+                    (agent_sessions.c.agent_id == vibe_agent_id, agent_sessions.c.agent_name),
+                    else_=persisted_agent_name,
+                )
+                if vibe_agent_id is not None
+                else persisted_agent_name
+            )
         requested_backend = (
             str(vibe_agent_backend or "") if vibe_agent_backend is not None else None
         )
@@ -955,23 +1138,29 @@ class SQLiteSessionsService:
         reclaim_reason: str | None = None,
     ) -> bool:
         now = _utc_now_iso()
+        from storage.background import run_update_event_transaction
+
         # ``reclaim_ledger_transaction`` OUTSIDE ``begin()``: every transaction that can
         # reclaim a definition must discard its ledger entries if it does not commit
         # (HFR-273), and the truncation has to run after the rollback.
-        with reclaim_ledger_transaction(), self.engine.begin() as conn:
+        deleted = 0
+        with reclaim_ledger_transaction(), run_update_event_transaction(
+            self.engine
+        ) as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
-            if scope_id is None:
-                return False
-            deleted = _delete_agent_session_rows(
-                conn,
-                select(agent_sessions.c.id)
-                .where(agent_sessions.c.scope_id == scope_id)
-                .where(_agent_session_name_predicate(str(agent_name) or "default"))
-                .where(agent_sessions.c.session_anchor == str(session_anchor)),
-                reclaim_mode=reclaim_mode,
-                reclaim_reason=reclaim_reason,
-            )
-            return bool(deleted)
+            if scope_id is not None:
+                deleted = _delete_agent_session_rows(
+                    conn,
+                    select(agent_sessions.c.id)
+                    .where(agent_sessions.c.scope_id == scope_id)
+                    .where(_agent_session_name_predicate(str(agent_name) or "default"))
+                    .where(agent_sessions.c.session_anchor == str(session_anchor)),
+                    reclaim_mode=reclaim_mode,
+                    reclaim_reason=reclaim_reason,
+                )
+        if scope_id is not None:
+            _publish_definition_reclaim_hint()
+        return bool(deleted)
 
     def delete_agent_sessions(
         self,
@@ -984,21 +1173,31 @@ class SQLiteSessionsService:
         include_superseded: bool = False,
     ) -> int:
         now = _utc_now_iso()
-        with reclaim_ledger_transaction(), self.engine.begin() as conn:
+        deleted = 0
+        from storage.background import run_update_event_transaction
+
+        with reclaim_ledger_transaction(), run_update_event_transaction(
+            self.engine
+        ) as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
-                return 0
-            stmt = select(agent_sessions.c.id).where(agent_sessions.c.scope_id == scope_id)
-            if agent_name is not None:
-                stmt = stmt.where(_agent_session_name_predicate(str(agent_name) or "default"))
-            if session_anchor_prefix is not None:
+                stmt = None
+            else:
+                stmt = select(agent_sessions.c.id).where(
+                    agent_sessions.c.scope_id == scope_id
+                )
+            if stmt is not None and agent_name is not None:
+                stmt = stmt.where(
+                    _agent_session_name_predicate(str(agent_name) or "default")
+                )
+            if stmt is not None and session_anchor_prefix is not None:
                 prefix = str(session_anchor_prefix)
                 prefix_pattern = f"{_escape_sql_like(prefix)}:%"
                 stmt = stmt.where(
                     (agent_sessions.c.session_anchor == prefix)
                     | (agent_sessions.c.session_anchor.like(prefix_pattern, escape="\\"))
                 )
-            if not include_superseded:
+            if stmt is not None and not include_superseded:
                 # A superseded row carries ``<original_anchor>:superseded:<id>``.
                 # This is a HARD delete and superseding deliberately keeps the row
                 # -- its native id is write-once and its history is not
@@ -1030,12 +1229,16 @@ class SQLiteSessionsService:
                         ),
                     )
                 )
-            return _delete_agent_session_rows(
-                conn,
-                stmt,
-                reclaim_mode=reclaim_mode,
-                reclaim_reason=reclaim_reason,
-            )
+            if stmt is not None:
+                deleted = _delete_agent_session_rows(
+                    conn,
+                    stmt,
+                    reclaim_mode=reclaim_mode,
+                    reclaim_reason=reclaim_reason,
+                )
+        if scope_id is not None:
+            _publish_definition_reclaim_hint()
+        return deleted
 
     def load_state(self) -> SessionState:
         with self.engine.connect() as conn:
@@ -1046,6 +1249,26 @@ class SQLiteSessionsService:
                 processed_message_ts=self._load_processed_messages(conn),
                 last_activity=self._load_last_activity(conn),
             )
+
+    def processed_message_exists(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        message_ts: str,
+    ) -> bool:
+        record_key = _processed_message_record_key(
+            str(channel_id),
+            str(thread_ts),
+            str(message_ts),
+        )
+        with self.engine.connect() as conn:
+            row_id = conn.execute(
+                select(runtime_records.c.id)
+                .where(runtime_records.c.record_type == "processed_message")
+                .where(runtime_records.c.record_key == record_key)
+                .limit(1)
+            ).scalar_one_or_none()
+        return row_id is not None
 
     def try_record_processed_message(self, channel_id: str, thread_ts: str, message_ts: str) -> bool:
         """Atomically claim a message for processing.
@@ -1775,7 +1998,7 @@ class SQLiteSessionsService:
         rows = conn.execute(
             select(runtime_records.c.payload_json)
             .where(runtime_records.c.record_type == "processed_message")
-            .order_by(runtime_records.c.created_at)
+            .order_by(runtime_records.c.created_at, _RUNTIME_RECORD_ROWID)
         )
         result: dict[str, dict[str, list[str]]] = {}
         for (payload_json,) in rows:
@@ -1992,14 +2215,11 @@ def _delete_agent_session_rows(
     reclaim_mode: ReclaimMode,
     reclaim_reason: str | None,
 ) -> int:
-    """Hard-delete session rows, reclaiming what was bound to them first.
+    """Remove Session rows from active routing, preserving retained history.
 
-    Every hard delete of a session row runs through here so no teardown path can
-    leave a ``run_definitions.session_id`` pointing at a row that no longer exists
-    — the root cause of a pinned task that fires and fails forever. The reclaim
-    must run BEFORE the delete: it is the last moment both rows are visible, and
-    the settings snapshot it takes is what lets a later rebind preserve the
-    session's model / agent instead of silently resetting to scope defaults.
+    Empty rows are deleted. A row with Message or Delivery history is archived
+    and re-anchored instead, so ``/new`` frees the original anchor without
+    orphaning immutable communication or execution audit.
 
     ``id_query`` is re-asserted BY THE DELETE, so a row that stopped matching after
     the id read is kept, and the returned count names only the rows actually removed.
@@ -2034,20 +2254,123 @@ def _delete_agent_session_rows(
         # the user asked to clear, ``pause`` keeps them re-enablable, and the kept row is
         # a superseded one the thread has already moved off.
         reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)
-        removed = bool(
+        claimed = bool(
             conn.execute(
-                agent_sessions.delete()
+                agent_sessions.update()
                 .where(agent_sessions.c.id == session_id)
                 .where(agent_sessions.c.id.in_(id_query))
+                .values(updated_at=agent_sessions.c.updated_at)
             ).rowcount
         )
-        if not removed:
+        if not claimed:
             logger.warning(
                 "Skipped hard-deleting session %s: it stopped matching the teardown "
                 "query concurrently (superseded, re-anchored or already gone)",
                 session_id,
             )
             continue
+        now = _utc_now_iso()
+        # BEFORE the history branch, because both halves end this Session's ability to
+        # run anything: the archival half cancels its queued runs outright, and the
+        # delete half removes the row they are bound to. A queued command-task
+        # escalation suppressed its parent's failure notice on the promise that the turn
+        # would carry the report, so either way that report is now impossible and the
+        # failure has to fall back to the notice ladder -- which does not need the
+        # Session, since a notice is delivered to the scope. Same reason as the archive
+        # path in ``workbench_sessions_service``, and in this same transaction.
+        #
+        # The delete half used to be the quieter of the two: it cancelled nothing, so
+        # the escalation was left queued against a row that no longer exists and no
+        # cancel-shaped guard could ever see it. The cancel below closes that.
+        from storage.background import (
+            TEARDOWN_CONDEMNED_RUN_STATUSES,
+            _defer_run_ids_updated_from_connection,
+            rearm_notices_for_escalations_canceled_with_session,
+        )
+
+        rearm_notices_for_escalations_canceled_with_session(conn, session_id, now=now)
+        condemned_run_ids = list(
+            conn.execute(
+                select(agent_runs.c.id)
+                .where(agent_runs.c.session_id == session_id)
+                .where(agent_runs.c.status.in_(TEARDOWN_CONDEMNED_RUN_STATUSES))
+            ).scalars()
+        )
+        # Also before the branch, and for the same reason. ``agent_runs.session_id``
+        # carries no foreign key, so deleting the Session row leaves its runs ``queued``
+        # and claimable against a Session that is gone -- and for an escalation that is
+        # not merely untidy: the re-arm just above handed the failure to the notice
+        # ladder on the grounds that the turn can never run, so a turn that IS claimed
+        # and then dies on the missing Session reports the same failure twice, the
+        # second time from the lane meant to replace the first. Terminalizing here is
+        # what makes that premise true. In-flight runs are cancel-requested only; the
+        # executor owns the transition for work it has already claimed.
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.session_id == session_id)
+            .where(agent_runs.c.status.in_(TEARDOWN_CONDEMNED_RUN_STATUSES))
+            .values(cancel_requested=1, cancel_requested_at=now, updated_at=now)
+        )
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.session_id == session_id)
+            .where(agent_runs.c.status.in_(("pending", "queued")))
+            .values(status="canceled", completed_at=now, updated_at=now)
+        )
+        _defer_run_ids_updated_from_connection(conn, condemned_run_ids)
+        has_retained_history = bool(
+            conn.execute(
+                select(messages.c.id)
+                .where(messages.c.session_id == session_id)
+                .limit(1)
+            ).first()
+            or conn.execute(
+                select(message_deliveries.c.id)
+                .where(message_deliveries.c.session_id == session_id)
+                .limit(1)
+            ).first()
+        )
+        if has_retained_history:
+            row = conn.execute(
+                select(agent_sessions.c.session_anchor).where(
+                    agent_sessions.c.id == session_id
+                )
+            ).first()
+            current_anchor = str((row or ("",))[0] or "")
+            superseded_anchor = (
+                current_anchor
+                if SUPERSEDED_ANCHOR_INFIX in current_anchor
+                else (
+                    f"{current_anchor}{SUPERSEDED_ANCHOR_INFIX}{session_id}"
+                    if current_anchor
+                    else f"superseded:{session_id}"
+                )
+            )
+            retire_session_delivery_owners(conn, session_id)
+            delivery_store.set_draft(conn, session_id, None)
+            retained = conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == session_id)
+                .values(
+                    status="archived",
+                    agent_status="idle",
+                    session_anchor=superseded_anchor,
+                    updated_at=now,
+                )
+            )
+            if retained.rowcount != 1:
+                raise RuntimeError(
+                    f"claimed Session {session_id} disappeared during archival"
+                )
+            deleted += 1
+            continue
+        removed = bool(
+            conn.execute(
+                agent_sessions.delete().where(agent_sessions.c.id == session_id)
+            ).rowcount
+        )
+        if not removed:
+            raise RuntimeError(f"claimed Session {session_id} disappeared during teardown")
         deleted += 1
     return deleted
 
@@ -2269,7 +2592,7 @@ def _prune_processed_message_records(
         select(runtime_records.c.record_key)
         .where(runtime_records.c.record_type == "processed_message")
         .where(runtime_records.c.record_key.like(prefix_pattern, escape="\\"))
-        .order_by(runtime_records.c.created_at.desc())
+        .order_by(runtime_records.c.created_at.desc(), _RUNTIME_RECORD_ROWID.desc())
         .offset(200)
     ).all()
     old_record_keys = [row[0] for row in rows]

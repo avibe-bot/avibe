@@ -56,6 +56,7 @@ class CodexTransport:
         self._notify_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
         self._notify_task: Optional[asyncio.Task[None]] = None
         self._notify_inflight = 0
+        self._closed_event = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -67,6 +68,7 @@ class CodexTransport:
             logger.warning("CodexTransport.start() called but process is already running")
             return
 
+        self._closed_event.clear()
         cmd = (
             [self._binary, "--dangerously-bypass-approvals-and-sandbox"]
             + ["app-server"]
@@ -110,7 +112,7 @@ class CodexTransport:
                 "initialize",
                 {
                     "clientInfo": {
-                        "name": "vibe-remote",
+                        "name": "avibe",
                         "version": "1.0.0",
                     },
                 },
@@ -118,9 +120,15 @@ class CodexTransport:
             logger.info("Codex app-server initialized: %s", resp)
             await self.send_notification("initialized")
             self._initialized = True
-        except Exception:
-            logger.exception("Codex app-server handshake failed, cleaning up")
-            await self.stop()
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                logger.info("Codex app-server handshake cancelled, cleaning up")
+            else:
+                logger.exception("Codex app-server handshake failed, cleaning up")
+            try:
+                await self.stop()
+            except Exception:
+                logger.exception("Failed to clean up Codex app-server after handshake failure")
             raise
 
     async def stop(self) -> None:
@@ -128,6 +136,7 @@ class CodexTransport:
         self._initialized = False
         proc = self._process
         if not proc or proc.returncode is not None:
+            self._closed_event.set()
             self._cleanup_tasks()
             return
 
@@ -152,6 +161,7 @@ class CodexTransport:
                     pass
 
         self._cleanup_tasks()
+        self._closed_event.set()
         # Fail all pending futures
         for fut in self._pending.values():
             if not fut.done():
@@ -186,6 +196,15 @@ class CodexTransport:
         """Whether an already-read notification can still deliver a terminal."""
 
         return self._notify_inflight > 0 or not self._notify_queue.empty()
+
+    async def wait_closed(self) -> None:
+        """Wait until the app-server exits and already-read notifications drain."""
+
+        await self._closed_event.wait()
+        for _ in range(50):
+            if not self.has_pending_notifications:
+                return
+            await asyncio.sleep(0.01)
 
     @property
     def pid(self) -> Optional[int]:
@@ -242,6 +261,11 @@ class CodexTransport:
 
         try:
             return await asyncio.wait_for(fut, timeout=120.0)
+        except asyncio.CancelledError:
+            self._pending.pop(req_id, None)
+            if not fut.done():
+                fut.cancel()
+            raise
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             self._initialized = False
@@ -297,6 +321,7 @@ class CodexTransport:
             logger.exception("Codex reader loop crashed")
         finally:
             self._initialized = False
+            self._closed_event.set()
             # Process ended — fail pending futures
             for fut in self._pending.values():
                 if not fut.done():

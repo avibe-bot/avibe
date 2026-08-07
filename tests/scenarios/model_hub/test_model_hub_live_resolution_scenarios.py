@@ -236,7 +236,7 @@ def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
         )
         assert projected["selected_by_agent"] is None
         assert projected["selected_model_id"] is None
-        assert projected["current"] is None
+        assert "current" not in projected
         assert projected["supply_status"] is None
 
         gateway = ModelHubTurnGateway(service)

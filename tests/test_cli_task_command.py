@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
 import sqlite3
 import sys
 from contextlib import redirect_stderr
@@ -99,6 +100,151 @@ def test_disabled_agent_cannot_run(tmp_path: Path) -> None:
 
     assert result == 1
     assert payload["error"] == "agent 'worker' is disabled"
+
+
+def test_task_update_preserves_archived_agent_reference(capsys) -> None:
+    db_path = cli.paths.get_sqlite_state_path()
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="archive-fallback", backend="codex")
+        agent = agent_store.create(name="pm", backend="codex")
+        store = cli.ScheduledTaskStore()
+        task = store.add_task(
+            name="Daily review",
+            session_key="slack::channel::C123",
+            prompt="review",
+            schedule_type="cron",
+            agent_name=agent.name,
+            cron="0 9 * * *",
+            timezone_name="UTC",
+        )
+        archived = agent_store.archive(agent.name)
+        assert archived is not None
+        store.load()
+
+        args = cli.build_parser().parse_args(
+            ["task", "update", task.id, "--name", "Renamed review"]
+        )
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._task_store", return_value=store),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            assert cli.cmd_task_update(args) == 0
+
+        assert json.loads(capsys.readouterr().out)["definition"]["agent_name"] == archived.archived_name
+        assert cli.ScheduledTaskStore().get_task(task.id).agent_name == archived.archived_name
+
+        explicit = cli.build_parser().parse_args(
+            ["task", "update", task.id, "--agent", archived.archived_name]
+        )
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore()),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            result, payload = _capture_stderr_json(cli.cmd_task_update, explicit)
+        assert result == 1
+        assert "disabled" in payload["error"]
+    finally:
+        agent_store.close()
+
+
+def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        agent_store.create(name="archive-fallback", backend="codex")
+        agent_store.create(name="worker", backend="codex")
+        with patch("vibe.cli._agent_store", return_value=agent_store):
+            assert cli.cmd_agent_remove(_parse_agent(["remove", "worker"])) == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["removed_agent"] == "worker"
+        assert payload["archived_agent"]["name"].startswith("_worker-")
+        assert payload["archived_agent"]["display_name"] == "worker"
+        assert agent_store.get("worker") is None
+    finally:
+        agent_store.close()
+
+
+def test_agent_remove_cli_localizes_archive_refusal(tmp_path: Path) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        agent_store.create(name="only-agent", backend="codex")
+        agent_store.set_default_agent_name("only-agent")
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch(
+                "vibe.cli.V2Config.load",
+                return_value=SimpleNamespace(language="zh"),
+            ),
+        ):
+            result, payload = _capture_stderr_json(
+                cli.cmd_agent_remove,
+                _parse_agent(["remove", "only-agent"]),
+            )
+
+        assert result == 1
+        assert payload["code"] == "agent_no_default_replacement"
+        assert payload["error"] == "没有其他已启用 Agent 时，无法归档默认 Agent `only-agent`。"
+        assert payload["hint"] == "归档当前默认 Agent 前，请保留另一个已启用 Agent。"
+    finally:
+        agent_store.close()
+
+
+def test_agent_remove_cli_localizes_invalid_reference_metadata() -> None:
+    def refuse_archive(_name):
+        raise cli.AgentReferenceRewriteError()
+
+    store = SimpleNamespace(archive=refuse_archive)
+    with (
+        patch("vibe.cli._agent_store", return_value=store),
+        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+    ):
+        result, payload = _capture_stderr_json(
+            cli.cmd_agent_remove,
+            _parse_agent(["remove", "worker"]),
+        )
+
+    assert result == 1
+    assert payload["code"] == "agent_reference_metadata_invalid"
+    assert payload["error"] == "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。"
+    assert payload["hint"] == "请修复或删除元数据异常的任务或监控，然后重试。"
+
+
+def test_agent_update_and_enable_localize_archived_edit_refusal(tmp_path: Path) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        agent_store.create(name="archive-fallback", backend="codex")
+        agent_store.create(name="worker", backend="codex")
+        archived = agent_store.archive("worker")
+        assert archived is not None
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+        ):
+            update_result, update_payload = _capture_stderr_json(
+                cli.cmd_agent_update,
+                _parse_agent(["update", archived.archived_name, "--description", "changed"]),
+            )
+            enable_result, enable_payload = _capture_stderr_json(
+                lambda parsed: cli.cmd_agent_set_enabled(parsed, enabled=True),
+                _parse_agent(["enable", archived.archived_name]),
+            )
+
+        for result, payload in ((update_result, update_payload), (enable_result, enable_payload)):
+            assert result == 1
+            assert payload["code"] == "agent_archived_read_only"
+            assert payload["error"] == f"Agent `{archived.archived_name}` 已归档，无法编辑。"
+            assert payload["hint"] == "已归档 Agent 为只读状态，仅供现有持久引用继续使用。"
+    finally:
+        agent_store.close()
 
 
 def test_agent_list_is_bounded_and_compact_by_default(tmp_path: Path, capsys) -> None:
@@ -585,7 +731,11 @@ def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     assert payload["help_command"] == "vibe task list"
 
 
-def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys) -> None:
+def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys, monkeypatch) -> None:
+    # ``patch.dict(..., clear=False)`` below pins only the five ids this test names, so
+    # the ORIGIN half of the contract (platform/channel/session_key/...) leaked in from
+    # the Avibe Agent shell that runs the suite and appeared in the asserted metadata.
+    _bare_terminal_caller(monkeypatch)
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)
     args = _parse_task_add(
@@ -799,6 +949,59 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
     assert payload["definition"]["cwd"] is None
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
     assert "session_workdir" not in payload["definition"]["metadata"]
+
+
+def test_task_add_releases_create_once_session_when_definition_write_fails(monkeypatch) -> None:
+    _no_caller_context(monkeypatch)
+    args = _parse_task_add(
+        [
+            "--create-session",
+            "--scope-id",
+            "avibe::project::proj-cleanup-task",
+            "--at",
+            "2026-08-02T00:00:00+00:00",
+            "--message",
+            "hello",
+        ]
+    )
+    released: list[tuple[str, str]] = []
+    agent = SimpleNamespace(id="agent-pm", name="pm", backend="claude")
+
+    with (
+        patch(
+            "vibe.cli._resolve_agent_target",
+            return_value=SimpleNamespace(agent=agent, requires_enabled_write_guard=True),
+        ),
+        patch(
+            "vibe.cli._resolve_definition_scope_key",
+            return_value="avibe::project::proj-cleanup-task",
+        ),
+        patch("vibe.cli._resolve_definition_session_cwd", return_value=None),
+        patch("vibe.cli._reserve_definition_session", return_value="ses-reserved-task"),
+        patch("vibe.cli._validate_definition_delivery_target", return_value=(None, None)),
+        patch(
+            "vibe.cli._task_store",
+            return_value=SimpleNamespace(
+                add_task=lambda **_kwargs: (_ for _ in ()).throw(
+                    ValueError("agent 'pm' was archived before the write")
+                )
+            ),
+        ),
+        patch(
+            "vibe.cli._release_cli_session_reservation",
+            side_effect=lambda session_id, *, reason: released.append((session_id, reason)) or True,
+        ),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert "archived before the write" in payload["error"]
+    assert released == [
+        (
+            "ses-reserved-task",
+            "task creation failed before its Session reservation was adopted",
+        )
+    ]
 
 
 def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_path: Path, capsys) -> None:
@@ -1472,6 +1675,396 @@ def test_task_update_rejects_scope_without_session_creation(tmp_path: Path) -> N
     assert payload["code"] == "scope_without_session_creation"
 
 
+def test_task_update_repoints_an_escalating_command_tasks_cwd(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-050 -- the same flag the add path now accepts, on a task that already exists."""
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    old = tmp_path / "old"
+    old.mkdir()
+    new_dir = tmp_path / "new"
+    new_dir.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="sesCaller",
+        session_policy="existing",
+        cwd=str(old),
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--cwd", str(new_dir)])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["cwd"] == str(new_dir)
+    assert "session_workdir" not in (definition["metadata"] or {})
+
+
+def test_task_update_keeps_a_command_tasks_cwd_through_an_unrelated_edit(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-051 -- a rename must not silently un-pin the directory the command was given.
+
+    A bound definition resolves its SESSION question to ``None`` on every edit, and the
+    update path persists that with ``update_cwd=True``. Once a command task can store a
+    ``cwd`` of its own, that same write erases it -- and nothing about a ``--name`` edit
+    tells the user their job just went back to following its escalation Session.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="sesCaller",
+        session_policy="existing",
+        cwd=str(pinned),
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--name", "renamed"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["name"] == "renamed"
+    assert definition["cwd"] == str(pinned), (
+        "an unrelated edit dropped the command's working directory, so the next fire "
+        f"silently moved to the bound Session's: {definition['cwd']!r}"
+    )
+
+
+def test_task_update_retarget_does_not_pull_the_command_back_to_its_sessions_directory(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-059 -- once the two halves differ, neither may be read as the other.
+
+    ``--cwd`` on a bound escalating command moves the command to B and leaves its
+    Session on A, which is the whole point of SCT-050. A later ``--create-session*``
+    carries A forward as the Session's answer -- correct -- and
+    ``_command_definition_spawn_cwd`` read that before the stored command half, so the
+    command was pulled back to A with nothing in the edit asking to. SCT-051's rule in
+    the retarget lane: only the explicit flag replaces a stored directory.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    session_dir = tmp_path / "session-dir"
+    session_dir.mkdir()
+    command_dir = tmp_path / "command-dir"
+    command_dir.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="sesCaller",
+        session_policy="create_once",
+        agent_name="codex",
+        # What ``task update --cwd <command_dir>`` leaves behind on a definition whose
+        # reusable Session was reserved in ``session_dir``: the halves now differ.
+        cwd=str(command_dir),
+        metadata={
+            "session_scope_id": "avibe::project::proj-command-task",
+            "session_workdir": str(session_dir),
+            "on_failure": "agent",
+        },
+    )
+    args = _parse_task_update(task.id, ["--create-session-per-run"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+        patch("os.getcwd", return_value=str(tmp_path)),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["session_policy"] == "create_per_run"
+    assert definition["cwd"] == str(command_dir), (
+        "the policy change pulled the command back to its Session's directory: "
+        f"{definition['cwd']!r}"
+    )
+    assert definition["metadata"]["session_workdir"] == str(session_dir), (
+        "the Session half did not survive the retarget: "
+        f"{definition['metadata'].get('session_workdir')!r}"
+    )
+
+
+def test_task_update_unrelated_edit_leaves_a_per_run_definitions_sessions_unplaced(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-058 -- an edit that asks nothing about directories must place no Session.
+
+    SCT-053 covers the retarget; this is the same conflation in the lane where nothing
+    is asked at all. With no ``--cwd`` and no creation flag the update carries the
+    stored directory forward from ``task.cwd``, which for a command task is the
+    COMMAND's -- so a plain ``--name`` wrote it into ``metadata["session_workdir"]``
+    and every future per-run Session was pinned to the directory ``task add`` happened
+    to be typed in, undoing SCT-047's deliberate blank. Each half now carries forward
+    from where that half is stored.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    described_in = tmp_path / "described-in"
+    described_in.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="",
+        session_policy="create_per_run",
+        agent_name="codex",
+        # What SCT-047 stores for a per-run command created without ``--cwd``: the
+        # command has a directory, the Sessions deliberately do not.
+        cwd=str(described_in),
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--name", "renamed"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["name"] == "renamed"
+    assert definition["cwd"] == str(described_in), (
+        "the rename moved the command: " f"{definition['cwd']!r}"
+    )
+    assert "session_workdir" not in (definition["metadata"] or {}), (
+        "a rename pinned every future per-run Session to the command's directory, so "
+        "the escalation turn stopped inheriting from its Scope"
+    )
+
+
+def test_task_update_retarget_does_not_promote_a_command_cwd_onto_a_new_session(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-053 -- the two halves of ``cwd`` survive a policy change separately.
+
+    Retargeting at ``--create-session-per-run`` without naming a directory carries
+    forward the one the definition already has. For a message task that is right --
+    ``cwd`` IS its Session's directory. For an escalating command task it is where the
+    COMMAND runs, and carrying it across pins the newly created escalation Session to a
+    directory the user chose for a subprocess, instead of letting it inherit from its
+    Scope. The command must keep it; the Session must not receive it.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="sesCaller",
+        session_policy="existing",
+        cwd=str(pinned),
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--create-session-per-run"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+        patch("os.getcwd", return_value=str(tmp_path)),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["session_policy"] == "create_per_run"
+    assert definition["cwd"] == str(pinned), (
+        "the policy change moved the command, which nothing in the edit asked for: "
+        f"{definition['cwd']!r}"
+    )
+    assert "session_workdir" not in (definition["metadata"] or {}), (
+        "the command's directory was promoted into the created Session's placement, so "
+        "the escalation Session stopped following its Scope"
+    )
+
+
+def test_task_update_reserves_a_replacement_session_without_the_commands_directory(
+    tmp_path: Path, capsys
+) -> None:
+    """SCT-056 -- the reservation reads the Session's half, not the command's.
+
+    ``--create-session`` on a ``create_once`` definition reserves a replacement Session
+    there and then, and it was handed ``cwd`` -- the variable
+    ``_command_definition_spawn_cwd`` had already overwritten with the COMMAND's answer.
+    So an escalating command task pinned to a build directory reserved its replacement
+    escalation Session *in that build directory*, instead of letting it take the Scope's
+    workdir. ``_stored_session_workdir`` closes the branch one step earlier; this is the
+    line that could put it straight back.
+    """
+
+    from sqlalchemy import select
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, scope_settings
+    from storage.settings_service import upsert_scope
+
+    state_home = tmp_path / "home"
+    scope_cwd = tmp_path / "scope"
+    scope_cwd.mkdir()
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        engine = create_sqlite_engine(db_path)
+        with engine.begin() as conn:
+            scope_id = upsert_scope(conn, "avibe", "project", "proj-command-cwd", now="2026-06-16T00:00:00Z")
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=str(scope_cwd),
+                    agent_name="worker",
+                    agent_backend="codex",
+                    agent_variant="codex",
+                    model=None,
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-06-16T00:00:00Z",
+                    updated_at="2026-06-16T00:00:00Z",
+                )
+            )
+            conn.execute(
+                agent_sessions.insert().values(
+                    id="sesOld",
+                    scope_id=scope_id,
+                    agent_backend="codex",
+                    agent_name="worker",
+                    agent_variant="codex",
+                    session_anchor="avibe_proj-command-cwd:definition_old",
+                    native_session_id="native-old",
+                    status="active",
+                    metadata_json="{}",
+                    created_at="2026-06-16T00:00:00Z",
+                    updated_at="2026-06-16T00:00:00Z",
+                    last_active_at="2026-06-16T00:00:00Z",
+                    workdir=str(scope_cwd),
+                )
+            )
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        store = _command_task_store(tmp_path)
+        task = _stored_command_task(
+            store,
+            session_id="sesOld",
+            session_policy="create_once",
+            agent_name="worker",
+            cwd=str(pinned),
+            metadata={"session_scope_id": scope_id, "on_failure": "agent"},
+        )
+        parser = cli.build_parser()
+        args = parser.parse_args(["task", "update", task.id, "--create-session"])
+
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_store", return_value=store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        ):
+            result = cli.cmd_task_update(args)
+
+        definition = json.loads(capsys.readouterr().out)["definition"]
+        with engine.connect() as conn:
+            reserved = conn.execute(
+                select(agent_sessions.c.workdir).where(agent_sessions.c.id == definition["session_id"]).limit(1)
+            ).mappings().one()
+
+    assert result == 0
+    assert definition["session_id"] != "sesOld"
+    assert definition["cwd"] == str(pinned), "the command lost the directory it was pinned to"
+    assert reserved["workdir"] != str(pinned), (
+        "the replacement escalation Session was reserved in the command's working "
+        f"directory: {reserved['workdir']!r}"
+    )
+
+
+def test_task_update_repoints_a_reserved_command_task_without_replacing_its_session(
+    tmp_path: Path, capsys
+) -> None:
+    """SCT-057 -- repointing the command must not mean replacing the escalation Session.
+
+    ``_reject_inert_create_once_cwd_update`` refuses ``--cwd`` once a reusable Session
+    exists, which is right for a message task -- that Session owns its workdir and the
+    flag would do nothing. It ran before the command-aware resolution, so the only way
+    to move a nightly command was ``--create-session``, discarding an escalation Session
+    that had nothing to do with the request. Same rule as the ``existing`` refusal, and
+    softened the same way: the command's half moves, the Session's half is untouched.
+    """
+
+    db_path, agent_store = _caller_session_state(tmp_path, session_id="sesReserved")
+    store = _command_task_store(tmp_path)
+    saved = tmp_path / "saved"
+    saved.mkdir()
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    task = _stored_command_task(
+        store,
+        session_id="sesReserved",
+        session_policy="create_once",
+        agent_name="codex",
+        cwd=str(saved),
+        metadata={
+            "session_scope_id": "avibe::project::proj-command-task",
+            "session_workdir": str(saved),
+            "on_failure": "agent",
+        },
+    )
+    parser = cli.build_parser()
+    args = parser.parse_args(["task", "update", task.id, "--cwd", str(moved)])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["cwd"] == str(moved)
+    assert definition["session_id"] == "sesReserved", "the escalation Session was replaced"
+    assert definition["metadata"]["session_workdir"] == str(saved), (
+        "moving the command moved the Session it escalates to as well: "
+        f"{definition['metadata'].get('session_workdir')!r}"
+    )
+
+
 def test_task_update_rejects_cwd_for_already_reserved_create_once_task(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)
@@ -1725,6 +2318,77 @@ def test_hook_send_deprecation_warning_names_callback_policy(tmp_path: Path, cap
     assert "vibe hook send is deprecated" in payload["deprecation_warning"]
     assert "--no-callback" in payload["deprecation_warning"]
     assert "--callback-session-id <session-id>" in payload["deprecation_warning"]
+
+
+def test_hook_send_guards_an_explicit_agent_inside_enqueue(tmp_path: Path, capsys) -> None:
+    args = _parse_hook_send(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            "--agent",
+            "worker",
+            "--message",
+            "hello",
+        ]
+    )
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    agent = agent_store.create(name="worker", backend="codex")
+    captured: dict[str, object] = {}
+
+    def enqueue_hook_send(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id="run-hook", request_type="agent_run")
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli._task_request_store",
+            return_value=SimpleNamespace(enqueue_hook_send=enqueue_hook_send),
+        ),
+    ):
+        result = cli.cmd_hook_send(args)
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["run_id"] == "run-hook"
+    assert captured["agent_name"] == agent.name
+    assert captured["expected_enabled_agent_id"] == agent.id
+
+
+def test_hook_send_guards_the_implicit_default_agent_inside_enqueue(tmp_path: Path, capsys) -> None:
+    args = _parse_hook_send(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            "--message",
+            "hello",
+        ]
+    )
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    default_agent = agent_store.ensure_default_agent(backend="codex")
+    captured: dict[str, object] = {}
+
+    def enqueue_hook_send(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id="run-hook", request_type="agent_run")
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli._task_request_store",
+            return_value=SimpleNamespace(enqueue_hook_send=enqueue_hook_send),
+        ),
+    ):
+        result = cli.cmd_hook_send(args)
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["run_id"] == "run-hook"
+    assert captured["agent_name"] == default_agent.name
+    assert captured["expected_enabled_agent_id"] == default_agent.id
 
 
 def test_hook_send_rejects_conflicting_delivery_target_flags(capsys) -> None:
@@ -2694,6 +3358,22 @@ def test_agent_create_accepts_effort_alias(tmp_path: Path, capsys) -> None:
     assert payload["agent"]["reasoning_effort"] == "high"
 
 
+def test_agent_create_localizes_reserved_name_error(tmp_path: Path) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    args = _parse_agent(["create", "_hidden", "--backend", "codex"])
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_agent_create, args)
+
+    assert result == 1
+    assert payload["code"] == "agent_name_reserved"
+    assert payload["error"] == "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。"
+    assert payload["hint"] == "请选择不以下划线 `_` 开头的 Agent 名称。"
+
+
 def test_agent_default_cli_sets_default_agent(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
@@ -2779,8 +3459,10 @@ def test_default_agent_pointer_is_created(tmp_path: Path) -> None:
     assert agent_store.get_default_agent().backend == "codex"
 
 
+@pytest.mark.no_sqlite_template
 def test_resolve_agent_for_target_bootstraps_sqlite_before_scope_lookup(tmp_path: Path) -> None:
     db_path = tmp_path / "fresh-state" / "vibe.sqlite"
+    assert not db_path.exists()
     default_agent = SimpleNamespace(name="default", backend="codex")
     fake_store = SimpleNamespace(
         require=lambda name: (_ for _ in ()).throw(ValueError(f"agent '{name}' not found")),
@@ -2860,6 +3542,108 @@ def test_resolve_agent_for_target_ignores_deprecated_scope_backend(tmp_path: Pat
     assert row[0] is None
     assert row[1] == "codex"
     assert "agent_name" not in json.loads(row[2])["routing"]
+
+
+def test_scope_derived_agent_target_preserves_the_stable_reference(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    original = agent_store.create(name="pm", backend="claude")
+    agent_store.create(name="archive-fallback", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-08-01T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=scope_id,
+                enabled=1,
+                role=None,
+                workdir=None,
+                agent_name=original.name,
+                agent_backend=original.backend,
+                agent_variant=None,
+                model=None,
+                reasoning_effort=None,
+                require_mention=None,
+                settings_version=1,
+                settings_json="{}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+    ):
+        captured_scope = cli._resolve_scope_routing_target("slack::channel::C123")
+
+    assert captured_scope == cli._ScopeRoutingTarget(original.name, original.id)
+    archived = agent_store.archive(original.name)
+    assert archived is not None
+    replacement = agent_store.create(name="pm", backend="claude")
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli._resolve_scope_routing_target",
+            return_value=captured_scope,
+        ),
+    ):
+        resolution = cli._resolve_agent_target(
+            agent_name=None,
+            session_id=None,
+            session_key="slack::channel::C123",
+            help_command="vibe task add --help",
+        )
+
+    assert resolution.agent is not None
+    assert resolution.agent.id == original.id
+    assert resolution.agent.id != replacement.id
+    assert resolution.agent.name == archived.archived_name
+    assert resolution.requires_enabled_write_guard is False
+    assert resolution.preserves_existing_reference is True
+    assert cli._agent_write_guard_ids(resolution) == (None, original.id)
+
+
+def test_session_derived_agent_target_prefers_the_stable_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    original = agent_store.create(name="pm", backend="claude")
+    agent_store.create(name="archive-fallback", backend="codex")
+    archived = agent_store.archive(original.name)
+    assert archived is not None
+    replacement = agent_store.create(name="pm", backend="claude")
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli.resolve_session_id_target",
+            return_value=SimpleNamespace(
+                agent_id=original.id,
+                agent_name=replacement.name,
+                agent_backend=original.backend,
+            ),
+        ),
+    ):
+        resolution = cli._resolve_agent_target(
+            agent_name=None,
+            session_id="ses_preserved",
+            session_key="",
+            help_command="vibe agent run --help",
+        )
+
+    assert resolution.agent is not None
+    assert resolution.agent.id == original.id
+    assert resolution.agent.id != replacement.id
+    assert resolution.agent.name == archived.archived_name
+    assert resolution.requires_enabled_write_guard is False
+    assert resolution.preserves_existing_reference is True
+    assert cli._agent_write_guard_ids(resolution) == (None, original.id)
 
 
 def test_resolve_agent_for_target_allows_unresolved_legacy_scope_backend_without_session_creation(
@@ -3101,11 +3885,20 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
             "hello",
         ]
     )
+    task_store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    original_add_task = task_store.add_task
+    captured: dict[str, object] = {}
+
+    def add_task(**kwargs):
+        captured.update(kwargs)
+        return original_add_task(**kwargs)
 
     with (
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=task_store),
+        patch.object(task_store, "add_task", side_effect=add_task),
     ):
         result = cli.cmd_task_add(args)
 
@@ -3113,6 +3906,7 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["definition"]["agent_name"] == default_agent.name
+    assert captured["expected_enabled_agent_id"] == default_agent.id
 
 
 def test_task_add_rejects_deprecated_prompt_argument() -> None:
@@ -3308,3 +4102,1137 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
         f"enabled={None if live is None else live.enabled!r} while the row says "
         f"name={stored.name!r} enabled={stored.enabled!r}"
     )
+
+
+# --- the reserved workspace-notifications Session is not an admission target --
+#
+# Round-16 review thread 3678900318, confirmed blocking as comment 5124692513. The
+# reserved row (``ses-workspace-notices``) exists to HOLD failure notices and accepts no
+# turn: no backend, no dispatch. A round-15 guard closed the Web composer
+# (``POST /api/sessions/<id>/messages``); every CLI door reaches the runtime through
+# ``resolve_session_id_target`` instead, and that resolver refused only ARCHIVED rows
+# while this one is deliberately kept ACTIVE.
+#
+# The maintainer's evidence contract is ZERO SIDE EFFECTS at each door, not merely a
+# non-zero exit: no definition row, no queued Run, no ``messages`` row, nothing
+# dispatched. Each test below therefore asserts the absences explicitly rather than
+# trusting the return code, and each carries a POSITIVE CONTROL in the same test so a
+# guard that simply refused everything could not pass it.
+#
+# Subordinate coverage under HFR-094; no new scenario id.
+
+
+def _capture_stderr_text(func, *args) -> tuple[int, str]:
+    """Like ``_capture_stderr_json``, but WITHOUT parsing.
+
+    The refusal tests below have to assert the EXIT CODE before they touch the payload.
+    Against ``d00bc038`` the command succeeds, writes its success payload to stdout and
+    leaves stderr empty — so a helper that parses first turns the real regression signal
+    ("this was admitted") into a ``JSONDecodeError`` about an empty string, which names
+    neither the lane nor the defect.
+    """
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        result = func(*args)
+    return result, stderr.getvalue()
+
+
+def _no_caller_context(monkeypatch) -> None:
+    """Run the command as a BARE terminal invocation.
+
+    ``caller_context_from_env`` keys off ``AVIBE_SESSION_ID``, which is set inside every
+    Avibe-hosted Agent shell — including the one a coding agent runs these tests from. Left
+    alone it changes the command under test (it defaults the target Session and relaxes the
+    session-policy validation) and stamps the caller into ``metadata.created_by``, so the
+    same test exercises a different path locally than it does in CI. Deleted rather than
+    replaced: the lane being pinned is a human typing the command.
+    """
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+
+
+def _reserved_session_cli_db(tmp_path: Path):
+    """A migrated CLI state DB holding the reserved row plus one ordinary session.
+
+    Both rows in ONE database because the point is DISCRIMINATION: the same command,
+    the same store and the same resolver must refuse one id and accept the other, which
+    a test with only the reserved row cannot show.
+
+    Returns ``(db_path, agent_store, ordinary_session_id)``.
+    """
+    from storage.agent_session_rows import resolve_workspace_notice_session
+    from storage.importer import ensure_sqlite_state
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        assert resolve_workspace_notice_session(conn, title="Workspace notifications") == (
+            "ses-workspace-notices"
+        )
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        ordinary = service.bind_agent_session(
+            scope_key="slack::channel::C900",
+            agent_name="worker",
+            session_anchor="slack_C900",
+            native_session_id="native-C900",
+        )
+    finally:
+        service.close()
+    assert ordinary
+    return db_path, agent_store, ordinary
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_hint"),
+    [
+        (
+            "en",
+            "This session only receives Avibe's workspace failure notifications — it does not accept messages.",
+        ),
+        (
+            "zh",
+            "该会话只接收 Avibe 的工作区失败通知，不接受发送消息。",
+        ),
+    ],
+)
+def test_reserved_session_cli_hint_uses_the_configured_backend_locale(
+    language: str,
+    expected_hint: str,
+) -> None:
+    exc = cli.UnresolvableSessionTarget(
+        "reserved",
+        session_id="ses-workspace-notices",
+        reason="reserved",
+    )
+    with patch.object(
+        cli.V2Config,
+        "load",
+        return_value=SimpleNamespace(language=language),
+    ):
+        error = cli._reserved_session_cli_error(exc)
+
+    assert error.hint == expected_hint
+
+
+def _message_rows(db_path: Path, session_id: str) -> list[tuple]:
+    from sqlalchemy import text as sa_text
+
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        return [
+            tuple(row)
+            for row in conn.execute(
+                sa_text(
+                    "SELECT author, type, content_text FROM messages "
+                    "WHERE session_id = :sid ORDER BY created_at, id"
+                ),
+                {"sid": session_id},
+            )
+        ]
+
+
+def test_task_add_refuses_the_reserved_session_with_no_side_effects(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """``vibe task add --session-id ses-workspace-notices`` is refused at ADMISSION.
+
+    The definition is the durable half of the hole: once persisted, every future fire
+    re-resolves the same pin, so a definition that got in would have to be discovered
+    and paused rather than simply never accepted. ``cmd_task_add`` reaches
+    ``_resolve_agent_for_target`` — and through it ``resolve_session_id_target`` —
+    BEFORE it writes anything, so the shared resolver guard closes this door with no
+    CLI-local exception of its own. That is the mechanism the maintainer asked for: one
+    shared-target fix, not another route-local special case.
+
+    Zero side effects, asserted as absences (comment 5124692513): no definition in the
+    store, no queued Run, and the reserved transcript untouched.
+
+    POSITIVE CONTROL in the same test: the ordinary session id, through the identical
+    command and store, IS accepted. A guard that refused every ``--session-id`` would
+    fail here.
+    """
+    _no_caller_context(monkeypatch)
+    db_path, agent_store, ordinary = _reserved_session_cli_db(tmp_path)
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    args = _parse_task_add(
+        ["--session-id", "ses-workspace-notices", "--cron", "0 * * * *", "--message", "hello"]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+    ):
+        result, stderr_text = _capture_stderr_text(cli.cmd_task_add, args)
+
+    assert result == 1, (
+        "``vibe task add --session-id ses-workspace-notices`` was ADMITTED. The reserved "
+        "row accepts no turn, so every future fire of this definition would resolve a "
+        f"target that cannot take one. stdout={capsys.readouterr().out!r}"
+    )
+    payload = json.loads(stderr_text)
+    assert payload["ok"] is False
+    assert payload["code"] == "reserved_session", (
+        "the refusal must be TYPED, not swallowed by the broad handler's generic "
+        "``task_command_failed``. ``reserved_session`` is the same token the Web surface "
+        "already answers with, so one client vocabulary covers both: "
+        f"{payload}"
+    )
+    assert "reserved for the runtime" in payload["error"], (
+        f"the refusal has to say WHY, in the diagnostic the resolver owns: {payload}"
+    )
+    assert "ses-workspace-notices" in payload["error"], (
+        f"and it has to name the session that was refused: {payload}"
+    )
+    assert payload["details"] == {
+        "session_id": "ses-workspace-notices",
+        "reason": "reserved",
+    }, f"and it must carry the machine-readable subject and reason: {payload}"
+
+    # --- zero side effects --------------------------------------------------
+    assert cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json").list_tasks() == [], (
+        "a definition pinned to a row that takes no turns must never be PERSISTED: "
+        "every later fire would re-resolve the same pin"
+    )
+    assert store.list_tasks() == [], "and the live store the command used must agree"
+    assert request_store.list_pending() == [], (
+        "creation does not fire, and a refused creation may not queue anything either"
+    )
+    assert _message_rows(db_path, "ses-workspace-notices") == [], (
+        "nothing may be written into the runtime's own row"
+    )
+
+    # --- positive control: the ordinary session is accepted -----------------
+    ok_args = _parse_task_add(
+        ["--session-id", ordinary, "--cron", "0 * * * *", "--message", "hello"]
+    )
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+    ):
+        assert cli.cmd_task_add(ok_args) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["ok"] is True
+    assert accepted["definition"]["session_id"] == ordinary, (
+        "the guard must not have narrowed ordinary session targeting: "
+        f"{accepted['definition']}"
+    )
+    assert [task.session_id for task in store.list_tasks()] == [ordinary]
+
+
+def test_agent_run_refuses_the_reserved_session_with_no_side_effects(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """The direct lane named in the finding, as a test rather than a hand probe.
+
+    ``vibe agent run --session-id ses-workspace-notices --message … --no-callback`` is
+    the exact command quoted in review thread 3678900318. Against ``d00bc038`` it
+    returned ``ok: true`` with EXIT 0 and left a QUEUED ``agent_run`` request whose
+    ``session_id`` was the reserved row — a real turn on its way into a machine-owned
+    session with an empty ``agent_backend``, which is what "accepts no turn" was
+    supposed to forbid.
+
+    ``--no-callback`` is load-bearing, not noise: without it the command stops earlier
+    on ``missing_async_callback``, which would let this test pass on a tree with the hole
+    wide open. The flag is what makes the run reach admission.
+
+    Zero side effects: no queued Run (the durable artifact the scheduler would have
+    picked up) and no ``messages`` row. Positive control: the ordinary session queues.
+    """
+    _no_caller_context(monkeypatch)
+    db_path, agent_store, ordinary = _reserved_session_cli_db(tmp_path)
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    args = _parse_agent_run(
+        [
+            "--async",
+            "--no-callback",
+            "--session-id",
+            "ses-workspace-notices",
+            "--message",
+            "hello",
+        ]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+    ):
+        result, stderr_text = _capture_stderr_text(cli.cmd_agent_run, args)
+
+    assert result == 1, (
+        "``vibe agent run --session-id ses-workspace-notices --message … --no-callback`` "
+        "returned success — the exact command from review thread 3678900318, admitted. "
+        f"stdout={capsys.readouterr().out!r} pending="
+        f"{[r.session_id for r in request_store.list_pending()]}"
+    )
+    payload = json.loads(stderr_text)
+    assert payload["ok"] is False
+    assert payload["code"] == "reserved_session", (
+        "the gate's remaining ask (comment 5124964406): direct Agent admission fell "
+        "through ``cmd_agent_run``'s broad ``except Exception`` and reported "
+        "``task_command_failed``, so a caller had only prose to branch on. The refusal "
+        f"must stay typed and coded at the consuming CLI surface: {payload}"
+    )
+    assert "reserved for the runtime" in payload["error"], (
+        f"the resolver's own diagnostic has to reach the caller: {payload}"
+    )
+    assert "ses-workspace-notices" in payload["error"]
+    assert payload["details"] == {
+        "session_id": "ses-workspace-notices",
+        "reason": "reserved",
+    }, f"and it must carry the machine-readable subject and reason: {payload}"
+
+    # --- zero side effects --------------------------------------------------
+    assert request_store.list_pending() == [], (
+        "against d00bc038 this held one queued agent_run for the reserved session; a "
+        "queued Run is the artifact the scheduler would dispatch"
+    )
+    assert cli.TaskExecutionStore(tmp_path / "task_requests").list_pending() == [], (
+        "and durably so, not only in the store instance the command happened to hold"
+    )
+    assert _message_rows(db_path, "ses-workspace-notices") == [], (
+        "no turn side effect of any kind lands in the runtime's own row"
+    )
+
+    # --- positive control: the ordinary session still runs ------------------
+    ok_args = _parse_agent_run(
+        ["--async", "--no-callback", "--session-id", ordinary, "--message", "hello"]
+    )
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+    ):
+        assert cli.cmd_agent_run(ok_args) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["ok"] is True
+    assert [request.session_id for request in request_store.list_pending()] == [ordinary], (
+        "an ordinary Session must still be able to take a direct Agent Run: "
+        f"{[r.session_id for r in request_store.list_pending()]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scheduled command tasks (``vibe task add/update --shell`` and friends)
+# ---------------------------------------------------------------------------
+
+#: Every variable ``caller_context_from_env`` reads (core/caller_context.py). The whole
+#: set is pinned per test rather than just ``AVIBE_SESSION_ID``, because these tests
+#: assert on what lands in ``metadata.created_by``: a stray ``AVIBE_CALLER_PLATFORM``
+#: inherited from the Agent shell that runs the suite would otherwise change the payload
+#: without changing the test.
+_CALLER_CONTEXT_ENV_VARS = (
+    "AVIBE_SESSION_ID",
+    "AVIBE_RUN_ID",
+    "AVIBE_CALLER_SOURCE",
+    "AVIBE_CALLER_BACKEND",
+    "AVIBE_NATIVE_SESSION_ID",
+    "AVIBE_CALLER_PLATFORM",
+    "AVIBE_CALLER_USER_ID",
+    "AVIBE_CALLER_CHANNEL_ID",
+    "AVIBE_CALLER_SESSION_KEY",
+    "AVIBE_CALLER_MESSAGE_ID",
+    "AVIBE_CALLER_WORKSPACE_ID",
+)
+
+
+def _bare_terminal_caller(monkeypatch) -> None:
+    """A human typing the command in a plain shell: no Avibe caller context at all."""
+
+    for name in _CALLER_CONTEXT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _agent_shell_caller(monkeypatch, *, session_id: str = "sesCaller") -> None:
+    """The command running inside an Avibe-hosted Agent turn."""
+
+    _bare_terminal_caller(monkeypatch)
+    monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+    monkeypatch.setenv("AVIBE_RUN_ID", "run_caller")
+    monkeypatch.setenv("AVIBE_CALLER_SOURCE", "agent_turn")
+    monkeypatch.setenv("AVIBE_CALLER_BACKEND", "codex")
+
+
+def _parse_task_update(task_id: str, argv: list[str]):
+    parser = cli.build_parser()
+    return parser.parse_args(["task", "update", task_id, *argv])
+
+
+def _command_task_store(tmp_path: Path):
+    return cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+
+
+def _caller_session_state(tmp_path: Path, *, session_id: str = "sesCaller"):
+    """A migrated CLI state DB holding one active Session owned by an enabled Agent."""
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="codex", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-06-28T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "avibe", "project", "proj-command-task", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="codex",
+                agent_variant="default",
+                session_anchor=f"anchor_{session_id}",
+                native_session_id="native-caller",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    return db_path, agent_store
+
+
+# --- parse forms -----------------------------------------------------------
+
+
+def test_task_add_parses_shell_command_form() -> None:
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh --verbose"])
+
+    command, shell_command, has_command = cli._resolve_task_command(
+        args, help_command="vibe task add --help"
+    )
+
+    assert (command, shell_command, has_command) == ([], "./scripts/sync.sh --verbose", True)
+
+
+def test_task_add_keeps_flag_values_in_trailing_command_argv() -> None:
+    """``--`` must hand the whole tail to the command, option-looking tokens included."""
+
+    args = _parse_task_add(
+        ["--cron", "0 3 * * *", "--", "./scripts/sync.sh", "--target", "prod", "-v"]
+    )
+
+    command, shell_command, has_command = cli._resolve_task_command(
+        args, help_command="vibe task add --help"
+    )
+
+    assert command == ["./scripts/sync.sh", "--target", "prod", "-v"]
+    assert shell_command is None
+    assert has_command is True
+
+
+def test_task_add_rejects_both_command_inputs() -> None:
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./a.sh", "--", "./b.sh"])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "conflicting_task_command_inputs"
+
+
+def test_task_add_rejects_empty_shell_command() -> None:
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "   "])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "empty_task_command"
+
+
+def test_task_add_rejects_bare_command_separator() -> None:
+    args = _parse_task_add(["--cron", "0 3 * * *", "--"])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "empty_task_command"
+
+
+# --- action matrix ---------------------------------------------------------
+
+
+def test_task_add_rejects_on_failure_without_command(monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(
+        ["--session-id", "sesTarget", "--cron", "0 * * * *", "--message", "hi", "--on-failure", "agent"]
+    )
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "on_failure_requires_command"
+
+
+def test_task_add_rejects_timeout_without_command(monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(
+        ["--session-id", "sesTarget", "--cron", "0 * * * *", "--message", "hi", "--timeout", "30"]
+    )
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "timeout_requires_command"
+
+
+@pytest.mark.parametrize("timeout", ["-1", "inf", "nan"])
+def test_task_add_rejects_an_unusable_timeout(monkeypatch, timeout: str) -> None:
+    """``inf`` is the trap: ``float`` accepts it and ``>= 0`` waves it through.
+
+    The documented spelling for "no timeout" is ``0``. A stored ``Infinity`` is not a
+    JSON number, so it breaks the readers -- the Workbench falls back to displaying
+    the six-hour default while the executor waits forever.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(["--cron", "0 * * * *", "--shell", "./a.sh", "--timeout", timeout])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "invalid_timeout"
+
+
+def test_task_add_rejects_message_on_non_escalating_command_task(monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(["--cron", "0 * * * *", "--shell", "./a.sh", "--message", "look at this"])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "message_without_consumer"
+    assert payload["details"]["flags"] == ["--message"]
+
+
+def test_task_add_requires_a_message_or_a_command(monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(["--session-id", "sesTarget", "--cron", "0 * * * *"])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "missing_task_action"
+
+
+@pytest.mark.parametrize(
+    "flag_argv,flag_name",
+    [
+        (["--session-id", "sesTarget"], "--session-id"),
+        (["--session-key", "slack::channel::C123"], "--session-key"),
+        (["--create-session"], "--create-session"),
+        (["--create-session-per-run"], "--create-session-per-run"),
+        (["--scope-id", "avibe::project::proj-x"], "--scope-id"),
+        (["--agent", "codex"], "--agent"),
+        (["--post-to", "channel"], "--post-to"),
+        (["--deliver-key", "slack::channel::C123"], "--deliver-key"),
+    ],
+)
+def test_task_add_rejects_session_flags_for_pure_command_task(
+    monkeypatch, flag_argv: list[str], flag_name: str
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh", *flag_argv])
+
+    result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "session_flags_with_command_task"
+    assert payload["details"]["flags"] == [flag_name]
+    assert "--on-failure agent" in payload["hint"]
+
+
+# --- caller-context defaulting --------------------------------------------
+
+
+def test_task_add_pure_command_task_ignores_caller_session_default(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Created from chat, a pure command task must NOT inherit the calling Session.
+
+    Otherwise ``--shell`` would be uncreatable from an Agent turn: the caller default
+    would bind a Session, and a bound Session is exactly what a pure command task
+    refuses to carry.
+    """
+
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(["--cron", "0 3 * * *", "--shell", "./scripts/sync.sh"])
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    definition = payload["definition"]
+    assert definition["session_id"] is None
+    assert definition["session_policy"] is None
+    assert definition["session_key"] == ""
+    assert definition["agent_name"] is None
+    assert "session_default_notice" not in payload
+    # The caller is still RECORDED, just not bound: creation origin survives.
+    assert definition["metadata"]["created_by"]["caller"]["session_id"] == "sesCaller"
+
+
+def test_task_add_escalating_command_task_binds_caller_session(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        [
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--on-failure",
+            "agent",
+            "--message",
+            "The nightly sync failed. Diagnose it.",
+        ]
+    )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    definition = payload["definition"]
+    assert definition["session_id"] == "sesCaller"
+    assert definition["session_policy"] == "existing"
+    assert definition["shell_command"] == "./scripts/sync.sh"
+    assert definition["prompt"] == "The nightly sync failed. Diagnose it."
+    assert definition["metadata"]["on_failure"] == "agent"
+    assert definition["kind"] == "command"
+    assert payload["session_default_notice"]["code"] == "session_defaulted_to_caller"
+
+
+def test_task_add_escalating_command_task_accepts_an_explicit_cwd(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-050 -- the command's directory is not the bound Session's question.
+
+    An escalating command task binds to an existing Session for one reason -- a failed
+    run needs somewhere to report -- and that binding made ``session_policy`` read
+    ``existing``, where ``--cwd`` was refused on the rule that a bound Session owns its
+    working directory. The rule is right about the SESSION and wrong about the command:
+    the flag was the only way to say where a subprocess with no Agent turn spawns, and
+    it came back ``cwd_with_existing_session``.
+
+    Stored on the definition, and NOT as the Session's workdir: the Session still owns
+    that, so ``session_workdir`` must stay out of the metadata.
+    """
+
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    args = _parse_task_add(
+        [
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--on-failure",
+            "agent",
+            "--message",
+            "The nightly sync failed. Diagnose it.",
+            "--cwd",
+            str(project),
+        ]
+    )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["session_policy"] == "existing"
+    assert definition["cwd"] == str(project), (
+        "the command has no way to say where it runs, so it falls back to whatever "
+        f"directory its escalation Session happens to have: {definition['cwd']!r}"
+    )
+    assert "session_workdir" not in (definition["metadata"] or {}), (
+        "the bound Session owns its own working directory; pinning it here is the "
+        "rule the refusal was protecting"
+    )
+
+
+def test_task_add_escalating_command_task_rejects_a_missing_cwd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-050 -- accepted does not mean unchecked, and the error must name the real problem.
+
+    Every other policy resolves ``--cwd`` through the same existence check. Reporting a
+    typo'd directory as ``cwd_with_existing_session`` would send the user to look at
+    their Session binding.
+    """
+
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        [
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--on-failure",
+            "agent",
+            "--cwd",
+            str(tmp_path / "does-not-exist"),
+        ]
+    )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "cwd_not_found"
+
+
+def test_task_add_message_task_still_refuses_cwd_for_a_bound_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-050 -- the softened refusal is softened for commands only.
+
+    A message task's Agent turn starts in its Session's workdir. There is no second
+    directory to name, so ``--cwd`` there is still a request to rewrite a Session's own
+    setting from a task definition.
+    """
+
+    _agent_shell_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path)
+    store = _command_task_store(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    args = _parse_task_add(
+        ["--cron", "0 3 * * *", "--message", "Share the summary.", "--cwd", str(project)]
+    )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "cwd_with_existing_session"
+
+
+def test_task_add_per_run_command_records_the_directory_it_was_described_in(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-047 -- a command whose Session does not exist yet still runs somewhere.
+
+    ``--create-session-per-run`` stores no ``cwd``, on purpose: that Session is created
+    at escalation, and its workdir is resolved then from the Scope or the runtime
+    default. The COMMAND cannot wait for it. It fires on the next tick out of the
+    definition's ``cwd``, and with nothing there it fell through to the ``~/.avibe``
+    fallback -- so the documented ``--shell './scripts/sync.sh'`` ran from the product
+    state directory, where the script does not exist and a relative write lands in
+    persisted state.
+
+    The Session's half of the answer must stay unanswered: recording the invocation
+    directory as the definition's ``cwd`` must not also pin the Session that escalation
+    creates, or a scope-bound definition would stop following its Scope's workdir.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    store = _command_task_store(tmp_path)
+    invoke_dir = tmp_path / "repo"
+    invoke_dir.mkdir()
+    args = _parse_task_add(
+        [
+            "--agent",
+            "worker",
+            "--create-session-per-run",
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--on-failure",
+            "agent",
+        ]
+    )
+
+    with (
+        patch("os.getcwd", return_value=str(invoke_dir)),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["session_policy"] == "create_per_run"
+    assert definition["cwd"] == str(invoke_dir), (
+        "the command was recorded with no directory of its own, so it fires from the "
+        f"product state directory instead of where it was described: {definition['cwd']!r}"
+    )
+    assert "session_workdir" not in definition["metadata"], (
+        "recording the command's directory also pinned the Session escalation creates"
+    )
+
+
+# --- persisted shape ------------------------------------------------------
+
+
+def test_task_add_pure_shell_command_persists_command_fields(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        [
+            "--name",
+            "nightly-sync",
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "./scripts/sync.sh",
+            "--timeout",
+            "0",
+            "--cwd",
+            str(tmp_path),
+        ]
+    )
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    definition = payload["definition"]
+    assert definition["shell_command"] == "./scripts/sync.sh"
+    assert definition["command"] is None
+    assert definition["timeout_seconds"] == 0
+    assert definition["prompt"] == ""
+    assert definition["cwd"] == str(tmp_path)
+    assert definition["metadata"]["on_failure"] == "none"
+    assert "session_workdir" not in definition["metadata"]
+
+    stored = store.get_task(definition["id"])
+    assert stored.has_command is True
+    assert stored.on_failure == "none"
+    assert stored.shell_command == "./scripts/sync.sh"
+    assert stored.timeout_seconds == 0
+
+
+def test_task_add_command_argv_persists_the_argv_list(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        ["--cron", "0 3 * * *", "--cwd", str(tmp_path), "--", "python3", "sync.py", "--target", "prod"]
+    )
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["command"] == ["python3", "sync.py", "--target", "prod"]
+    assert definition["shell_command"] is None
+    assert definition["timeout_seconds"] is None
+    assert definition["command_preview"] == "python3 sync.py --target prod"
+    assert definition["display_name"] == "python3 sync.py --target prod"
+
+
+def test_task_add_message_task_stores_no_command_fields(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Regression guard: the message lane must be untouched by the command flags."""
+
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    args = _parse_task_add(
+        ["--session-key", "slack::channel::C123", "--cron", "0 * * * *", "--message", "morning briefing"]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["prompt"] == "morning briefing"
+    assert definition["shell_command"] is None
+    assert definition["command"] is None
+    assert definition["timeout_seconds"] is None
+    assert definition["kind"] == "message"
+    assert definition["on_failure"] == "none"
+    assert "on_failure" not in definition["metadata"]
+
+
+# --- update ---------------------------------------------------------------
+
+
+def _stored_command_task(store, **overrides):
+    payload = {
+        "name": "nightly-sync",
+        "session_key": "",
+        "prompt": "",
+        "schedule_type": "cron",
+        "cron": "0 3 * * *",
+        "timezone_name": "UTC",
+        "shell_command": "./scripts/old.sh",
+        "timeout_seconds": 60,
+        "metadata": {"on_failure": "none"},
+    }
+    payload.update(overrides)
+    return store.add_task(**payload)
+
+
+def test_task_update_replaces_pure_command_task_shell(tmp_path: Path, capsys, monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, cwd=str(tmp_path))
+    args = _parse_task_update(task.id, ["--shell", "./scripts/new.sh"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["shell_command"] == "./scripts/new.sh"
+    # ``update_command_fields`` is all-or-nothing, so an unnamed column must survive.
+    assert definition["timeout_seconds"] == 60
+    assert definition["cwd"] == str(tmp_path)
+    assert definition["session_policy"] is None
+    assert definition["session_id"] is None
+
+
+def test_task_update_timeout_only_preserves_stored_command(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(
+        store,
+        shell_command=None,
+        command=["python3", "sync.py"],
+        cwd=str(tmp_path),
+    )
+    args = _parse_task_update(task.id, ["--timeout", "900"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["command"] == ["python3", "sync.py"]
+    assert definition["shell_command"] is None
+    assert definition["timeout_seconds"] == 900
+
+
+def test_task_update_rejects_message_flags_on_command_task(tmp_path: Path, monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, cwd=str(tmp_path))
+    args = _parse_task_update(task.id, ["--message", "please look"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(cli.cmd_task_update, args)
+
+    assert result == 1
+    assert payload["code"] == "task_mode_immutable"
+    assert payload["details"]["kind"] == "command"
+
+
+def test_task_update_rewords_escalation_guidance_on_an_agent_command_task(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """SCT-007 -- an ``--on-failure agent`` task owns its message, so it stays editable.
+
+    ``cmd_task_add`` REQUIRES ``--on-failure agent`` for a message to be legal beside
+    a command (``message_without_consumer``), so rejecting the message here forbade
+    exactly the shape the add path blesses -- leaving the escalation guidance
+    rewordable only by deleting and recreating the task. The command columns must
+    survive the edit untouched: this is a message change, not a mode switch.
+    """
+
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(
+        store,
+        cwd=str(tmp_path),
+        prompt="The nightly sync failed. Diagnose it.",
+        session_key="slack::channel::C123",
+        metadata={"on_failure": "agent"},
+    )
+    args = _parse_task_update(task.id, ["--message", "Check the upstream API first."])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["prompt"] == "Check the upstream API first."
+    assert definition["shell_command"] == "./scripts/old.sh"
+    assert definition["timeout_seconds"] == 60
+    assert definition["on_failure"] == "agent"
+
+
+def test_task_update_rejects_command_flags_on_message_task(tmp_path: Path, monkeypatch) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="morning briefing",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    args = _parse_task_update(task.id, ["--shell", "./scripts/new.sh"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(cli.cmd_task_update, args)
+
+    assert result == 1
+    assert payload["code"] == "task_mode_immutable"
+    assert payload["details"]["kind"] == "message"
+    assert payload["details"]["flags"] == ["--shell"]
+
+
+def test_task_update_rejects_failure_handling_change(tmp_path: Path, monkeypatch) -> None:
+    """Escalation decides whether the definition owns a Session, so it is not editable."""
+
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, cwd=str(tmp_path))
+    args = _parse_task_update(task.id, ["--on-failure", "agent"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(cli.cmd_task_update, args)
+
+    assert result == 1
+    assert payload["code"] == "task_mode_immutable"
+    assert payload["details"]["on_failure"] == "none"
+    assert payload["details"]["requested_on_failure"] == "agent"
+
+
+def test_task_update_rejects_session_flags_on_pure_command_task(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, cwd=str(tmp_path))
+    args = _parse_task_update(task.id, ["--session-id", "sesTarget"])
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(cli.cmd_task_update, args)
+
+    assert result == 1
+    assert payload["code"] == "session_flags_with_command_task"
+
+
+# --- rendering ------------------------------------------------------------
+
+
+def test_task_payload_renders_command_kind_and_preview(tmp_path: Path) -> None:
+    store = _command_task_store(tmp_path)
+    task = _stored_command_task(store, name=None, shell_command="./scripts/sync.sh --verbose")
+    task.last_exit_code = 2
+
+    payload = cli._task_payload(task)
+    brief = cli._task_payload(task, brief=True)
+
+    assert payload["kind"] == "command"
+    assert payload["on_failure"] == "none"
+    assert payload["command_preview"] == "./scripts/sync.sh --verbose"
+    assert payload["display_name"] == "./scripts/sync.sh --verbose"
+    assert brief["kind"] == "command"
+    assert brief["last_exit_code"] == 2
+
+
+def test_task_payload_renders_message_kind_for_message_tasks(tmp_path: Path) -> None:
+    store = _command_task_store(tmp_path)
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="morning briefing",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+
+    payload = cli._task_payload(task)
+
+    assert payload["kind"] == "message"
+    assert payload["command_preview"] == ""
+    assert payload["display_name"] == "morning briefing"
+    assert cli._task_payload(task, brief=True)["last_exit_code"] is None
+
+
+# --- documented examples --------------------------------------------------
+
+
+def test_documented_task_command_examples_stay_parseable() -> None:
+    """Injected help text is a live caller: every example must survive the parser."""
+
+    parser = cli.build_parser()
+    text = cli._task_add_examples_text() + "\n" + cli._task_update_examples_text()
+    examples = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith(("vibe task add ", "vibe task update "))
+    ]
+    command_examples = [line for line in examples if "--shell" in line or "--timeout" in line]
+    assert len(examples) >= 4
+    assert len(command_examples) >= 3
+
+    for example in examples:
+        parser.parse_args(shlex.split(example)[1:])

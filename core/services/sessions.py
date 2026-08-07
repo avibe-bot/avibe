@@ -37,6 +37,7 @@ from typing import Optional
 
 from config import paths
 from storage.workbench_sessions_service import (
+    ReservedSessionError,
     SessionArchivedError,
     SessionBackendLockedError,
     archive_session,
@@ -49,7 +50,8 @@ from storage.workbench_sessions_service import (
     is_session_archived,
     list_sessions,
     list_sessions_page,
-    reset_running_agent_status,
+    require_enabled_agent_backend,
+    require_enabled_agent_identity,
     set_agent_status,
     touch_session,
     update_session,
@@ -58,6 +60,7 @@ from vibe.i18n import t as i18n_t
 
 __all__ = [
     "SESSION_ARCHIVED_I18N_KEY",
+    "ReservedSessionError",
     "SessionArchivedError",
     "SessionBackendLockedError",
     "archive_session",
@@ -70,7 +73,6 @@ __all__ = [
     "is_session_archived",
     "list_sessions",
     "list_sessions_page",
-    "reset_running_agent_status",
     "set_agent_status",
     "session_archived_message",
     "touch_session",
@@ -162,6 +164,8 @@ def reserve_agent_session(
     visibility: str = "foreground",
     metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
+    require_enabled_agent: bool = False,
+    expected_reference_agent_id: Optional[str] = None,
 ) -> Optional[str]:
     """Reserve a new ``agent_sessions`` row keyed by an IM-style scope.
 
@@ -183,6 +187,8 @@ def reserve_agent_session(
             workdir=workdir,
             visibility=visibility,
             metadata=metadata,
+            require_enabled_agent=require_enabled_agent,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
     finally:
         service.close()
@@ -200,6 +206,8 @@ def reserve_standalone_agent_session(
     visibility: str = "background",
     metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
+    require_enabled_agent: bool = False,
+    expected_reference_agent_id: Optional[str] = None,
 ) -> Optional[str]:
     """Reserve a background-capable session with no Scope."""
 
@@ -215,6 +223,8 @@ def reserve_standalone_agent_session(
             workdir=workdir,
             visibility=visibility,
             metadata=metadata,
+            require_enabled_agent=require_enabled_agent,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
     finally:
         service.close()

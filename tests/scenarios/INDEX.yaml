@@ -20,6 +20,7 @@ capabilities:
       - tests/test_model_hub_api.py
       - tests/test_model_hub_config.py
       - tests/test_model_hub_resolution.py
+      - tests/test_model_hub_runtime.py
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery
     status: active
@@ -38,6 +39,18 @@ capabilities:
       - tests/test_agent_run_target.py
       - tests/test_watches.py
       - tests/test_cli_watch_command.py
+  - id: harness_command_task
+    name: Scheduled command tasks and their failure visibility
+    status: active
+    catalog: tests/scenarios/harness_command_task/catalog.yaml
+    observations: tests/scenarios/harness_command_task/observations.yaml
+    scenario_tests:
+      - tests/test_harness_failure_visibility.py
+      - tests/test_scheduled_command_task_integration.py
+    unit_or_contract_tests:
+      - tests/test_command_runner.py
+      - tests/test_cli_task_command.py
+      - tests/test_scheduled_tasks.py
   - id: auth_setup
     name: IM-driven backend auth recovery
     status: active
@@ -76,6 +89,8 @@ capabilities:
       - tests/test_ui_api.py
       - tests/test_auth_pipeline.py
       - tests/test_agent_run_target.py
+      - tests/test_core_services_dispatch.py
     unit_or_contract_tests:
       - tests/test_sqlite_settings_store.py
+      - tests/test_message_context_helpers.py
       - tests/test_chat_discovery.py

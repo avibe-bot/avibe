@@ -23,14 +23,16 @@ In `~/.vibe_remote/config/config.json`:
   "agents": {
     "codex": {
       "enabled": true,
-      "cli_path": "codex",
-      "default_model": "gpt-5-codex"
+      "cli_path": "codex"
     }
   }
 }
 ```
 
-No additional flag is required to bypass approvals—the bot always adds `--dangerously-bypass-approvals-and-sandbox`.
+Set the model on the Agents page. New Codex Agents without an explicit model are
+prefilled with Avibe's release recommendation, and that value remains visible and
+editable on the Agent. No additional flag is required to bypass approvals—the bot
+always adds `--dangerously-bypass-approvals-and-sandbox`.
 
 ## 3. Route chats to Codex
 

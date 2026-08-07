@@ -575,6 +575,19 @@ class SessionsStore:
         """Check if a message ID is in the processed set."""
         return message_ts in self._get_processed_set(channel_id, thread_ts)
 
+    def has_processed_message(self, channel_id: str, thread_ts: str, message_ts: str) -> bool:
+        """Check the cross-process processed-message authority."""
+
+        self._ensure_service()
+        exists = self._service.processed_message_exists(
+            channel_id,
+            thread_ts,
+            message_ts,
+        )
+        if exists:
+            self._remember_processed_message(channel_id, thread_ts, message_ts)
+        return exists
+
     def _remember_processed_message(self, channel_id: str, thread_ts: str, message_ts: str) -> None:
         if channel_id not in self.state.processed_message_ts:
             self.state.processed_message_ts[channel_id] = {}

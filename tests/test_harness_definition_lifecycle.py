@@ -33,6 +33,7 @@ from storage.background import (
     DEFINITION_RETIREMENT_COLUMNS,
     DEFINITION_STATUS_COUNTS,
     DEFINITION_STATUS_FILTERS,
+    NO_EVENT_EXIT_CODE,
     SQLiteBackgroundTaskStore,
     _id_batches,
     compute_next_run_at,
@@ -243,27 +244,91 @@ def test_counts_and_rows_come_from_one_expression(store) -> None:
             assert {row["lifecycle_state"] for row in rows} <= set(expected), status
 
 
+def test_a_one_shot_watch_that_ended_quietly_counts_as_a_success(store) -> None:
+    """Exit 64 retires a ``once`` watch cleanly, so the compact list hides it.
+
+    The two projections have to agree with the supervisor about which codes are
+    clean endings. While this one recognised only ``None``/``0``, a watch that
+    ended on the no-event path stayed pinned to ``vibe watch list`` as unfinished
+    business and reported itself as failed — the opposite of what it did.
+    """
+    _watch(
+        store,
+        "quiet",
+        mode="once",
+        enabled=False,
+        last_finished_at=NOW,
+        retired_at=NOW,
+        last_exit_code=NO_EVENT_EXIT_CODE,
+    )
+    _watch(
+        store,
+        "broken",
+        mode="once",
+        enabled=False,
+        last_finished_at=NOW,
+        retired_at=NOW,
+        last_exit_code=1,
+        last_error="boom",
+    )
+
+    assert _state(store, "quiet") == "finished"
+    compact = store.list_watches_page(
+        page_request=PageRequest(page=1, limit=10), include_successful_finished=False
+    )
+    full = store.list_watches_page(
+        page_request=PageRequest(page=1, limit=10), include_successful_finished=True
+    )
+
+    assert {row["id"] for row in compact.items} == {"broken"}
+    assert {row["id"] for row in full.items} == {"quiet", "broken"}
+
+
 def test_an_unknown_status_is_rejected_rather_than_silently_ignored(store) -> None:
     with pytest.raises(ValueError):
         store.list_watches_page(status="enabled", page_request=PageRequest(page=1, limit=5))
 
 
 @pytest.mark.parametrize(
-    ("exit_code", "error", "expected"),
+    ("exit_code", "error", "timed_out", "expected"),
     [
-        (0, None, "normal"),
-        (None, None, "normal"),
-        (124, "waiter timed out", "timeout"),
-        (1, "boom", "error"),
+        (0, None, None, "normal"),
+        (None, None, None, "normal"),
+        # A watch cycle, and every row written before the scheduler recorded the fact:
+        # 124 is all there is to go on, so it still reads as a timeout.
+        (124, "waiter timed out", None, "timeout"),
+        (1, "boom", None, "error"),
         # Scheduled tasks never write an exit code, so the code alone would call
         # every failed one a normal ending.
-        (None, "boom", "error"),
-        (0, "   ", "normal"),
+        (None, "boom", None, "error"),
+        (0, "   ", None, "normal"),
+        # SCT-024. The scheduler is the only witness to its own timeout: a command
+        # that wraps itself in ``timeout`` reports a REAL one as 124 too, and calling
+        # that "stopped for running too long" tells the user to raise a limit that
+        # was never reached.
+        (124, "command exited with status 124", False, "error"),
+        (124, "command timed out after 5 second(s)", True, "timeout"),
+        # And the flag outranks the code in the other direction as well: a command
+        # killed by the scheduler that still managed its own exit status.
+        (137, "command timed out after 5 second(s)", True, "timeout"),
+        # A waiter that finished its cycle and found nothing worth an Agent turn ended
+        # cleanly. Reading 64 as a failure made the quiet path -- the reason the code
+        # exists -- look broken everywhere a finished watch is rendered.
+        (NO_EVENT_EXIT_CODE, None, None, "normal"),
+        # The code does not excuse a real error the waiter also reported.
+        (NO_EVENT_EXIT_CODE, "boom", None, "error"),
     ],
 )
-def test_lifecycle_detail_names_how_a_finished_row_ended(exit_code, error, expected) -> None:
+def test_lifecycle_detail_names_how_a_finished_row_ended(
+    exit_code, error, timed_out, expected
+) -> None:
     assert (
-        definition_lifecycle_detail(lifecycle_state="finished", last_exit_code=exit_code, last_error=error)
+        definition_lifecycle_detail(
+            lifecycle_state="finished",
+            last_exit_code=exit_code,
+            last_error=error,
+            timed_out=timed_out,
+        )
         == expected
     )
 
@@ -802,6 +867,126 @@ def test_one_shot_states_and_counts_agree_on_the_clock(store) -> None:
 
     counts = store.count_scheduled_tasks()
     assert (counts["waiting"], counts["finished"], counts["paused"]) == (1, 1, 1)
+
+
+def test_naive_one_shot_uses_its_task_timezone_in_rows_counts_and_next_fire(store) -> None:
+    """Offset-free ``run_at`` has one meaning across SQL and the scheduler."""
+
+    now_utc = datetime.now(timezone.utc)
+    los_angeles = ZoneInfo("America/Los_Angeles")
+    shanghai = ZoneInfo("Asia/Shanghai")
+    ahead = (now_utc.astimezone(los_angeles) + timedelta(hours=1)).replace(tzinfo=None)
+    behind = (now_utc.astimezone(shanghai) - timedelta(hours=1)).replace(tzinfo=None)
+
+    _task(
+        store,
+        "naive-ahead",
+        schedule_type="at",
+        run_at=ahead.isoformat(),
+        timezone="America/Los_Angeles",
+    )
+    _task(
+        store,
+        "naive-behind",
+        schedule_type="at",
+        run_at=behind.isoformat(),
+        timezone="Asia/Shanghai",
+    )
+
+    rows = {row["id"]: row for row in store.list_scheduled_tasks()}
+    assert rows["naive-ahead"]["lifecycle_state"] == "waiting"
+    assert rows["naive-behind"]["lifecycle_state"] == "finished"
+    assert rows["naive-ahead"]["next_run_at"] is not None
+    assert rows["naive-behind"]["next_run_at"] is None
+
+    counts = store.count_scheduled_tasks()
+    assert (counts["waiting"], counts["finished"]) == (1, 1)
+
+
+def test_searching_tasks_looks_at_what_a_command_task_actually_runs(store) -> None:
+    """SCT-011 -- a command task is findable by its command, like a watch already is.
+
+    Search offers a different field list per definition type, and the ``scheduled``
+    branch was written when every task was a prompt: it reads ``message``/``prompt``
+    but not ``shell_command``/``command_json``. A command task stores its instruction
+    in the latter and can leave ``message`` empty (nothing is being said to an Agent),
+    so the only text distinguishing it was the one text search would not read. The
+    ``watch`` branch has always read both columns; tasks now share them.
+
+    ``cwd`` is deliberately still excluded here: task rows overwhelmingly share one
+    working directory, so matching on it would return almost everything.
+    """
+
+    _task(store, "deploy-task", name="nightly", shell_command="./scripts/sync.sh --dry-run")
+    _task(store, "argv-task", name="probe", command=["curl", "-sf", "https://health.local"])
+    _task(store, "prompt-task", name="digest", prompt="summarise the day")
+
+    def _found(query: str) -> set[str]:
+        page = store.list_scheduled_tasks_page(page_request=PageRequest(limit=50), query=query)
+        return {row["id"] for row in page.items}
+
+    assert _found("sync.sh") == {"deploy-task"}, "a shell command task is unfindable"
+    assert _found("health.local") == {"argv-task"}, "an argv command task is unfindable"
+    assert _found("summarise") == {"prompt-task"}, "and message search still works"
+    # The chips count the same rows the list returns, because both go through
+    # ``_definitions_query``; a field added to one but not the other splits them.
+    assert store.count_scheduled_tasks(query="sync.sh")["total"] == 1
+
+
+def test_an_escalation_turn_is_not_a_verdict_on_the_command_that_queued_it(store) -> None:
+    """SCT-014 -- the Agent turn REPORTING a failure must not report it as a success.
+
+    A ``--on-failure agent`` escalation is an ``agent_runs`` row carrying the failing
+    definition's own ``definition_id`` -- which is what links the turn to the task -- and
+    it settles ``succeeded`` whenever the Agent answers, because answering is all it was
+    asked to do. Read as one of the definition's verdicts it is the newest row in the
+    window, so the health badge went green on the strength of the very turn that exists
+    to say the command broke, "last succeeded" pointed at that turn, and a success
+    between two failures closed the failure streak.
+
+    Exactly the ``watch_runtime`` shape (a row sharing a definition's id that is not
+    that definition's outcome), so it takes the same exclusion.
+    """
+
+    settled = datetime.now(timezone.utc)
+    fresh = (settled - timedelta(minutes=5)).isoformat()
+    later = settled.isoformat()
+
+    _task(store, "backup", name="nightly backup", shell_command="./scripts/backup.sh")
+    for index in range(2):
+        _run(
+            store,
+            f"fire-{index}",
+            "backup",
+            request_type="scheduled",
+            run_type="scheduled",
+            status="failed",
+            error="command exited with status 2",
+            created_at=fresh,
+            completed_at=fresh,
+        )
+    # The turn the second failure queued, and it answered.
+    _run(
+        store,
+        "escalation-1",
+        "backup",
+        request_type="task_escalation",
+        run_type="task_escalation",
+        status="succeeded",
+        parent_run_id="fire-1",
+        created_at=later,
+        completed_at=later,
+    )
+
+    health = store.definition_health("backup")
+    assert health["health"] == "failing", (
+        "the escalation turn reporting the failure was counted as the task succeeding: "
+        f"{health}"
+    )
+    assert health["consecutive_failures"] == 2
+    assert store.last_success_settled_at("backup") is None, (
+        "the definition has never succeeded, but the escalation turn claimed it did"
+    )
 
 
 def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_path: Path) -> None:

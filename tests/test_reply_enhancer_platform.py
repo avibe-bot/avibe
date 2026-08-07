@@ -101,9 +101,23 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
         self.assertIn(
-            "If the user asks you to configure, repair, or operate Avibe itself, read `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` before making changes.",
+            "Use the `use-avibe` playbook for Avibe configuration, repair, explanation, "
+            "and operations",
             prompt,
         )
+        self.assertIn(
+            "Before changing Avibe state or disrupting its running service, consult that playbook",
+            prompt,
+        )
+        self.assertIn(
+            "use `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` "
+            "when it is not installed locally",
+            prompt,
+        )
+        self.assertIn("skills/use-avibe/SKILL.md", prompt)
+        self.assertNotIn("new user turn", prompt)
+        self.assertNotIn("active Agent Session context", prompt)
+        self.assertNotIn("context compaction removed the guidance", prompt)
         self.assertIn("## Send files", prompt)
         self.assertIn("Avibe provides optional capabilities:", prompt)
         self.assertNotIn("If you generate an image with Codex", prompt)
@@ -1589,7 +1603,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "| Dispatch an existing queued Workbench Session head now | `vibe session send-now <session-id>` |",
+            "| Promote an existing queued Session head now | `vibe session send-now <session-id>` |",
             prompt,
         )
         self.assertIn("| Branch from current Session context | `vibe agent run --fork-self ...` |", prompt)
@@ -1613,7 +1627,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Outside an Agent shell, a caller-less run", prompt)
         self.assertIn("Pass `--sync` only when the current process must wait for the result", prompt)
         self.assertIn(
-            "That existing-Session send queues behind an active turn by default",
+            "That existing-Session send is a P1 delivery by default",
             prompt,
         )
         self.assertIn(
@@ -1621,7 +1635,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "Both forms require a Web/Workbench Session",
+            "Both forms work for Workbench and IM Sessions",
             prompt,
         )
         self.assertIn(
@@ -1645,11 +1659,32 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "the new message does not leapfrog it",
+            "persist the new Run at P3 and then promote the exact FIFO head through P1",
             prompt,
         )
         self.assertIn(
-            "If interruption is refused, the active turn and durable queue remain intact",
+            "the new message never leapfrogs it",
+            prompt,
+        )
+        self.assertIn(
+            "the same exact-head P1 promotion without adding a Message",
+            prompt,
+        )
+        self.assertIn(
+            "the promoted head steers that same logical/native Turn",
+            prompt,
+        )
+        self.assertIn(
+            "if the Session is idle, it starts as a new Turn",
+            prompt,
+        )
+        self.assertNotIn(
+            "Both forms require a Web/Workbench Session, interrupt through the shared Stop path",
+            prompt,
+        )
+        self.assertNotIn("content-P0 admission", prompt)
+        self.assertIn(
+            "never falls back to Stop",
             prompt,
         )
         self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)

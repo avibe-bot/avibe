@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { ToastProvider } from '@/context/ToastContext';
+import { ToastProvider } from '@/context/ToastProvider';
 import { AgentCard } from './AgentCard';
 import { modelChainKey, type ModelChainIndex } from './modelRows';
 import type { AgentChain, AgentSupply, Source } from './types';
@@ -28,6 +28,7 @@ const source = (id: string, name: string): Source => ({
   supply_channel: 'hub',
   billing: 'metered',
   state: { status: 'active', retry_at: null, detail_key: null },
+  last_discovered_at: null,
   models: [{ id: 'claude-opus-4-6', provenance: 'discovered' }],
 });
 
@@ -37,7 +38,6 @@ const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   menu_kind: 'fixed',
   selected_by_agent: null,
   selected_model_id: 'claude-opus-4-6',
-  current: { model_id: 'claude-opus-4-6', source_id: 'src_a', channel: 'hub' },
   sources: { policy: 'follow', order: ['src_a'], eligibility: [] },
   supply_status: 'ok',
   model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 1 }],
@@ -105,15 +105,15 @@ const render = (
 );
 
 describe('AgentCard model list', () => {
-  it('shows every model, the current marker, and the actual serving source', () => {
+  it('shows every model and the actual serving source without a current badge', () => {
     const html = render(
       [agent()],
       chains(chain('claude-opus-4-6'), chain('claude-sonnet-4-6')),
     );
     expect(html).toContain('claude-opus-4-6');
     expect(html).toContain('claude-sonnet-4-6');
-    expect(html).toContain(zh.settings.models.current);
     expect(html).toContain('当前由 Anthropic API Key 供给');
+    expect(html).not.toContain('>当前</');
   });
 
   it('explains an automatic switch on the current model row', () => {
@@ -145,10 +145,11 @@ describe('AgentCard model list', () => {
     expect(html).toContain('当前已自动换到 OpenAI API Key');
   });
 
-  it('renders an honest row-zero state when no model is selected', () => {
-    const html = render([agent({ selected_model_id: null, current: null })], chains(chain('claude-opus-4-6')));
-    expect(html).toContain(zh.settings.models.emptySelection.title);
-    expect(html).toContain(zh.settings.models.emptySelection.action);
+  it('does not turn an absent selection into a Models-page state', () => {
+    const html = render([agent({ selected_model_id: null })], chains(chain('claude-opus-4-6')));
+    expect(html).toContain('claude-opus-4-6');
+    expect(html).not.toContain('尚未选择型号');
+    expect(html).not.toContain('href="/agents"');
   });
 
   it('gives an interrupted model its route door', () => {
@@ -218,7 +219,6 @@ describe('AgentCard model list', () => {
       backend: 'opencode',
       menu_kind: 'open',
       selected_model_id: 'anthropic/claude-opus-4-6',
-      current: null,
       sources: {
         policy: 'custom',
         order: ['src_enabled'],
@@ -245,19 +245,19 @@ describe('AgentCard model list', () => {
     const footer = render([open], {}, false, undefined, pending);
     expect(footer).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?管理型号<\/button>/);
 
-    const rowZero = render([
+    const emptyMenu = render([
       agent({
         backend: 'opencode',
         menu_kind: 'open',
         selected_model_id: null,
-        current: null,
         model_supply: [],
         mappings: [],
         menu: { view: 'featured', checked: [] },
         builtin_models: null,
       }),
     ], {}, false, undefined, pending);
-    expect(rowZero).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?选择型号<\/button>/);
+    expect(emptyMenu).toContain(zh.settings.models.agents.emptyModels);
+    expect(emptyMenu).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?管理型号<\/button>/);
   });
 
   it('filters to affected rows without leaving healthy siblings behind', () => {
@@ -301,7 +301,7 @@ describe('AgentCard model list', () => {
   });
 
   it('keeps Direct honest and offers the managed-mode action instead of order editing', () => {
-    const html = render([agent({ mode: 'direct', sources: null, current: null })], {});
+    const html = render([agent({ mode: 'direct', sources: null })], {});
     expect(html).toContain(zh.settings.models.modelStatus.direct);
     expect(html).toContain(zh.settings.models.agents.enableManaged);
     expect(html).not.toContain(zh.settings.models.agents.sourceOrder);

@@ -24,6 +24,7 @@ from core.show_session_events import (
     localized_show_event_error,
     show_event_requests_dispatch,
 )
+from storage import message_deliveries
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, media_objects, messages, show_session_events
@@ -67,6 +68,45 @@ def _seed_session(session_id: str = "ses_mark") -> str:
             )
         )
     return scope_id
+
+
+def _accept_delivery(payload: dict[str, object]) -> None:
+    with create_sqlite_engine().begin() as conn:
+        delivery_id = str(payload["user_message_id"])
+        delivery = message_deliveries.get_delivery(conn, delivery_id)
+        assert delivery is not None
+        turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=delivery["session_id"],
+            initial_delivery_id=delivery_id,
+            state="starting",
+            backend="codex",
+        )
+        attempt_id = message_deliveries.new_attempt_id()
+        assert message_deliveries.open_start_attempt(
+            conn,
+            delivery_id,
+            expected_version=delivery["version"],
+            turn_id=turn_id,
+            attempt_id=attempt_id,
+        )
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert turn is not None
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            runtime_key=f"runtime:{turn_id}",
+            runtime_turn_id=f"runtime-turn:{turn_id}",
+            native_turn_id=f"native:{turn_id}",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "test_native_acceptance"},
+        )
 
 
 def _png_bytes(width: int, height: int) -> bytes:
@@ -906,10 +946,13 @@ def test_show_event_store_records_intent_dispatch_payload(isolated_state):
     assert event["payload"]["dispatch"] is True
     assert "[show-intent] choose" in event["transcript_text"]
     assert "Pick B." in event["transcript_text"]
-    assert event["message"]["author"] == "harness"
-    assert event["message"]["source"] == "harness"
-    assert event["message"]["author_name"] == "show_intent"
-    assert event["message"]["author_id"] == event["id"]
+    assert event["message"] is None
+    assert event["message_id"] is None
+    assert event["delivery"]["state"] == "reserved"
+    assert event["delivery"]["author"] == "harness"
+    assert event["delivery"]["source"] == "harness"
+    assert event["delivery"]["author_name"] == "show_intent"
+    assert event["delivery"]["author_id"] == event["id"]
 
 
 def test_show_trigger_kind_is_closed_over_dispatching_event_types():
@@ -1305,7 +1348,7 @@ def test_show_event_store_lists_after_cursor(isolated_state):
     assert [event["id"] for event in page["events"]] == [second["id"]]
 
 
-def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
+def test_dispatching_show_event_reserves_delivery_outside_transcript(isolated_state):
     from storage import messages_service
 
     _seed_session("ses_show")
@@ -1329,11 +1372,14 @@ def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
     finally:
         store.close()
 
-    assert dispatching["message"]["type"] == messages_service.PENDING_TYPE
-    assert dispatching["message"]["author"] == messages_service.HARNESS_TYPE
-    assert dispatching["message"]["source"] == messages_service.HARNESS_TYPE
-    assert dispatching["message"]["author_name"] == "show_annotation"
-    assert dispatching["message"]["author_id"] == dispatching["id"]
+    assert dispatching["message"] is None
+    assert dispatching["message_id"] is None
+    assert dispatching["delivery"]["priority"] == "p1"
+    assert dispatching["delivery"]["state"] == "reserved"
+    assert dispatching["delivery"]["author"] == messages_service.HARNESS_TYPE
+    assert dispatching["delivery"]["source"] == messages_service.HARNESS_TYPE
+    assert dispatching["delivery"]["author_name"] == "show_annotation"
+    assert dispatching["delivery"]["author_id"] == dispatching["id"]
     assert non_dispatching["message"]["type"] == messages_service.ANNOTATION_TYPE
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -1344,14 +1390,12 @@ def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
             types=messages_service.TRANSCRIPT_TYPES,
             tail=True,
         )
-        queued = messages_service.list_queued(conn, "ses_show")
+        queued = message_deliveries.list_queued(conn, "ses_show")
     assert [message["text"] for message in visible["messages"]] == [non_dispatching["transcript_text"]]
     assert queued == []
 
 
-def test_dispatching_show_event_retry_reuses_event_and_transcript_row(isolated_state):
-    from storage import messages_service
-
+def test_dispatching_show_event_retry_reuses_event_and_delivery(isolated_state):
     _seed_session("ses_show_retry")
     payload = {
         "id": "show_evt_retry_identity",
@@ -1370,8 +1414,9 @@ def test_dispatching_show_event_retry_reuses_event_and_transcript_row(isolated_s
         store.close()
 
     assert replay["id"] == first["id"]
-    assert replay["message_id"] == first["message_id"]
-    assert replay["message"]["type"] == messages_service.PENDING_TYPE
+    assert replay["message_id"] is None
+    assert replay["delivery_id"] == first["delivery_id"]
+    assert replay["delivery"]["state"] == "reserved"
     engine = create_sqlite_engine()
     with engine.connect() as conn:
         event_rows = conn.execute(
@@ -1384,8 +1429,13 @@ def test_dispatching_show_event_retry_reuses_event_and_transcript_row(isolated_s
                 messages.c.native_message_id == "show:show_evt_retry_identity"
             )
         ).mappings().all()
+        delivery_row = message_deliveries.get_delivery_by_dedupe(
+            conn,
+            "show:show_evt_retry_identity",
+        )
     assert len(event_rows) == 1
-    assert len(message_rows) == 1
+    assert len(message_rows) == 0
+    assert delivery_row is not None
 
 
 def test_show_event_store_rejects_reused_id_with_different_contents(isolated_state):
@@ -1472,9 +1522,7 @@ def test_localized_show_event_errors_follow_configured_language(
     assert str(pending) == "Show 事件可能仍在处理中，未在本地重复提交。"
 
 
-def test_direct_dispatching_show_event_is_visible_annotation_input(isolated_state):
-    from storage import messages_service
-
+def test_direct_dispatching_show_event_requires_acceptance_before_visibility(isolated_state):
     _seed_session("ses_show")
     store = ShowSessionEventStore()
     try:
@@ -1493,19 +1541,17 @@ def test_direct_dispatching_show_event_is_visible_annotation_input(isolated_stat
     finally:
         store.close()
 
-    assert event["message"]["type"] == messages_service.ANNOTATION_TYPE
-    assert event["message"]["author"] == messages_service.HARNESS_TYPE
-    assert event["message"]["source"] == messages_service.HARNESS_TYPE
+    assert event["message"] is None
+    assert event["delivery"]["state"] == "reserved"
     assert [item["id"] for item in events["events"]] == [event["id"]]
     with create_sqlite_engine().connect() as conn:
-        assert messages_service.list_queued(conn, "ses_show") == []
+        assert message_deliveries.list_queued(conn, "ses_show") == []
 
 
-def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
-    from storage import messages_service
+def test_startup_leaves_reserved_show_delivery_outside_transcript(isolated_state):
     from vibe import ui_server
 
-    scope_id = _seed_session("ses_show_restart")
+    _seed_session("ses_show_restart")
     store = ShowSessionEventStore()
     try:
         show_event = store.append(
@@ -1523,38 +1569,22 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
     finally:
         store.close()
 
-    with create_sqlite_engine().begin() as conn:
-        chat_message = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id="ses_show_restart",
-            platform="avibe",
-            author="user",
-            source="user",
-            message_type=messages_service.PENDING_TYPE,
-            text="Recover my chat prompt after restart.",
-        )
-
-    # Ordinary Chat becomes visible. Harness-owned Show input stays retryable
-    # because startup has no queue drain that owns it.
-    summary = ui_server._recover_stale_pending_messages()
-    assert summary == {"promoted": 1, "deleted": 0, "skipped": 1}
+    assert not hasattr(ui_server, "_recover_stale_pending_messages")
 
     with create_sqlite_engine().connect() as conn:
-        repaired = {
-            row["id"]: row
-            for row in messages_service.list_session_messages(
-                conn,
-                session_id="ses_show_restart",
-                limit=50,
-                types=messages_service.TRANSCRIPT_TYPES,
-                tail=True,
-            )["messages"]
-        }
-        queued = messages_service.list_queued(conn, "ses_show_restart")
-    assert repaired[chat_message["id"]]["type"] == "user"
-    assert repaired[chat_message["id"]]["author"] == "user"
-    assert show_event["message_id"] not in repaired
+        from storage import messages_service
+
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id="ses_show_restart",
+            limit=50,
+            types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
+        )["messages"]
+        reserved = message_deliveries.get_delivery(conn, show_event["delivery_id"])
+        queued = message_deliveries.list_queued(conn, "ses_show_restart")
+    assert visible == []
+    assert reserved is not None and reserved["state"] == "reserved"
     assert queued == []
 
     store = ShowSessionEventStore()
@@ -1563,10 +1593,10 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
     finally:
         store.close()
     assert retryable is not None
-    assert retryable["message"]["type"] == messages_service.PENDING_TYPE
-    assert retryable["message"]["metadata"][
-        messages_service.QUEUED_DISPATCH_TEXT_KEY
-    ].startswith("[show-annotation] comment")
+    assert retryable["message"] is None
+    assert retryable["delivery"]["dispatch_text"].startswith(
+        "[show-annotation] comment"
+    )
 
 
 def test_record_local_show_event_uses_synchronous_unified_entry(
@@ -1584,6 +1614,7 @@ def test_record_local_show_event_uses_synchronous_unified_entry(
 
     async def fake_dispatch_async(payload, **_kwargs):
         dispatches.append(payload)
+        _accept_delivery(payload)
         return {"status_code": 202, "body": {"ok": True}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
@@ -1604,21 +1635,14 @@ def test_record_local_show_event_uses_synchronous_unified_entry(
         "[show-annotation] comment\n\nDeliver this."
     )
     assert f"Show event id: {event['id']}" in dispatches[0]["text"]
-    assert (
-        messages_service.QUEUED_DISPATCH_TEXT_KEY
-        not in event["message"]["metadata"]
-    )
+    assert event["delivery"]["state"] == "accepted"
+    assert event["delivery"]["dispatch_text"] == ""
     assert "dispatch_owner" not in dispatches[0]
     assert event["message"]["type"] == "annotation"
-    assert [name for name, _data in published] == [
-        "show.event",
-        "message.new",
-        "session.activity",
-    ]
-    assert published[1][1]["id"] == event["message_id"]
+    assert [name for name, _data in published] == ["show.event"]
 
 
-def test_failed_local_show_dispatch_keeps_row_pending_so_replay_retries(
+def test_definitive_local_show_dispatch_failure_retires_without_replay(
     isolated_state,
     monkeypatch,
 ):
@@ -1633,6 +1657,7 @@ def test_failed_local_show_dispatch_keeps_row_pending_so_replay_retries(
         attempts += 1
         if attempts == 1:
             raise internal_client.InternalServerUnavailable("controller unavailable")
+        _accept_delivery(_payload)
         return {"status_code": 202, "body": {"ok": True}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
@@ -1659,19 +1684,19 @@ def test_failed_local_show_dispatch_keeps_row_pending_so_replay_retries(
         )
     assert stranded["messages"] == []
 
-    replay = ui_server.record_local_show_event("ses_show", payload)
+    store = ui_server._show_session_event_store()
+    try:
+        failed_event = store.get_event("ses_show", "show_evt_failed_once")
+    finally:
+        store.close()
+    assert failed_event is not None
+    assert failed_event["delivery"]["state"] == "retired"
 
-    assert attempts == 2
-    assert replay["message"]["type"] == messages_service.ANNOTATION_TYPE
-    with create_sqlite_engine().connect() as conn:
-        visible = messages_service.list_session_messages(
-            conn,
-            session_id="ses_show",
-            limit=50,
-            types=messages_service.TRANSCRIPT_TYPES,
-            tail=True,
-        )
-    assert [row["id"] for row in visible["messages"]] == [replay["message_id"]]
+    with pytest.raises(ShowSessionEventError) as replay_error:
+        ui_server.record_local_show_event("ses_show", payload)
+
+    assert replay_error.value.code == "show_event_dispatch_failed"
+    assert attempts == 1
 
 
 def test_ambiguous_local_show_dispatch_replays_under_the_same_reservation(
@@ -1688,6 +1713,7 @@ def test_ambiguous_local_show_dispatch_replays_under_the_same_reservation(
         seen_message_ids.append(dispatch_payload["user_message_id"])
         if len(seen_message_ids) == 1:
             raise internal_client.InternalServerTimeout("acceptance unknown")
+        _accept_delivery(dispatch_payload)
         return {"status_code": 202, "body": {"ok": True, "duplicate": True}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
@@ -1750,163 +1776,36 @@ def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(inte
         assert dispatch_text.endswith(guidance)
 
 
-def test_annotation_builders_match_frozen_examples():
-    from storage import messages_service
-
-    # This docs fixture is the single authoritative row copy shared by both lanes.
-    fixture_path = (
-        Path(__file__).parents[1]
-        / "docs/plans/show-annotation-message-type/examples.json"
-    )
-    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
-    frozen_fields = fixture["_frozen_fields"]
-    frozen_rows = [
-        example["row"]
-        for example in fixture["examples"]
-    ]
-
-    forward = frozen_rows[0]
-    forward_anchor = {
-        "selector": forward["metadata"]["anchor_selector"],
-        "text": forward["content"]["annotation"]["quote"],
-    }
-    forward_payload = {
-        "scope": forward["metadata"]["show_event_scope"],
+def test_annotation_display_and_dispatch_text_are_independent_facts():
+    payload = {
         "intent": "comment",
-        "comment": forward["text"],
-        "primaryAnchor": forward["metadata"]["anchor_kind"],
-    }
-
-    queued = frozen_rows[1]
-    queued_attachment = queued["content"]["attachments"][0]
-    queued_dispatch = queued["metadata"][messages_service.QUEUED_DISPATCH_TEXT_KEY]
-    screenshot_line = next(
-        line for line in queued_dispatch.splitlines() if line.startswith("Screenshot: ")
-    )
-    assert screenshot_line == (
-        "Screenshot: state/media/med_9a71c33f8b2e.png (1240x620)"
-    )
-    origin_x, origin_y, dimensions = queued["metadata"]["screenshot_region"].split(
-        ", "
-    )
-    width, height = dimensions.split("x", 1)
-    screenshot_region = {
-        "x": int(origin_x.removeprefix("x:")),
-        "y": int(origin_y.removeprefix("y:")),
-        "width": int(width),
-        "height": int(height),
-    }
-    queued_payload = {
-        "scope": queued["metadata"]["show_event_scope"],
-        "intent": "comment",
-        "comment": queued["text"],
-        "primaryAnchor": queued["metadata"]["anchor_kind"],
+        "comment": "Review the selected region.",
+        "primaryAnchor": "screenshot",
         "screenshot": {
-            "attachmentId": queued_attachment["url"].removeprefix("/api/media/"),
+            "attachmentId": "med_9a71c33f8b2e",
             "path": "state/media/med_9a71c33f8b2e.png",
-            "mimeType": queued_attachment["mime"],
-            "width": queued_attachment["width"],
-            "height": queued_attachment["height"],
-            "region": screenshot_region,
+            "mimeType": "image/png",
+            "width": 1240,
+            "height": 620,
+            "region": {"x": 20, "y": 30, "width": 400, "height": 180},
         },
     }
+    display_text = _format_transcript_text(
+        "human.annotation.created",
+        payload,
+        {},
+    )
+    dispatch_text = _format_dispatch_text(
+        "human.annotation.created",
+        payload,
+        {},
+        event_id="show_evt_strict_delivery",
+    )
 
-    produced_rows = [
-        {
-            "type": messages_service.ANNOTATION_TYPE,
-            "author": messages_service.HARNESS_TYPE,
-            "content": {
-                "text": _format_transcript_text(
-                    forward["metadata"]["show_event_type"],
-                    forward_payload,
-                    forward_anchor,
-                ),
-                "annotation": _annotation_display(
-                    forward["metadata"]["show_event_type"],
-                    forward_anchor,
-                ),
-            },
-            "metadata": {
-                messages_service.QUEUED_DISPATCH_TEXT_KEY: _format_dispatch_text(
-                    forward["metadata"]["show_event_type"],
-                    forward_payload,
-                    forward_anchor,
-                    event_id=forward["metadata"]["show_event_id"],
-                )
-            },
-        },
-        {
-            "type": messages_service.QUEUED_TYPE,
-            "author": messages_service.HARNESS_TYPE,
-            "content": {
-                "text": _format_transcript_text(
-                    queued["metadata"]["show_event_type"],
-                    queued_payload,
-                    {},
-                ),
-                "annotation": _annotation_display(
-                    queued["metadata"]["show_event_type"],
-                    {},
-                ),
-                "attachments": _annotation_attachments(queued_payload),
-            },
-            "metadata": {
-                messages_service.QUEUED_DISPATCH_TEXT_KEY: _format_dispatch_text(
-                    queued["metadata"]["show_event_type"],
-                    queued_payload,
-                    {},
-                    event_id=queued["metadata"]["show_event_id"],
-                )
-            },
-        },
-    ]
-
-    for frozen in frozen_rows[2:]:
-        event_type = frozen["metadata"]["show_event_type"]
-        quote = frozen["content"]["annotation"].get("quote")
-        anchor = {"text": quote} if quote else {}
-        produced_rows.append(
-            {
-                "type": messages_service.ANNOTATION_TYPE,
-                "author": "agent",
-                "content": {
-                    "text": _format_transcript_text(
-                        event_type,
-                        {"body": frozen["text"]},
-                        anchor,
-                    ),
-                    "annotation": _annotation_display(event_type, anchor),
-                },
-                "metadata": {},
-            }
-        )
-
-    def frozen_value(row, path):
-        current = row
-        for part in path.split("."):
-            if not isinstance(current, dict) or part not in current:
-                return False, None
-            current = current[part]
-        return True, current
-
-    assert frozen_fields == [
-        "type",
-        "author",
-        "content.text",
-        "content.annotation",
-        "content.attachments",
-        "metadata._queued_dispatch_text",
-    ]
-    for produced, frozen in zip(produced_rows, frozen_rows, strict=True):
-        for field in frozen_fields:
-            produced_present, produced_value = frozen_value(produced, field)
-            frozen_present, frozen_value_at_path = frozen_value(frozen, field)
-            assert produced_present is frozen_present, field
-            if field == "metadata._queued_dispatch_text":
-                # The prompt body is machine-only; its presence is the contract.
-                continue
-            assert produced_value == frozen_value_at_path, field
-
+    assert display_text == "Review the selected region."
+    assert display_text in dispatch_text
+    assert "Screenshot: state/media/med_9a71c33f8b2e.png (1240x620)" in dispatch_text
+    assert "Show event id: show_evt_strict_delivery" in dispatch_text
     machine_markers = (
         "[show-annotation]",
         "Anchor kind:",
@@ -1917,10 +1816,4 @@ def test_annotation_builders_match_frozen_examples():
         "Show event id:",
         "vibe show reply",
     )
-    for produced in produced_rows[:2]:
-        display_text = produced["content"]["text"]
-        dispatch_text = produced["metadata"][
-            messages_service.QUEUED_DISPATCH_TEXT_KEY
-        ]
-        assert display_text in dispatch_text
-        assert all(marker not in display_text for marker in machine_markers)
+    assert all(marker not in display_text for marker in machine_markers)

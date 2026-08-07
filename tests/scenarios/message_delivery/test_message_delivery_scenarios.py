@@ -135,6 +135,56 @@ class MessageDeliveryScenarioTests(unittest.IsolatedAsyncioTestCase):
         ScenarioExpect.text_contains(harness, "hello")
         self.assertEqual(harness.finalized_calls, [("C123", "171717.123", "msg-1")])
 
+    async def test_scheduled_turn_scenario_shows_its_prompt_before_the_result(self):
+        """Scenario: MESSAGE-DELIVERY-018"""
+        harness = MessageDeliveryHarness(platform="slack")
+        harness.context.message_id = "scheduled:run-18"
+        harness.context.platform_specific = {
+            "turn_source": "scheduled",
+            "turn_base_session_id": "slack_scheduled-18",
+            "task_trigger_kind": "scheduled",
+            "task_execution_id": "run-18",
+            "task_definition_id": "task-18",
+            "task_definition_name": "Morning digest",
+            "scheduled_anchor_required": True,
+        }
+        runner = ScenarioRunner(harness)
+
+        await runner.run(
+            ScenarioStep("echo_harness_prompt", lambda h: h.emit_harness_prompt("summarize open PRs")),
+            ScenarioStep("emit_result", lambda h: h.emit_result("3 open PRs")),
+        )
+
+        ScenarioExpect.step_history(runner, ["echo_harness_prompt", "emit_result"])
+        # The channel reads trigger -> result, so the reply is no longer an answer to
+        # a question only the Workbench transcript could show.
+        texts = harness.rendered_texts()
+        self.assertEqual(len(texts), 2)
+        self.assertIn("Morning digest", texts[0])
+        self.assertIn("> summarize open PRs", texts[0])
+        self.assertEqual(texts[1], "3 open PRs")
+        # The echo must not consume the scheduled anchor: the RESULT is still what a
+        # follow-up threads under.
+        self.assertEqual(harness.finalized_calls, [("C123", None, "msg-2")])
+
+    async def test_background_session_scenario_stays_silent_including_its_prompt(self):
+        """Scenario: MESSAGE-DELIVERY-019"""
+        harness = MessageDeliveryHarness(platform="slack")
+        harness.context.message_id = "agent_run:run-19"
+        harness.context.platform_specific = {
+            "turn_source": "scheduled",
+            "task_trigger_kind": "agent_run",
+            "task_execution_id": "run-19",
+            "suppress_delivery": True,
+        }
+        runner = ScenarioRunner(harness)
+
+        await runner.run(
+            ScenarioStep("echo_harness_prompt", lambda h: h.emit_harness_prompt("investigate the flake")),
+        )
+
+        self.assertEqual(harness.rendered_texts(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

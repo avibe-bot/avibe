@@ -335,6 +335,72 @@ class AudioAsrServiceTests(unittest.TestCase):
                     [],
                 )
 
+    def test_dictation_classifies_non_json_proxy_errors_by_status(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+
+        class ErrorResponse:
+            def __init__(self, status):
+                self.status = status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self, **_kwargs):
+                raise ValueError("proxy returned HTML")
+
+        class ErrorSession:
+            def __init__(self, status):
+                self.status = status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def post(self, *_args, **_kwargs):
+                return ErrorResponse(self.status)
+
+        cases = [
+            (503, AudioAsrUnavailableError),
+            (504, AudioAsrTimeoutError),
+        ]
+        for status, expected_error in cases:
+            with self.subTest(status=status):
+                with patch(
+                    "core.audio_asr.aiohttp.ClientSession",
+                    return_value=ErrorSession(status),
+                ):
+                    with self.assertRaises(expected_error):
+                        asyncio.run(
+                            service.transcribe_voice_segment(
+                                None,
+                                dictation_id="dictation-1",
+                                sequence=1,
+                                overlap_ms=0,
+                                final=True,
+                                finalize_only=True,
+                                receipts=["receipt-0"],
+                                before="",
+                                after="",
+                            )
+                        )
+
     def test_http_callers_can_override_the_request_deadline(self):
         service = AudioAsrService(
             SimpleNamespace(

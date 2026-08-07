@@ -5,6 +5,7 @@ import { TransformWrapper, TransformComponent, type ReactZoomPanPinchRef } from 
 
 import { Button } from '@/components/ui/button';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
+import { ImageViewerContext } from './image-viewer-context';
 
 // A session-scoped image lightbox. ChatPage computes the ordered list of media-
 // proxy image URLs in the transcript and wraps the page in a provider; any chat
@@ -12,14 +13,6 @@ import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia
 // and the lightbox pages left/right through the whole session's images. Used
 // through the optional context so the shared Markdown renderer keeps working
 // (no-op) where there's no provider (e.g. the agent-config editor preview).
-
-type ImageViewerContextValue = { open: (src: string) => void };
-
-const ImageViewerContext = React.createContext<ImageViewerContextValue | null>(null);
-
-export function useImageViewer(): ImageViewerContextValue | null {
-  return React.useContext(ImageViewerContext);
-}
 
 // Overlay controls sit on a dark backdrop, so the shared Button's themed
 // foreground/hover (tuned for app surfaces) would be invisible here — override

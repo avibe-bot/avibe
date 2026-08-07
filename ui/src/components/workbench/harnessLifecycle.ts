@@ -322,8 +322,40 @@ export type HarnessDefinitionFacts = {
   last_run_at?: string | null;
   last_started_at?: string | null;
   last_finished_at?: string | null;
+  last_error?: string | null;
   updated_at?: string | null;
+  // Derived server-side from the definition's own run history, because
+  // ``last_run_at``/``last_error`` are overwritten on every fire and one success
+  // therefore erased days of failure.
+  health?: HarnessDefinitionHealth | string | null;
+  consecutive_failures?: number | null;
+  recent_failures?: number | null;
+  // Command-task fields (also present on a watch, which has always run a
+  // command). ``/api/harness/tasks`` serves the raw store row, so these arrive
+  // exactly as ``_scheduled_task_from_row`` writes them: ``shell_command`` as a
+  // string, ``command`` decoded from ``command_json``, and both None-preserving —
+  // which is why every helper below tests for presence rather than truthiness of
+  // a joined string.
+  shell_command?: string | null;
+  command?: unknown[] | null;
+  timeout_seconds?: number | null;
+  last_exit_code?: number | null;
+  // Decoded server-side (key is ``metadata``, not ``metadata_json``). Holds the
+  // command-task-only ``on_failure`` policy; see ``taskOnFailure``.
+  metadata?: Record<string, unknown> | null;
 };
+
+// ``failing`` = the newest verdict failed; ``degraded`` = the newest succeeded but
+// a failure is still in the window; ``unknown`` = health could not be computed,
+// which is deliberately not the same as ``healthy``.
+export const HARNESS_HEALTH_STATES = ['failing', 'degraded', 'healthy', 'unknown'] as const;
+export type HarnessDefinitionHealth = (typeof HARNESS_HEALTH_STATES)[number];
+const HEALTH_STATES = new Set<string>(HARNESS_HEALTH_STATES);
+
+export function definitionHealth(row: HarnessDefinitionFacts): HarnessDefinitionHealth | null {
+  const value = row.health;
+  return value && HEALTH_STATES.has(value) ? (value as HarnessDefinitionHealth) : null;
+}
 
 const WHITESPACE_RUN = /\s+/g;
 
@@ -346,6 +378,109 @@ export function definitionRowTitle(
     if (collapsed) return collapsed;
   }
   return kindLabel;
+}
+
+// ---------------------------------------------------------------------------
+// Command tasks
+// ---------------------------------------------------------------------------
+
+// Whether this scheduled definition runs a subprocess instead of prompting an
+// Agent. MIRROR of ``ScheduledTask.has_command`` in ``core/scheduled_tasks.py``:
+// a non-empty ``shell_command`` or a non-empty argv list, nothing else. An empty
+// argv list is not a command — the column is populated with ``[]`` by rows that
+// have none.
+export function taskIsCommand(row: HarnessDefinitionFacts): boolean {
+  if (typeof row.shell_command === 'string' && row.shell_command.trim()) return true;
+  return Array.isArray(row.command) && row.command.length > 0;
+}
+
+// Exactly Python's ``shlex._find_unsafe`` complement: a part made only of these
+// characters survives a shell unquoted, so quoting it would be noise.
+const SHELL_SAFE_PART = /^[\w@%+=:,./-]+$/;
+
+// One argv part as a shell would need it written. MIRROR of ``shlex.quote``,
+// including its single-quote escape (``'"'"'``), because the same row's command is
+// rendered by ``shlex.join`` in ``vibe task list`` and in a failure notice, and the
+// two must not disagree about what the command is.
+function shellQuotePart(value: string): string {
+  if (value === '') return "''";
+  if (SHELL_SAFE_PART.test(value)) return value;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+// An argv list as ONE readable line. Boundaries are preserved by quoting, never
+// implied by spaces: ``['bash', '-lc', 'echo hi there']`` joined bare reads as five
+// arguments, so every surface that showed it was showing a command the definition
+// does not run — and the pane it is shown in is the one a user copies from when a
+// fire fails.
+export function formatCommandLine(shellCommand: unknown, argv: unknown): string {
+  if (typeof shellCommand === 'string' && shellCommand.trim()) return shellCommand;
+  if (!Array.isArray(argv)) return '';
+  return argv.map((part) => shellQuotePart(String(part))).join(' ');
+}
+
+// What a command run RECORDED that it executed, from the snapshot the fire wrote onto
+// its own metadata (``COMMAND_SNAPSHOT_METADATA_KEY`` in ``core/scheduled_tasks.py``).
+// Empty for an Agent run, and for a command run written before the snapshot existed —
+// there is nothing trustworthy to show for those, and the definition cannot stand in:
+// it is editable and deletable, so it answers about the command configured NOW.
+export function runCommandSnapshotLine(run: { metadata?: unknown } | null | undefined): string {
+  const metadata = run?.metadata;
+  if (!metadata || typeof metadata !== 'object') return '';
+  const snapshot = (metadata as Record<string, unknown>).command;
+  if (!snapshot || typeof snapshot !== 'object') return '';
+  const { shell, argv } = snapshot as { shell?: unknown; argv?: unknown };
+  return formatCommandLine(shell, argv);
+}
+
+// The command in one line, for a row title or a chip. Mirrors the CLI's
+// ``_watch_command_preview``: ``shell_command`` verbatim when present, else the
+// argv shell-joined, trimmed, and cut with an ellipsis rather than a hard
+// slice so the reader can see that something was dropped. The full text always
+// stays available (detail pane, ``title`` attribute) — this is the scannable form.
+export function taskCommandPreview(row: HarnessDefinitionFacts, maxChars = 120): string {
+  const preview = formatCommandLine(row.shell_command, row.command).trim();
+  if (preview.length <= maxChars) return preview;
+  return `${preview.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+// MIRROR of ``COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS`` in ``core/scheduled_tasks.py``:
+// six hours, applied by the executor to any command definition that stores no
+// timeout of its own. Keep the two in step — a client that shows a limit the
+// executor does not enforce is worse than showing none.
+export const COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS = 21600;
+
+// How long a fire of this definition is actually allowed to take, and whether that
+// number is the user's or the default. A null ``timeout_seconds`` is neither
+// "unlimited" nor "unknown": the executor substitutes the default, so the limit is
+// real and the pane owes the user the number. A stored ``0`` IS unlimited and stays
+// distinguishable — the caller renders it as such rather than as "0s".
+export function taskTimeout(row: HarnessDefinitionFacts): {
+  seconds: number;
+  isDefault: boolean;
+} {
+  const stored = row.timeout_seconds;
+  if (typeof stored === 'number' && Number.isFinite(stored)) {
+    return { seconds: stored, isDefault: false };
+  }
+  return { seconds: COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS, isDefault: true };
+}
+
+export const TASK_ON_FAILURE_VALUES = ['none', 'agent'] as const;
+export type TaskOnFailure = (typeof TASK_ON_FAILURE_VALUES)[number];
+
+// What a failed command run does. MIRROR of ``ScheduledTask.on_failure``: the
+// policy lives in ``metadata`` rather than a column, so absence, a non-object
+// metadata blob, and a value this client has no word for all resolve to
+// ``none`` — the quiet default. Never invent ``agent`` from a value we cannot
+// read: that would promise an Agent turn nobody configured.
+export function taskOnFailure(row: HarnessDefinitionFacts): TaskOnFailure {
+  const metadata = row.metadata;
+  if (!metadata || typeof metadata !== 'object') return 'none';
+  const raw = (metadata as Record<string, unknown>).on_failure;
+  if (typeof raw !== 'string') return 'none';
+  const value = raw.trim().toLowerCase();
+  return value === 'agent' ? 'agent' : 'none';
 }
 
 // The last moment this row is known to have done anything.
@@ -431,11 +566,13 @@ export function definitionChipLabel(
   return row.schedule_type || t('harness.unknownSchedule');
 }
 
-// What the row warns about, if anything: how a finished row ended, or a waiter
-// whose process is gone while the row still claims to be armed. ``null`` when
-// there is nothing to warn about — including when liveness is simply unknown,
-// which must not be dressed up as "dead".
-export type HarnessRowAlert = 'error' | 'timeout' | 'dead';
+// What the row warns about, if anything: how a finished row ended, a waiter
+// whose process is gone while the row still claims to be armed, or a health
+// verdict the server could not compute. ``null`` is reserved for rows with
+// nothing to report — which includes unknown *liveness* (never dressed up as
+// "dead") but not unknown *health*, because a health the projection failed to
+// read is the one thing that must not render as a passing row.
+export type HarnessRowAlert = 'error' | 'timeout' | 'dead' | 'degraded' | 'unknown';
 
 export type HarnessDefinitionLine = {
   primary: string;
@@ -475,13 +612,31 @@ export function definitionRowLine(
   const liveness = kind === 'watch' ? livenessLabel(row, t) : null;
   const dead =
     kind === 'watch' && row.process_alive === false && waiterExpectedAlive(row) ? ('dead' as const) : null;
+  // A recurring definition that fails every night is ``waiting`` between fires,
+  // and every non-finished branch below used to return ``alert: null`` — so the
+  // one state a broken cron actually sits in was the one state that could not warn.
+  // ``finished`` keeps reporting how it ended; the health alert is what the other
+  // states gain.
+  // ``healthy`` is the only verdict that stays silent. ``unknown`` gets its own
+  // alert rather than falling through to ``null``: the server emits it when the
+  // health read itself failed, and collapsing that into "nothing to report"
+  // hands the operator a clean list exactly when the failure signal is missing.
+  const health = definitionHealth(row);
+  const unhealthy: HarnessRowAlert | null =
+    health === 'failing'
+      ? 'error'
+      : health === 'degraded'
+        ? 'degraded'
+        : health === 'unknown'
+          ? 'unknown'
+          : null;
 
   if (state === 'finished') {
     const detail = row.lifecycle_detail;
     return {
       primary: lifecycleLabel('finished', detail, t),
       secondary: humanizeTime(since, t, now),
-      alert: detail === 'error' || detail === 'timeout' ? detail : null,
+      alert: detail === 'error' || detail === 'timeout' ? detail : unhealthy,
     };
   }
 
@@ -490,7 +645,7 @@ export function definitionRowLine(
     return {
       primary: duration ? t('harness.row.runningFor', { duration }) : t('harness.lifecycle.running'),
       secondary: liveness,
-      alert: dead,
+      alert: dead ?? unhealthy,
     };
   }
 
@@ -503,7 +658,7 @@ export function definitionRowLine(
         row.mode === 'forever' && row.last_event_at
           ? t('harness.row.lastEvent', { when: humanizeTime(row.last_event_at, t, now) })
           : t('harness.row.waitingFor', { duration: humanizeGap(since, now, t) ?? '—' });
-      return { primary, secondary: liveness, alert: dead };
+      return { primary, secondary: liveness, alert: dead ?? unhealthy };
     }
     if (row.next_run_at) {
       const gap = humanizeGap(row.next_run_at, now, t);
@@ -516,19 +671,19 @@ export function definitionRowLine(
         return {
           primary: gap && isFuture ? t('harness.row.nextIn', { duration: gap }) : when,
           secondary: when,
-          alert: null,
+          alert: unhealthy,
         };
       }
       return {
         primary: t('harness.row.nextAt', { when }),
         secondary: row.last_run_at ? t('harness.row.lastRun', { when: humanizeTime(row.last_run_at, t, now) }) : null,
-        alert: null,
+        alert: unhealthy,
       };
     }
     return {
       primary: t('harness.row.waitingFor', { duration: humanizeGap(since, now, t) ?? '—' }),
       secondary: row.last_run_at ? t('harness.row.lastRun', { when: humanizeTime(row.last_run_at, t, now) }) : null,
-      alert: null,
+      alert: unhealthy,
     };
   }
 
@@ -537,6 +692,6 @@ export function definitionRowLine(
   return {
     primary: lifecycleLabel(state ?? 'paused', null, t),
     secondary: since ? humanizeTime(since, t, now) : null,
-    alert: null,
+    alert: unhealthy,
   };
 }

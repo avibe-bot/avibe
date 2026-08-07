@@ -216,6 +216,44 @@ def test_reconcile_agent_backends_missing_socket_raises_unavailable(tmp_path):
         )
 
 
+def test_backend_auth_round_trip(socket_path):
+    app = FastAPI()
+    captured: dict = {}
+
+    @app.post("/internal/backend-auth/test")
+    async def _test(payload: dict):
+        captured["payload"] = payload
+        return {"ok": True, "excerpt": "hello"}
+
+    sock = socket_path
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.test_backend_auth(
+                "codex",
+                model="gpt-5.4-mini",
+                socket_path=sock,
+            )
+
+    result = asyncio.run(_go())
+    assert captured["payload"] == {"backend": "codex", "model": "gpt-5.4-mini"}
+    assert result == {
+        "status_code": 200,
+        "body": {"ok": True, "excerpt": "hello"},
+    }
+
+
+def test_backend_auth_missing_socket_raises_unavailable(tmp_path):
+    with pytest.raises(internal_client.InternalServerUnavailable):
+        asyncio.run(
+            internal_client.test_backend_auth(
+                "claude",
+                socket_path=tmp_path / "missing.sock",
+            )
+        )
+
+
 def test_memory_runtime_install_sync_round_trip(socket_path):
     captured: dict = {}
 

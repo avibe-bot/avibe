@@ -23,7 +23,7 @@ responses without changing the envelope version.
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean}` → `{source, recovered, interrupted_pairs}` | API-key replacement. The optional `force` is a JSON body field, never a query parameter. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
 | DELETE `/api/models/sources/<id>?force=<bool>` | → `{ok}` or `source_last_supplier` + `would_interrupt` | Guard evaluates the post-delete enabled orders. |
-| POST `/api/models/sources/<id>/test` | → `{discovered: integer}` | Explicit source re-discovery, including blocked-source recovery. |
+| POST `/api/models/sources/<id>/refresh` | → `{source: Source, discovered: integer}` | Explicit source re-discovery, including blocked-source recovery. The returned source contains the replacement model list and successful `last_discovered_at`. |
 | GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include `named_agents`, the enabled named-Agent live projection. |
 | GET `/api/models/agents/<backend>/sources` | → `{agent: AgentSupply}` | Returns the authoritative effective order and eligibility. |
 | PUT `/api/models/agents/<backend>/sources` | source-order request → `{agent: AgentSupply}` | Full canonical order is re-echoed. |
@@ -42,7 +42,8 @@ responses without changing the envelope version.
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources}` | Imported sources auto-join eligible follow orders; custom orders stay frozen. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime` | → `RuntimeDependency` status | Managed engine status. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object is contract v4; `not_started` is installed lazy-start idleness, not an alarm. |
+| POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Explicitly starts the managed engine. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 
 The removed global route `PUT /api/models/priority` has no v3 replacement.
 Ordering is backend-owned through the sources routes.
@@ -80,11 +81,6 @@ Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
   "selected_by_agent": "pm",
   "selected_model_id": "claude-opus-4-6",
   "selected_model_explicit": true,
-  "current": {
-    "model_id": "claude-opus-4-6",
-    "source_id": "src_anthkey01",
-    "channel": "hub"
-  },
   "sources": {
     "policy": "follow",
     "order": ["src_claudepro1", "src_anthkey01"],
@@ -132,8 +128,8 @@ Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
 ```
 
 `named_agents` lists every enabled named Vibe Agent whose backend matches this
-record. `effective_model_id` is the Agent's pinned model, otherwise the backend
-default. `supply_status` is derived independently for that effective model. The
+record. `effective_model_id` is the Agent's explicit model. `supply_status` is
+derived independently for that effective model. The
 list name and object shape are intentionally distinct from `SupplyGap.agents`,
 which is a list of bare names inside a mutation result.
 
@@ -141,11 +137,9 @@ which is a list of bare names inside a mutation result.
 user's explicit configuration request. FALSE means no explicit model selection,
 including a resolver-picked value or no selected model.
 
-For a fixed native menu, `current.model_id` is the effective upstream id for the
-selected source. It may therefore differ from `selected_model_id` without an
-explicit mapping when built-in native alias resolution chooses a discovered dated
-model. Chain and probe inputs remain the caller-facing `selected_model_id`; each
-candidate derives its own effective upstream id.
+AgentSupply does not project a backend-level serving head. Chain and probe responses
+carry the effective upstream model and source for the named model request; the
+Agents payload stays at per-named-Agent selection and supply-status grain.
 
 Disabled Agents are absent. In Direct mode each named Agent may still have an
 effective model, but its Hub `supply_status` is null.
@@ -167,8 +161,8 @@ per-backend unavailable set beside the complete eligibility inventory, while
 
 ### Honest null selection
 
-Hub mode does not invent a default. When neither the routed Vibe Agent nor the
-backend configuration pins a model:
+An isolated Model Hub service that is not connected to the Vibe Agent catalog may
+still have no projected selection:
 
 ```json
 {
@@ -176,13 +170,12 @@ backend configuration pins a model:
   "selected_by_agent": null,
   "selected_model_id": null,
   "selected_model_explicit": false,
-  "current": null,
   "supply_status": null
 }
 ```
 
-This means “no pinned selection.” Each turn still resolves against the model carried
-by that request, including the CLI's own default. `sources`, `model_supply`, and
+This means “no projected Agent selection.” Each turn still resolves against the
+model carried by that request. `sources`, `model_supply`, and
 `named_agents` remain present and non-null in Hub mode. Each eligibility row keeps
 its process availability but carries `in_current_model_chain: null`.
 
@@ -282,16 +275,14 @@ extra `source` or `flow` nesting is added.
 }
 ```
 
-`agents` is the set of enabled named Vibe Agents whose effective model is the
-menu-side `model_id`, including Agents that inherit the backend default. It is
-present and may be empty.
+`agents` is the set of enabled named Vibe Agents whose explicit model is the
+menu-side `model_id`. It is present and may be empty.
 
 The protected model set for a backend is the union of:
 
-1. effective models of enabled named Vibe Agents;
-2. the backend default;
-3. checked open-menu models;
-4. the menu-side `builtin_id` of mappings whose `enabled` is true.
+1. explicit models of enabled named Vibe Agents;
+2. checked open-menu models;
+3. the menu-side `builtin_id` of mappings whose `enabled` is true.
 
 The guard evaluates each protected `(backend, model)` against the post-mutation
 state. It counts only runnable suppliers in that backend's enabled effective order,
@@ -403,16 +394,19 @@ API-key success:
 }
 ```
 
-## Blocked-source test
+## Source refresh and blocked-source recovery
 
-`POST /api/models/sources/<id>/test` is an explicit source-scoped operation. It may
-test a source whose global state is `needs_action` or `error`, even though normal
+`POST /api/models/sources/<id>/refresh` is an explicit source-scoped operation. It may
+refresh a source whose global state is `needs_action` or `error`, even though normal
 turn resolution and the chain probe exclude that source as non-runnable.
 
 On usable discovery it updates the discovered model set, clears the blocker, and
-sets the source to `standby`. A classified failure updates the source-global state
-and returns the normal safe error. This route is the only recovery test added; v3
-does not add a second “recover” endpoint.
+sets the source to `standby`. The response returns that complete updated source and
+the discovered count; clients do not reconstruct the model list from the count.
+`last_discovered_at` advances only on this successful replacement. A classified
+failure updates the source-global state, preserves the last successful model list and
+timestamp, and returns the normal safe error. This route is the only refresh/recovery
+operation; there is no parallel “test” or “recover” endpoint.
 
 ## OAuth completion
 
@@ -642,7 +636,7 @@ contract harness and API-boundary tests enforce:
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |
 | `channel_switch.from_source == channel_switch.to_source` | event emitter |
-| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, `sources`, `supply_status`, `model_supply`, and `named_agents`; source creation returns both `adopted_by` and `skipped_by` | API payload test |
+| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, `sources`, `supply_status`, `model_supply`, and `named_agents`; every Source includes persisted `last_discovered_at`; source creation returns both `adopted_by` and `skipped_by`; source refresh returns the updated Source plus count | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 

@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next';
 import { LayoutGrid } from 'lucide-react';
 import clsx from 'clsx';
 
+import { isAppleContextClick, type LaunchModifiers } from '../../../apps/appLaunch';
 import { APP_REGISTRY } from '../../../apps/registry';
 import { ShowPageAvatarTile } from '../../../apps/showPageAvatarTile';
 import { Button } from '../../ui/button';
@@ -10,7 +11,8 @@ import type { AppSearchResult } from './appSearch';
 type AppSearchResultSectionProps = {
   results: AppSearchResult[];
   selectedKey?: string;
-  onSelect: (result: AppSearchResult) => void;
+  /** Receives the activating event so a ⌘/Ctrl-click can open a browser tab (§7.1m). */
+  onSelect: (result: AppSearchResult, launch?: LaunchModifiers) => void;
 };
 
 export const AppSearchResultSection: React.FC<AppSearchResultSectionProps> = ({
@@ -40,7 +42,8 @@ export const AppSearchResultSection: React.FC<AppSearchResultSectionProps> = ({
               key={result.key}
               type="button"
               variant="ghost"
-              onClick={() => onSelect(result)}
+              // A macOS Ctrl-click is the right-click gesture: leave it to the context menu.
+              onClick={(e) => !isAppleContextClick(e) && onSelect(result, e)}
               aria-current={selected ? 'true' : undefined}
               className={clsx(
                 'h-auto w-full justify-start gap-2.5 px-2.5 py-2 text-left font-normal',

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Protocol, cast
 from urllib.parse import parse_qsl, urlsplit
@@ -155,20 +155,6 @@ class V2ModelHubConfigStore:
                 config = default_config()
             config.model_hub = model_hub
             config.save()
-
-    def requested_model(self, backend: str) -> str:
-        try:
-            config = V2Config.load()
-        except FileNotFoundError:
-            config = default_config()
-        backend_config = getattr(config.agents, backend, None)
-        model = str(getattr(backend_config, "default_model", None) or "").strip()
-        if backend == "opencode" and model and "/" not in model:
-            provider = str(getattr(backend_config, "default_provider", None) or "").strip()
-            if provider:
-                return f"{provider}/{model}"
-        return model
-
 
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""
@@ -384,6 +370,7 @@ def _runtime_payload(status: EngineStatus) -> dict:
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     return {
+        "contract_version": 4,
         "manifest": EngineRuntimeManager().contract_manifest(),
         "status": {
             "installed_version": status.installed_version,
@@ -439,6 +426,7 @@ class ModelHubService:
         )
         self._mutation_lock = asyncio.Lock()
         self._engine_synced = False
+        self._engine_preparation_failed = False
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -461,11 +449,7 @@ class ModelHubService:
             ).strip()
             if requested_model:
                 return requested_model
-        return self._backend_default_model(agent.backend)
-
-    def _backend_default_model(self, backend: str) -> str:
-        getter = getattr(self.store, "requested_model", None)
-        return str(getter(backend) if callable(getter) else "").strip()
+        return ""
 
     def _unavailable_native_sources(
         self,
@@ -535,8 +519,10 @@ class ModelHubService:
             source.supply_channel == "hub" for source in config.sources
         )
         if not bindings and not force_empty and not has_hub_sources:
+            self._engine_preparation_failed = False
             return
         await self._engine_call(self.adapter.sync_sources(bindings))
+        self._engine_preparation_failed = False
 
     async def _commit_synced(self, previous: ModelHubConfig, updated: ModelHubConfig) -> None:
         """Persist the authoritative config before updating its engine projection."""
@@ -608,6 +594,25 @@ class ModelHubService:
                     )
                 except OSError:
                     pass
+
+    async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
+        try:
+            if already_synced:
+                self._engine_preparation_failed = False
+                return
+            await self._ensure_engine_synced()
+        except Exception:
+            self._engine_preparation_failed = True
+            raise
+        self._engine_preparation_failed = False
+
+    def _runtime_status_after_demand(self, status: EngineStatus) -> EngineStatus:
+        if self._engine_preparation_failed and status.health in {
+            EngineHealth.NOT_INSTALLED,
+            EngineHealth.NOT_STARTED,
+        }:
+            return replace(status, health=EngineHealth.DOWN)
+        return status
 
     @staticmethod
     def _credential_was_already_revoked(error: Exception) -> bool:
@@ -808,6 +813,7 @@ class ModelHubService:
             for model_id in discovered
             if model_id not in manual_model_ids
         ] + manual_models
+        source.last_discovered_at = discovered_at
 
     async def _commit_new_source_locked(
         self,
@@ -1451,6 +1457,7 @@ class ModelHubService:
             "state",
             "usage",
             "created_at",
+            "last_discovered_at",
         } & set(payload)
         if forbidden:
             raise ModelHubError("discovery_failed")
@@ -1755,11 +1762,9 @@ class ModelHubService:
             if named_agent is not None and named_agent not in names:
                 names.append(named_agent)
 
-        default_model = self._backend_default_model(backend)
-        add(default_model)
         if self.named_agents_override is not None:
             for name, pinned_model in self.named_agents_override(backend):
-                add(str(pinned_model or "").strip() or default_model, name)
+                add(pinned_model, name)
         if agent.menu_kind == "open" and agent.menu is not None:
             for identifier in agent.menu.checked:
                 add(identifier)
@@ -1839,7 +1844,7 @@ class ModelHubService:
             if source.credential_ref:
                 self.revocations.remove(source.id, source.credential_ref)
 
-    async def test_source(self, source_id: str) -> tuple[dict, int]:
+    async def refresh_source(self, source_id: str) -> tuple[dict, int]:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
@@ -2074,15 +2079,6 @@ class ModelHubService:
             now=self.now(),
             unavailable_source_ids=unavailable_source_ids,
         )
-        current = (
-            {
-                "model_id": resolution.target_model,
-                "source_id": resolution.source.id,
-                "channel": resolution.source.supply_channel,
-            }
-            if resolution.source is not None
-            else None
-        )
         menu_model_ids = (
             builtin_models if builtin_models is not None else list(agent.menu.checked if agent.menu else ())
         )
@@ -2146,9 +2142,7 @@ class ModelHubService:
         named_agents = []
         if self.named_agents_override is not None:
             for name, pinned_model in self.named_agents_override(backend):
-                requested = str(pinned_model or "").strip() or self._backend_default_model(
-                    backend
-                )
+                requested = str(pinned_model or "").strip()
                 named_resolution = resolve_model_hub_turn(
                     config,
                     backend,
@@ -2172,7 +2166,6 @@ class ModelHubService:
             "selected_by_agent": selected_by_agent,
             "selected_model_id": selected_model_id,
             "selected_model_explicit": selected_model_explicit,
-            "current": current,
             "sources": sources,
             "supply_status": (
                 resolution.supply_status
@@ -2592,7 +2585,7 @@ class ModelHubService:
                 ),
             }
 
-        await self._ensure_engine_synced()
+        await self._prepare_engine_for_demand()
         started_at = time.monotonic()
         handle = await self._engine_call(
             self.adapter.invoke(
@@ -3080,6 +3073,11 @@ class ModelHubService:
 
     async def runtime_status(self) -> dict:
         status = await self._engine_call(self.adapter.status())
+        return _runtime_payload(self._runtime_status_after_demand(status))
+
+    async def runtime_start(self) -> dict:
+        await self._prepare_engine_for_demand()
+        status = await self._engine_call(self.adapter.start())
         return _runtime_payload(status)
 
     def migration_scan(self) -> dict:
@@ -3313,8 +3311,8 @@ class ModelHubService:
                     None,
                     supply_channel="native_cli",
                 )
-            if not engine_prepared:
-                await self._ensure_engine_synced()
+            await self._prepare_engine_for_demand(already_synced=engine_prepared)
+            engine_prepared = True
             if attempt_observer is not None:
                 attempt_observer(
                     source.id,

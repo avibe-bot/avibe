@@ -36,6 +36,7 @@ export type AgentGraphNode = {
   session_id: string;
   title: string | null;
   agent_name: string | null;
+  agent_display_name?: string | null;
   agent_backend: string | null;
   model: string | null;
   reasoning_effort: string | null;
@@ -190,7 +191,7 @@ export type StatusMeta = {
 const STATUS_META: Record<AgentGraphStatus, StatusMeta> = {
   active: { tone: 'mint', dotClass: 'bg-mint', labelKey: 'agents.graph.status.active', dim: false, glyph: 'dot' },
   queued: { tone: 'gold', dotClass: 'bg-gold', labelKey: 'agents.graph.status.queued', dim: false, glyph: 'dot' },
-  idle: { tone: 'cyan', dotClass: 'bg-cyan', labelKey: 'agents.graph.status.idle', dim: false, glyph: 'dot' },
+  idle: { tone: 'muted', dotClass: 'bg-muted', labelKey: 'agents.graph.status.idle', dim: false, glyph: 'dot' },
   orphan: { tone: 'gold', dotClass: 'bg-amber-500', labelKey: 'agents.graph.status.orphan', dim: false, glyph: 'dot' },
   succeeded: { tone: 'muted', dotClass: 'bg-muted', labelKey: 'agents.graph.status.succeeded', dim: true, glyph: 'check' },
   failed: { tone: 'destructive', dotClass: 'bg-destructive', labelKey: 'agents.graph.status.failed', dim: true, glyph: 'cross' },
@@ -240,11 +241,14 @@ export function runElapsedSeconds(
   return Math.max(0, (end - start) / 1000);
 }
 
-// Fallback label when a node has no title: agent name + short session suffix.
-export function nodeDisplayTitle(node: Pick<AgentGraphNode, 'title' | 'agent_name' | 'session_id'>): string {
+// Fallback label when a node has no title: display name + short session suffix.
+export function nodeDisplayTitle(
+  node: Pick<AgentGraphNode, 'title' | 'agent_name' | 'agent_display_name' | 'session_id'>,
+): string {
   if (node.title && node.title.trim()) return node.title;
   const suffix = node.session_id.length > 6 ? node.session_id.slice(-6) : node.session_id;
-  return node.agent_name ? `${node.agent_name} · ${suffix}` : suffix;
+  const agentLabel = node.agent_display_name?.trim() || node.agent_name;
+  return agentLabel ? `${agentLabel} · ${suffix}` : suffix;
 }
 
 // Desktop run-graph fill height (design.pen KfgtJ — canvas fills its container):

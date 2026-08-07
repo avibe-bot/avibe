@@ -159,10 +159,6 @@
           "paths": ["/properties/supply_channel"]
         },
         {
-          "schema": "agent-supply.schema.json",
-          "paths": ["/properties/current/properties/channel"]
-        },
-        {
           "schema": "agent-chain.schema.json",
           "paths": ["/properties/chain/items/properties/channel"]
         },

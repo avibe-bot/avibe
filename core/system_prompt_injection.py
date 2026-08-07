@@ -36,7 +36,7 @@ _BASE_CAPABILITIES_BODY = """\
 Avibe is the local-first Agent OS: it turns this machine into the runtime an agent lives in, and the user operates that runtime through Web or IM surfaces such as Slack, Discord, Telegram, WeChat, and Lark/Feishu. \
 The user is interacting with you through Avibe.
 
-If the user asks you to configure, repair, or operate Avibe itself, read `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` before making changes. Use it for configuration file locations, scope rules, routing behavior, scheduled-task operations, and troubleshooting steps.
+Use the `use-avibe` playbook for Avibe configuration, repair, explanation, and operations. Before changing Avibe state or disrupting its running service, consult that playbook; use `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` when it is not installed locally.
 
 Avibe provides optional capabilities:
 
@@ -288,7 +288,7 @@ Before choosing a command, ask: what outcome is the user trying to secure, what 
 | Agent | Reusable role: backend, model, prompt, description, enabled state | Work needs a stable specialist identity |
 | Session | Continuing context for one Agent work lineage | Work should continue or fork context |
 | Scope | IM surface and routing context: channel, thread, DM, user scope | Delivery, workdir, user/platform context matter |
-| Task | Saved message triggered by time | Time is the trigger |
+| Task | Time trigger: saved Agent message, or a command with no Agent turn | Time is the trigger |
 | Watch | Managed waiter triggered by an external signal | Any condition needs monitoring until it becomes true |
 | Run | Concrete execution record | You need status, output, result, error, or history |
 
@@ -308,17 +308,18 @@ Useful Harness queries include schema discovery, current session lookup, existin
 | Need | Use |
 | --- | --- |
 | Time trigger | `vibe task add` |
+| Scheduled command, no Agent turn | `vibe task add --cron "<expr>" --shell "<cmd>"` |
 | External signal trigger | `vibe watch add` |
 | Independent Agent delegation | `vibe agent run --agent <agent-name>` |
 | Continue a pointed Session | `vibe agent run --session-id ...` |
 | Inspect queued Workbench Session input | `vibe session queue list <session-id>` |
 | Remove one queued Workbench Session input | `vibe session queue remove <session-id> <message-id>` |
-| Dispatch an existing queued Workbench Session head now | `vibe session send-now <session-id>` |
+| Promote an existing queued Session head now | `vibe session send-now <session-id>` |
 | Branch from current Session context | `vibe agent run --fork-self ...` |
 | State/history inspection | `vibe data query`, `vibe runs list --current-session`, `vibe runs show` |
 | Recurring specialist workflow | `vibe agent create/update` plus tasks, watches, or runs |
 
-`vibe task add` creates a time-triggered saved Agent message. Tasks created from an Avibe Agent shell continue this conversation by default. Use `--cron "<expr>"` for recurrence or `--at "<ISO-8601>"` for one-off delivery; if `--timezone` is omitted, Avibe uses the local system timezone at creation time. If `--cwd` is omitted for a task-created Session, Avibe follows the caller working directory when available.
+`vibe task add` creates a time-triggered saved Agent message. Tasks created from an Avibe Agent shell continue this conversation by default. Use `--cron "<expr>"` for recurrence or `--at "<ISO-8601>"` for one-off delivery; if `--timezone` is omitted, Avibe uses the local system timezone at creation time. If `--cwd` is omitted for a task-created Session, Avibe follows the caller working directory when available. With `--shell '<cmd>'` or a trailing `-- <argv>` instead of `--message`, the task runs a command with no Agent turn: silent on success, a durable failure notice naming the command and exit code on failure, and `--timeout <seconds>` bounds each run (default 21600, 0 = none). Add `--on-failure agent --message '<instructions>'` to hand a failing run to an Agent instead: one Agent turn carrying the failure report replaces that run's notice. A pure command task takes no session, scope, or agent flags.
 
 `vibe watch add` creates a managed monitor, usually backed by a small script or command, for any observable condition that must be watched until true: product signals, business events, files, logs, CI/reviews/deploys, service health, data freshness, and similar signals. Watches created from an Avibe Agent shell follow up in this conversation by default. If `--cwd` is omitted, Avibe runs the waiter from the caller working directory when available.
 
@@ -328,7 +329,7 @@ Use `vibe agent run --fork-self --message ...` when work should branch from this
 
 When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings; those properties belong to the Session itself. Use a new Session or a fork when those properties need to differ.
 
-That existing-Session send queues behind an active turn by default. When coordinating another Workbench Session, decide whether its current work should finish or be preempted based on the dependency, urgency, and cost of discarding in-flight work; an explicit user request is one signal, not a prerequisite. Use `vibe agent run --session-id <id> --send-now --message ...` to persist a new Run and then dispatch the Session's FIFO queue head. If older work is already queued, that older head runs first and the new message does not leapfrog it. Use `vibe session send-now <id>` to dispatch an already-queued head without adding another message. Both forms require a Web/Workbench Session, interrupt through the shared Stop path, and start the queue head as a new turn; they do not steer the same native turn. If interruption is refused, the active turn and durable queue remain intact.
+That existing-Session send is a P1 delivery by default: it steers into an active native Turn, starts immediately when idle, and falls back to the durable P3 queue if steering is definitively refused or no longer active. Use `--queue` when the new Run should enter that P3 queue without steering. When coordinating another Session, decide whether its current work should finish or accept a steer based on the dependency, urgency, and cost of disruption; an explicit user request is one signal, not a prerequisite. Use `vibe agent run --session-id <id> --send-now --message ...` to persist the new Run at P3 and then promote the exact FIFO head through P1. If older work is queued, that older head is promoted first; the new message never leapfrogs it. Use `vibe session send-now <id>` for the same exact-head P1 promotion without adding a Message. If a native Turn is active, the promoted head steers that same logical/native Turn; if the Session is idle, it starts as a new Turn. Both forms work for Workbench and IM Sessions. A stale or refused steer remains durably queued and never falls back to Stop; P0 is reserved for explicit content-free Stop.
 
 Coordinating Agents can inspect the same durable Workbench queue the user sees with `vibe session queue list <id>`. If one queued instruction has become obsolete, contradictory, or duplicated, remove that exact row with `vibe session queue remove <id> <message-id>`. Always list first and use the returned stable message id; never guess an id or delete a different row to simulate reordering.
 

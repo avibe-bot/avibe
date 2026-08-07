@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  agentNeedsModelSelection,
   listedModelIds,
   manualModelSources,
   modelChainKey,
@@ -22,7 +21,6 @@ const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   menu_kind: 'fixed',
   selected_by_agent: null,
   selected_model_id: 'current-model',
-  current: null,
   sources: { policy: 'follow', order: [], eligibility: [] },
   supply_status: 'ok',
   model_supply: [{ model_id: 'supply-model', chain_length: 1 }],
@@ -56,6 +54,7 @@ const read = (over: Partial<Extract<ModelChainRead, { kind: 'ready' }>['chain']>
 });
 
 const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependency => ({
+  contract_version: 4,
   manifest: { name: 'cliproxyapi', version: '1', source_sha: 'a', assets: [] },
   status: { health, verified: health === 'ok' },
 });
@@ -69,6 +68,7 @@ const source = (id: string): Source => ({
   supply_channel: 'hub',
   billing: 'metered',
   state: { status: 'active' },
+  last_discovered_at: null,
   models: [],
 });
 
@@ -161,15 +161,15 @@ describe('model row projection', () => {
     expect(modelSupplierCounts([first, second]).get('shared-model')).toBe(2);
   });
 
-  it('counts an interrupted model and the honest row-zero state independently', () => {
+  it('counts an interrupted model without treating absent selection as another issue', () => {
     const row = read({ supply_state: 'interrupted', chain: [] });
     const a = agent({ selected_model_id: null, builtin_models: ['builtin-model'], model_supply: [] });
-    expect(agentNeedsModelSelection(a)).toBe(true);
-    expect(modelIssueCount([a], { [modelChainKey('claude', 'builtin-model')]: row })).toBe(2);
+    expect(modelIssueCount([a], { [modelChainKey('claude', 'builtin-model')]: row })).toBe(1);
   });
 
   it('attributes runtime failure only to a model whose current head uses the managed channel', () => {
     expect(modelNeedsAttention(agent(), 'builtin-model', read(), runtime('down'))).toBe(true);
+    expect(modelNeedsAttention(agent(), 'builtin-model', read(), runtime('not_started'))).toBe(false);
     const native = read({ chain: [{
       source_id: 'src_native',
       channel: 'native_cli',

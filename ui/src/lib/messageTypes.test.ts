@@ -26,21 +26,10 @@ describe('message type catalog reader', () => {
   });
 });
 
-// ===== One-time equivalence oracle =====
-// The five predicates as they read BEFORE this lane replaced their inline type-name
-// lists with catalog lookups. This is frozen historical behavior, NOT a catalog
-// mirror to maintain: it is asserted only over ``PRE_REFACTOR_TYPES`` — the names
-// that existed at the refactor — so a type added to the catalog later is out of its
-// scope by construction. A failure here means a catalog value and the frontend's
-// former behavior disagree, which is a drift finding to raise, not a snapshot to
-// quietly update.
-const PRE_REFACTOR_TYPES = [
-  'user',
-  'harness',
-  'result',
-  'notify',
-  'error',
-  'assistant',
+// Operational state and process events no longer masquerade as Session Messages.
+// Keep this list as a migration boundary: these names must resolve to neutral catalog
+// defaults even when an old browser or deep link presents one.
+const RETIRED_PSEUDO_MESSAGE_TYPES = [
   'tool_call',
   'queued',
   'draft',
@@ -49,29 +38,37 @@ const PRE_REFACTOR_TYPES = [
   'silent',
 ] as const;
 
-// Unknown / non-type strings the predicates must also agree on. ``show_annotation``
-// is one of them on purpose: it is an ``author_name``, never a message type, and
-// keeping it here pins that it does not become one by the back door.
-//
-// ``annotation`` is deliberately absent. This block is an equivalence oracle
-// against pre-refactor behavior, and ``annotation`` is behavior that did not
-// exist then — it had no type, so the transcript reached it through
-// ``metadata.source``. Its behavior is pinned by the tests that own it
-// (chatMessageTypes / AnnotationMessage), not by an oracle it postdates.
-const PROBE_TYPES: readonly string[] = [...PRE_REFACTOR_TYPES, 'show_annotation', 'future_type', ''];
+const CANONICAL_MESSAGE_TYPES = [
+  'user',
+  'harness',
+  'annotation',
+  'result',
+  'notify',
+  'error',
+  'assistant',
+] as const;
+
+const PROBE_TYPES: readonly string[] = [
+  ...CANONICAL_MESSAGE_TYPES,
+  ...RETIRED_PSEUDO_MESSAGE_TYPES,
+  'show_annotation',
+  'future_type',
+  '',
+];
 
 const wasTranscript = (type: string): boolean =>
   type === 'user' ||
   type === 'harness' ||
+  type === 'annotation' ||
   type === 'result' ||
   type === 'error' ||
   type === 'notify';
 
 const wasNotify = (type: string): boolean => type === 'notify' || type === 'error';
 
-const wasActivity = (type: string): boolean => type === 'assistant' || type === 'tool_call';
+const wasActivity = (type: string): boolean => type === 'assistant';
 
-const wasHarnessInputType = (type: string): boolean => type === 'harness';
+const wasHarnessInputType = (type: string): boolean => type === 'harness' || type === 'annotation';
 
 type TerminalCandidate = { author: string; type: string; metadata?: Record<string, unknown> | null };
 
@@ -81,7 +78,14 @@ const wasTerminalAgentMessage = (message: TerminalCandidate): boolean =>
     message.type === 'error' ||
     (message.type === 'notify' && message.metadata?.event === 'backend_failure'));
 
-describe('catalog-derived predicates match pre-refactor behavior', () => {
+describe('catalog-derived predicates match the communication-record boundary', () => {
+  it('does not declare retired pseudo-message types', () => {
+    for (const type of RETIRED_PSEUDO_MESSAGE_TYPES) {
+      expect(messageTypeNames(), type).not.toContain(type);
+      expect(specFor(type), type).toEqual(specFor(''));
+    }
+  });
+
   it('transcript visibility (ChatPage isTranscriptMessage)', () => {
     // ``isTranscriptMessage`` is now ``specFor(type).transcript`` and nothing
     // else — the ``metadata.source`` side channel it used to be OR'd with is
@@ -97,9 +101,9 @@ describe('catalog-derived predicates match pre-refactor behavior', () => {
     }
   });
 
-  it('activity-step identity (isActivityMessageType)', () => {
+  it('activity-step identity includes synthetic tool events', () => {
     for (const type of PROBE_TYPES) {
-      expect(isActivityMessageType(type), type).toBe(wasActivity(type));
+      expect(isActivityMessageType(type), type).toBe(type === 'tool_call' || wasActivity(type));
     }
   });
 
@@ -110,7 +114,8 @@ describe('catalog-derived predicates match pre-refactor behavior', () => {
       // agent before the catalog is consulted, because a harness-input type can
       // still carry agent-written rows (a reverse annotation is one).
       const match = { author: 'system', source: 'system', type };
-      expect(messageSearchRole(match), type).toBe(wasHarnessInputType(type) ? 'automated' : 'agent');
+      const expectedRole = type === 'annotation' ? 'you' : wasHarnessInputType(type) ? 'automated' : 'agent';
+      expect(messageSearchRole(match), type).toBe(expectedRole);
       expect(specFor(type).inputAuthors.includes('harness'), type).toBe(wasHarnessInputType(type));
     }
   });
@@ -136,11 +141,8 @@ describe('catalog-derived predicates match pre-refactor behavior', () => {
     }
   });
 
-  it('keeps silent out of the visible-terminal set even though it is terminal', () => {
-    // ``silent`` carries ``activityRole: terminal`` for activity bookkeeping but is
-    // not transcript-visible, which is why the visible-terminal predicate is the
-    // intersection of the two properties rather than the role alone.
-    expect(specFor('silent').activityRole).toBe('terminal');
+  it('treats retired silent markers as neutral unknown types', () => {
+    expect(specFor('silent').activityRole).toBe('none');
     expect(specFor('silent').transcript).toBe(false);
     expect(isTerminalAgentMessage({ author: 'agent', type: 'silent' })).toBe(false);
   });

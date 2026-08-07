@@ -10,7 +10,8 @@ import {
   WorkbenchEventReconnectLoop,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
-import type { DockDoc } from './DockContext';
+import type { DockDoc } from './dockDoc';
+import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -355,11 +356,15 @@ export type VaultMetadataUpdatePayload = {
 };
 
 export type TunnelQualitySnapshot = {
-  schema_version: 1;
+  schema_version: 1 | 2;
   state: 'healthy' | 'degraded' | 'recovering' | 'unknown';
   grade: 'good' | 'fair' | 'poor' | 'critical' | 'unknown';
   sampled_at: string;
   protocol: 'quic' | 'http2' | 'unknown';
+  transport?: {
+    configured: 'auto' | 'quic' | 'http2';
+    effective: 'quic' | 'http2' | 'unknown';
+  };
   connector_count: number;
   ha_connections: number;
   rtt_ms: { min: number; median: number; max: number } | null;
@@ -368,15 +373,60 @@ export type TunnelQualitySnapshot = {
   window_seconds: number;
   request_errors_per_minute: number;
   packet_loss_per_minute: number;
+  request_path?: {
+    source: 'synthetic_local';
+    status: 'healthy' | 'degraded' | 'unavailable' | 'insufficient';
+    confidence: 'low' | 'medium' | 'high';
+    window_seconds: number;
+    sample_count: number;
+    success_count: number;
+    latency_ms: { p50: number; p95: number; p99: number; max: number } | null;
+    failure_rate: number;
+    slow_request_rate: {
+      over_500_ms: number;
+      over_1000_ms: number;
+      over_2000_ms: number;
+    };
+    baseline_p95_ms: number | null;
+  } | null;
   recovery: {
     state: 'idle' | 'evaluating' | 'draining' | 'cooldown';
     last_attempt_at: string | null;
-    last_trigger: 'availability' | 'latency' | 'errors' | 'manual' | null;
+    last_trigger: 'availability' | 'latency' | 'tail_latency' | 'errors' | 'manual' | null;
     last_result: 'improved' | 'no_improvement' | 'failed' | null;
     previous_median_rtt_ms: number | null;
     result_median_rtt_ms: number | null;
+    previous_protocol?: 'quic' | 'http2' | null;
+    result_protocol?: 'quic' | 'http2' | null;
+    previous_p95_ms?: number | null;
+    result_p95_ms?: number | null;
+    previous_p99_ms?: number | null;
+    result_p99_ms?: number | null;
     next_attempt_at: string | null;
     attempt_count_window: number;
+  };
+};
+
+export type CloudflareEdgeLocation = {
+  colo: string;
+  location?: string;
+  country?: string;
+};
+
+export type TunnelNetworkPath = {
+  schema_version: 1;
+  provider: 'Cloudflare';
+  asn: 13335;
+  sampled_at: string;
+  locations_pending: boolean;
+  client_access: 'local' | 'remote';
+  client_ingress: CloudflareEdgeLocation | null;
+  connector: {
+    locations: Array<CloudflareEdgeLocation & { id: string }>;
+    edge_ips: string[];
+  };
+  route: {
+    assessment: 'same_metro' | 'same_country' | 'cross_country' | 'unknown';
   };
 };
 
@@ -387,9 +437,38 @@ export type RemoteAccessStatus = {
   running: boolean;
   public_url?: string;
   pid_state?: string;
+  transport_protocol?: 'auto' | 'quic' | 'http2';
+  settings?: RemoteAccessSettings;
   tunnel_quality?: TunnelQualitySnapshot;
+  network_path?: TunnelNetworkPath;
   error?: string;
   optimization_started?: boolean;
+};
+
+export type RemoteAccessSettings = {
+  transport_protocol: 'auto' | 'quic' | 'http2';
+  auto_recovery: boolean;
+  optimization_profile: 'stable' | 'balanced' | 'low_latency';
+  edge_ip_version: 'auto' | '4' | '6';
+  edge_bind_address: string;
+};
+
+export type TunnelNetworkInterface = {
+  id: string;
+  name: string;
+  address: string;
+  ip_version: '4' | '6';
+};
+
+export type TunnelConnectivityDiagnostics = {
+  ok: boolean;
+  sampled_at: string;
+  effective_protocol: 'quic' | 'http2' | 'unknown';
+  dns: { status: 'available' | 'unavailable' | 'unknown' };
+  quic: { status: 'available' | 'unavailable' | 'unknown'; source: string };
+  http2: { status: 'available' | 'unavailable' | 'unknown'; source: string };
+  cloudflared_version?: string | null;
+  error?: string;
 };
 
 export type ApiContextType = {
@@ -562,6 +641,8 @@ export type ApiContextType = {
       display_name?: string;
       folder_path?: string;
       agent_backend?: string | null;
+      agent_id?: string | null;
+      expected_agent_id?: string | null;
       agent_name?: string | null;
       agent_variant?: string | null;
       model?: string | null;
@@ -638,12 +719,17 @@ export type ApiContextType = {
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
-  listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
+  listVibeAgents: (params?: {
+    backend?: string;
+    includeDisabled?: boolean;
+    includeArchived?: boolean;
+    cache?: boolean;
+  }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
-  removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string }>;
+  removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string; archived_agent?: VibeAgentBrief; default_agent_name?: string | null }>;
   listVaultSecrets: () => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
@@ -727,6 +813,9 @@ export type ApiContextType = {
   startRemoteAccess: () => Promise<RemoteAccessStatus>;
   stopRemoteAccess: () => Promise<RemoteAccessStatus>;
   optimizeRemoteAccessRoute: () => Promise<RemoteAccessStatus>;
+  getRemoteAccessNetworkInterfaces: () => Promise<{ ok: boolean; interfaces: TunnelNetworkInterface[] }>;
+  saveRemoteAccessSettings: (settings: RemoteAccessSettings) => Promise<RemoteAccessStatus>;
+  diagnoseRemoteAccess: () => Promise<TunnelConnectivityDiagnostics>;
   getAuthSession: () => Promise<SessionInfo>;
   signOut: () => Promise<{ ok: boolean }>;
 };
@@ -739,6 +828,7 @@ export type ApiContextType = {
 // absent field) means "no project default" → fall back to the global default.
 export type ProjectDefaultAgent = {
   agent_backend: string | null;
+  agent_id: string | null;
   agent_name: string | null;
   agent_variant: string | null;
   model: string | null;
@@ -781,6 +871,13 @@ export type WorkbenchSession = {
   model: string | null;
   reasoning_effort: string | null;
   status: string;
+  /** Storage projection, not a user preference: ``foreground`` = an ordinary chat,
+   *  ``background`` = hidden and undelivered, ``system`` = a row the RUNTIME owns
+   *  (kept out of session lists, still an Inbox destination — today the
+   *  workspace-notifications session, which accepts no turn, see
+   *  ``sessionReadOnlyReason``). Optional because payloads cached by an older client
+   *  predate the field; the server always sends it. */
+  visibility?: 'foreground' | 'background' | 'system';
   pinned: boolean;
   /** Live agent-runtime status driving the sidebar dot: idle (gray) /
    *  running (green) / failed (red). Distinct from the lifecycle ``status``. */
@@ -830,11 +927,14 @@ export type WorkbenchSessionUpdate = {
 export type VibeAgentBrief = {
   id: string;
   name: string;
+  display_name: string;
   description: string | null;
   backend: string;
   model: string | null;
   reasoning_effort: string | null;
   enabled: boolean;
+  archived: boolean;
+  archived_at: string | null;
   source: string;
   updated_at: string;
 };
@@ -943,6 +1043,7 @@ export type SkillsCheckResult = {
 };
 
 export type VibeAgentUpdatePayload = {
+  name?: string;
   description?: string | null;
   model?: string | null;
   reasoning_effort?: string | null;
@@ -1209,6 +1310,7 @@ export type HarnessSessionSummary = {
 // ``lifecycle_detail`` is set only on ``finished`` rows and says how they ended.
 export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
 export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+export type HarnessDefinitionHealth = 'failing' | 'degraded' | 'healthy' | 'unknown';
 
 // The fields every task/watch row reads to describe its state.
 export type HarnessDefinitionState = {
@@ -1224,6 +1326,20 @@ export type HarnessDefinitionState = {
   // "how long has this been running" must come from the run that is running,
   // not from whenever the row last did anything.
   running_since: string | null;
+  // Derived from this definition's own settled run outcomes, never from
+  // ``last_run_at``/``last_error``: those are overwritten on every fire, so one
+  // success used to erase days of failure and a daily-failing cron rendered
+  // identically to a daily-succeeding one.
+  //
+  // ``failing`` = the newest verdict failed. ``degraded`` = the newest succeeded
+  // but a failure is still inside the window — a success downgrades, it does not
+  // clear. ``unknown`` = health could not be computed, which must not read as a
+  // clean bill of health.
+  health: HarnessDefinitionHealth | null;
+  // How many verdicts back the failure run reaches, and how many failures are in
+  // the window at all. Both age out on their own; neither is acknowledgment state.
+  consecutive_failures: number;
+  recent_failures: number;
 };
 
 export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
@@ -1248,6 +1364,25 @@ export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
   last_run_at: string | null;
   last_run_id: string | null;
   last_error: string | null;
+  // Command tasks: a scheduled definition that runs a subprocess instead of
+  // prompting an Agent. Non-null ``shell_command`` OR a non-empty ``command``
+  // argv is what makes a row one (see ``taskIsCommand``); its ``prompt`` is
+  // empty and — when ``metadata.on_failure`` is ``"none"`` — it has no session
+  // at all, so nothing here may be assumed present.
+  //
+  // ``/api/harness/tasks`` serves the raw store row, so these are exactly the
+  // keys ``_scheduled_task_from_row`` writes: ``metadata`` already decoded, not
+  // ``metadata_json``.
+  shell_command?: string | null;
+  command?: unknown[] | null;
+  timeout_seconds?: number | null;
+  last_exit_code?: number | null;
+  metadata?: Record<string, unknown> | null;
+  // Where a command task's subprocess runs. Null is not "nowhere": a definition
+  // bound to a Session follows that Session's workdir, read live at fire time
+  // (``_bound_session_workdir``), so the pane names the source rather than
+  // printing a blank.
+  cwd?: string | null;
 };
 
 export type HarnessWatchRuntime = {
@@ -1922,6 +2057,7 @@ export type CodexAuthSaveResult = CodexAuthState & {
 };
 
 export type ClaudeAuthMode = 'oauth' | 'api_key';
+export type ClaudeCredentialType = 'api_key' | 'auth_token';
 
 // Claude Code reads ``~/.claude/settings.json`` at launch and its ``env``
 // block wins over inherited process env. avibe therefore writes
@@ -1950,6 +2086,7 @@ export type ClaudeAuthState = {
   settings_env_has_key: boolean;
   settings_env_key_length: number;
   settings_env_key_var: 'ANTHROPIC_API_KEY' | 'ANTHROPIC_AUTH_TOKEN' | null;
+  credential_type: ClaudeCredentialType | null;
   settings_env_base_url: string | null;
   settings_conflict: boolean;
   message?: string;
@@ -1958,6 +2095,7 @@ export type ClaudeAuthState = {
 export type ClaudeAuthPayload = {
   auth_mode: ClaudeAuthMode;
   api_key?: string | null;
+  credential_type?: ClaudeCredentialType;
   base_url?: string | null;
 };
 
@@ -2153,59 +2291,6 @@ export class ApiError extends Error {
     this.code = code;
   }
 }
-
-/** Pick the machine code + human fallback out of an error response body.
- *
- *  Accepts the legacy ``error`` shape (a bare string, or ``{ code, message }``) AND the
- *  top-level ``{ code, message }`` shape newer routes use (e.g. /api/vault/*), so callers
- *  always get a real ``ApiError.code`` to branch on instead of a generic status string.
- *
- *  Note the precedence, which is a CONTRACT for route authors: ``error`` is consulted
- *  first, and a STRING ``error`` is taken as the code — so a route that pairs a human
- *  sentence in ``error`` with the real code alongside it in a top-level ``code`` loses that
- *  code here, and its message is rendered verbatim in every locale. Routes with a machine
- *  code must nest it: ``{"error": {"code", "message"}}`` (see ``_show_page_error_response``
- *  in ``vibe/ui_server.py``). Extracted from ``handleApiError`` unchanged so that contract
- *  is directly testable — see ApiErrorParse.test.ts. */
-export const selectApiErrorFields = (
-  data: any,
-  defaultMessage: string,
-): { code: string | null; fallback: string } | null => {
-  // Not ``data?.error``: a non-object JSON body (``null``) must keep THROWING here so
-  // handleApiError's catch falls back to the status text, exactly as before.
-  const rawErr = data.error ?? (data.code ? { code: data.code, message: data.message } : undefined);
-  if (!rawErr) return null;
-  const code = typeof rawErr === 'string' ? rawErr : rawErr?.code;
-  const fallback = typeof rawErr === 'string' ? rawErr : rawErr?.message ?? rawErr?.code ?? defaultMessage;
-  return { code: typeof code === 'string' ? code : null, fallback };
-};
-
-/** Which session an error response says is archived, or ``null`` if it says no such
- *  thing. The WHOLE decision — the code guard and the id lookup — so it is testable
- *  without a DOM (this repo has no DOM test environment; same reason
- *  ``selectApiErrorFields`` was extracted). ``handleApiError`` only fans the answer
- *  out to subscribers.
- *
- *  Every route that can answer ``409 session_archived`` puts the session id in the
- *  first segment after its collection: ``/api/sessions/<id>`` (PATCH), plus
- *  ``/messages`` and ``/fork`` under it, and ``/api/show-pages/<session_id>/…``
- *  (ensure / visibility / share-id / rotate-share / icon). One pattern therefore
- *  covers all of them, and a future session-scoped route inherits it.
- *
- *  Deliberately UNANCHORED: some callers pass a human LABEL rather than a bare
- *  path (``updateSession`` sends ``"PATCH /api/sessions/<id>"``), and that label
- *  belongs to the very route this convergence was added for. */
-export const archivedConflictSessionId = (code: string | null, path: string): string | null => {
-  if (code !== 'session_archived') return null;
-  const match = /\/api\/(?:sessions|show-pages)\/([^/?#\s]+)/.exec(path);
-  if (!match) return null;
-  try {
-    return decodeURIComponent(match[1]) || null;
-  } catch {
-    // A malformed escape must not throw inside an error handler.
-    return match[1] || null;
-  }
-};
 
 const ApiContext = createContext<ApiContextType | undefined>(undefined);
 const CONFIG_CACHE_TTL_MS = 30_000;
@@ -3154,8 +3239,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       if (params?.backend) search.set('backend', params.backend);
       if (params?.includeDisabled) search.set('include_disabled', '1');
+      if (params?.includeArchived) search.set('include_archived', '1');
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/agents?${qs}` : '/api/agents', 5_000);
+      const path = qs ? `/api/agents?${qs}` : '/api/agents';
+      return params?.cache === false ? getJson(path) : getCachedJson(path, 5_000);
     },
     getVibeAgent: (name) => getCachedJson(`/api/agents/${encodeURIComponent(name)}`, 5_000),
     createVibeAgent: (payload) => postJson('/api/agents', payload),
@@ -3421,6 +3508,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     startRemoteAccess: () => postJson('/api/remote-access/start', {}),
     stopRemoteAccess: () => postJson('/api/remote-access/stop', {}),
     optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}),
+    getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
+    saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
+    diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
     getAuthSession: () => getJson('/api/session'),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps

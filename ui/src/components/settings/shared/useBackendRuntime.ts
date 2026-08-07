@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { errorMessage } from '@/lib/errorMessage';
 
 export type CliStatus = 'unknown' | 'ok' | 'missing';
 
@@ -126,9 +127,9 @@ export function useBackendRuntime({
         const nextPath = result.path || cliPath || defaultCli;
         setCliPath(nextPath);
         setCliStatus(result.found ? 'ok' : 'missing');
-      } catch (e: any) {
+      } catch (e) {
         setCliStatus('missing');
-        showToast(e?.message || t('common.saveFailed'), 'error');
+        showToast(errorMessage(e) || t('common.saveFailed'), 'error');
       } finally {
         setDetecting(false);
       }
@@ -189,9 +190,9 @@ export function useBackendRuntime({
       } else {
         showToast(result.message || t('common.saveFailed'), 'error');
       }
-    } catch (e: any) {
+    } catch (e) {
       setInstallResult({ ok: false, message: String(e), output: null });
-      showToast(e?.message || String(e), 'error');
+      showToast(errorMessage(e) || String(e), 'error');
     } finally {
       setInstalling(false);
     }
@@ -216,8 +217,8 @@ export function useBackendRuntime({
       assertBackendRuntimeApplied(saved, t('common.saveFailed'));
       setSavedCliPath(cliPath);
       showToast(t('common.saved'), 'success');
-    } catch (e: any) {
-      showToast(e?.message || t('common.saveFailed'), 'error');
+    } catch (e) {
+      showToast(errorMessage(e) || t('common.saveFailed'), 'error');
     } finally {
       setSavingRuntime(false);
     }
@@ -246,8 +247,8 @@ export function useBackendRuntime({
         });
         saved = true;
         assertBackendRuntimeApplied(savedConfig, t('common.saveFailed'));
-      } catch (e: any) {
-        showToast(e?.message || t('common.saveFailed'), 'error');
+      } catch (e) {
+        showToast(errorMessage(e) || t('common.saveFailed'), 'error');
         if (!saved) setEnabled(!next);
       }
     })();

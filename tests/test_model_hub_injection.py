@@ -163,12 +163,14 @@ def _service(
     *,
     now,
 ) -> ModelHubService:
+    store = MemoryStore(config)
     return ModelHubService(
-        store=MemoryStore(config),
+        store=store,
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=now,
+        requested_model_override=store.requested_model,
     )
 
 
@@ -923,7 +925,7 @@ def test_agent_projection_matches_interrupted_unmapped_fixed_backend(tmp_path: P
     router = _router(service)
     with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
         asyncio.run(router.resolve("claude", "claude-opus-4-6"))
-    assert projected["current"] is None
+    assert "current" not in projected
     assert projected["supply_status"] == "interrupted"
     assert adapter.starts == 0
     event = service.events.list(limit=10)[0]
@@ -933,8 +935,8 @@ def test_agent_projection_matches_interrupted_unmapped_fixed_backend(tmp_path: P
     )
 
 
-def test_agent_projection_uses_global_default_vibe_agent_model(tmp_path: Path) -> None:
-    """MH-CHAN-001: the global default Vibe Agent supplies the projected model."""
+def test_agent_projection_uses_explicit_default_vibe_agent_model(tmp_path: Path) -> None:
+    """MH-CHAN-001: the default Vibe Agent supplies its explicit model."""
 
     hub = _source(
         "src_hub_agent_model",
@@ -954,22 +956,29 @@ def test_agent_projection_uses_global_default_vibe_agent_model(tmp_path: Path) -
         LaunchAdapter({hub.id: "route-hub"}),
         now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
     )
-    service.store.requested_models["codex"] = "backend-default"
     service.requested_model_override = lambda backend: "agent-model" if backend == "codex" else None
     router = _router(service)
 
-    projected = next(agent for agent in service.list_agents() if agent["backend"] == "codex")["current"]
+    projected = next(agent for agent in service.list_agents() if agent["backend"] == "codex")
+    chain = service.agent_chain("codex", "agent-model")
+    candidate = next(item for item in chain["chain"] if item["runnable"])
     launch = asyncio.run(router.resolve("codex", "agent-model"))
 
-    assert projected == {
+    assert "current" not in projected
+    assert projected["selected_model_id"] == "agent-model"
+    assert {
+        "model_id": candidate["resolved_model_id"] or chain["model_id"],
+        "source_id": candidate["source_id"],
+        "channel": candidate["channel"],
+    } == {
         "model_id": launch.target_model,
         "source_id": launch.source_id,
         "channel": launch.channel,
     }
 
 
-def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Path) -> None:
-    """MH-CHAN-001/MH-MAP-001/MH-OC-001: projection equals runtime resolution."""
+def test_agent_chain_and_runtime_router_share_resolution_table(tmp_path: Path) -> None:
+    """MH-CHAN-001/MH-MAP-001/MH-OC-001: chain equals runtime resolution."""
 
     fixed_hub = _source(
         "src_hub_mapped",
@@ -1121,7 +1130,7 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         service.store.requested_models[backend] = requested_model
         router = _router(service)
 
-        projected = next(agent for agent in service.list_agents() if agent["backend"] == backend)["current"]
+        projected = next(agent for agent in service.list_agents() if agent["backend"] == backend)
         launch = asyncio.run(router.resolve(backend, requested_model))
         actual = (
             None
@@ -1133,7 +1142,16 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
             }
         )
 
-        assert projected == actual == expected
+        assert "current" not in projected
+        if expected is not None and requested_model:
+            chain = service.agent_chain(backend, requested_model)
+            candidate = next(item for item in chain["chain"] if item["runnable"])
+            assert {
+                "model_id": candidate["resolved_model_id"] or chain["model_id"],
+                "source_id": candidate["source_id"],
+                "channel": candidate["channel"],
+            } == expected
+        assert actual == expected
 
 
 def test_mh_chan_001_configured_hub_stays_fail_closed_for_unavailable_model(tmp_path: Path) -> None:
@@ -1237,10 +1255,17 @@ def test_projection_rechecks_expired_native_readiness_before_recovery(
     service.store.requested_models["codex"] = "gpt-5"
     router = _router(service, native_cli_ready=lambda _backend: False)
 
-    projected = next(agent for agent in service.list_agents() if agent["backend"] == "codex")["current"]
+    projected = next(agent for agent in service.list_agents() if agent["backend"] == "codex")
+    chain = service.agent_chain("codex", "gpt-5")
+    candidate = next(item for item in chain["chain"] if item["runnable"])
     launch = asyncio.run(router.resolve("codex", "gpt-5"))
 
-    assert projected == {
+    assert "current" not in projected
+    assert {
+        "model_id": candidate["resolved_model_id"] or chain["model_id"],
+        "source_id": candidate["source_id"],
+        "channel": candidate["channel"],
+    } == {
         "model_id": "gpt-5",
         "source_id": hub.id,
         "channel": "hub",
@@ -1404,11 +1429,18 @@ def test_mh_chan_001_verified_codex_keyring_source_remains_routable(
 
     clock["now"] += timedelta(seconds=301)
     service.store.requested_models["codex"] = "gpt-5"
-    projected = next(agent for agent in service.list_agents() if agent["backend"] == "codex")["current"]
+    projected = next(agent for agent in service.list_agents() if agent["backend"] == "codex")
+    chain = service.agent_chain("codex", "gpt-5")
+    candidate = next(item for item in chain["chain"] if item["runnable"])
     assert native.state.status == "cooldown"
     recovered = asyncio.run(router.resolve("codex", "gpt-5"))
 
-    assert projected == {
+    assert "current" not in projected
+    assert {
+        "model_id": candidate["resolved_model_id"] or chain["model_id"],
+        "source_id": candidate["source_id"],
+        "channel": candidate["channel"],
+    } == {
         "model_id": "gpt-5",
         "source_id": native.id,
         "channel": "native_cli",
@@ -1978,6 +2010,9 @@ def test_mh_inj_codex_runtime_change_waits_for_shared_active_turn(tmp_path: Path
         agent._on_server_request = AsyncMock()
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
         agent.controller = SimpleNamespace(resource_governor=None)
+        agent._runtime_ownership_snapshot_for_cwd = Mock(
+            return_value=SimpleNamespace(blocks_transport_replacement=False)
+        )
         launch = ModelHubLaunch(
             "codex",
             "hub",
@@ -2043,6 +2078,9 @@ def test_mh_inj_codex_hub_to_direct_retires_gateway_scope(
             model_hub_runtime=SimpleNamespace(
                 retire_process_scope=retire_scope,
             ),
+        )
+        agent._runtime_ownership_snapshot_for_cwd = Mock(
+            return_value=SimpleNamespace(blocks_transport_replacement=False)
         )
         launch = ModelHubLaunch(
             "codex",
@@ -2195,11 +2233,12 @@ def test_mh_inj_codex_direct_resume_clears_implicit_hub_provider() -> None:
 def test_mh_inj_claude_channel_change_waits_for_active_turn() -> None:
     async def exercise() -> None:
         handler = object.__new__(SessionHandler)
+        handler.controller = SimpleNamespace(runtime_activation=None)
         key = "session:/work"
         client = SimpleNamespace(_vibe_model_hub_fingerprint="native_cli:src_native")
         handler.claude_sessions = {key: client}
         handler.active_sessions = {key}
-        handler.cleanup_session = AsyncMock()
+        handler._cleanup_session_locked = AsyncMock()
         launch = ModelHubLaunch(
             "claude",
             "hub",
@@ -2225,10 +2264,10 @@ def test_mh_inj_claude_channel_change_waits_for_active_turn() -> None:
             )
         )
         await asyncio.sleep(0.02)
-        handler.cleanup_session.assert_not_awaited()
+        handler._cleanup_session_locked.assert_not_awaited()
         handler.active_sessions.clear()
         assert await task is None
-        handler.cleanup_session.assert_awaited_once_with(
+        handler._cleanup_session_locked.assert_awaited_once_with(
             key,
             retire_model_hub_scope=False,
         )

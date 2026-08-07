@@ -35,15 +35,15 @@ import { SettingsLogsPage } from './components/settings/SettingsLogsPage';
 import { SettingsMessagingPage } from './components/settings/SettingsMessagingPage';
 import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPage';
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
-import { StatusProvider } from './context/StatusContext';
+import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
 import { useWindowManager } from './context/WindowManagerContext';
-import { ToastProvider } from './context/ToastContext';
-import { ThemeProvider } from './context/ThemeContext';
+import { ToastProvider } from './context/ToastProvider';
+import { ThemeProvider } from './context/ThemeProvider';
 import { VaultSandboxAppearanceBridge } from './components/VaultSandboxAppearanceBridge';
-import { WorkbenchInboxProvider } from './context/WorkbenchInboxContext';
-import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsContext';
-import { ComposerBridgeProvider } from './context/ComposerBridgeContext';
+import { WorkbenchInboxProvider } from './context/WorkbenchInboxProvider';
+import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsProvider';
+import { ComposerBridgeProvider } from './context/ComposerBridgeProvider';
 import { UnsavedChangesProvider } from './context/UnsavedChangesProvider';
 import { AgentationToggle } from './components/AgentationToggle';
 import { PwaLoopbackLinkGuard } from './components/PwaLoopbackLinkGuard';
@@ -348,6 +348,12 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         // bridge, the stale setup-required state immediately redirects back to
         // /setup, so the first finish appears to "not take" even though the
         // config was already saved with setup_completed=true.
+        //
+        // Reading a ref during render is normally wrong because the component
+        // will not re-render when it changes. Here that is the intent: this
+        // branch only bridges the single frame before the re-validation effect
+        // (which owns the re-render) flips `guardStatus` to loading.
+        // eslint-disable-next-line react-hooks/refs -- Deliberate one-frame bridge; see above.
         if (previousIsSetupRouteRef.current) {
             return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
         }

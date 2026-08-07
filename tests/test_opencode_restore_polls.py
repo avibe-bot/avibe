@@ -1,11 +1,10 @@
-"""Tests for ``OpenCodeAgent.restore_active_polls`` status recovery.
+"""Tests for ``OpenCodeAgent.restore_active_polls`` durable identity recovery.
 
-On a controller restart mid-OpenCode-turn, ``_reset_stale_agent_status`` flips
-every ``running`` workbench session to ``idle``. ``restore_active_polls`` then
-RESUMES the still-active OpenCode poll — but the resumed poll does NOT re-enter
-``AgentService.handle_message`` (the inbound status chokepoint), so the avibe
-sidebar dot would stay idle/gray for a backend turn that is still live unless the
-restore path re-marks the session ``running`` itself. These tests lock that:
+On controller restart, durable Turn ownership stays running while OpenCode
+rebuilds its logical/runtime/native mapping. The restored poll must publish that
+mapping before Delivery reconciliation and then wait for the recovery-complete
+barrier. Legacy polls without durable Turn history still restore their status
+projection. These tests lock that:
 
 * an avibe poll → ``controller.set_agent_status(session_id, "running")``;
 * an IM poll → NO status write (only avibe sessions get a dot).
@@ -18,11 +17,17 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_sessions import ActivePollInfo  # noqa: E402
 from core.services.agent_steering import SteerOutcome, SteerRequest, active_steer_identity, steer_active_turn  # noqa: E402
 from modules.agents.opencode.agent import OpenCodeAgent  # noqa: E402
+
+
+ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
+NATIVE_PART_ID = "prt_1234567890abcdef1234567890abcdef"
 
 
 def _make_poll(*, platform: str, base_session_id: str, opencode_session_id: str) -> ActivePollInfo:
@@ -49,15 +54,21 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     class _Server:
         def __init__(self):
             self.messages = [{"info": {"role": "assistant", "time": {}}}]
+            self.messages_error = None
             self.status = {"type": "busy"}
             self.status_error = None
+            self.mark_run_active_error = None
 
         async def list_messages(self, session_id, directory):
             # One in-progress assistant message → the session is "still active",
             # so the poll is restored (not pruned as stale).
+            if self.messages_error is not None:
+                raise self.messages_error
             return list(self.messages)
 
         async def mark_run_active(self, session_id):
+            if self.mark_run_active_error is not None:
+                raise self.mark_run_active_error
             return None
 
         async def mark_run_inactive(self, session_id):
@@ -135,6 +146,93 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     return agent, status_writes, removed, request_sessions
 
 
+def test_restore_registration_failure_terminalizes_exact_owner_before_release() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "opencode_native_steering": {
+            "target_session_id": "ses_wb",
+            "logical_turn_id": "turn-restore-failed",
+        },
+    }
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.mark_run_active_error = RuntimeError("registration failed")
+    failed: list[tuple[str, str, str]] = []
+
+    def _fail(turn_id: str, *, backend: str, reason: str) -> bool:
+        failed.append((turn_id, backend, reason))
+        return True
+
+    agent.controller.session_turns.fail_restored_backend_turn = _fail
+
+    assert asyncio.run(agent.restore_active_polls()) == 0
+    assert failed == [("turn-restore-failed", "opencode", "poll_registration_failed")]
+    assert removed == ["oc-1"]
+    assert agent._active_requests == {}
+
+
+def test_restore_registration_failure_keeps_poll_if_terminal_write_fails() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "opencode_native_steering": {
+            "target_session_id": "ses_wb",
+            "logical_turn_id": "turn-restore-failed",
+        },
+    }
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.mark_run_active_error = RuntimeError("registration failed")
+
+    def _fail(*_args, **_kwargs):
+        raise RuntimeError("terminal write failed")
+
+    agent.controller.session_turns.fail_restored_backend_turn = _fail
+
+    assert asyncio.run(agent.restore_active_polls()) == 0
+    assert removed == []
+    assert agent._active_requests == {}
+
+
+def test_restore_im_registration_failure_retries_before_releasing_poll() -> None:
+    poll = _make_poll(platform="slack", base_session_id="C123:thread", opencode_session_id="oc-im")
+    agent, _, removed, _ = _build_agent({"oc-im": poll})
+    attempts = 0
+    poll_started = asyncio.Event()
+    release_poll = asyncio.Event()
+
+    async def _flaky_mark_run_active(_session_id: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary registration failure")
+
+    class _HeldPollLoop:
+        async def run_restored_poll_loop(self, _poll_info):
+            poll_started.set()
+            await release_poll.wait()
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    agent._test_server.mark_run_active = _flaky_mark_run_active
+    agent._poll_loop = _HeldPollLoop()
+
+    async def _run() -> int:
+        restored = await agent.restore_active_polls()
+        if restored != 1:
+            return restored
+        await asyncio.wait_for(poll_started.wait(), timeout=1)
+        task = agent._active_requests[poll.base_session_id]
+        assert not task.done()
+        release_poll.set()
+        await task
+        return restored
+
+    assert asyncio.run(_run()) == 1
+    assert attempts == 2
+    assert removed == []
+
+
 def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     poll.model_dict = {"providerID": "openai", "modelID": "gpt-5"}
@@ -151,6 +249,8 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
     agent, _, _, _ = _build_agent({"oc-1": poll})
     poll_started = asyncio.Event()
     release_poll = asyncio.Event()
+    recovery_complete = asyncio.Event()
+    agent.controller._delivery_recovery_complete = recovery_complete
 
     class _HeldPollLoop:
         async def run_restored_poll_loop(self, poll_info):
@@ -164,7 +264,7 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
 
     async def _run():
         restored = await agent.restore_active_polls()
-        await poll_started.wait()
+        assert not poll_started.is_set()
         identity = active_steer_identity(
             agent.controller,
             "opencode",
@@ -172,6 +272,8 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             expected_logical_turn_id="logical-restored",
         )
         assert identity is not None
+        recovery_complete.set()
+        await poll_started.wait()
         receipt = await steer_active_turn(
             agent.controller,
             "opencode",
@@ -202,6 +304,163 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             "tools": {"question": False},
         }
     ]
+
+
+def test_restore_publishes_workbench_status_after_native_identity_registration() -> None:
+    poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_wb",
+        opencode_session_id="oc-1",
+    )
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    observed: list[tuple[bool, bool]] = []
+
+    def restore_running(session_id: str) -> None:
+        observed.append(
+            (
+                session_id in agent._active_requests,
+                agent._session_manager.get_request_session(session_id) is not None,
+            )
+        )
+
+    agent.controller.session_turns.restore_running = restore_running
+
+    async def _run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(_run()) == 1
+    assert observed == [(True, True)]
+
+
+def test_restore_preserves_durable_poll_when_verification_is_temporarily_unavailable() -> None:
+    poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_wb",
+        opencode_session_id="oc-unknown",
+    )
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "delivery_start_attempt_id": ATTEMPT_ID,
+        "opencode_native_steering": {
+            "target_session_id": "ses_wb",
+            "logical_turn_id": "turn-unknown",
+        },
+    }
+    agent, _, removed, _ = _build_agent({"oc-unknown": poll})
+    agent._test_server.messages_error = TimeoutError("temporary verification failure")
+
+    class _RecoveredPollLoop:
+        async def run_restored_poll_loop(self, poll_info):
+            agent._test_server.messages_error = None
+
+        async def remove_restored_ack(self, poll_info):
+            raise AssertionError("unknown verification must not retire the durable poll")
+
+    agent._poll_loop = _RecoveredPollLoop()
+
+    async def _run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(_run()) == 1
+    assert removed == []
+
+
+def test_restore_rebuilds_completed_exact_start_attempt() -> None:
+    poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_wb",
+        opencode_session_id="oc-1",
+    )
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "delivery_start_attempt_id": ATTEMPT_ID,
+        "opencode_native_steering": {
+            "target_session_id": "ses_wb",
+            "logical_turn_id": "logical-start",
+        },
+    }
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.messages = [
+        {
+            "info": {"id": "native-start-user", "role": "user", "time": {}},
+            "parts": [{"id": NATIVE_PART_ID, "type": "text", "text": "hello"}],
+        },
+        {
+            "info": {
+                "id": "assistant-done",
+                "role": "assistant",
+                "time": {"completed": 1},
+                "finish": "stop",
+            }
+        },
+    ]
+    agent._test_server.status = {"type": "idle"}
+    poll_started = asyncio.Event()
+    release_poll = asyncio.Event()
+    recovery_complete = asyncio.Event()
+    agent.controller._delivery_recovery_complete = recovery_complete
+
+    class _HeldPollLoop:
+        async def run_restored_poll_loop(self, _poll_info):
+            poll_started.set()
+            await release_poll.wait()
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    agent._poll_loop = _HeldPollLoop()
+
+    async def _run() -> int:
+        restored = await agent.restore_active_polls()
+        identity = active_steer_identity(
+            agent.controller,
+            "opencode",
+            "ses_wb",
+            expected_logical_turn_id="logical-start",
+        )
+        assert identity is not None
+        recovery_complete.set()
+        await poll_started.wait()
+        release_poll.set()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(_run()) == 1
+    assert removed == []
+
+
+def test_restore_reconciles_definitive_missing_start_attempt() -> None:
+    poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_wb",
+        opencode_session_id="oc-1",
+    )
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "delivery_start_attempt_id": ATTEMPT_ID,
+        "opencode_native_steering": {
+            "target_session_id": "ses_wb",
+            "logical_turn_id": "logical-missing",
+        },
+    }
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.messages = []
+    agent._test_server.status = {"type": "idle"}
+    reconciled: list[tuple[str, str, str]] = []
+
+    def _reconcile(turn_id: str, attempt_id: str, *, backend: str) -> bool:
+        reconciled.append((turn_id, attempt_id, backend))
+        return True
+
+    agent.controller.session_turns.reconcile_start_attempt_not_written = _reconcile
+
+    assert asyncio.run(agent.restore_active_polls()) == 0
+    assert reconciled == [("logical-missing", ATTEMPT_ID, "opencode")]
+    assert removed == ["oc-1"]
 
 
 def test_restore_keeps_accepted_steer_with_post_assistant_user_evidence() -> None:

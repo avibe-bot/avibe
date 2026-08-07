@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import en from '../../i18n/en.json';
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { AnnotationMessage } from './AnnotationMessage';
-import { QueueRow } from './ChatPage';
+import { QueueRow, QueueStrip } from './ChatPage';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -38,6 +38,25 @@ const queued = (over: Partial<WorkbenchMessage> = {}): WorkbenchMessage =>
 
 const renderQueued = (item: WorkbenchMessage) =>
   wrap(<QueueRow item={item} onRemove={() => undefined} onRecall={() => undefined} />);
+
+describe('QueueStrip — compatible queued messages read as one batch', () => {
+  it('uses one shared bubble and reveals each original row boundary on hover or focus', () => {
+    const html = wrap(
+      <QueueStrip
+        queue={[queued({ id: 'msg_1', text: 'One' }), queued({ id: 'msg_2', text: 'Two' })]}
+        onRemove={() => undefined}
+        onRecall={() => undefined}
+        onSendNow={() => undefined}
+      />,
+    );
+
+    expect(html.match(/data-queue-batch="true"/g)).toHaveLength(1);
+    expect(html.match(/data-queue-row="true"/g)).toHaveLength(2);
+    expect(html).toContain('hover:rounded-lg');
+    expect(html).toContain('focus-within:rounded-lg');
+    expect(html).not.toContain('flex-col gap-1');
+  });
+});
 
 describe('QueueRow — a queued annotation in the strip (rule 08)', () => {
   it('names a queued annotation, and leaves an ordinary queued prompt unlabelled', () => {

@@ -8,7 +8,13 @@ from vibe import api
 from vibe.ui_server import app
 
 
-def _seed_session(session_id: str, *, title: str | None = None) -> None:
+def _seed_session(
+    session_id: str,
+    *,
+    title: str | None = None,
+    agent_id: str | None = None,
+    agent_name: str | None = None,
+) -> None:
     from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -25,6 +31,8 @@ def _seed_session(session_id: str, *, title: str | None = None) -> None:
                 agent_sessions.insert().values(
                     id=session_id,
                     scope_id=scope_id,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
                     agent_backend="claude",
                     agent_variant="default",
                     session_anchor="anchor_" + session_id,
@@ -74,6 +82,40 @@ def test_list_show_pages_orders_newest_first_and_joins_title(monkeypatch, tmp_pa
     assert by_id["ses_plain"]["visibility"] == "private"
     updated_ats = [page["updated_at"] for page in result["pages"]]
     assert updated_ats == sorted(updated_ats, reverse=True)
+
+
+def test_list_show_pages_preserves_archived_agent_display_name(monkeypatch, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from storage.models import agent_sessions
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    store = VibeAgentStore()
+    try:
+        original = store.create(name="pm", backend="claude")
+        store.create(name="zz-fallback", backend="claude")
+        _seed_session(
+            "ses_archived_agent",
+            agent_id=original.id,
+            agent_name=original.name,
+        )
+        _set_visibility("ses_archived_agent", "private")
+
+        archived = store.archive(original.name)
+        assert archived is not None
+        result = api.list_show_pages()
+
+        page = next(item for item in result["pages"] if item["session_id"] == "ses_archived_agent")
+        assert page["agent"] == "pm"
+        with store.engine.connect() as conn:
+            internal_name = conn.execute(
+                agent_sessions.select()
+                .with_only_columns(agent_sessions.c.agent_name)
+                .where(agent_sessions.c.id == "ses_archived_agent")
+            ).scalar_one()
+        assert internal_name == archived.archived_name
+    finally:
+        store.close()
 
 
 def test_set_show_page_visibility_public_then_offline(monkeypatch, tmp_path):

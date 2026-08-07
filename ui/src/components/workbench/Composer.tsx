@@ -8,7 +8,7 @@ import {
   useState,
 } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Clock, Copy, Loader2, Mic, Paperclip, Plus, RotateCcw, Send, Square, Trash2, X } from 'lucide-react';
+import { Check, Clock, Copy, Loader2, Mic, Paperclip, Plus, RotateCcw, Send, Square, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useToast } from '../../context/ToastContext';
@@ -18,18 +18,17 @@ import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
   applyVoiceInsertion,
-  cleanupVoiceTranscript,
   voiceInsertionSnapshot,
   voiceInsertionText,
-  type VoiceCleanupResult,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
 import {
+  finalizeVoiceDictation,
   transcribeVoiceSegments,
   VOICE_SEGMENT_MS,
   VOICE_TRANSCRIPTION_CONCURRENCY,
   VoiceTranscriptionQueue,
-  voiceTranscriptFromSegments,
+  type VoiceCleanupOutcome,
   type VoiceTranscriptionSegment,
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
@@ -117,7 +116,7 @@ type VoiceRecordingSession = {
   finalization?: Promise<void>;
   transcriptionQueue: VoiceTranscriptionQueue;
   insertion: VoiceInsertionSnapshot;
-  cleanupOutcome?: VoiceCleanupResult['outcome'];
+  cleanupOutcome?: VoiceCleanupOutcome;
   cleanupElapsedMs?: number;
 };
 
@@ -135,24 +134,33 @@ const newVoiceDictationId = (): string => (
 );
 
 const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void> => {
+  const startedAt = Date.now();
   try {
-    const rawTranscript = voiceTranscriptFromSegments(session.segments);
-    session.finalizedSegmentCount = session.segments.length;
-    session.finalizedFailedSegmentCount = session.segments.filter(
-      (segment) => segment.error,
-    ).length;
-    const cleanup = await cleanupVoiceTranscript(rawTranscript, session.insertion, {
-      signal: session.abortController.signal,
-    });
+    session.finalizedSegmentCount = session.segments.filter((segment) => segment.blob).length;
+    const result = await (async () => {
+      try {
+        return await finalizeVoiceDictation(session.segments, {
+          dictationId: session.dictationId,
+          before: session.insertion.before,
+          after: session.insertion.after,
+        }, {
+          signal: session.abortController.signal,
+        });
+      } finally {
+        session.finalizedFailedSegmentCount = session.segments.filter(
+          (segment) => segment.error,
+        ).length;
+      }
+    })();
     if (session.abortController.signal.aborted) return;
-    session.cleanupOutcome = cleanup.outcome;
-    session.cleanupElapsedMs = cleanup.elapsedMs;
-    if (!cleanup.text.trim()) throw new VoiceTranscriptionError('empty');
-    session.transcript = cleanup.text;
+    session.cleanupOutcome = result.cleanup;
+    session.cleanupElapsedMs = Date.now() - startedAt;
+    session.transcript = result.text;
     session.segments = [];
     session.error = undefined;
     session.status = 'ready';
   } catch (error) {
+    session.cleanupElapsedMs = Date.now() - startedAt;
     session.transcript = undefined;
     session.error = error;
     session.status = 'failed';
@@ -643,9 +651,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     blob: Blob,
     durationMs: number,
     overlapMs?: number,
+    final = false,
   ) => {
     const segment: VoiceSegment = {
       blob,
+      sequence: session.segments.length,
+      final,
       durationMs,
       overlapMs,
       task: Promise.resolve(),
@@ -818,12 +829,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           blob,
           metadata.durationMs,
           metadata.overlapMs,
+          metadata.final,
         ),
         onStopRequested: (reason, metadata) => {
           if (reason === 'abort') return;
           session.stoppedAt = metadata.requestedAt;
           session.backlogAtStop = session.segments.filter(
-            (segment) => !segment.text && !segment.error,
+            (segment) => !segment.final && !segment.receipt && !segment.error,
           ).length;
         },
         onError: (error) => {
@@ -851,6 +863,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             }
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;
+          }
+          if (session.segments.length && !session.segments.at(-1)?.final) {
+            session.segments.push({
+              blob: null,
+              sequence: session.segments.length,
+              final: true,
+              durationMs: 0,
+              task: Promise.resolve(),
+            });
           }
           void finishVoiceSession(session);
         },
@@ -957,6 +978,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // ``turn_state.foreground``, not the row's ``agent_status``, so an archived chat
   // opened inside that window loads read-only AND busy.
   const busyControls = busy && !disabled;
+  const voiceProcessing = transcribing || recordingStarting || restoringRecording;
+  const voiceControlMode = voiceProcessing
+    ? 'loading'
+    : recording
+      ? 'finish'
+      : voiceRetainedSession?.status === 'ready'
+        ? 'copy'
+        : voiceRetainedSession && canRetryVoiceSession(voiceRetainedSession)
+          ? 'retry'
+          : asrAvailable
+            ? 'record'
+            : null;
+  const voiceFlowActive = (
+    recording
+    || voiceProcessing
+    || voiceRetainedSession !== null
+  );
+  const voiceCaptureActive = recording || voiceProcessing;
+  const voiceDiscardAvailable = recording || voiceRetainedSession !== null;
 
   const update = (next: string) => {
     setValue(next);
@@ -1041,13 +1081,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           mediaEnabled ? 'pl-1.5' : 'pl-3.5',
         )}
       >
-        {/* Left controls sit in a tight (gap-0) cluster of 28px-wide (w-7) icon
-            buttons. Equal *box* gaps don't look equal here — two adjacent icon
-            buttons stack their inner padding, so an 8px box gap reads as ~26px
-            between the glyphs. Instead each button's icon padding (6px), the
-            left pad (pl-1.5 = 6px) and the cluster→textarea gap (gap-1.5 = 6px)
-            are all 6px, which makes the *visual* spacing uniform:
-            wall→＋ == ＋→mic == mic→textarea ≈ 12px. */}
+        {/* Attach stays in the first idle slot and voice starts in the second.
+            Once a voice flow starts, the unrelated attachment control withdraws
+            and the active voice action takes the left edge. */}
         {mediaEnabled && (
           <div className="flex items-end">
             <input
@@ -1061,109 +1097,105 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 e.target.value = '';
               }}
             />
-            {/* Attach uses a generic plus rather than a paperclip — reads as
-                "add anything" and pairs cleanly with the mic. */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={() => fileInputRef.current?.click()}
-              // A disabled composer cannot send, so staging attachments is a
-              // dead end. Opening a native picker can also hide the page, so
-              // keep it unavailable until an active recording has stopped.
-              disabled={disabled || voiceDraftReadOnly}
-              aria-label={t('chat.compose.attach')}
-              className="h-9 w-7 shrink-0"
-            >
-              <Plus className="size-4" />
-            </Button>
-            {asrAvailable && (
-              <>
-                {/* While recording this is the Stop control: tap to finish +
-                    transcribe (the discard path is the trash button by Send, or ESC). */}
-                <Button
-                  type="button"
-                  variant={recording ? 'secondary' : 'ghost'}
-                  size="icon"
-                  onPointerDown={() => {
-                    if (!recording) pendingVoiceInsertionRef.current = captureVoiceInsertion();
-                  }}
-                  onPointerCancel={() => {
-                    pendingVoiceInsertionRef.current = null;
-                  }}
-                  onContextMenu={() => {
-                    pendingVoiceInsertionRef.current = null;
-                  }}
-                  onClick={(event) => toggleRecording(event.detail > 0)}
-                  disabled={isVoiceControlDisabled(
-                    disabled,
-                    recording,
-                    transcribing || recordingStarting || restoringRecording,
-                    Boolean(voiceRetainedSession),
-                  )}
-                  aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
-                  className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
-                >
-                  {transcribing || recordingStarting || restoringRecording ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : recording ? (
-                    <Square className="size-4" />
-                  ) : (
-                    <Mic className="size-4" />
-                  )}
-                </Button>
-                {recording && (
-                  <span
-                    className="flex h-9 w-10 items-center justify-center text-xs tabular-nums text-muted"
-                    aria-live="off"
-                  >
-                    {formatRecordingDuration(recordingSeconds)}
-                  </span>
-                )}
-              </>
+            {!voiceFlowActive && (
+              /* Attach uses a generic plus rather than a paperclip so it reads
+                 as the general "add anything" entry point. */
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={disabled}
+                aria-label={t('chat.compose.attach')}
+                className="h-9 w-7 shrink-0"
+              >
+                <Plus className="size-4" />
+              </Button>
             )}
-            {/* Recovery remains available even when the ASR status request fails:
-                Copy and Discard are local, and Retry can explain unavailability. */}
-            {voiceRetainedSession && !recording && (
-              <>
-                {voiceRetainedSession.status === 'ready' ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => void copyReadyVoiceTranscript(voiceRetainedSession)}
-                    aria-label={t('chat.compose.voiceCopyTranscript')}
-                    title={t('chat.compose.voiceCopyTranscript')}
-                    className="h-9 w-7 shrink-0"
-                  >
-                    <Copy className="size-4" />
-                  </Button>
-                ) : canRetryVoiceSession(voiceRetainedSession) ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => void retryVoiceSession(voiceRetainedSession)}
-                    disabled={transcribing}
-                    aria-label={t('chat.compose.voiceRetry')}
-                    title={t('chat.compose.voiceRetry')}
-                    className="h-9 w-7 shrink-0"
-                  >
-                    <RotateCcw className="size-4" />
-                  </Button>
-                ) : null}
-                <Button
-                  type="button"
-                  variant="destructive-soft"
-                  size="icon"
-                  onClick={() => discardVoiceSession(voiceRetainedSession)}
-                  aria-label={t('chat.compose.voiceDiscard')}
-                  title={t('chat.compose.voiceDiscard')}
-                  className="h-9 w-7 shrink-0"
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-              </>
+            {voiceControlMode === 'record' && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onPointerDown={() => {
+                  pendingVoiceInsertionRef.current = captureVoiceInsertion();
+                }}
+                onPointerCancel={() => {
+                  pendingVoiceInsertionRef.current = null;
+                }}
+                onContextMenu={() => {
+                  pendingVoiceInsertionRef.current = null;
+                }}
+                onClick={(event) => toggleRecording(event.detail > 0)}
+                disabled={isVoiceControlDisabled(
+                  disabled,
+                  recording,
+                  voiceProcessing,
+                  Boolean(voiceRetainedSession),
+                )}
+                aria-label={t('chat.compose.voice')}
+                className="size-9 shrink-0"
+              >
+                <Mic className="size-4" />
+              </Button>
+            )}
+            {voiceControlMode === 'finish' && (
+              <Button
+                type="button"
+                variant="default"
+                size="icon"
+                onClick={stopRecording}
+                aria-label={t('chat.compose.stopRecording')}
+                className="h-9 w-12 shrink-0"
+              >
+                <Check className="size-[18px]" strokeWidth={2.5} />
+              </Button>
+            )}
+            {voiceControlMode === 'loading' && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon"
+                disabled
+                aria-label={t('chat.compose.voiceProcessing')}
+                className="size-9 shrink-0"
+              >
+                <Loader2 className="size-4 animate-spin" />
+              </Button>
+            )}
+            {voiceControlMode === 'retry' && voiceRetainedSession && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => void retryVoiceSession(voiceRetainedSession)}
+                aria-label={t('chat.compose.voiceRetry')}
+                title={t('chat.compose.voiceRetry')}
+                className="size-9 shrink-0"
+              >
+                <RotateCcw className="size-4" />
+              </Button>
+            )}
+            {voiceControlMode === 'copy' && voiceRetainedSession && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => void copyReadyVoiceTranscript(voiceRetainedSession)}
+                aria-label={t('chat.compose.voiceCopyTranscript')}
+                title={t('chat.compose.voiceCopyTranscript')}
+                className="size-9 shrink-0"
+              >
+                <Copy className="size-4" />
+              </Button>
+            )}
+            {recording && (
+              <span
+                className="flex h-9 w-10 items-center justify-center text-xs tabular-nums text-muted"
+                aria-live="off"
+              >
+                {formatRecordingDuration(recordingSeconds)}
+              </span>
             )}
           </div>
         )}
@@ -1230,23 +1262,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />
         )}
-        {/* While recording, the left mic button is the Stop control (tap to
-            finish + transcribe); this trash button cancels/discards the clip —
-            same as ESC. Send stays greyed until recording ends. */}
-        {recording && (
-          <Button
-            type="button"
-            variant="destructive-soft"
-            size="icon"
-            onClick={abortRecording}
-            aria-label={t('chat.compose.cancelRecording')}
-            className="size-9 shrink-0"
-          >
-            <Trash2 className="size-4" />
-          </Button>
-        )}
-        {/* 36px (size-9) icon buttons: pink-soft Stop while a turn runs, else a
-            flat mint Send — design-system variants, not a glowy brand CTA. */}
+        {/* A running agent turn keeps its Stop escape hatch even during voice
+            capture. Queue/Send withdraw while capture owns the draft. */}
         {busyControls ? (
           <>
             {/* Sending while a turn runs is allowed — the backend enqueues it
@@ -1254,7 +1271,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 affordance for it, but only when there's something to send: a cyan
                 "queue" button left of Stop. Paper-plane + a small clock badge
                 reads as "send, but later / into the queue". */}
-            {canSubmit && (
+            {!voiceCaptureActive && canSubmit && (
               <Button
                 type="button"
                 variant="accent"
@@ -1284,7 +1301,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <Square className="size-4" />
             </Button>
           </>
-        ) : (
+        ) : !voiceCaptureActive ? (
           <Button
             type="button"
             variant="default"
@@ -1295,6 +1312,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             className="size-9 shrink-0"
           >
             <Send className="size-4" />
+          </Button>
+        ) : null}
+        {/* Destructive voice actions stay at the opposite edge from the primary
+            voice slot. Finish is never adjacent to Trash; once a failed or
+            recovered recording is retained, Send remains available before the
+            rightmost Trash action. */}
+        {voiceDiscardAvailable && (
+          <Button
+            type="button"
+            variant="destructive-soft"
+            size="icon"
+            onClick={() => {
+              if (recording) abortRecording();
+              else if (voiceRetainedSession) discardVoiceSession(voiceRetainedSession);
+            }}
+            aria-label={t(
+              recording
+                ? 'chat.compose.cancelRecording'
+                : 'chat.compose.voiceDiscard',
+            )}
+            className="size-9 shrink-0"
+          >
+            <Trash2 className="size-4" />
           </Button>
         )}
       </div>

@@ -4,10 +4,12 @@ import { Copy, ExternalLink, LayoutGrid, PinOff, Plus, SquarePlus } from 'lucide
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
+import { appLaunchIntent, appTabHref, isAppleContextClick, tabModifierLabel } from '../../apps/appLaunch';
 import { APP_REGISTRY, type AppDefinition, type AppId } from '../../apps/registry';
-import { showPageAvatar, showPageIconUrl, showPagePrivatePath } from '../../apps/showPageAvatar';
+import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
-import { dockIdToSession, useDock } from '../../context/DockContext';
+import { useDock } from '../../context/DockContext';
+import { dockIdToSession } from '../../context/dockDoc';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { useShowPageInventory } from '../useShowPages';
@@ -24,9 +26,10 @@ type ResidentItem =
 // order); a running app's tile reveals a ＋ (and a right-click menu) to open
 // another window. EVERY tile — built-ins included (§7.1c) — can be unpinned from
 // the Dock via the right-click menu (it stays installed, so the Apps view can
-// re-dock it); pinned Show Pages additionally offer Open in New Tab. When the Dock
-// is empty it shows an App Library shortcut rather than a dead surface. The
-// minimized-window strip trails the row and is not reorderable.
+// re-dock it), and every tile offers Open in New Tab, which a ⌘/Ctrl-click on the
+// icon also performs (§7.1m). When the Dock is empty it shows an App Library
+// shortcut rather than a dead surface. The minimized-window strip trails the row
+// and is not reorderable.
 export const Dock: React.FC = () => {
   const { t } = useTranslation();
   const wm = useWindowManager();
@@ -133,9 +136,23 @@ export const Dock: React.FC = () => {
     setMenu(null);
   };
 
-  const openExternal = (sessionId: string) => {
-    window.open(showPagePrivatePath(sessionId), '_blank', 'noopener,noreferrer');
+  // The app's own standalone browser surface: a Show Page's `/show/<sid>/` page,
+  // a built-in's `/apps/<id>` route (§7.1m, shared pure mapping).
+  const tabHrefFor = (item: ResidentItem) =>
+    item.kind === 'builtin' ? appTabHref({ appId: item.id }) : appTabHref({ appId: 'showpage', sessionId: item.sessionId });
+
+  // The gesture is invisible otherwise, so it is spelled out in the two places a user
+  // already looks: the tile's hover tooltip and the right-click menu row it mirrors.
+  const tabChord = t('apps.dock.newTabChord', { key: tabModifierLabel() });
+
+  // Hand the app to the browser as a real tab. Returns false when the app has no
+  // standalone surface, so a ⌘-click can fall back to a workbench window.
+  const openInTab = (item: ResidentItem) => {
+    const href = tabHrefFor(item);
     setMenu(null);
+    if (!href) return false;
+    window.open(href, '_blank', 'noopener,noreferrer');
+    return true;
   };
 
   // Unpin from the Dock = undock (remove from `order`) for ANY tile, built-ins
@@ -156,9 +173,9 @@ export const Dock: React.FC = () => {
 
   const menuItemCount = (item: ResidentItem) => {
     const running = windowsFor(item).length > 0;
-    // New Window (+ Show All Windows if running) + [Open in New Tab for a
-    // Show Page] + Unpin from Dock (every tile).
-    return 1 + (running ? 1 : 0) + (item.kind === 'showpage' ? 1 : 0) + 1;
+    // New Window (+ Show All Windows if running) + Open in New Tab (any tile with
+    // a standalone surface) + Unpin from Dock (every tile).
+    return 1 + (running ? 1 : 0) + (tabHrefFor(item) ? 1 : 0) + 1;
   };
 
   return (
@@ -190,9 +207,13 @@ export const Dock: React.FC = () => {
                 <div className="relative">
                   <button
                     type="button"
-                    title={
-                      index < 9 ? `${label} · ${t('apps.dock.switchShortcut', { number: index + 1 })}` : label
-                    }
+                    title={[
+                      label,
+                      index < 9 ? t('apps.dock.switchShortcut', { number: index + 1 }) : null,
+                      tabHrefFor(item) ? tabChord : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
                     aria-label={label}
                     onPointerDown={(e) => {
                       pressPtRef.current = { x: e.clientX, y: e.clientY };
@@ -206,8 +227,16 @@ export const Dock: React.FC = () => {
                       const press = pressPtRef.current;
                       pressPtRef.current = null;
                       if (e.detail !== 0 && isDragRelease(press, { x: e.clientX, y: e.clientY })) return;
-                      if (e.metaKey || e.ctrlKey || e.altKey) openNew(item);
-                      else activate(item);
+                      // Modifier click (§7.1m): the platform tab modifier (⌘ on Apple,
+                      // Ctrl elsewhere) → a real browser tab, Alt/Shift → another
+                      // workbench window. An app with no standalone surface falls back
+                      // to a window rather than doing nothing. A macOS Ctrl-click is the
+                      // right-click gesture — onContextMenu owns it, so do nothing here.
+                      if (isAppleContextClick(e)) return;
+                      const intent = appLaunchIntent(e);
+                      if (intent === 'newTab' && openInTab(item)) return;
+                      if (intent === 'activate') activate(item);
+                      else openNew(item);
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -364,9 +393,9 @@ export const Dock: React.FC = () => {
           // survives into the item onClick closures (a mutable `menu.item` would
           // widen back to ResidentItem inside them).
           const item = menu.item;
-          const showpage = item.kind === 'showpage' ? item : null;
+          const hasTab = !!tabHrefFor(item);
           return (
-            <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} width={196} itemCount={menuItemCount(item)}>
+            <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} width={hasTab ? 268 : 196} itemCount={menuItemCount(item)}>
               <ContextMenuItem
                 icon={<SquarePlus className="size-[15px] text-cyan" />}
                 label={t('apps.dock.newWindow')}
@@ -379,11 +408,15 @@ export const Dock: React.FC = () => {
                   onClick={() => showAll(item)}
                 />
               )}
-              {showpage && (
+              {/* Open in New Tab is no longer Show-Page-only: a built-in has an
+                  `/apps/<id>` surface too, and this is the discoverable twin of the
+                  ⌘/Ctrl-click on the icon (§7.1m). */}
+              {hasTab && (
                 <ContextMenuItem
                   icon={<ExternalLink className="size-[15px]" />}
                   label={t('apps.dock.openInNewTab')}
-                  onClick={() => openExternal(showpage.sessionId)}
+                  shortcut={tabChord}
+                  onClick={() => openInTab(item)}
                 />
               )}
               {/* Unpin (undock) is available on EVERY tile now, built-ins included. */}

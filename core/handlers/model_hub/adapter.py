@@ -1,4 +1,8 @@
-"""Model Hub — EngineAdapter interface. FROZEN CONTRACT v1.4 (2026-07-30 15:36 +08:00).
+"""Model Hub — EngineAdapter interface. FROZEN CONTRACT v1.5 (2026-07-31).
+
+v1.5 changelog (honest lazy-start health):
+- ``EngineHealth.NOT_STARTED`` distinguishes an installed runtime that has not
+  been demanded in this service lifetime from one that started and went down.
 
 v1.4 changelog (ref-keyed cleanup convergence):
 - ``cleanup_orphaned_oauth_material`` treats an absent credential ref as an
@@ -65,6 +69,7 @@ class EngineHealth(str, Enum):
     OK = "ok"
     DEGRADED = "degraded"
     DOWN = "down"
+    NOT_STARTED = "not_started"
     NOT_INSTALLED = "not_installed"
 
 

@@ -29,6 +29,7 @@ import clsx from 'clsx';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { useApi } from '../../context/ApiContext';
+import { DEFAULT_TAB, harnessEmptyStateKey, harnessTabFromParam, TAB_ORDER, type TabKey } from './harnessTabs';
 import type {
   HarnessDefinitionCounts,
   HarnessDefinitionStatus,
@@ -62,15 +63,22 @@ import {
   DEFINITION_STATUS_FILTERS,
   definitionActiveCount,
   definitionChipLabel,
+  definitionHealth,
   definitionRowLine,
   definitionRowTitle,
   definitionStatusCount,
   definitionSurvivesToggle,
+  formatCommandLine,
   formatWallTime,
   humanizeCron,
   humanizeTime,
   isWallClockTimestamp,
   lifecycleLabel,
+  runCommandSnapshotLine,
+  taskCommandPreview,
+  taskIsCommand,
+  taskOnFailure,
+  taskTimeout,
   waiterExpectedAlive,
 } from './harnessLifecycle';
 import type {
@@ -78,9 +86,11 @@ import type {
   HarnessLifecycleState,
   HarnessRowAlert,
 } from './harnessLifecycle';
+import { agentDisplayName, loadHarnessAgentCatalog } from './harnessAgents';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
+import { errorMessage } from '@/lib/errorMessage';
 
 // Detail-panel schedule, in words. The literal it was derived from is printed
 // beside it by the caller — humanizing must never be the only copy of a value
@@ -100,7 +110,22 @@ function formatSchedule(task: HarnessTask, t: (k: string, opts?: any) => string)
   return task.schedule_type || t('harness.unknownSchedule');
 }
 
-type TabKey = 'tasks' | 'watches' | 'runs';
+// The limit a command definition's next fire runs under, in one phrase. Three
+// distinct states, and none of them may be rendered as another: a stored positive
+// value is the user's own number, a stored 0 is no limit at all, and no stored value
+// means the executor's default applies — which is a real limit, so it is named and
+// marked as the default rather than left out.
+function formatTimeout(
+  task: HarnessTask,
+  t: (k: string, opts?: Record<string, unknown>) => string,
+): string {
+  const { seconds, isDefault } = taskTimeout(task);
+  if (seconds <= 0) return t('harness.detail.timeoutNone');
+  if (isDefault) {
+    return t('harness.detail.timeoutDefault', { duration: formatElapsed(seconds, t) });
+  }
+  return t('harness.detail.timeoutSeconds', { seconds });
+}
 
 // Status segments per tab. Definitions filter by what they are doing; runs by
 // execution outcome. One control renders whichever set the tab needs.
@@ -113,27 +138,6 @@ const RUN_STATUS_FILTERS = ['all', 'queued', 'running', 'succeeded', 'failed', '
 // selector also offers types read back from the ledger that the UI has no
 // built-in name for, and those are just as selectable.
 type RunTypeFilter = string;
-
-const TAB_ORDER: TabKey[] = ['tasks', 'watches', 'runs'];
-const DEFAULT_TAB: TabKey = 'tasks';
-
-// Which tab a ``?tab=`` param opens. Anything that is not a tab opens the
-// default rather than selecting nothing — ``?tab=webhooks`` still arrives from
-// links and bookmarks made before the Webhooks tab was removed, and must land
-// on Tasks, not on an empty page with no tab lit.
-//
-// One function rather than a guard here and a ``useState`` initializer three
-// hundred lines away, so removing a tab later cannot strand its old links.
-export function harnessTabFromParam(param: string | null | undefined): TabKey {
-  return (TAB_ORDER as string[]).includes(param ?? '') ? (param as TabKey) : DEFAULT_TAB;
-}
-
-export function harnessEmptyStateKey(kind: TabKey, hasStoredRows: boolean): string {
-  if (!hasStoredRows) {
-    return kind === 'tasks' ? 'harness.emptyTasks' : kind === 'watches' ? 'harness.emptyWatches' : 'harness.emptyRuns';
-  }
-  return kind === 'tasks' ? 'harness.noTaskMatches' : kind === 'watches' ? 'harness.noWatchMatches' : 'harness.noRunMatches';
-}
 
 const PAGE_LIMIT = 30;
 const EMPTY_DEFINITION_COUNTS: HarnessDefinitionCounts = {
@@ -187,6 +191,7 @@ export const HarnessPage: React.FC = () => {
   const [selectedRun, setSelectedRun] = useState<HarnessRun | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});
   // Per-id pending state so the row's toggle / delete buttons can show a
   // spinner without disabling siblings.
   const [pendingMutation, setPendingMutation] = useState<Record<string, boolean>>({});
@@ -208,6 +213,7 @@ export const HarnessPage: React.FC = () => {
   const [runTypeFilter, setRunTypeFilter] = useState<RunTypeFilter>('default');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const refreshSeq = useRef(0);
+  const agentRefreshSeq = useRef(0);
   // URL scope from the background-work banner (spec req 4): ?tab / ?session /
   // ?run deep-link into a session-scoped tab (removable "只看本会话" chip) or a
   // specific run. One-way URL -> state, keyed per-param so a user's tab click
@@ -361,9 +367,9 @@ export const HarnessPage: React.FC = () => {
         setRunsHasMore(page.has_more);
         if (page.run_types) setPresentRunTypes(page.run_types);
       }
-    } catch (err: any) {
+    } catch (err) {
       if (!isCurrent()) return;
-      setError(err?.message ?? String(err));
+      setError(errorMessage(err) ?? String(err));
     } finally {
       if (isCurrent()) setLoading(false);
     }
@@ -384,32 +390,32 @@ export const HarnessPage: React.FC = () => {
     refresh();
   }, [refresh]);
 
+  const refreshAgents = useCallback(async () => {
+    const seq = agentRefreshSeq.current + 1;
+    agentRefreshSeq.current = seq;
+    try {
+      const agents = await loadHarnessAgentCatalog(api);
+      if (agentRefreshSeq.current === seq) setAgentsByName(agents);
+    } catch {
+      // Harness data remains usable when the optional Agent metadata lookup fails.
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void refreshAgents();
+    return () => {
+      agentRefreshSeq.current += 1;
+    };
+  }, [refreshAgents]);
+
   useEffect(() => {
     return api.connectWorkbenchEvents({
       onRunsUpdated: () => {
         void refresh();
+        void refreshAgents();
       },
     });
-  }, [api, refresh]);
-
-  // Resolve agent_name → backend/model/effort for the detail panels: the
-  // task/watch payload stores only the name. Fetched once on mount.
-  const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .listVibeAgents({ includeDisabled: true })
-      .then((res) => {
-        if (cancelled) return;
-        const map: Record<string, VibeAgentBrief> = {};
-        for (const a of res.agents) map[a.name] = a;
-        setAgentsByName(map);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
+  }, [api, refresh, refreshAgents]);
 
   const markPending = useCallback((id: string, value: boolean) => {
     setPendingMutation((prev) => {
@@ -432,8 +438,8 @@ export const HarnessPage: React.FC = () => {
           setSelection((prev) => (prev?.kind === 'task' && prev.id === task.id ? null : prev));
         }
         await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
         setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, enabled: task.enabled } : t)));
       } finally {
         markPending(task.id, false);
@@ -454,8 +460,8 @@ export const HarnessPage: React.FC = () => {
         setSelection((prev) => (prev?.kind === 'task' && prev.id === task.id ? null : prev));
         if (tasks.length === 1 && tasksPage > 1) setTasksPage((page) => Math.max(1, page - 1));
         else await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
       } finally {
         markPending(task.id, false);
       }
@@ -474,8 +480,8 @@ export const HarnessPage: React.FC = () => {
           setSelection((prev) => (prev?.kind === 'watch' && prev.id === watch.id ? null : prev));
         }
         await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
         setWatches((prev) => prev.map((w) => (w.id === watch.id ? { ...w, enabled: watch.enabled } : w)));
       } finally {
         markPending(watch.id, false);
@@ -496,8 +502,8 @@ export const HarnessPage: React.FC = () => {
         setSelection((prev) => (prev?.kind === 'watch' && prev.id === watch.id ? null : prev));
         if (watches.length === 1 && watchesPage > 1) setWatchesPage((page) => Math.max(1, page - 1));
         else await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
       } finally {
         markPending(watch.id, false);
       }
@@ -815,6 +821,7 @@ export const HarnessPage: React.FC = () => {
           {tab === 'runs' && (
             <RunsList
               runs={runs}
+              agentsByName={agentsByName}
               loading={loading}
               hasStoredRows={runCounts.all > 0}
               selectedId={selection?.kind === 'run' ? selection.id : null}
@@ -857,7 +864,7 @@ export const HarnessPage: React.FC = () => {
                 pending={!!pendingMutation[selectedWatch.id]}
               />
             ) : selectedRun ? (
-              <RunDetail run={selectedRun} />
+              <RunDetail run={selectedRun} agent={agentsByName[selectedRun.agent_name ?? '']} />
             ) : null}
           </div>
         )}
@@ -997,6 +1004,75 @@ const ALERT_CLASS: Record<HarnessRowAlert, string> = {
   // not an error the store recorded — it is the absence of one, which is
   // exactly why nothing used to show it.
   dead: 'text-pink',
+  // Recovered but not clean: the newest verdict succeeded while a failure is
+  // still in the window. Amber rather than pink — it is a "look at this", not a
+  // "this is broken right now".
+  degraded: 'text-amber',
+  // Health could not be read at all. Muted, because the fault is in the
+  // reporting path rather than in the definition — but present, because the
+  // alternative is a row that looks like it passed.
+  unknown: 'text-muted',
+};
+
+// Derived health, on the LIST row rather than only in the detail pane. A cron
+// task failing every night used to render identically to one succeeding every
+// night: the only failure signal was ``last_error``, which lives behind a click,
+// and the row's alert channel was driven by ``lifecycle_detail`` — null unless the
+// row is ``finished``, which a recurring definition never is.
+//
+// ``healthy`` renders nothing — a badge on every passing row is noise, and the
+// silence is what makes the other three worth looking at.
+//
+// ``unknown`` does render. The server emits it when the health read failed or
+// the stored metadata was malformed, so it is a rare fault state, not a noisy
+// one; rendering it as nothing produced a spotless Harness list at precisely the
+// moment the failure signal could not be computed, which is the opposite of what
+// the projection contract promises. Muted rather than pink or amber, because
+// what is broken is the reporting path, not necessarily the definition.
+export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row }) => {
+  const { t } = useTranslation();
+  const health = definitionHealth(row);
+  if (health !== 'failing' && health !== 'degraded' && health !== 'unknown') return null;
+  // No count on ``unknown``: both counters come from the same run history this
+  // row could not read, so printing one would put a number on nothing.
+  const count = health === 'unknown' ? 0 : health === 'failing' ? row.consecutive_failures : row.recent_failures;
+  return (
+    <Badge
+      variant="secondary"
+      className={clsx(
+        'shrink-0 font-mono text-[9px] uppercase',
+        health === 'failing' ? 'text-pink' : health === 'degraded' ? 'text-amber' : 'text-muted',
+      )}
+      title={row.last_error || undefined}
+    >
+      {t(`harness.health.${health}`)}
+      {count > 1 ? ` ${count}` : ''}
+    </Badge>
+  );
+};
+
+// What a task *does*, when that is not the default. A command task runs a
+// subprocess instead of prompting an Agent, and nothing else on the row says so:
+// the schedule chip, the state dot and the second line read identically for both
+// kinds, so an operator scanning the list had no way to tell a shell task from a
+// message task without opening it.
+//
+// A message task gets no chip — the same philosophy as ``HealthBadge``'s
+// ``healthy``: the overwhelming majority are message tasks, a chip on every one
+// of them is noise, and the silence is what makes this chip worth reading.
+// Watches are excluded outright: every watch runs a command, so the chip would
+// say nothing there (their ``kind`` chip already reads once/continuous).
+export const TaskKindBadge: React.FC<{ row: HarnessTask | HarnessWatch; kind: HarnessDefinitionKind }> = ({
+  row,
+  kind,
+}) => {
+  const { t } = useTranslation();
+  if (kind !== 'task' || !taskIsCommand(row)) return null;
+  return (
+    <Badge variant="secondary" className="shrink-0 font-mono text-[9px] uppercase" title={taskCommandPreview(row)}>
+      {t('harness.taskKind.command')}
+    </Badge>
+  );
 };
 
 interface DefinitionRowProps {
@@ -1021,7 +1097,16 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
   onDelete,
 }) => {
   const { t } = useTranslation();
-  const title = definitionRowTitle(row, t(`harness.kind.${kind}`));
+  // A command task has no name and no message to fall back to — its ``prompt``
+  // is empty by construction — so the existing chain landed on the kind label
+  // and every unnamed command task in the list rendered as the word "Task".
+  // The command is what identifies it, exactly as ``_watch_display_name`` uses
+  // it for a watch; it goes in the last slot of the same chain rather than
+  // ahead of the user's own name.
+  const title = definitionRowTitle(
+    row,
+    kind === 'task' && taskIsCommand(row) ? taskCommandPreview(row) : t(`harness.kind.${kind}`),
+  );
   const chip = definitionChipLabel(row, kind, t);
   const line = definitionRowLine(row, kind, t, now);
   return (
@@ -1043,11 +1128,13 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
             <span className="truncate text-[14px] font-semibold text-foreground" title={title}>
               {title}
             </span>
+            <TaskKindBadge row={row} kind={kind} />
             {chip && (
               <Badge variant="secondary" className="shrink-0 font-mono text-[9px] uppercase">
                 {chip}
               </Badge>
             )}
+            <HealthBadge row={row} />
           </div>
           <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted">
             {line.alert && <AlertTriangle className={clsx('size-3 shrink-0', ALERT_CLASS[line.alert])} />}
@@ -1122,6 +1209,29 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
   );
 };
 
+/** What to print for a command task that stores no working directory of its own.
+ *
+ * Names the CHAIN the fire actually walks (``_execute_command_task``) -- the bound
+ * Session's workdir read live, then ``runtime.default_cwd``, then the Avibe state
+ * directory -- rather than an outcome the pane cannot verify. "Session working
+ * directory" was the wrong promise: ``_bound_session_workdir`` answers ``None`` for a
+ * deleted row, a NULL workdir or a failed read, and every fallback is
+ * ``isdir``-validated besides, so the command can land further down the chain while the
+ * pane names a Session. The last term is not decoration either -- ``default_cwd`` is
+ * unset on a fresh install and revalidated on every fire, so "Runtime default" alone
+ * named a specific config key that the run may never reach.
+ *
+ * Where the pane can already see the first term is impossible -- no binding at all, or
+ * one whose Session row is gone (the same ``deleted`` state the Session field prints
+ * two rows up) -- it drops that term instead of contradicting itself.
+ */
+function commandCwdFallbackKey(task: HarnessTask): string {
+  const state = harnessSessionState(task, task.session_id);
+  return state === 'none' || state === 'deleted'
+    ? 'harness.detail.cwdRuntimeDefault'
+    : 'harness.detail.cwdFromSession';
+}
+
 interface TaskDetailProps {
   task: HarnessTask;
   agent?: VibeAgentBrief;
@@ -1129,9 +1239,64 @@ interface TaskDetailProps {
   pending: boolean;
 }
 
-const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, pending }) => {
+/** Agent, Session, session mode, delivery and the message they carry.
+ *
+ * One component because they are one answer -- who runs this, where it lands -- and
+ * because a command task needs that answer said differently: it routes only a FAILURE,
+ * and its message is triage guidance rather than the payload of every run. Both
+ * differences are wording and framing, so they are props here instead of a second copy
+ * of the fields.
+ */
+const RoutingFields: React.FC<{
+  task: HarnessTask;
+  agent?: VibeAgentBrief;
+  group?: string;
+  messageLabel: string;
+  showMessage: boolean;
+}> = ({ task, agent, group, messageLabel, showMessage }) => {
   const { t } = useTranslation();
-  const title = definitionRowTitle(task, t('harness.kind.task'));
+  const fields = (
+    <>
+      <DetailField label={t('harness.detail.agent')}>
+        <DetailAgent agentName={task.agent_name} agent={agent} />
+      </DetailField>
+      <DetailField label={t('harness.detail.session')}>
+        <DetailSession summary={task} sessionId={task.session_id} />
+      </DetailField>
+      <div className="grid grid-cols-2 gap-4">
+        <DetailField label={t('harness.detail.sessionPolicy')}>
+          <span className="text-[12px] text-foreground">{sessionPolicyLabel(task.session_policy, t)}</span>
+        </DetailField>
+        <DetailField label={t('harness.detail.delivery')}>
+          <span className="text-[12px] text-foreground">{deliveryLabel(task.post_to, t)}</span>
+        </DetailField>
+      </div>
+      {showMessage && (
+        <DetailField label={messageLabel}>
+          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+            {task.message || task.prompt || '—'}
+          </pre>
+        </DetailField>
+      )}
+    </>
+  );
+  return group ? <DetailGroup label={group}>{fields}</DetailGroup> : fields;
+};
+
+export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, pending }) => {
+  const { t } = useTranslation();
+  const isCommand = taskIsCommand(task);
+  const commandPreview = isCommand ? taskCommandPreview(task) : '';
+  const escalates = isCommand && taskOnFailure(task) === 'agent';
+  const routesSomewhere =
+    !isCommand ||
+    taskOnFailure(task) === 'agent' ||
+    Boolean(task.agent_name) ||
+    Boolean(task.session_id) ||
+    Boolean(task.session_key) ||
+    Boolean(task.post_to) ||
+    Boolean(task.deliver_key);
+  const title = definitionRowTitle(task, isCommand ? commandPreview : t('harness.kind.task'));
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 items-center gap-2">
@@ -1147,6 +1312,42 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
           disabled={pending}
         />
       </div>
+      {/* Same anatomy and position as ``WatchDetail``'s command field — the two
+          run a subprocess the same way, so they read the same way. The preview
+          truncates for the header; this is the copyable full text. */}
+      {isCommand && (
+        <DetailField label={t('harness.detail.command')}>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+            {formatCommandLine(task.shell_command, task.command) || '—'}
+          </pre>
+        </DetailField>
+      )}
+      {/* Where the command runs and how long it may take -- process mechanics, so they
+          sit with the command rather than with the failure lane below. ``WatchDetail``
+          has shown the working directory since it shipped; the task pane never did, so
+          a scheduled command's directory was unanswerable from the UI even once
+          ``--cwd`` stored one. A null is not "nowhere": the fire walks a chain, so the
+          field names the chain rather than printing the em-dash a missing field would.
+          */}
+      {isCommand && (
+        <div className="grid grid-cols-2 gap-4">
+          <DetailField label={t('harness.detail.cwd')}>
+            <code className="font-mono text-[11px] text-muted">
+              {task.cwd || t(commandCwdFallbackKey(task))}
+            </code>
+          </DetailField>
+          <DetailField label={t('harness.detail.timeout')}>
+            {/* Always rendered, because a limit is always in force: a row with no
+                stored timeout is run under the six-hour default, and hiding the
+                field read as "no limit". A stored 0 IS "no limit" server-side, and
+                printing "0s" would read as an instant kill — the opposite. The
+                default is shown in duration words ("6h") because it is a policy
+                constant nobody typed; a stored value is echoed in the seconds the
+                user actually set. */}
+            <span className="font-mono text-[11px] text-muted">{formatTimeout(task, t)}</span>
+          </DetailField>
+        </div>
+      )}
       {/* The row humanizes the schedule; this is where the literal lives, so
           an operator can still read and copy the exact expression. */}
       <DetailField label={t('harness.detail.schedule')}>
@@ -1164,33 +1365,82 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
           </span>
         </DetailField>
       )}
-      <DetailField label={t('harness.detail.agent')}>
-        <DetailAgent agentName={task.agent_name} agent={agent} />
-      </DetailField>
-      <DetailField label={t('harness.detail.session')}>
-        <DetailSession summary={task} sessionId={task.session_id} />
-      </DetailField>
-      <div className="grid grid-cols-2 gap-4">
-        <DetailField label={t('harness.detail.sessionPolicy')}>
-          <span className="text-[12px] text-foreground">{sessionPolicyLabel(task.session_policy, t)}</span>
+      {/* Routing, and only where there is something to route. These three label
+          helpers all resolve a null to a CONCRETE answer — "Inherited default",
+          "Existing", "Session" — which is right for a message task, whose null
+          agent really is the inherited default. A command created with the CLI's
+          default ``--on-failure none`` is bound to nothing at all, so the same
+          rendering told the user it routes through an Agent it deliberately does
+          not have. Shown as soon as anything here is real: an escalation turn
+          (``--on-failure agent``), a pinned Agent, or a conversation a failure
+          notice is delivered to. */}
+      {/* BEFORE the routing it governs, not after it. "no Agent" is a deliberate
+          configuration rather than an omission, so it is stated rather than left
+          blank — and when it says the opposite, it is the sentence that makes the
+          block below mean "only when this fails". */}
+      {isCommand && (
+        <DetailField label={t('harness.detail.onFailure')}>
+          <span className="text-[12px] text-foreground">{t(`harness.onFailure.${taskOnFailure(task)}`)}</span>
         </DetailField>
-        <DetailField label={t('harness.detail.delivery')}>
-          <span className="text-[12px] text-foreground">{deliveryLabel(task.post_to, t)}</span>
+      )}
+      {routesSomewhere && (
+        <RoutingFields
+          task={task}
+          agent={agent}
+          // Only an ESCALATING command task is describing a path it does not take on a
+          // healthy day. A message task routes every run through these same fields, so
+          // grouping them under a failure heading there would be a lie in the other
+          // direction -- and so would grouping them for a command task whose
+          // ``on_failure`` is ``none``. That row is exactly what SCT-043's gate keeps:
+          // no Agent turn, but a real Session or delivery target carrying the failure
+          // notice. Keyed on the same value the field above prints, so the pane cannot
+          // say "Notice only (no Agent)" and "escalation" about one task.
+          group={escalates ? t('harness.detail.escalation') : undefined}
+          messageLabel={escalates ? t('harness.detail.triagePrompt') : t('harness.detail.message')}
+          showMessage={Boolean(!isCommand || task.message || task.prompt)}
+        />
+      )}
+      {/* A command task's ``prompt`` is empty by construction, so this field
+          would render a bare em-dash under the heading "Message" — a promise of
+          a message the task does not have. A command task that *also* carries
+          one (``--on-failure agent``) shows it above, inside the escalation
+          group, because that is the only thing it is. This is the leftover case:
+          a stored message with nothing to route it, which no current CLI path
+          creates and old rows still can. Shown rather than dropped. */}
+      {!routesSomewhere && (task.message || task.prompt) && (
+        <DetailField label={t('harness.detail.message')}>
+          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+            {task.message || task.prompt || '—'}
+          </pre>
         </DetailField>
-      </div>
-      <DetailField label={t('harness.detail.message')}>
-        <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
-          {task.message || task.prompt || '—'}
-        </pre>
-      </DetailField>
+      )}
       {task.last_run_at && (
         <DetailField label={t('harness.detail.lastRun')}>
           <span className="font-mono text-[11px] text-muted">{formatLocalDateTime(task.last_run_at)}</span>
-          {task.last_error && (
-            <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive">
-              {task.last_error}
-            </div>
-          )}
+        </DetailField>
+      )}
+      {/* The verdict of the last command run, on the definition rather than only
+          on the run row: a nightly command task's exit code is the one fact an
+          operator wants without paging through the runs tab. Not gated on
+          ``last_run_at`` — a stored exit code proves a run happened. */}
+      {task.last_exit_code != null && (
+        <DetailField label={t('harness.detail.lastExitCode')}>
+          <span
+            className={clsx('font-mono text-[11px]', task.last_exit_code === 0 ? 'text-muted' : 'text-pink')}
+          >
+            {task.last_exit_code}
+          </span>
+        </DetailField>
+      )}
+      {/* Its own field, and no longer nested inside ``last_run_at``: a task can
+          carry a ``last_error`` with no ``last_run_at`` (a fire that failed before
+          it ever ran), and that case rendered nothing at all. ``harness.detail.lastError``
+          already existed and was used only by the watch pane. */}
+      {task.last_error && (
+        <DetailField label={t('harness.detail.lastError')}>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-destructive/40 bg-destructive/[0.06] p-2 font-mono text-[11px] text-destructive">
+            {task.last_error}
+          </pre>
         </DetailField>
       )}
       <DetailField label={t('harness.detail.id')}>
@@ -1267,7 +1517,7 @@ interface WatchDetailProps {
 
 export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled, pending }) => {
   const { t } = useTranslation();
-  const cmd = watch.shell_command || (Array.isArray(watch.command) ? watch.command.join(' ') : '') || '—';
+  const cmd = formatCommandLine(watch.shell_command, watch.command) || '—';
   const title = definitionRowTitle(watch, t('harness.kind.watch'));
   const showRuntime =
     watch.process_alive === true || (watch.process_alive === false && waiterExpectedAlive(watch));
@@ -1361,6 +1611,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
 
 interface RunsListProps {
   runs: HarnessRun[];
+  agentsByName: Record<string, VibeAgentBrief>;
   loading: boolean;
   hasStoredRows: boolean;
   selectedId: string | null;
@@ -1373,6 +1624,7 @@ interface RunsListProps {
 
 const RunsList: React.FC<RunsListProps> = ({
   runs,
+  agentsByName,
   loading,
   hasStoredRows,
   selectedId,
@@ -1427,7 +1679,9 @@ const RunsList: React.FC<RunsListProps> = ({
                   {run.agent_name && (
                     <span className="inline-flex min-w-0 items-center gap-1">
                       <Bot className="size-3 shrink-0" />
-                      <span className="truncate">{run.agent_name}</span>
+                      <span className="truncate">
+                        {agentDisplayName(run.agent_name, agentsByName[run.agent_name])}
+                      </span>
                     </span>
                   )}
                   <RunSessionLabel run={run} />
@@ -1505,12 +1759,14 @@ const RunSessionLabel: React.FC<{ run: HarnessRun }> = ({ run }) => {
 
 interface RunDetailProps {
   run: HarnessRun;
+  agent?: VibeAgentBrief;
 }
 
-export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
+export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
   const { t } = useTranslation();
   const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
   const title = runRowTitle(run, typeLabel);
+  const runCommandLine = runCommandSnapshotLine(run);
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-start gap-2">
@@ -1541,7 +1797,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
         <span className="text-[12px] text-foreground">{typeLabel}</span>
       </DetailField>
       <DetailField label={t('harness.detail.agent')}>
-        <span className="text-[12px] text-foreground">{run.agent_name || '—'}</span>
+        <span className="text-[12px] text-foreground">{agentDisplayName(run.agent_name, agent)}</span>
         {run.agent_backend && <span className="ml-2 font-mono text-[10px] text-muted">{run.agent_backend}</span>}
         {run.model && <span className="ml-2 font-mono text-[10px] text-muted">{run.model}</span>}
       </DetailField>
@@ -1613,6 +1869,16 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
               {run.callback_error}
             </div>
           )}
+        </DetailField>
+      )}
+      {/* What this run actually executed, read off the run's own snapshot. The
+          definition it came from is editable and deletable, so it cannot answer for a
+          past execution — only the run can. */}
+      {runCommandLine && (
+        <DetailField label={t('harness.detail.command')}>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+            {runCommandLine}
+          </pre>
         </DetailField>
       )}
       {(run.message || run.prompt) && (
@@ -1719,7 +1985,7 @@ function deliveryLabel(postTo: string | null | undefined, t: (k: string) => stri
 
 // Agent executor: name + resolved backend·model·effort, with a jump to the
 // Agents page. agent_name can be null (the definition inherits the scope /
-// global default); model/effort can be null (backend default).
+// global default); model/effort can be null in legacy or partial records.
 const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }> = ({ agentName, agent }) => {
   const { t } = useTranslation();
   if (!agentName) {
@@ -1737,15 +2003,17 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
   return (
     <div className="flex min-w-0 items-center gap-2">
       <Bot className="size-3.5 shrink-0 text-violet" />
-      <span className="shrink-0 text-[12px] font-medium text-foreground">{agentName}</span>
+      <span className="shrink-0 text-[12px] font-medium text-foreground">{agent?.display_name || agentName}</span>
       {meta && <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted">{meta}</span>}
-      <Link
-        to="/agents"
-        className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
-      >
-        {t('harness.detail.openInAgents')}
-        <ArrowUpRight className="size-3" />
-      </Link>
+      {!agent?.archived && (
+        <Link
+          to="/agents"
+          className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
+        >
+          {t('harness.detail.openInAgents')}
+          <ArrowUpRight className="size-3" />
+        </Link>
+      )}
     </div>
   );
 };
@@ -1821,6 +2089,21 @@ const DetailField: React.FC<DetailFieldProps> = ({ label, children }) => (
   <div className="flex flex-col gap-1.5">
     <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{label}</div>
     <div>{children}</div>
+  </div>
+);
+
+/** A named group of fields that answer one question, indented under that question.
+ *
+ * Written for the escalation lane: five fields describing a path that runs on no
+ * healthy day, rendered at the same weight as the command and the schedule, said the
+ * task's daily work was an Agent turn on Opus. The fields are right (see
+ * ``routesSomewhere``) and the fix is not to hide them -- it is to say what they
+ * belong to, above them rather than below.
+ */
+const DetailGroup: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div className="flex flex-col gap-4 border-l-2 border-border pl-3">
+    <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{label}</div>
+    {children}
   </div>
 );
 

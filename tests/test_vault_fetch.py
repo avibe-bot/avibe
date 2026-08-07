@@ -102,8 +102,14 @@ def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | 
         return _grant_from_request(conn, req, session_id=session_id)
 
 
+APPROVAL_POLL_TIMEOUT = 30.0
+
+
 def _approve_next_pending_access_request(*, session_id: str | None = None) -> dict:
-    deadline = time.monotonic() + 2
+    # Generous: the loop returns as soon as the request appears, so the only
+    # thing this bounds is how long a genuinely broken run hangs. A tight
+    # budget raced the CLI's own approval wait and flaked on loaded runners.
+    deadline = time.monotonic() + APPROVAL_POLL_TIMEOUT
     while time.monotonic() < deadline:
         with cli._open_vault_engine().begin() as conn:
             requests = []
@@ -258,9 +264,9 @@ def test_fetch_waits_for_protected_approval_then_delivers(capfd, monkeypatch):
     monkeypatch.setattr(api, "avault_deliver_fetch", Mock())
 
     code = cli.cmd_vault_fetch(
-        _ns(auth="GH_PAT", url="https://api.github.com/repos/o/r", session_id="ses_cli", approval_wait=2)
+        _ns(auth="GH_PAT", url="https://api.github.com/repos/o/r", session_id="ses_cli", approval_wait=APPROVAL_POLL_TIMEOUT)
     )
-    approver.join(timeout=2)
+    approver.join(timeout=APPROVAL_POLL_TIMEOUT)
     captured = capfd.readouterr()
 
     assert code == 0

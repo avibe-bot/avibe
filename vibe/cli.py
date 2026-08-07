@@ -24,7 +24,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from textwrap import dedent
-from typing import Mapping, NamedTuple, Optional
+from typing import Any, Callable, Mapping, NamedTuple, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -36,25 +36,30 @@ from config import SettingsStore, paths
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
     AGENT_RUN_DELIVERY_QUEUE,
+    AGENT_RUN_DELIVERY_STEER,
     AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
+    UnresolvableSessionTarget,
     parse_scope_id,
     parse_session_key,
     resolve_session_id_target,
     session_anchor_for_target,
 )
 from core.caller_context import caller_context_from_env
-from core.vibe_agents import VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.command_runner import command_line_preview
+from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
+    NO_EVENT_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
     WATCH_RECONCILE_INTERVAL_SECONDS,
     ManagedWatchStore,
     WatchRuntimeStateStore,
 )
 from vibe import __version__, api, runtime
+from vibe.i18n import t as i18n_t
 from vibe.i18n import normalize_language, t as i18n_t
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
@@ -75,7 +80,7 @@ from storage.background import (
     compute_next_run_at,
     normalize_run_status,
 )
-from storage.models import scope_settings, scopes
+from storage.models import agents, scope_settings, scopes
 from storage.pagination import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -123,6 +128,24 @@ WATCH_STARTUP_STABLE_RUNNING_SECONDS = 1.5
 WATCH_STARTUP_JITTER_BUFFER_SECONDS = 1.0
 
 
+#: Commands whose trailing ``-- <command ...>`` tail is lifted out of argv BEFORE argparse
+#: runs, mapped to ``(namespace attribute, first index searched for the separator)``.
+#:
+#: ``argparse.REMAINDER`` alone cannot carry these: it swallows everything after the first
+#: non-flag token, so a legitimate option VALUE typed after the command (``-- ./sync.sh
+#: --flag value``) would be eaten as part of the remainder for some orderings and dropped
+#: for others. Lifting the tail here leaves the positional as a pure landing slot that
+#: exists for the usage text, and keeps every flag on the command line parseable.
+#:
+#: The search index skips the fixed leading tokens (subcommand words plus any positional
+#: id) so a definition id that happens to be ``--`` cannot be mistaken for the separator.
+_POST_SEPARATOR_COMMAND_SPECS: dict[tuple[str, str], tuple[str, int]] = {
+    ("watch", "update"): ("waiter_command", 3),
+    ("task", "add"): ("command_argv", 2),
+    ("task", "update"): ("command_argv", 3),
+}
+
+
 class VibeArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):
         self.error_help_command = kwargs.pop("error_help_command", None)
@@ -131,19 +154,26 @@ class VibeArgumentParser(argparse.ArgumentParser):
 
     def parse_args(self, args=None, namespace=None):
         parsed_args = list(sys.argv[1:] if args is None else args)
-        watch_update_waiter_command = None
-        if self.prog == "vibe" and len(parsed_args) >= 4 and parsed_args[:2] == ["watch", "update"]:
-            try:
-                separator_index = parsed_args.index("--", 3)
-            except ValueError:
+        lifted_attribute: str | None = None
+        lifted_command: list[str] | None = None
+        if self.prog == "vibe" and len(parsed_args) >= 2:
+            spec = _POST_SEPARATOR_COMMAND_SPECS.get((parsed_args[0], parsed_args[1]))
+            if spec is not None:
+                attribute, search_from = spec
                 separator_index = -1
-            if separator_index >= 0:
-                watch_update_waiter_command = ["--", *parsed_args[separator_index + 1 :]]
-                parsed_args = [*parsed_args[:separator_index]]
+                if len(parsed_args) > search_from:
+                    try:
+                        separator_index = parsed_args.index("--", search_from)
+                    except ValueError:
+                        separator_index = -1
+                if separator_index >= 0:
+                    lifted_attribute = attribute
+                    lifted_command = ["--", *parsed_args[separator_index + 1 :]]
+                    parsed_args = [*parsed_args[:separator_index]]
 
         parsed = super().parse_args(parsed_args, namespace)
-        if watch_update_waiter_command is not None:
-            setattr(parsed, "waiter_command", watch_update_waiter_command)
+        if lifted_attribute is not None:
+            setattr(parsed, lifted_attribute, lifted_command)
         return parsed
 
     def error(self, message):
@@ -186,7 +216,65 @@ class _LocalShowEventsTarget(NamedTuple):
     verify_ui_pid: int | None = None
 
 
+#: The reserved workspace-notifications session, refused at a CLI admission door.
+#:
+#: ONE CODE ACROSS TWO SURFACES. ``reserved_session`` is not new vocabulary invented for
+#: the CLI: ``storage.workbench_sessions_service`` already raises it as
+#: ``ReservedSessionError.code``, ``vibe/ui_server.py`` answers ``403 reserved_session``
+#: for the DELETE, the PATCH and the messages POST, and ``ui/src/i18n`` renders one
+#: ``errors.reserved_session`` entry for it. A coding agent driving ``vibe`` and a browser
+#: driving the API now branch on the SAME token, which is the whole point of coding it:
+#: the round-16 hole was reachable from the CLI precisely because the two surfaces did not
+#: share a contract.
+#:
+#: ONLY ``reserved`` IS TYPED HERE, and the other three ``UnresolvableSessionTarget``
+#: reasons deliberately stay on the generic path. The breadth was checked against the
+#: vocabulary that actually exists rather than assumed:
+#:
+#: * ``session_archived`` does not exist in this CLI at all — it lives only on the Show
+#:   and HTTP surfaces (``core/show_pages.py``, ``vibe/api.py``, ``vibe/ui_server.py``).
+#:   Adding it here would be new vocabulary, not mirroring.
+#: * ``session_not_found`` DOES exist here (``vibe session get`` / ``vibe session
+#:   update``) but means something narrower: a ``LookupError`` from
+#:   ``sessions_service.get_active_session``, which by its own comment folds ARCHIVED into
+#:   not-found. Reusing it for ``reason == "missing"`` would give one token two
+#:   incompatible meanings depending on which command emitted it — worse than a generic
+#:   code, because a client cannot tell which one it got.
+#: * this exception class already HAS a typed CLI code, ``invalid_session_id``, on the
+#:   paths that route through ``_validate_session_id_target`` /
+#:   ``_validate_callback_session_id``. Re-coding ``missing`` / ``archived`` / ``unusable``
+#:   here would make a THIRD vocabulary for one class. Unifying those three is a real
+#:   cleanup with its own blast radius; it is not this finding, and doing it silently
+#:   inside a review round would be the larger change.
+RESERVED_SESSION_CLI_CODE = "reserved_session"
+
+
+def _reserved_session_cli_error(exc: "UnresolvableSessionTarget") -> TaskCliError:
+    """Re-type the resolver refusal and localize its user-facing guidance."""
+
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    return TaskCliError(
+        str(exc),
+        code=RESERVED_SESSION_CLI_CODE,
+        hint=i18n_t("harness.notice.workspaceSessionReadOnly", lang),
+        details={"session_id": exc.session_id, "reason": exc.reason},
+    )
+
+
 def _print_task_error(exc: Exception, *, help_command: str | None = None) -> None:
+    # Re-typed BEFORE the ``TaskCliError`` branch, and here rather than in each command's
+    # own ``except``, because this is the one printer every CLI admission door funnels its
+    # broad handler through. ``cmd_agent_run``, ``cmd_task_add`` and ``cmd_watch_add`` all
+    # reached ``resolve_session_id_target`` via ``_resolve_agent_for_target``, which does
+    # not wrap — so all three reported ``task_command_failed`` and a client had nothing but
+    # a prose string to branch on. Fixing it at the printer means a command added later
+    # inherits the code instead of having to remember it, and adds no third copy of the
+    # payload builder below.
+    if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
+        exc = _reserved_session_cli_error(exc)
     if isinstance(exc, TaskCliError):
         payload = {
             "schema_version": 1,
@@ -565,10 +653,21 @@ def _task_add_examples_text() -> str:
           Cron weekday digits use APScheduler semantics: 0=Mon through 6=Sun; 7 is invalid. Prefer weekday names such as mon, tue, or sun when scheduling by day of week.
           --timezone controls how --cron and naive --at timestamps are interpreted.
 
+        Command tasks:
+          A command task runs a subprocess on schedule with NO Agent turn, so it needs no Session, Agent, or message.
+          Use --shell for a shell command string, or pass the executable and its args after '--'.
+          Failure handling is silent-success by default: a successful run stays quiet, and a failed run records a failure notice.
+          Add --on-failure agent with --message to spend an Agent turn triaging a failed run instead.
+          --timeout bounds one run; use 0 for no timeout.
+          --cwd is where the command runs; without it, a Session-bound command follows that Session's directory
+          and every other command records the directory you ran this from.
+
         Examples:
           vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
           vibe task add --create-session --scope-id slack::channel::C123 --cron '*/5 * * * *' --message 'Tell a new joke each time.'
           vibe task add --create-session --scope-id slack::channel::C123 --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
+          vibe task add --name nightly-sync --cron '0 3 * * *' --shell './scripts/sync.sh'
+          vibe task add --cron '0 3 * * *' --shell './scripts/sync.sh' --on-failure agent --message 'The nightly sync failed. Diagnose it.'
         """
     )
 
@@ -585,9 +684,12 @@ def _task_update_examples_text() -> str:
           vibe task update 12ab34cd56ef --session-id sesk8m4q2p7x
           vibe task update 12ab34cd56ef --create-session --scope-id slack::channel::C123
           vibe task update 12ab34cd56ef --reset-delivery
+          vibe task update 12ab34cd56ef --shell './scripts/sync.sh --verbose'
+          vibe task update 12ab34cd56ef --timeout 900
 
         Guidance:
           Unspecified fields keep their existing values.
+          A command task and a message task are different kinds: remove and recreate the task to move between them, or to change --on-failure.
           Use --reset-delivery to return to following the session target directly.
           Use --same-scope or --scope-id when this task should create new Sessions in a specific scope.
           When changing schedule fields, pass either --cron or --at.
@@ -1260,6 +1362,11 @@ def _watch_add_examples_text() -> str:
           Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
           Terminal failures also send a follow-up and disable the watch.
           In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
+          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and sends a timeout follow-up;
+          64 PLUS the line 'avibe-watch: no-event' on stderr means the cycle ran and found nothing worth reporting,
+          so the watch ends or re-arms WITHOUT an Agent turn; any other non-zero is a failure.
+          The marker is required: 64 alone is also sysexits EX_USAGE, so a bare 64 stays a failure and stops the watch.
+          Use it in waiters whose normal outcome is uninteresting, such as green CI.
           Pass either --shell '<command>' or a command after '--'.
           --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
 
@@ -1276,8 +1383,10 @@ def _agent_run_examples_text() -> str:
         """\
         Session target:
           Use --session-id to continue an existing Agent Session.
-          Add --send-now to persist the new Run, interrupt its active turn, and dispatch the FIFO queue head.
-          If work is already queued and no new message is needed, use: vibe session send-now <session-id>
+          The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
+          Add --queue to persist this Run as P3 behind the active Turn.
+          Add --send-now to persist the new Run and steer the exact FIFO head into the active Turn.
+          To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
@@ -1304,7 +1413,7 @@ def _agent_run_examples_text() -> str:
         Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
-          vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
+          vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correction in the current turn.'
           vibe session queue list sesk8m4q2p7x
           vibe session queue remove sesk8m4q2p7x msg_queued123
           vibe session send-now sesk8m4q2p7x
@@ -1691,8 +1800,46 @@ def _task_message_preview(message: str, *, max_chars: int = 72) -> str:
     return compact[: max_chars - 1].rstrip() + "…"
 
 
+def _task_command_fields(task) -> tuple[Optional[str], list[str], dict]:
+    """``(shell_command, command, metadata)`` from a stored row or a read projection."""
+
+    if isinstance(task, Mapping):
+        shell_command = task.get("shell_command")
+        command = task.get("command") or []
+        metadata = task.get("metadata")
+    else:
+        shell_command = task.shell_command
+        command = task.command or []
+        metadata = task.metadata
+    return (
+        str(shell_command) if shell_command else None,
+        [str(item) for item in command] if isinstance(command, list) else [],
+        metadata if isinstance(metadata, dict) else {},
+    )
+
+
+def _task_kind(task) -> str:
+    """``"command"`` when this definition runs a subprocess, else ``"message"``."""
+
+    shell_command, command, _metadata = _task_command_fields(task)
+    return "command" if (shell_command or command) else "message"
+
+
+def _task_on_failure(task) -> str:
+    _shell_command, _command, metadata = _task_command_fields(task)
+    value = str(metadata.get("on_failure") or "none").strip().lower()
+    return value or "none"
+
+
+def _task_command_preview(task) -> str:
+    shell_command, command, _metadata = _task_command_fields(task)
+    return command_line_preview(shell_command, command)
+
+
 def _task_display_name(task) -> str:
-    return task.name or _task_message_preview(task.prompt)
+    # A command task stores no message, so the command itself is the only human-readable
+    # label the list has; without this fallback those rows rendered with an empty name.
+    return task.name or _task_message_preview(task.prompt) or _task_command_preview(task)
 
 
 def _task_state(task) -> str:
@@ -1706,6 +1853,16 @@ def _task_state(task) -> str:
 
 
 def _task_last_status(task) -> str:
+    """Historical compatibility field; never used to determine lifecycle.
+
+    Deliberately three-valued and identical to ``_task_projection_last_status``.
+    An earlier revision of this change added a fourth value, ``degraded``, here —
+    before #1061 demoted the field. Keeping that would have put new semantics on a
+    field declared compatibility-only AND made the two spellings of ``last_status``
+    disagree about their own vocabulary. Health is reported in its own fields,
+    computed once in ``_enrich_definitions`` and read back by everything else.
+    """
+
     if task.last_run_at and task.last_error:
         return "failed"
     if task.last_run_at:
@@ -1740,6 +1897,16 @@ def _task_schedule_summary(task) -> str:
 
 
 def _task_payload(task, *, brief: bool = False):
+    """The stored row alone, for the one case that has no projection to read.
+
+    Carries no health: derived health is a fact about ``agent_runs`` that only
+    ``_enrich_definitions`` computes, and a payload builder that answered it from
+    a second query of its own is how the CLI came to disagree with every other
+    surface. Callers reach this only when the read-back finds nothing — the
+    file-backed store has no run history at all — where degrading to the stored
+    fields beats inventing a badge.
+    """
+
     derived = {
         "display_name": _task_display_name(task),
         "message_preview": _task_message_preview(task.prompt),
@@ -1747,14 +1914,25 @@ def _task_payload(task, *, brief: bool = False):
         "last_status": _task_last_status(task),
         "next_run_at": _task_next_run_at(task),
         "schedule_summary": _task_schedule_summary(task),
+        # Command-task facts. ``kind`` is what every surface branches on, and
+        # ``on_failure`` is carried even for message tasks so the key never has to be
+        # probed for existence.
+        "kind": _task_kind(task),
+        "on_failure": _task_on_failure(task),
+        "command_preview": _task_command_preview(task),
     }
     if brief:
         return {
             "id": task.id,
             "name": task.name,
             "display_name": derived["display_name"],
+            "kind": derived["kind"],
+            "last_exit_code": task.last_exit_code,
             "state": derived["state"],
             "last_status": derived["last_status"],
+            # ``last_error`` used to be dropped here, which left the list a user
+            # actually runs unable to say WHY anything was failing.
+            "last_error": task.last_error,
             "next_run_at": derived["next_run_at"],
             "schedule_type": task.schedule_type,
             "schedule_summary": derived["schedule_summary"],
@@ -1777,6 +1955,33 @@ _CANONICAL_DEFINITION_FIELDS = (
     "next_run_at",
     "waiting_since",
     "running_since",
+)
+
+#: Derived failure health, forwarded verbatim beside the canonical lifecycle
+#: fields — NOT folded into ``lifecycle_state`` and NOT smuggled into
+#: ``last_status``.
+#:
+#: Health and lifecycle are ORTHOGONAL axes. A cron that fails every night is
+#: ``waiting`` between fires and ``failing`` the whole time; that combination is
+#: precisely the case this exists to surface. Folding health into
+#: ``lifecycle_state`` would need a fifth value in a closed four-value vocabulary
+#: the Workbench switches on three ways (icon, pill class, i18n key), or would lose
+#: one of the two axes.
+#:
+#: ``last_status`` is the other wrong home: it is explicitly a compatibility field
+#: that never determines lifecycle, so putting new semantics there would leave the
+#: canonical projection unable to see that a definition is broken — which is the
+#: original defect one layer up.
+#:
+#: These ride the same store row as the canonical fields, because the health query
+#: is computed in ``_enrich_definitions`` — the one chokepoint every list, show and
+#: Workbench read already passes through.
+_DEFINITION_FAILURE_FIELDS = (
+    "health",
+    "consecutive_failures",
+    "recent_failures",
+    # The one field that says WHY, dropped from the brief list payload before.
+    "last_error",
 )
 
 
@@ -1806,18 +2011,24 @@ def _task_projection_last_status(task: Mapping[str, object]) -> str:
 def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False) -> dict:
     prompt = str(task.get("prompt") or "")
     name = task.get("name")
+    command_preview = _task_command_preview(task)
     derived = {
-        "display_name": str(name) if name else _task_message_preview(prompt),
+        "display_name": str(name) if name else (_task_message_preview(prompt) or command_preview),
         "message_preview": _task_message_preview(prompt),
         "state": _task_projection_state(task),
         "last_status": _task_projection_last_status(task),
         "schedule_summary": _task_schedule_summary(task),
+        "kind": _task_kind(task),
+        "on_failure": _task_on_failure(task),
+        "command_preview": command_preview,
     }
     if brief:
         payload = {
             "id": task.get("id"),
             "name": name,
             "display_name": derived["display_name"],
+            "kind": derived["kind"],
+            "last_exit_code": task.get("last_exit_code"),
             "state": derived["state"],
             "last_status": derived["last_status"],
             "schedule_type": task.get("schedule_type"),
@@ -1831,6 +2042,7 @@ def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False)
             "enabled": task.get("enabled"),
         }
         payload.update({field: task.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
+        payload.update({field: task.get(field) for field in _DEFINITION_FAILURE_FIELDS})
         return payload
     payload = dict(task)
     payload.update(derived)
@@ -1843,13 +2055,50 @@ def _task_store() -> ScheduledTaskStore:
 
 @contextlib.contextmanager
 def _definition_read_store():
-    """Own the canonical read projection store used by CLI list/show commands."""
+    """Own the canonical read projection store used by CLI read commands."""
 
     store = SQLiteBackgroundTaskStore()
     try:
         yield store
     finally:
         store.close()
+
+
+def _read_definition_projection(
+    read: Callable[[SQLiteBackgroundTaskStore], Optional[dict[str, Any]]],
+) -> Optional[dict[str, Any]]:
+    """Read one definition back through ``_enrich_definitions``, or ``None``.
+
+    Never raises: a mutation that succeeded must still report the row it wrote
+    even if the projection cannot be read, so callers degrade to the stored
+    fields instead of turning a completed write into a failed command.
+    """
+
+    try:
+        with _definition_read_store() as store:
+            return read(store)
+    except Exception:
+        logger.debug("definition projection read-back failed", exc_info=True)
+        return None
+
+
+def _task_mutation_payload(task) -> dict:
+    """The projected row a task mutation just wrote.
+
+    Create / pause / resume / update answer with exactly what ``vibe task show``
+    prints next, because they read the same enriched row rather than deriving
+    anything themselves. That is the whole contract: the mutation response is the
+    first — and for an agent, often the only — thing anyone sees, so a definition
+    that is already failing has to say so there in the same words.
+
+    ``None`` means there is no projection to read (the file-backed store keeps no
+    ``agent_runs`` history), which degrades to the stored row.
+    """
+
+    projected = _read_definition_projection(lambda store: store.get_scheduled_task(task.id))
+    if projected is None:
+        return _task_payload(task)
+    return _task_projection_payload(projected)
 
 
 def _task_request_store() -> TaskExecutionStore:
@@ -2466,32 +2715,56 @@ def _validate_agent_name_arg(agent_name: Optional[str]) -> Optional[str]:
 
 class _ScopeRoutingTarget(NamedTuple):
     agent_name: Optional[str]
+    agent_id: Optional[str]
+
+
+class _AgentTargetResolution(NamedTuple):
+    agent: Optional[VibeAgent]
+    requires_enabled_write_guard: bool
+    preserves_existing_reference: bool = False
+
+
+def _agent_write_guard_ids(
+    resolution: _AgentTargetResolution,
+) -> tuple[Optional[str], Optional[str]]:
+    agent = resolution.agent
+    if agent is None:
+        return None, None
+    if resolution.requires_enabled_write_guard:
+        return agent.id, None
+    if getattr(resolution, "preserves_existing_reference", False):
+        return None, agent.id
+    return None, None
 
 
 def _resolve_scope_routing_target(session_key: str) -> _ScopeRoutingTarget:
     if not session_key:
-        return _ScopeRoutingTarget(None)
+        return _ScopeRoutingTarget(None, None)
     try:
         parsed = parse_scope_id(session_key)
     except ValueError:
         try:
             parsed = parse_session_key(session_key)
         except ValueError:
-            return _ScopeRoutingTarget(None)
+            return _ScopeRoutingTarget(None, None)
     scope_id = make_scope_id(parsed.platform, parsed.scope_type, parsed.scope_id)
     _ensure_cli_sqlite_state()
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(scope_settings.c.agent_name)
+                select(scope_settings.c.agent_name, agents.c.id.label("agent_id"))
+                .select_from(
+                    scope_settings.outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+                )
                 .where(scope_settings.c.scope_id == scope_id)
                 .limit(1)
             ).first()
             if row is None:
-                return _ScopeRoutingTarget(None)
+                return _ScopeRoutingTarget(None, None)
             agent_name = str(row.agent_name).strip() if row.agent_name else None
-            return _ScopeRoutingTarget(agent_name)
+            agent_id = str(row.agent_id).strip() if row.agent_id else None
+            return _ScopeRoutingTarget(agent_name, agent_id)
     finally:
         engine.dispose()
 
@@ -2500,19 +2773,32 @@ def _resolve_scope_agent_name(session_key: str) -> Optional[str]:
     return _resolve_scope_routing_target(session_key).agent_name
 
 
-def _resolve_agent_for_target(
+def _resolve_agent_target(
     *,
     agent_name: Optional[str],
     session_id: Optional[str],
     session_key: str,
     help_command: str,
-):
+    existing_agent_reference: bool = False,
+) -> _AgentTargetResolution:
     store = _agent_store()
     try:
-        requested = store.require_enabled(agent_name) if agent_name else None
+        requested = None
+        if agent_name:
+            requested = (
+                store.require_reference(agent_name)
+                if existing_agent_reference
+                else store.require_enabled(agent_name)
+            )
         if session_id:
             target = resolve_session_id_target(session_id)
-            session_agent = store.require_enabled(target.agent_name) if target.agent_name else None
+            session_agent = (
+                store.require_reference_by_id(target.agent_id)
+                if target.agent_id
+                else store.require_reference(target.agent_name)
+                if target.agent_name
+                else None
+            )
             if requested is not None and session_agent is not None and requested.name != session_agent.name:
                 raise TaskCliError(
                     "agent does not match the existing session agent",
@@ -2538,37 +2824,76 @@ def _resolve_agent_for_target(
                     },
                     help_command=help_command,
                 )
-            return session_agent or requested
+            return _AgentTargetResolution(
+                session_agent or requested,
+                requested is not None and not existing_agent_reference,
+                requested is None or existing_agent_reference,
+            )
 
         if requested is not None:
-            return requested
+            return _AgentTargetResolution(
+                requested,
+                not existing_agent_reference,
+                existing_agent_reference,
+            )
 
         if session_key:
             scope_target = _resolve_scope_routing_target(session_key)
             if scope_target.agent_name:
-                return store.require_enabled(scope_target.agent_name)
+                return _AgentTargetResolution(
+                    (
+                        store.require_reference_by_id(scope_target.agent_id)
+                        if scope_target.agent_id
+                        else store.require_reference(scope_target.agent_name)
+                    ),
+                    False,
+                    True,
+                )
 
-        return store.get_default_agent()
+        default_agent = store.get_default_agent()
+        return _AgentTargetResolution(default_agent, default_agent is not None)
     finally:
         store.close()
+
+
+def _resolve_agent_for_target(
+    *,
+    agent_name: Optional[str],
+    session_id: Optional[str],
+    session_key: str,
+    help_command: str,
+    existing_agent_reference: bool = False,
+):
+    return _resolve_agent_target(
+        agent_name=agent_name,
+        session_id=session_id,
+        session_key=session_key,
+        help_command=help_command,
+        existing_agent_reference=existing_agent_reference,
+    ).agent
 
 
 def _resolve_agent_for_session_reservation(
     *,
     agent_name: Optional[str],
+    agent_id: Optional[str] = None,
     deliver_key: str,
     help_command: str,
 ) -> Optional[VibeAgent]:
     resolved_agent_name = agent_name
-    scope_target = _ScopeRoutingTarget(None)
+    scope_target = _ScopeRoutingTarget(None, None)
     if not resolved_agent_name:
         scope_target = _resolve_scope_routing_target(deliver_key)
         resolved_agent_name = scope_target.agent_name
 
     store = _agent_store()
     try:
+        if agent_id:
+            return store.require_reference_by_id(agent_id)
+        if scope_target.agent_id:
+            return store.require_reference_by_id(scope_target.agent_id)
         if resolved_agent_name:
-            return store.require_enabled(resolved_agent_name)
+            return store.require_reference(resolved_agent_name)
         return store.get_default_agent()
     finally:
         store.close()
@@ -2599,12 +2924,51 @@ def _resolve_watch_command(args, *, help_command: str) -> tuple[list[str], Optio
     )
 
 
-def _watch_command_preview(watch, *, max_chars: int = 120) -> str:
-    preview = watch.shell_command or shlex.join(watch.command)
-    preview = preview.strip()
-    if len(preview) <= max_chars:
-        return preview
-    return preview[: max_chars - 1].rstrip() + "…"
+def _resolve_task_command(args, *, help_command: str) -> tuple[list[str], Optional[str], bool]:
+    """Command inputs for a scheduled task, or ``([], None, False)`` for a message task.
+
+    Same two input shapes as ``_resolve_watch_command`` — ``--shell`` XOR a trailing
+    ``-- argv`` — with one deliberate difference: neither being present is NOT an
+    error here, because a task may instead carry a stored message for an Agent.
+    """
+
+    raw_shell = getattr(args, "shell", None)
+    shell_command = (raw_shell or "").strip()
+    raw_command = list(getattr(args, "command_argv", None) or [])
+    argv_present = bool(raw_command)
+    if raw_command and raw_command[0] == "--":
+        raw_command = raw_command[1:]
+
+    if shell_command and raw_command:
+        raise TaskCliError(
+            "use either --shell or a command after '--', not both",
+            code="conflicting_task_command_inputs",
+            hint="Pass a shell string with --shell, or pass the executable and its args after '--'.",
+            help_command=help_command,
+        )
+    if raw_shell is not None and not shell_command:
+        raise TaskCliError(
+            "--shell cannot be empty",
+            code="empty_task_command",
+            hint="Pass the shell command to run on schedule, for example --shell './scripts/sync.sh'.",
+            help_command=help_command,
+        )
+    if argv_present and not raw_command:
+        raise TaskCliError(
+            "a command is required after '--'",
+            code="empty_task_command",
+            hint="Add the executable and its args after '--', or use --shell for a shell command string.",
+            help_command=help_command,
+        )
+    if shell_command:
+        return [], shell_command, True
+    if raw_command:
+        return raw_command, None, True
+    return [], None, False
+
+
+def _watch_command_preview(watch) -> str:
+    return command_line_preview(watch.shell_command, watch.command)
 
 
 def _watch_display_name(watch) -> str:
@@ -2703,10 +3067,34 @@ def _watch_projection_payload(watch: Mapping[str, object], *, brief: bool = Fals
             "process_alive": watch.get("process_alive"),
         }
         payload.update({field: watch.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
+        # Watches get health on the same terms as tasks: ``_enrich_definitions``
+        # computes it for both, and a watch whose hook fails nightly is exactly as
+        # invisible as a task that does.
+        payload.update({field: watch.get(field) for field in _DEFINITION_FAILURE_FIELDS})
         return payload
     payload = dict(watch)
     payload.update(derived)
     return payload
+
+
+def _watch_mutation_payload(watch, runtime_entry: Optional[dict[str, object]]) -> dict:
+    """The projected row a watch mutation just wrote.
+
+    The twin of ``_task_mutation_payload``, and the reason watches needed one:
+    they never had a health lookup of their own, so every create / pause /
+    resume / update answered with no health at all while the same watch showed
+    ``failing`` in ``vibe watch list``. Reading the projection back gives both
+    definition types the one answer instead of one answer each.
+
+    ``runtime_entry`` remains the fallback's liveness source; the projected row
+    carries its own ``runtime`` and ``process_alive`` from the same heartbeat
+    rows the Workbench reads.
+    """
+
+    projected = _read_definition_projection(lambda store: store.get_watch(watch.id))
+    if projected is None:
+        return _watch_payload(watch, runtime_entry)
+    return _watch_projection_payload(projected)
 
 
 def _agent_payload(agent, *, brief: bool = False) -> dict:
@@ -2715,10 +3103,13 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
         return {
             "id": payload["id"],
             "name": payload["name"],
+            "display_name": payload["display_name"],
             "backend": payload["backend"],
             "model": payload["model"],
             "reasoning_effort": payload["reasoning_effort"],
             "enabled": payload["enabled"],
+            "archived": payload["archived"],
+            "archived_at": payload["archived_at"],
             "source": payload["source"],
             "updated_at": payload["updated_at"],
         }
@@ -2828,9 +3219,16 @@ def _wait_for_watch_startup(
                 hint="Inspect the stored watch error, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.",
                 example=inspect_command,
                 help_command=inspect_command,
-                details={"watch": _watch_payload(watch, runtime_entry)},
+                details={"watch": _watch_mutation_payload(watch, runtime_entry)},
             )
-        if watch.mode == "once" and watch.last_finished_at and not watch.last_error and watch.last_exit_code == 0:
+        # NO_EVENT_EXIT_CODE is a clean finish too: a once watch whose first cycle
+        # already decided there is nothing to report has completed, not hung.
+        if (
+            watch.mode == "once"
+            and watch.last_finished_at
+            and not watch.last_error
+            and watch.last_exit_code in (0, NO_EVENT_EXIT_CODE)
+        ):
             return watch, runtime_entry
         if runtime_entry and runtime_entry.get("running"):
             stable_for = _seconds_since_iso(runtime_entry.get("started_at")) or _seconds_since_iso(watch.last_started_at)
@@ -2848,7 +3246,7 @@ def _wait_for_watch_startup(
             hint="Inspect the stored watch error, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.",
             example=inspect_command,
             help_command=inspect_command,
-            details={"watch": _watch_payload(watch, runtime_entry)},
+            details={"watch": _watch_mutation_payload(watch, runtime_entry)},
         )
     raise TaskCliError(
         f"watch '{watch_id}' was created but startup was not confirmed within {timeout_seconds:.0f} second(s)",
@@ -2856,66 +3254,281 @@ def _wait_for_watch_startup(
         hint="Confirm that the Avibe service is running, then inspect the watch state before reporting that monitoring is active.",
         example=inspect_command,
         help_command=inspect_command,
-        details={"watch": _watch_payload(watch, runtime_entry) if watch is not None else {"id": watch_id}},
+        details={"watch": _watch_mutation_payload(watch, runtime_entry) if watch is not None else {"id": watch_id}},
     )
 
 
+#: Flags that only mean something for a definition that talks to an Agent Session.
+#: Attribute name -> the flag as the user typed it, for the refusal message.
+_TASK_SESSION_FLAG_ARGS: tuple[tuple[str, str], ...] = (
+    ("session_id", "--session-id"),
+    ("session_key", "--session-key"),
+    ("create_session", "--create-session"),
+    ("create_session_per_run", "--create-session-per-run"),
+    ("same_scope", "--same-scope"),
+    ("scope_id", "--scope-id"),
+    ("agent", "--agent"),
+    ("post_to", "--post-to"),
+    ("deliver_key", "--deliver-key"),
+)
+
+_TASK_MESSAGE_FLAG_ARGS: tuple[tuple[str, str], ...] = (
+    ("message", "--message"),
+    ("message_file", "--message-file"),
+    ("prompt", "--prompt"),
+    ("prompt_file", "--prompt-file"),
+)
+
+
+def _explicit_flag_names(args, candidates: tuple[tuple[str, str], ...]) -> list[str]:
+    """Which of ``candidates`` the user actually passed, in declaration order."""
+
+    present: list[str] = []
+    for attribute, flag in candidates:
+        value = getattr(args, attribute, None)
+        if isinstance(value, bool):
+            if value:
+                present.append(flag)
+        elif value is not None and str(value).strip():
+            present.append(flag)
+    return present
+
+
+def _reject_session_flags_for_command_task(args, *, help_command: str) -> None:
+    """A pure command task has no Session, so Session-shaped flags are inert config."""
+
+    offenders = _explicit_flag_names(args, _TASK_SESSION_FLAG_ARGS)
+    if not offenders:
+        return
+    raise TaskCliError(
+        "a pure command task has no Agent session; use --on-failure agent to attach one",
+        code="session_flags_with_command_task",
+        hint=(
+            "Drop "
+            + ", ".join(offenders)
+            + ", or add --on-failure agent so a failed run has an Agent Session to report into."
+        ),
+        example="vibe task add --cron '0 3 * * *' --shell './scripts/sync.sh'",
+        help_command=help_command,
+        details={"flags": offenders},
+    )
+
+
+def _validate_task_timeout(timeout: Optional[float], *, help_command: str) -> None:
+    # ``isfinite`` and not just ``>= 0``: ``float("inf") >= 0`` is True, so ``--timeout
+    # inf`` used to be stored and then waited on forever, while every reader of the
+    # definition -- JSON output, the Workbench -- rejects a non-finite number and shows
+    # the default instead. The documented spelling for "no timeout" is 0.
+    if timeout is None or (math.isfinite(timeout) and timeout >= 0):
+        return
+    raise TaskCliError(
+        "--timeout must be a finite number of seconds >= 0",
+        code="invalid_timeout",
+        hint="Use 0 for no timeout, or a positive number of seconds.",
+        help_command=help_command,
+        details={"timeout": timeout},
+    )
+
+
+def _validate_task_action_matrix(
+    args,
+    *,
+    has_command: bool,
+    requested_on_failure: Optional[str],
+    effective_on_failure: str,
+    help_command: str,
+) -> None:
+    """Which combinations of message, command and failure policy are creatable.
+
+    One place rather than scattered guards, because the interesting failures are all
+    CROSS-flag: a policy or a timeout that nothing would consume, a message no Agent
+    would ever read, and Session flags on a definition that has no Session at all.
+    """
+
+    timeout = getattr(args, "timeout", None)
+    if not has_command:
+        if requested_on_failure is not None:
+            raise TaskCliError(
+                "--on-failure only applies to command tasks",
+                code="on_failure_requires_command",
+                hint="Add --shell or a command after '--', or drop --on-failure.",
+                example="vibe task add --cron '0 3 * * *' --shell './scripts/sync.sh' --on-failure agent --message 'Diagnose the failure.'",
+                help_command=help_command,
+            )
+        if timeout is not None:
+            raise TaskCliError(
+                "--timeout only applies to command tasks",
+                code="timeout_requires_command",
+                hint="Add --shell or a command after '--', or drop --timeout.",
+                help_command=help_command,
+            )
+    _validate_task_timeout(timeout, help_command=help_command)
+    message_flags = _explicit_flag_names(args, _TASK_MESSAGE_FLAG_ARGS)
+    if has_command and message_flags and effective_on_failure == "none":
+        raise TaskCliError(
+            "a stored message needs an Agent to read it",
+            code="message_without_consumer",
+            hint="Add --on-failure agent so the message is sent when a run fails, or drop the message.",
+            example="vibe task add --cron '0 3 * * *' --shell './scripts/sync.sh' --on-failure agent --message 'The nightly sync failed. Diagnose it.'",
+            help_command=help_command,
+            details={"flags": message_flags},
+        )
+    if not has_command and not message_flags:
+        raise TaskCliError(
+            "one of --message, --message-file, --shell, or a command after '--' is required",
+            code="missing_task_action",
+            hint=(
+                "Use --message for a scheduled Agent turn, or --shell for a scheduled command "
+                "that runs with no Agent involved."
+            ),
+            example="vibe task add --cron '0 3 * * *' --shell './scripts/sync.sh'",
+            help_command=help_command,
+        )
+
+
 def cmd_task_add(args):
+    reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
-        session_default_notice = _apply_caller_session_default(
+        command, shell_command, has_command = _resolve_task_command(
             args,
-            caller_context,
-            purpose="Task target Session",
+            help_command="vibe task add --help",
+        )
+        requested_on_failure = getattr(args, "on_failure", None)
+        effective_on_failure = requested_on_failure or "none"
+        # A command task that escalates keeps the whole Session/Agent flow below,
+        # because its failure notice runs a real Agent turn. A PURE command task has
+        # no Session at all, so every Session-shaped input is refused instead of
+        # silently stored.
+        is_pure_command = has_command and effective_on_failure == "none"
+        _validate_task_action_matrix(
+            args,
+            has_command=has_command,
+            requested_on_failure=requested_on_failure,
+            effective_on_failure=effective_on_failure,
+            help_command="vibe task add --help",
         )
         schedule_type = "cron" if args.cron else "at"
-        session_policy = _validate_definition_session_policy(
-            args,
-            schedule_type=schedule_type,
-            help_command="vibe task add --help",
-            allow_caller_session_default=caller_context is not None,
-        )
-        scope_key = _resolve_definition_scope_key(args, caller_context=caller_context, help_command="vibe task add --help")
-        message = _resolve_prompt_input(
-            args,
-            help_command="vibe task add --help",
-            example_command="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *'",
-        )
-        session_id, session_key = _resolve_session_target_args(
-            args,
-            required=session_policy == "existing",
-            help_command="vibe task add --help",
-        )
-        cwd = _resolve_definition_session_cwd(
-            explicit_cwd=getattr(args, "cwd", None),
-            existing_cwd=None,
-            session_policy=session_policy,
-            scoped_session=_has_modern_scope_target(args),
-            help_command="vibe task add --help",
-        )
-        agent = _resolve_agent_for_target(
-            agent_name=getattr(args, "agent", None),
-            session_id=session_id,
-            session_key=session_key or scope_key or "",
-            help_command="vibe task add --help",
-        )
-        agent_name = agent.name if agent else None
-        if session_policy == "create_once":
-            session_id = _reserve_definition_session(
-                agent_name=agent_name,
-                deliver_key=scope_key or "",
-                workdir=cwd,
+        if is_pure_command:
+            _reject_session_flags_for_command_task(args, help_command="vibe task add --help")
+            # Deliberately BEFORE any caller default is applied: inside an Avibe Agent
+            # shell ``AVIBE_SESSION_ID`` would otherwise bind this task to the calling
+            # conversation, and a pure cron command could not be created from chat at all.
+            session_default_notice = None
+            session_policy = None
+            session_id = None
+            session_key = ""
+            agent_name = None
+            expected_enabled_agent_id = None
+            expected_reference_agent_id = None
+            scope_key = None
+            message = ""
+            session_target = None
+            delivery_target = None
+            raw_cwd = (getattr(args, "cwd", None) or "").strip()
+            cwd = (
+                _resolve_existing_cwd(
+                    raw_cwd,
+                    help_command="vibe task add --help",
+                    code="cwd_not_found",
+                    label="task",
+                )
+                if raw_cwd
+                else os.getcwd()
+            )
+            session_workdir = None
+        else:
+            session_default_notice = _apply_caller_session_default(
+                args,
+                caller_context,
+                purpose="Task target Session",
+            )
+            session_policy = _validate_definition_session_policy(
+                args,
+                schedule_type=schedule_type,
+                help_command="vibe task add --help",
+                allow_caller_session_default=caller_context is not None,
+            )
+            scope_key = _resolve_definition_scope_key(args, caller_context=caller_context, help_command="vibe task add --help")
+            # Optional only for an escalating command task, where the Agent turn is a
+            # failure notice and the stored message is extra triage guidance.
+            message = (
+                _resolve_prompt_input(
+                    args,
+                    help_command="vibe task add --help",
+                    example_command="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *'",
+                )
+                if not has_command or _explicit_flag_names(args, _TASK_MESSAGE_FLAG_ARGS)
+                else ""
+            )
+            session_id, session_key = _resolve_session_target_args(
+                args,
+                required=session_policy == "existing",
                 help_command="vibe task add --help",
             )
-        session_target, delivery_target = _validate_definition_delivery_target(
-            session_policy=session_policy,
-            session_id=session_id,
-            session_key=session_key,
-            post_to=getattr(args, "post_to", None),
-            deliver_key=getattr(args, "deliver_key", None),
-            scope_key=scope_key,
-            help_command="vibe task add --help",
+            cwd = _resolve_definition_session_cwd(
+                explicit_cwd=getattr(args, "cwd", None),
+                existing_cwd=None,
+                session_policy=session_policy,
+                scoped_session=_has_modern_scope_target(args),
+                has_command=has_command,
+                help_command="vibe task add --help",
+            )
+            session_workdir = cwd
+            cwd = _command_definition_spawn_cwd(
+                cwd,
+                has_command=has_command,
+                session_policy=session_policy,
+                explicit_cwd=getattr(args, "cwd", None),
+                help_command="vibe task add --help",
+            )
+            agent_resolution = _resolve_agent_target(
+                agent_name=getattr(args, "agent", None),
+                session_id=session_id,
+                session_key=session_key or scope_key or "",
+                help_command="vibe task add --help",
+            )
+            agent = agent_resolution.agent
+            agent_name = agent.name if agent else None
+            expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+                agent_resolution
+            )
+            if session_policy == "create_once":
+                session_id = _reserve_definition_session(
+                    agent_name=agent_name,
+                    agent_id=agent.id if agent else None,
+                    deliver_key=scope_key or "",
+                    # The SESSION half, captured before the command's overwrote it. The
+                    # two agree here today, but reading the command's answer is what
+                    # made the update path place a Session in a subprocess directory,
+                    # and the same line is the one that would do it here.
+                    workdir=session_workdir,
+                    help_command="vibe task add --help",
+                    require_enabled_agent=expected_enabled_agent_id is not None,
+                    expected_reference_agent_id=expected_reference_agent_id,
+                )
+                reserved_session_id = session_id
+            session_target, delivery_target = _validate_definition_delivery_target(
+                session_policy=session_policy,
+                session_id=session_id,
+                session_key=session_key,
+                post_to=getattr(args, "post_to", None),
+                deliver_key=getattr(args, "deliver_key", None),
+                scope_key=scope_key,
+                help_command="vibe task add --help",
+            )
+        metadata = _definition_metadata_with_scope(
+            caller_context,
+            scope_id=scope_key,
+            # ``session_workdir`` describes a Session this definition will create, which
+            # is a different question from ``cwd`` -- where its command runs. A pure
+            # command task creates no Session at all, and a per-run one lets its Session
+            # keep whatever workdir creation resolves (see
+            # ``_command_definition_spawn_cwd``, which answers only the command's half).
+            session_workdir=session_workdir,
         )
+        if has_command:
+            metadata["on_failure"] = effective_on_failure
         timezone_name = args.timezone or _default_timezone_name()
         try:
             timezone = ZoneInfo(timezone_name)
@@ -2955,7 +3568,12 @@ def cmd_task_add(args):
                 cwd=cwd,
                 cron=args.cron,
                 timezone_name=timezone_name,
-                metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
+                shell_command=shell_command or None,
+                command=command or None,
+                timeout_seconds=getattr(args, "timeout", None),
+                metadata=metadata,
+                expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
         else:
             try:
@@ -2982,10 +3600,16 @@ def cmd_task_add(args):
                 cwd=cwd,
                 run_at=run_at,
                 timezone_name=timezone_name,
-                metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
+                shell_command=shell_command or None,
+                command=command or None,
+                timeout_seconds=getattr(args, "timeout", None),
+                metadata=metadata,
+                expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+        reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_payload(task)
+        task_payload = _task_mutation_payload(task)
         payload_fields = {
             "warnings": warnings,
         }
@@ -2994,6 +3618,11 @@ def cmd_task_add(args):
         _print_definition_payload(task_payload, **payload_fields)
         return 0
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="task creation failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe task add --help")
         return 1
 
@@ -3069,7 +3698,7 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
             )
         )
         return 1
-    task_payload = _task_payload(updated)
+    task_payload = _task_mutation_payload(updated)
     _print_definition_payload(task_payload)
     return 0
 
@@ -3092,7 +3721,210 @@ def cmd_task_remove(task_id: str):
     return 0
 
 
+def _explicit_task_command_update_flags(args) -> list[str]:
+    """Command-shaped update flags the user passed, in declaration order."""
+
+    present: list[str] = []
+    if getattr(args, "shell", None) is not None:
+        present.append("--shell")
+    if getattr(args, "command_argv", None) is not None:
+        present.append("--")
+    if getattr(args, "on_failure", None) is not None:
+        present.append("--on-failure")
+    if getattr(args, "timeout", None) is not None:
+        present.append("--timeout")
+    return present
+
+
+def _resolve_definition_name_update(args, task, *, help_command: str) -> Optional[str]:
+    if getattr(args, "name", None) is not None and getattr(args, "clear_name", False):
+        raise TaskCliError(
+            "use either --name or --clear-name, not both",
+            code="conflicting_name_update",
+            hint="Pass a new name with --name, or remove the stored name with --clear-name.",
+            help_command=help_command,
+        )
+    if getattr(args, "clear_name", False):
+        return None
+    if getattr(args, "name", None) is not None:
+        return _normalize_task_name(args.name)
+    return task.name
+
+
+def _resolve_definition_schedule_update(
+    args,
+    task,
+    *,
+    help_command: str,
+) -> tuple[str, Optional[str], Optional[str], str]:
+    """``(schedule_type, cron, run_at, timezone_name)`` for one stored definition."""
+
+    timezone_name = args.timezone or task.timezone
+    try:
+        timezone = ZoneInfo(timezone_name)
+    except Exception as exc:
+        raise TaskCliError(
+            f"invalid timezone: {timezone_name}",
+            code="invalid_timezone",
+            hint="Use a valid IANA timezone such as UTC, Asia/Shanghai, or America/Los_Angeles.",
+            example="Asia/Shanghai",
+            help_command=help_command,
+            details={"timezone": timezone_name},
+        ) from exc
+
+    if args.cron and args.at:
+        raise TaskCliError(
+            "use either --cron or --at when updating the schedule",
+            code="conflicting_schedule_inputs",
+            hint="Pass only one schedule update flag at a time.",
+            help_command=help_command,
+        )
+    if args.cron:
+        try:
+            CronTrigger.from_crontab(args.cron, timezone=timezone)
+        except ValueError as exc:
+            raise TaskCliError(
+                f"invalid cron expression: {args.cron}",
+                code="invalid_cron",
+                hint="Use standard 5-field crontab format: minute hour day-of-month month day-of-week.",
+                example="0 * * * *",
+                help_command=help_command,
+                details={"cron": args.cron},
+            ) from exc
+        return "cron", args.cron, None, timezone_name
+    if args.at:
+        try:
+            run_at = _normalize_run_at(args.at, timezone_name)
+        except ValueError as exc:
+            raise TaskCliError(
+                f"invalid --at timestamp: {args.at}",
+                code="invalid_run_at",
+                hint="Use ISO 8601, for example 2026-03-31T09:00:00+08:00 or 2026-03-31T09:00:00.",
+                example="2026-03-31T09:00:00+08:00",
+                help_command=help_command,
+                details={"at": args.at, "timezone": timezone_name},
+            ) from exc
+        return "at", None, run_at, timezone_name
+    return task.schedule_type, task.cron, task.run_at, timezone_name
+
+
+def _merge_task_command_update(
+    args,
+    task,
+    *,
+    help_command: str,
+) -> tuple[Optional[str], Optional[list[str]], Optional[float]]:
+    """Stored command fields with the provided flags applied.
+
+    ``update_command_fields`` is all-or-nothing across the three columns, so an edit
+    that names only one of them still has to send the other two back unchanged.
+    """
+
+    shell_command = task.shell_command
+    command = task.command
+    if getattr(args, "shell", None) is not None or getattr(args, "command_argv", None) is not None:
+        resolved_command, resolved_shell, _has_command = _resolve_task_command(args, help_command=help_command)
+        shell_command = resolved_shell
+        command = resolved_command or None
+    requested_timeout = getattr(args, "timeout", None)
+    _validate_task_timeout(requested_timeout, help_command=help_command)
+    timeout_seconds = requested_timeout if requested_timeout is not None else task.timeout_seconds
+    return shell_command, command, timeout_seconds
+
+
+def _cmd_task_update_pure_command(args, store, task) -> int:
+    """Update a command task that has no Session, Agent, or delivery target.
+
+    Kept off the main update path on purpose: that path resolves an Agent, defaults a
+    Session policy to ``existing`` and validates a delivery target, all of which would
+    invent bindings for a definition that deliberately has none — and would drop the
+    stored ``cwd`` on the way, because ``existing`` Sessions own their own workdir.
+    """
+
+    help_command = "vibe task update --help"
+    _reject_session_flags_for_command_task(args, help_command=help_command)
+    name = _resolve_definition_name_update(args, task, help_command=help_command)
+    schedule_type, cron, run_at, timezone_name = _resolve_definition_schedule_update(
+        args,
+        task,
+        help_command=help_command,
+    )
+    shell_command, command, timeout_seconds = _merge_task_command_update(
+        args,
+        task,
+        help_command=help_command,
+    )
+    raw_cwd = (getattr(args, "cwd", None) or "").strip()
+    cwd = (
+        _resolve_existing_cwd(raw_cwd, help_command=help_command, code="cwd_not_found", label="task")
+        if raw_cwd
+        else task.cwd
+    )
+    metadata = dict(task.metadata or {})
+    if getattr(args, "on_failure", None) is not None:
+        metadata["on_failure"] = args.on_failure
+
+    changes = {
+        "name": name,
+        "schedule_type": schedule_type,
+        "cwd": cwd,
+        "cron": cron,
+        "run_at": run_at,
+        "timezone": timezone_name,
+        "metadata": metadata,
+        "shell_command": shell_command,
+        "command": command,
+        "timeout_seconds": timeout_seconds,
+    }
+    current = {
+        "name": task.name,
+        "schedule_type": task.schedule_type,
+        "cwd": task.cwd,
+        "cron": task.cron,
+        "run_at": task.run_at,
+        "timezone": task.timezone,
+        "metadata": task.metadata,
+        "shell_command": task.shell_command,
+        "command": task.command,
+        "timeout_seconds": task.timeout_seconds,
+    }
+    if changes == current:
+        raise TaskCliError(
+            "no task fields were changed",
+            code="no_task_changes",
+            hint="Pass at least one field to update, such as --name, --cron, --shell, or --timeout.",
+            help_command=help_command,
+            details={"task_id": args.task_id},
+        )
+
+    updated = store.update_task(
+        args.task_id,
+        name=name,
+        session_key=task.session_key,
+        session_id=task.session_id,
+        prompt=task.prompt,
+        schedule_type=schedule_type,
+        agent_name=task.agent_name,
+        session_policy=task.session_policy,
+        post_to=task.post_to,
+        deliver_key=task.deliver_key,
+        cwd=cwd,
+        update_cwd=True,
+        cron=cron,
+        run_at=run_at,
+        timezone_name=timezone_name,
+        shell_command=shell_command,
+        command=command,
+        timeout_seconds=timeout_seconds,
+        update_command_fields=True,
+        metadata=metadata,
+    )
+    _print_definition_payload(_task_mutation_payload(updated), warnings=[])
+    return 0
+
+
 def cmd_task_update(args):
+    reserved_session_id: Optional[str] = None
     try:
         store = _task_store()
         task = store.get_task(args.task_id)
@@ -3104,6 +3936,53 @@ def cmd_task_update(args):
                 help_command="vibe task list",
                 details={"task_id": args.task_id},
             )
+
+        # A definition is either a scheduled Agent message or a scheduled command, and
+        # the two shapes are not convertible in place: switching would leave the other
+        # shape's columns (a session binding, or a command line) stored as dead config.
+        command_flags = _explicit_task_command_update_flags(args)
+        message_flags = _explicit_flag_names(args, _TASK_MESSAGE_FLAG_ARGS)
+        #
+        # Scoped to ``on_failure=none``, because only THERE is a message a mode switch.
+        # An escalating command task already stores one -- it is the guidance the
+        # failure turn carries, and ``cmd_task_add`` REQUIRES that mode for a message
+        # to be legal beside a command (``message_without_consumer``). Rejecting it for
+        # every command task forbade the exact shape the add path blesses, so the
+        # guidance could only be reworded by deleting and recreating the task.
+        if task.has_command and message_flags and task.on_failure == "none":
+            raise TaskCliError(
+                "this task runs a command, so its message inputs cannot be changed",
+                code="task_mode_immutable",
+                hint="Remove this task and create it again to move between command and message tasks.",
+                help_command="vibe task update --help",
+                details={"task_id": args.task_id, "kind": "command", "flags": message_flags},
+            )
+        if not task.has_command and command_flags:
+            raise TaskCliError(
+                "this task sends a stored message, so command inputs cannot be added",
+                code="task_mode_immutable",
+                hint="Remove this task and create it again with --shell to make it a command task.",
+                help_command="vibe task update --help",
+                details={"task_id": args.task_id, "kind": "message", "flags": command_flags},
+            )
+        requested_on_failure = getattr(args, "on_failure", None)
+        if requested_on_failure is not None and requested_on_failure != task.on_failure:
+            raise TaskCliError(
+                f"cannot change failure handling from '{task.on_failure}' to '{requested_on_failure}'",
+                code="task_mode_immutable",
+                hint=(
+                    "Escalation decides whether this task owns an Agent Session at all. "
+                    "Remove this task and create it again with the failure handling you want."
+                ),
+                help_command="vibe task update --help",
+                details={
+                    "task_id": args.task_id,
+                    "on_failure": task.on_failure,
+                    "requested_on_failure": requested_on_failure,
+                },
+            )
+        if task.has_command and task.on_failure == "none":
+            return _cmd_task_update_pure_command(args, store, task)
 
         if getattr(args, "reset_delivery", False) and (
             getattr(args, "post_to", None) is not None
@@ -3168,19 +4047,7 @@ def cmd_task_update(args):
         elif scope_arg_present:
             metadata.pop("session_scope_id", None)
 
-        if getattr(args, "name", None) is not None and getattr(args, "clear_name", False):
-            raise TaskCliError(
-                "use either --name or --clear-name, not both",
-                code="conflicting_name_update",
-                hint="Pass a new name with --name, or remove the stored name with --clear-name.",
-                help_command="vibe task update --help",
-            )
-        if getattr(args, "clear_name", False):
-            name = None
-        elif getattr(args, "name", None) is not None:
-            name = _normalize_task_name(args.name)
-        else:
-            name = task.name
+        name = _resolve_definition_name_update(args, task, help_command="vibe task update --help")
 
         # Rejected rather than silently resolved, exactly as ``--name`` /
         # ``--clear-name`` above. The two flags mean opposite things and the pair had
@@ -3232,60 +4099,11 @@ def cmd_task_update(args):
             else task.prompt
         )
 
-        timezone_name = args.timezone or task.timezone
-        try:
-            timezone = ZoneInfo(timezone_name)
-        except Exception as exc:
-            raise TaskCliError(
-                f"invalid timezone: {timezone_name}",
-                code="invalid_timezone",
-                hint="Use a valid IANA timezone such as UTC, Asia/Shanghai, or America/Los_Angeles.",
-                example="Asia/Shanghai",
-                help_command="vibe task update --help",
-                details={"timezone": timezone_name},
-            ) from exc
-
-        if args.cron and args.at:
-            raise TaskCliError(
-                "use either --cron or --at when updating the schedule",
-                code="conflicting_schedule_inputs",
-                hint="Pass only one schedule update flag at a time.",
-                help_command="vibe task update --help",
-            )
-        if args.cron:
-            try:
-                CronTrigger.from_crontab(args.cron, timezone=timezone)
-            except ValueError as exc:
-                raise TaskCliError(
-                    f"invalid cron expression: {args.cron}",
-                    code="invalid_cron",
-                    hint="Use standard 5-field crontab format: minute hour day-of-month month day-of-week.",
-                    example="0 * * * *",
-                    help_command="vibe task update --help",
-                    details={"cron": args.cron},
-                ) from exc
-            schedule_type = "cron"
-            cron = args.cron
-            run_at = None
-        elif args.at:
-            try:
-                run_at = _normalize_run_at(args.at, timezone_name)
-            except ValueError as exc:
-                raise TaskCliError(
-                    f"invalid --at timestamp: {args.at}",
-                    code="invalid_run_at",
-                    hint="Use ISO 8601, for example 2026-03-31T09:00:00+08:00 or 2026-03-31T09:00:00.",
-                    example="2026-03-31T09:00:00+08:00",
-                    help_command="vibe task update --help",
-                    details={"at": args.at, "timezone": timezone_name},
-                ) from exc
-            schedule_type = "at"
-            cron = None
-            run_at = run_at
-        else:
-            schedule_type = task.schedule_type
-            cron = task.cron
-            run_at = task.run_at
+        schedule_type, cron, run_at, timezone_name = _resolve_definition_schedule_update(
+            args,
+            task,
+            help_command="vibe task update --help",
+        )
 
         session_policy = _definition_session_policy_for_update(
             args,
@@ -3300,13 +4118,40 @@ def cmd_task_update(args):
             current_policy=task.session_policy,
             current_session_id=task.session_id,
             create_session=bool(getattr(args, "create_session", False)),
+            has_command=task.has_command,
             help_command="vibe task update --help",
         )
-        if session_policy == "existing":
+        # This edit is not placing a Session: the definition is bound to one that owns
+        # its own directory, or has already reserved its reusable one and passed no
+        # --create-session to replace it. For a message task that leaves ``--cwd``
+        # nothing to do, and the two refusals above say so. For a command task it
+        # leaves exactly one question -- where the subprocess runs -- so the flag is
+        # resolved as the command's alone and the Session's half is read back from
+        # storage untouched. Without the branch, every path below writes SOME answer
+        # into ``session_workdir``, and for a command task that answer is the command's
+        # directory: an unrelated ``--name`` edit on a reserved definition wrote the
+        # subprocess directory into ``metadata["session_workdir"]``.
+        command_only_cwd = task.has_command and (
+            session_policy == "existing"
+            or (
+                session_policy == "create_once"
+                and bool(task.session_id)
+                and not getattr(args, "create_session", False)
+            )
+        )
+        if command_only_cwd:
+            session_workdir = _stored_session_workdir(task, metadata)
+            cwd = _resolve_command_only_cwd(
+                explicit_cwd,
+                stored_cwd=task.cwd,
+                help_command="vibe task update --help",
+            )
+        elif session_policy == "existing":
             cwd = _resolve_definition_session_cwd(
                 explicit_cwd=explicit_cwd,
                 existing_cwd=None,
                 session_policy=session_policy,
+                has_command=task.has_command,
                 help_command="vibe task update --help",
             )
         elif explicit_cwd is not None:
@@ -3320,13 +4165,32 @@ def cmd_task_update(args):
         elif getattr(args, "create_session", False) or getattr(args, "create_session_per_run", False):
             cwd = _resolve_definition_session_cwd(
                 explicit_cwd=None,
-                existing_cwd=task.cwd,
+                existing_cwd=_stored_session_workdir(task, metadata),
                 session_policy=session_policy,
                 scoped_session=_has_modern_scope_target(args) or bool(str(metadata.get("session_scope_id") or "").strip()),
                 help_command="vibe task update --help",
             )
         else:
-            cwd = task.cwd
+            # Nothing in this edit asks about directories, so each half carries forward
+            # from where that half is stored. For a message task ``task.cwd`` IS the
+            # Session's answer; for a command task it is the command's alone, and
+            # reading it here promoted it into ``metadata["session_workdir"]`` -- so a
+            # plain ``--name`` on a per-run definition that deliberately left its
+            # Sessions unplaced (SCT-047) pinned every future one to the directory
+            # ``task add`` happened to be typed in, and a ``create_once`` definition
+            # that had not reserved yet reserved there. The command half is untouched:
+            # ``_command_definition_spawn_cwd`` falls back to ``stored_cwd`` below.
+            cwd = _stored_session_workdir(task, metadata) if task.has_command else task.cwd
+        if not command_only_cwd:
+            session_workdir = cwd
+            cwd = _command_definition_spawn_cwd(
+                cwd,
+                has_command=task.has_command,
+                session_policy=session_policy,
+                explicit_cwd=explicit_cwd,
+                stored_cwd=task.cwd,
+                help_command="vibe task update --help",
+            )
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
         if session_policy == "create_once" and not scope_key:
             raise TaskCliError(
@@ -3335,6 +4199,7 @@ def cmd_task_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe task update --help",
             )
+        agent_resolution = _AgentTargetResolution(None, False)
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
@@ -3343,35 +4208,54 @@ def cmd_task_update(args):
             # future fire onto a different Agent.
             pass
         elif agent_name is None and session_policy != "existing":
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=None,
                 session_id=None,
                 session_key=scope_key,
                 help_command="vibe task update --help",
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=agent_name,
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe task update --help",
+                existing_agent_reference=not explicit_agent_requested,
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
+        )
         if session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key,
-                workdir=cwd,
+                # The SESSION half, captured before ``_command_definition_spawn_cwd``
+                # overwrote ``cwd`` with the command's. Reading ``cwd`` here handed the
+                # replacement Session the directory the user picked for a subprocess,
+                # so it stopped inheriting from its Scope -- the same defect
+                # ``_stored_session_workdir`` closes one branch earlier, through the
+                # one line that could reintroduce it.
+                workdir=session_workdir,
                 help_command="vibe task update --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+            reserved_session_id = session_id
             session_key = ""
         if session_policy == "existing":
             metadata.pop("session_workdir", None)
-        elif cwd:
-            metadata["session_workdir"] = cwd
+        elif session_workdir:
+            # The Session's half of the answer, not the command's: a per-run command
+            # records the invocation directory in ``cwd`` above without pinning the
+            # Session that escalation creates.
+            metadata["session_workdir"] = session_workdir
         else:
             metadata.pop("session_workdir", None)
         session_target, delivery_target = _validate_definition_update_delivery_target(
@@ -3383,6 +4267,20 @@ def cmd_task_update(args):
             scope_key=scope_key,
             help_command="vibe task update --help",
         )
+
+        # An escalating command task reaches here because it owns a Session for its
+        # failure notice; only its command columns need merging, and a message task
+        # sends all three back as ``None`` with the write gate closed.
+        if task.has_command:
+            shell_command, command, timeout_seconds = _merge_task_command_update(
+                args,
+                task,
+                help_command="vibe task update --help",
+            )
+        else:
+            shell_command = None
+            command = None
+            timeout_seconds = None
 
         changes = {
             "name": name,
@@ -3399,6 +4297,9 @@ def cmd_task_update(args):
             "run_at": run_at,
             "timezone": timezone_name,
             "metadata": metadata,
+            "shell_command": shell_command,
+            "command": command,
+            "timeout_seconds": timeout_seconds,
         }
         current = {
             "name": task.name,
@@ -3415,6 +4316,9 @@ def cmd_task_update(args):
             "run_at": task.run_at,
             "timezone": task.timezone,
             "metadata": task.metadata,
+            "shell_command": task.shell_command,
+            "command": task.command,
+            "timeout_seconds": task.timeout_seconds,
         }
         if changes == current:
             raise TaskCliError(
@@ -3441,13 +4345,25 @@ def cmd_task_update(args):
             cron=cron,
             run_at=run_at,
             timezone_name=timezone_name,
+            shell_command=shell_command,
+            command=command,
+            timeout_seconds=timeout_seconds,
+            update_command_fields=task.has_command,
             metadata=metadata,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
+        reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_payload(updated)
+        task_payload = _task_mutation_payload(updated)
         _print_definition_payload(task_payload, warnings=warnings)
         return 0
     except DefinitionWriteConflict as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="task update failed before its Session reservation was adopted",
+            )
         _print_task_error(
             _definition_conflict_cli_error(
                 exc,
@@ -3457,6 +4373,11 @@ def cmd_task_update(args):
         )
         return 1
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="task update failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe task update --help")
         return 1
 
@@ -3516,12 +4437,13 @@ def cmd_hook_send(args):
             help_command="vibe hook send --help",
             example_command="vibe hook send --session-id sesk8m4q2p7x",
         )
-        agent = _resolve_agent_for_target(
+        agent_resolution = _resolve_agent_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
             session_key=session_key,
             help_command="vibe hook send --help",
         )
+        agent = agent_resolution.agent
         request = _task_request_store().enqueue_hook_send(
             session_key=session_key,
             session_id=session_id,
@@ -3529,8 +4451,20 @@ def cmd_hook_send(args):
             deliver_key=args.deliver_key,
             prompt=message,
             agent_name=agent.name if agent else None,
+            agent_id=agent.id if agent else None,
             run_type="agent_run",
             source_kind="cli",
+            expected_enabled_agent_id=(
+                agent.id
+                if agent is not None and agent_resolution.requires_enabled_write_guard
+                else None
+            ),
+            expected_reference_agent_id=(
+                agent.id
+                if agent is not None
+                and getattr(agent_resolution, "preserves_existing_reference", False)
+                else None
+            ),
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
         _print_cli_payload(
@@ -3747,7 +4681,6 @@ def cmd_agent_models(args):
             agent=agent.name if agent else None,
             backend=backend,
             current=current,
-            default_model=options.get("default_model"),
             providers=page_providers if providers is not None else None,
             models=page_models,
             source=options.get("source"),
@@ -3824,6 +4757,21 @@ def cmd_agent_create(args):
         )
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
+    except AgentNameValidationError as exc:
+        try:
+            lang = V2Config.load().language
+        except Exception:
+            lang = "en"
+        key = f"error.agentNameValidation.{exc.code}"
+        _print_task_error(
+            TaskCliError(
+                i18n_t(f"{key}.message", lang, agent=exc.agent_name),
+                code=exc.code,
+                hint=i18n_t(f"{key}.hint", lang, agent=exc.agent_name),
+                details={"agent": exc.agent_name},
+            )
+        )
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
@@ -3865,6 +4813,9 @@ def cmd_agent_update(args):
         agent = _agent_store().update(args.name, **kwargs)
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
+    except AgentArchivedEditError as exc:
+        _print_task_error(_agent_archived_edit_cli_error(exc))
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
@@ -3875,34 +4826,76 @@ def cmd_agent_set_enabled(args, *, enabled: bool):
         agent = _agent_store().set_enabled(args.name, enabled)
         _print_cli_payload("agent", agent=_agent_payload(agent))
         return 0
+    except AgentArchivedEditError as exc:
+        _print_task_error(_agent_archived_edit_cli_error(exc))
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
 
 
+def _agent_archived_edit_cli_error(exc: AgentArchivedEditError) -> TaskCliError:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
+    return TaskCliError(
+        i18n_t(f"{key}.message", lang, agent=exc.agent_name),
+        code=exc.code,
+        hint=i18n_t(f"{key}.hint", lang, agent=exc.agent_name),
+        details={"agent": exc.agent_name},
+    )
+
+
+def _agent_reference_rewrite_cli_error(exc: AgentReferenceRewriteError) -> TaskCliError:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
+    return TaskCliError(
+        i18n_t(f"{key}.message", lang),
+        code=exc.code,
+        hint=i18n_t(f"{key}.hint", lang),
+    )
+
+
 def cmd_agent_remove(args):
     try:
         store = _agent_store()
-        counts = store.reference_counts(args.name)
-        if any(counts.values()):
-            raise TaskCliError(
-                f"agent '{args.name}' is still referenced",
-                code="agent_in_use",
-                hint="Reassign or remove the referencing scopes, sessions, tasks, or watches before deleting this Agent.",
-                details={"agent": args.name, "references": counts},
-            )
         try:
-            removed = store.remove(args.name)
-        except ValueError as exc:
+            archived = store.archive(args.name)
+        except AgentArchiveError as exc:
+            try:
+                lang = V2Config.load().language
+            except Exception:
+                lang = "en"
             raise TaskCliError(
-                str(exc),
-                code="agent_builtin",
-                hint="Built-in default Agents are created from enabled Backends and cannot be deleted.",
+                i18n_t(
+                    f"error.agentArchive.{exc.code}.message",
+                    lang,
+                    agent=exc.agent_name,
+                ),
+                code=exc.code,
+                hint=i18n_t(
+                    f"error.agentArchive.{exc.code}.hint",
+                    lang,
+                    agent=exc.agent_name,
+                ),
                 details={"agent": args.name},
             ) from exc
-        if not removed:
+        except AgentReferenceRewriteError as exc:
+            raise _agent_reference_rewrite_cli_error(exc) from exc
+        if archived is None:
             raise TaskCliError(f"agent '{args.name}' not found", code="agent_not_found", details={"agent": args.name})
-        _print_cli_payload("agent", removed_agent=args.name)
+        _print_cli_payload(
+            "agent",
+            removed_agent=archived.original_name,
+            archived_agent=_agent_payload(archived.agent, brief=True),
+            references=archived.references,
+            default_agent_name=archived.default_agent_name,
+        )
         return 0
     except Exception as exc:
         _print_task_error(exc)
@@ -4204,9 +5197,21 @@ def _reject_inert_create_once_cwd_update(
     current_policy: Optional[str],
     current_session_id: Optional[str],
     create_session: bool,
+    has_command: bool = False,
     help_command: str,
 ) -> None:
-    if explicit_cwd is None or create_session:
+    """Refuse a ``--cwd`` that would change nothing, for the tasks where it changes nothing.
+
+    A reusable Session that has already been reserved owns its workdir, so for a
+    message task the flag is inert and saying so beats accepting it silently. A command
+    task in the same position still has the other question to answer -- where its
+    subprocess runs -- and this refusal reached it first, so the only way to repoint a
+    nightly command was to replace an escalation Session that had nothing to do with
+    the request. Same rule as ``_resolve_definition_session_cwd``'s, softened the same
+    way and for the same reason.
+    """
+
+    if explicit_cwd is None or create_session or has_command:
         return
     if current_policy == "create_once" and current_session_id:
         raise TaskCliError(
@@ -4321,11 +5326,27 @@ def _resolve_definition_session_cwd(
     existing_cwd: Optional[str],
     session_policy: str,
     scoped_session: bool = False,
+    has_command: bool = False,
     help_command: str,
 ) -> Optional[str]:
+    """Where a Session this definition CREATES should run. Never the command's answer.
+
+    The ``existing`` refusal states a rule that is still true -- a Session bound here
+    owns its own directory, and a definition pointing at one must not rewrite it. What
+    it must not also do is refuse the OTHER question. A command task binds to an
+    existing Session for a reason unrelated to where it runs (``--on-failure agent``
+    needs somewhere to escalate), so the refusal landed on ``--cwd`` as collateral and
+    left the command with no way to say where it spawns.
+
+    ``has_command`` therefore softens the refusal rather than widening the return: this
+    still answers only the Session question, and answers it ``None``, so nothing writes
+    a workdir onto a Session that owns one. ``_command_definition_spawn_cwd`` picks the
+    flag up as the command's half.
+    """
+
     raw = (explicit_cwd or "").strip()
     if session_policy == "existing":
-        if raw:
+        if raw and not has_command:
             raise TaskCliError(
                 "--cwd only applies when this definition creates new Sessions",
                 code="cwd_with_existing_session",
@@ -4342,6 +5363,128 @@ def _resolve_definition_session_cwd(
     if session_policy == "create_per_run":
         return None
     return os.getcwd()
+
+
+def _command_definition_spawn_cwd(
+    session_cwd: Optional[str],
+    *,
+    has_command: bool,
+    session_policy: str,
+    explicit_cwd: Optional[str] = None,
+    stored_cwd: Optional[str] = None,
+    help_command: str = "vibe task add --help",
+) -> Optional[str]:
+    """Where this definition's COMMAND runs, given where its Session would run.
+
+    ``_resolve_definition_session_cwd`` answers a Session question, and declines to
+    answer it for ``create_per_run``: that Session does not exist yet, so creation
+    resolves its workdir later from the Scope or the runtime default. A command cannot
+    wait for that. It runs on the next tick from the definition's ``cwd``, and with
+    nothing recorded there it fell through to the ``~/.avibe`` fallback -- so
+    ``--shell './scripts/sync.sh'`` ran from the product state directory, where the
+    relative path is missing and a relative write lands in persisted state.
+
+    The invocation directory is the answer, for the same reason a pure command task
+    already records it: it is where the user was standing when they described the
+    command. Returned only for the policy that leaves the command with no other source
+    -- an ``existing`` binding is read live from its Session at fire time, and
+    ``create_once`` reserves its Session immediately -- and never over an explicit
+    ``--cwd``.
+
+    ``explicit_cwd`` is that flag arriving for the one policy whose Session question
+    answers ``None`` on purpose. Every other policy has already folded it into
+    ``session_cwd``, where it is BOTH answers at once: a created Session and its
+    command run in the same place. An ``existing`` binding is the case where the two
+    genuinely differ -- the Session keeps its directory, the command gets the one the
+    user named -- so the flag is resolved here, under the same ``cwd_not_found`` check
+    every other policy gives it, and stored as the definition's ``cwd``. Fire time
+    already prefers that over the bound Session's live workdir
+    (``_bound_session_workdir``), so omitting the flag keeps today's
+    inherit-from-Session behaviour untouched.
+
+    ``stored_cwd`` is what an UPDATE must not drop. A bound definition resolves its
+    Session question to ``None`` on every edit, and the update path persists that with
+    ``update_cwd=True`` -- so without this, renaming an escalating command task would
+    silently un-pin the directory it was created with, and the next fire would go back
+    to following the Session. Only the explicit flag replaces it, and it outranks the
+    invocation directory for every policy rather than only for ``existing``: a policy
+    change is not a request to move the command, and re-stamping the directory the
+    UPDATE happened to run from is the same silent relocation in a different lane.
+    It outranks ``session_cwd`` for the same reason. The two are equal wherever
+    ``--cwd`` set both, and differ exactly where the user separated them -- a bound
+    command moved to B while its Session keeps A -- so reading the Session half first
+    let a later ``--create-session*`` carry A forward onto the command and move it
+    back. ``stored_cwd`` defaults to ``None``, so ``task add`` -- which has nothing
+    stored yet -- resolves exactly as it did before.
+    """
+
+    if not has_command:
+        return session_cwd
+    raw = (explicit_cwd or "").strip()
+    if raw:
+        # The flag is the command's answer wherever it arrives. A creating policy has
+        # already folded it into ``session_cwd`` -- same directory, both halves -- so
+        # resolving it again here returns the same path; an ``existing`` binding answers
+        # its Session question ``None`` on purpose, and this is the only place the flag
+        # can be picked up at all.
+        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+    if stored_cwd:
+        # Before ``session_cwd``, because the two can legitimately differ and only one of
+        # them is an answer to this question. Once ``--cwd`` moves a bound command to B
+        # while its Session keeps A, a later ``--create-session*`` carrying A forward
+        # resolved the command to A as well -- moving it back, with nothing in the edit
+        # asking to. Same rule as ``_resolve_command_only_cwd``'s and SCT-051's: only the
+        # explicit flag replaces a stored directory.
+        return stored_cwd
+    if session_cwd:
+        return session_cwd
+    if session_policy == "create_per_run":
+        return os.getcwd()
+    return None
+
+
+def _resolve_command_only_cwd(
+    explicit_cwd: Optional[str],
+    *,
+    stored_cwd: Optional[str],
+    help_command: str,
+) -> Optional[str]:
+    """``--cwd`` for an edit that answers the command question and nothing else.
+
+    Under the same ``cwd_not_found`` check every other policy gives the flag. Omitting
+    it keeps the stored directory rather than re-deriving one, because a definition
+    whose Session is already settled has no other source to fall back to and the
+    invocation directory of an unrelated edit is not an answer anybody asked for.
+    """
+
+    raw = (explicit_cwd or "").strip()
+    if raw:
+        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+    return stored_cwd
+
+
+def _stored_session_workdir(task, metadata: Optional[dict]) -> Optional[str]:
+    """The SESSION half of what a definition already stores, for a policy change.
+
+    Retargeting at ``--create-session``/``--create-session-per-run`` without naming a
+    directory carries forward the one the definition already had. For a message task
+    ``task.cwd`` IS that directory: the Session question and the run question are the
+    same question, answered once at ``task add``.
+
+    For a command task they can differ, and since the ``existing`` refusal was softened
+    they routinely do -- ``task.cwd`` is where the COMMAND runs. The Session half lives
+    in ``metadata["session_workdir"]``, or is deliberately absent: a bound definition
+    never had one, and a per-run definition leaves it unset on purpose so an
+    escalation's Session follows its Scope (SCT-047). Reading ``task.cwd`` for it
+    promotes a directory the user picked for a subprocess into a Session placement they
+    never asked for, and the newly created Session stops inheriting from its Scope with
+    nothing in the edit saying so. ``_command_definition_spawn_cwd`` keeps the command
+    half from its own ``stored_cwd``, so the two survive the retarget separately.
+    """
+
+    if not task.has_command:
+        return task.cwd
+    return str((metadata or {}).get("session_workdir") or "").strip() or None
 
 
 def _has_modern_scope_target(args) -> bool:
@@ -4467,6 +5610,7 @@ def _reserve_cli_session(
             workdir=workdir,
             visibility=visibility,
             metadata={"scope_placement": "explicit", **dict(metadata or {})},
+            require_enabled_agent=True,
         )
     else:
         session_anchor = f"standalone_{uuid4().hex[:12]}"
@@ -4480,6 +5624,7 @@ def _reserve_cli_session(
             workdir=workdir,
             visibility=visibility,
             metadata=metadata,
+            require_enabled_agent=True,
         )
     if not session_id:
         raise TaskCliError(
@@ -4511,7 +5656,12 @@ def _reserve_forked_cli_session(
     scope_key: Optional[str],
     visibility: str,
 ):
-    from core.services.session_fork import SessionForkError, reserve_forked_session
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
+        SessionForkError,
+        reserve_forked_session,
+    )
 
     try:
         return reserve_forked_session(
@@ -4524,6 +5674,19 @@ def _reserve_forked_cli_session(
             db_path=paths.get_sqlite_state_path(),
         )
     except SessionForkError as exc:
+        if exc.code == SESSION_AGENT_UNAVAILABLE_CODE:
+            try:
+                lang = V2Config.load().language
+            except Exception:
+                lang = "en"
+            key = SESSION_AGENT_UNAVAILABLE_I18N_KEY
+            raise TaskCliError(
+                i18n_t(f"{key}.message", lang),
+                code=exc.code,
+                hint=i18n_t(f"{key}.hint", lang),
+                help_command="vibe agent run --help",
+                details={"source_session_id": source_session_id, **exc.details},
+            ) from exc
         raise TaskCliError(
             str(exc),
             code="session_fork_failed",
@@ -4536,9 +5699,12 @@ def _reserve_forked_cli_session(
 def _reserve_definition_session(
     *,
     agent_name: Optional[str],
+    agent_id: Optional[str] = None,
     deliver_key: str,
     help_command: str,
     workdir: Optional[str] = None,
+    require_enabled_agent: bool = False,
+    expected_reference_agent_id: Optional[str] = None,
 ) -> str:
     from core.services import sessions as sessions_service
 
@@ -4548,6 +5714,7 @@ def _reserve_definition_session(
         target = _parse_validated_session_key(deliver_key, help_command=help_command)
     agent = _resolve_agent_for_session_reservation(
         agent_name=agent_name,
+        agent_id=agent_id,
         deliver_key=deliver_key,
         help_command=help_command,
     )
@@ -4570,6 +5737,8 @@ def _reserve_definition_session(
         reasoning_effort=agent.reasoning_effort if agent else None,
         workdir=workdir,
         visibility="foreground",
+        require_enabled_agent=require_enabled_agent,
+        expected_reference_agent_id=expected_reference_agent_id,
     )
     if not session_id:
         raise TaskCliError(
@@ -4580,7 +5749,34 @@ def _reserve_definition_session(
     return session_id
 
 
+def _release_cli_session_reservation(session_id: str, *, reason: str) -> bool:
+    """Release only the unadopted Session reserved by a failed CLI mutation."""
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    service: Optional[SQLiteSessionsService] = None
+    try:
+        service = SQLiteSessionsService(paths.get_sqlite_state_path())
+        return service.release_reserved_agent_session(session_id, reason=reason)
+    except Exception:
+        logger.exception(
+            "Could not release the reserved Agent Session %s after a failed CLI mutation",
+            session_id,
+        )
+        return False
+    finally:
+        if service is not None:
+            try:
+                service.close()
+            except Exception:
+                logger.exception(
+                    "Could not close the Session store after releasing reservation %s",
+                    session_id,
+                )
+
+
 def cmd_agent_run(args):
+    reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
         visibility = (getattr(args, "visibility", None) or "background").strip()
@@ -4595,6 +5791,8 @@ def cmd_agent_run(args):
             AGENT_RUN_DELIVERY_SEND_NOW
             if bool(getattr(args, "send_now", False))
             else AGENT_RUN_DELIVERY_QUEUE
+            if bool(getattr(args, "queue", False))
+            else AGENT_RUN_DELIVERY_STEER
         )
         if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
             raise TaskCliError(
@@ -4674,20 +5872,6 @@ def cmd_agent_run(args):
         session_metadata = _session_creation_metadata_from_caller(caller_context)
         if session_policy in {"existing", "fork"} and session_id:
             target = resolve_session_id_target(session_id)
-            if (
-                delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW
-                and target.session_key.platform != "avibe"
-            ):
-                raise TaskCliError(
-                    "--send-now requires a Web/Workbench Agent Session",
-                    code="send_now_unsupported_target",
-                    hint="Omit --send-now to queue work for an IM-backed Session.",
-                    help_command="vibe agent run --help",
-                    details={
-                        "session_id": session_id,
-                        "platform": target.session_key.platform,
-                    },
-                )
             session_key = target.session_key.to_key()
             agent = _resolve_agent_for_target(
                 agent_name=agent_name or None,
@@ -4718,6 +5902,7 @@ def cmd_agent_run(args):
                 session_anchor_target=legacy_reservation_target,
                 visibility=visibility,
             )
+            reserved_session_id = session_id
         elif session_policy == "none":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -4726,6 +5911,7 @@ def cmd_agent_run(args):
                 metadata=session_metadata,
                 visibility=visibility,
             )
+            reserved_session_id = session_id
         elif session_policy == "fork":
             fork_result = _reserve_forked_cli_session(
                 source_session_id=source_session_id or "",
@@ -4736,6 +5922,7 @@ def cmd_agent_run(args):
                 visibility=visibility,
             )
             session_id = fork_result.session_id
+            reserved_session_id = session_id
             if agent_name:
                 agent = _agent_store().require_enabled(agent_name)
         if session_id and not session_key:
@@ -4783,7 +5970,9 @@ def cmd_agent_run(args):
             callback_active=run_async,
             delivery_intent=delivery_intent,
             metadata=provenance_metadata or None,
+            expected_enabled_agent_id=(agent.id if agent is not None and bool(agent_name) else None),
         )
+        reserved_session_id = None
         resolved_scope_id = _scope_id_payload_from_session(session_id)
         payload = {
             "accepted": True,
@@ -4814,10 +6003,7 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
-        if delivery_intent != AGENT_RUN_DELIVERY_QUEUE:
-            # Keep the long-standing default-queue envelope byte-compatible.
-            # The explicit control intent is surfaced only when the caller opted
-            # into the new behavior.
+        if delivery_intent != AGENT_RUN_DELIVERY_STEER:
             payload["delivery_intent"] = delivery_intent
             payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
@@ -4833,6 +6019,11 @@ def cmd_agent_run(args):
         _print_cli_payload("agent_run", **payload)
         return 0
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="Agent Run enqueue failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe agent run --help")
         return 1
 
@@ -5279,7 +6470,7 @@ def cmd_session_get(args):
 
 
 def cmd_session_send_now(args):
-    """Apply Workbench's Session-level Send now transition without adding work."""
+    """Promote a Session's exact FIFO head without adding work."""
 
     from core.services import sessions as sessions_service
     from vibe import internal_client
@@ -5289,17 +6480,6 @@ def cmd_session_send_now(args):
         engine = _open_session_engine()
         with engine.connect() as conn:
             sessions_service.get_active_session(conn, session_id)
-        target = resolve_session_id_target(session_id)
-        if target.session_key.platform != "avibe":
-            raise TaskCliError(
-                "send-now requires a Web/Workbench Agent Session",
-                code="send_now_unsupported_target",
-                hint="This Session uses an IM scope, whose active turn is not owned by Workbench.",
-                details={
-                    "session_id": session_id,
-                    "platform": target.session_key.platform,
-                },
-            )
         controller_result = asyncio.run(internal_client.send_now(session_id))
     except LookupError:
         _print_task_error(
@@ -5390,7 +6570,7 @@ def _session_queue_row(row: dict, *, position: int) -> dict:
 
 def cmd_session_queue_list(args):
     from core.services import sessions as sessions_service
-    from storage import messages_service
+    from storage import message_deliveries
 
     session_id = str(getattr(args, "session_id", "") or "").strip()
     try:
@@ -5411,7 +6591,7 @@ def cmd_session_queue_list(args):
                         "platform": target.session_key.platform,
                     },
                 )
-            result = messages_service.list_queued_page(
+            result = message_deliveries.list_queued_page(
                 conn,
                 session_id,
                 page_request=page_request,
@@ -5450,7 +6630,7 @@ def cmd_session_queue_list(args):
 
 def cmd_session_queue_remove(args):
     from core.services import sessions as sessions_service
-    from storage import messages_service
+    from storage import message_deliveries
     from storage.background import run_update_event_transaction
 
     session_id = str(getattr(args, "session_id", "") or "").strip()
@@ -5458,6 +6638,9 @@ def cmd_session_queue_remove(args):
     try:
         engine = _open_session_engine()
         with run_update_event_transaction(engine) as conn:
+            from storage.agent_session_rows import reserve_write_lock
+
+            reserve_write_lock(conn)
             sessions_service.get_active_session(conn, session_id)
             target = resolve_session_id_target(session_id)
             if target.session_key.platform != "avibe":
@@ -5469,7 +6652,7 @@ def cmd_session_queue_remove(args):
                         "platform": target.session_key.platform,
                     },
                 )
-            removed = messages_service.remove_queued(
+            removed = message_deliveries.retire_queued_with_run(
                 conn,
                 session_id,
                 message_id,
@@ -8357,6 +9540,7 @@ def cmd_vault_key_import(args):
 
 
 def cmd_watch_add(args):
+    reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
         session_default_notice = _apply_caller_session_default(
@@ -8377,13 +9561,17 @@ def cmd_watch_add(args):
             required=session_policy == "existing",
             help_command="vibe watch add --help",
         )
-        agent = _resolve_agent_for_target(
+        agent_resolution = _resolve_agent_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
             session_key=session_key or scope_key or "",
             help_command="vibe watch add --help",
         )
+        agent = agent_resolution.agent
         agent_name = agent.name if agent else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
+        )
         cwd = _resolve_watch_cwd(args.cwd, help_command="vibe watch add --help", default_to_invocation=True)
         session_workdir = (
             _resolve_definition_session_cwd(
@@ -8399,10 +9587,14 @@ def cmd_watch_add(args):
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key or "",
                 workdir=session_workdir,
                 help_command="vibe watch add --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+            reserved_session_id = session_id
         session_target, delivery_target = _validate_definition_delivery_target(
             session_policy=session_policy,
             session_id=session_id,
@@ -8450,11 +9642,14 @@ def cmd_watch_add(args):
             agent_name=agent_name,
             session_policy=session_policy,
             metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
+        reserved_session_id = None
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
-        watch_payload = _watch_payload(watch, runtime_entry)
+        watch_payload = _watch_mutation_payload(watch, runtime_entry)
         payload_fields = {
             "warnings": warnings,
         }
@@ -8463,6 +9658,11 @@ def cmd_watch_add(args):
         _print_definition_payload(watch_payload, **payload_fields)
         return 0
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="watch creation failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe watch add --help")
         return 1
 
@@ -8536,12 +9736,13 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
         )
         return 1
     runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
-    watch_payload = _watch_payload(updated, runtime_entry)
+    watch_payload = _watch_mutation_payload(updated, runtime_entry)
     _print_definition_payload(watch_payload)
     return 0
 
 
 def cmd_watch_update(args):
+    reserved_session_id: Optional[str] = None
     try:
         store = _watch_store()
         watch = store.get_watch(args.watch_id)
@@ -8759,6 +9960,7 @@ def cmd_watch_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe watch update --help",
             )
+        agent_resolution = _AgentTargetResolution(None, False)
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
@@ -8767,30 +9969,40 @@ def cmd_watch_update(args):
             # future watch hook onto a different Agent.
             pass
         elif agent_name is None and session_policy != "existing":
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=None,
                 session_id=None,
                 session_key=scope_key,
                 help_command="vibe watch update --help",
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=agent_name,
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe watch update --help",
+                existing_agent_reference=not explicit_agent_requested,
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
+        )
         if session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key,
                 workdir=session_workdir,
                 help_command="vibe watch update --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+            reserved_session_id = session_id
             session_key = ""
         if session_workdir:
             metadata["session_workdir"] = session_workdir
@@ -8855,13 +10067,24 @@ def cmd_watch_update(args):
                 details={"watch_id": args.watch_id},
             )
 
-        updated = store.update_watch(args.watch_id, **changes)
+        updated = store.update_watch(
+            args.watch_id,
+            **changes,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
+        )
+        reserved_session_id = None
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
-        watch_payload = _watch_payload(updated, runtime_entry)
+        watch_payload = _watch_mutation_payload(updated, runtime_entry)
         _print_definition_payload(watch_payload, warnings=warnings)
         return 0
     except DefinitionWriteConflict as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="watch update failed before its Session reservation was adopted",
+            )
         _print_task_error(
             _definition_conflict_cli_error(
                 exc,
@@ -8871,6 +10094,11 @@ def cmd_watch_update(args):
         )
         return 1
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="watch update failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe watch update --help")
         return 1
 
@@ -9477,7 +10705,40 @@ def _doctor(*, deep: bool = False):
                 )
             else:
                 rtt = quality.get("rtt_ms") if isinstance(quality.get("rtt_ms"), dict) else None
-                if rtt is None:
+                request_path = (
+                    quality.get("request_path")
+                    if isinstance(quality.get("request_path"), dict)
+                    else None
+                )
+                request_latency = (
+                    request_path.get("latency_ms")
+                    if remote_access.tunnel_quality.request_path_has_usable_latency(request_path)
+                    else None
+                )
+                request_path_unavailable = bool(
+                    request_path
+                    and request_path.get("confidence") != "low"
+                    and (
+                        request_path.get("status") == "unavailable"
+                        or int(request_path.get("success_count") or 0) == 0
+                    )
+                )
+                if request_path_unavailable:
+                    quality_message = (
+                        f"Tunnel quality: {state}/{grade}; remote requests unavailable, "
+                        f"{int(request_path.get('success_count') or 0)}/"
+                        f"{int(request_path.get('sample_count') or 0)} succeeded; "
+                        f"connector {quality.get('protocol') or 'unknown'}"
+                    )
+                elif request_latency is not None:
+                    slow_rate = request_path.get("slow_request_rate") or {}
+                    quality_message = (
+                        f"Tunnel quality: {state}/{grade}; remote requests P95 "
+                        f"{request_latency.get('p95')} ms, P99 {request_latency.get('p99')} ms, "
+                        f"{round(float(slow_rate.get('over_1000_ms') or 0) * 100)}% above 1 second; "
+                        f"connector {quality.get('protocol') or 'unknown'}"
+                    )
+                elif rtt is None:
                     quality_message = (
                         f"Tunnel quality: {state}; edge RTT unavailable for "
                         f"{quality.get('protocol') or 'unknown'} transport"
@@ -9488,7 +10749,9 @@ def _doctor(*, deep: bool = False):
                         f"maximum {rtt.get('max')} ms"
                     )
                 quality_status = "pass" if state == "healthy" and grade in {"good", "fair", "unknown"} else "warn"
-                if state == "degraded" and int(quality.get("ha_connections") or 0) == 0:
+                if request_path_unavailable or (
+                    state == "degraded" and int(quality.get("ha_connections") or 0) == 0
+                ):
                     quality_status = "fail"
                 _add_doctor_item(
                     remote_access_items,
@@ -11460,8 +12723,7 @@ def _resolve_show_event_after_ambiguous_live_timeout(
 ) -> dict | None:
     """Wait for acceptance, then let the caller replay the same reservation."""
     from core.show_session_events import ShowSessionEventStore
-    from storage import messages_service
-
+    from storage.delivery_states import ADMITTED_DELIVERY_STATES
     event_id = payload.get("id")
     if not isinstance(event_id, str) or not event_id:
         return None
@@ -11472,12 +12734,13 @@ def _resolve_show_event_after_ambiguous_live_timeout(
             event = store.get_event(session_id, event_id)
             if event is None:
                 return None
-            message = event.get("message")
-            if (
-                isinstance(message, dict)
-                and message.get("type") != messages_service.PENDING_TYPE
-            ):
-                return event
+            delivery = event.get("delivery")
+            if isinstance(delivery, dict):
+                state = delivery.get("state")
+                if state in ADMITTED_DELIVERY_STATES:
+                    return event
+                if state == "retired":
+                    return None
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.05)
@@ -12904,10 +14167,16 @@ def build_parser():
     )
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
-    agent_run_parser.add_argument(
+    agent_run_delivery_group = agent_run_parser.add_mutually_exclusive_group()
+    agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
-        help="Interrupt the existing Session's active turn and dispatch its FIFO queue head",
+        help="Persist this Run, then steer the exact FIFO head without stopping the active Turn",
+    )
+    agent_run_delivery_group.add_argument(
+        "--queue",
+        action="store_true",
+        help="Queue this Run behind the active Turn instead of steering it",
     )
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
@@ -12997,7 +14266,7 @@ def build_parser():
         help="Inspect, control, and update Agent sessions",
         description=(
             "Manage Avibe Agent sessions. 'list' and 'get' are read-only views; "
-            "'send-now' applies Workbench's queued-head interrupt transition; "
+            "'send-now' promotes the exact queued head, steering it when active; "
             "'update' changes title, visibility, or scope. Archived sessions are "
             "soft-deleted and never surfaced."
         ),
@@ -13037,12 +14306,12 @@ def build_parser():
     _add_json_noop(session_get_parser)
     session_send_now_parser = session_subparsers.add_parser(
         "send-now",
-        help="Interrupt a busy Session and dispatch its existing FIFO queue head",
+        help="Promote the exact existing FIFO queue head",
         description=(
-            "Apply the same Session-level Send now transition as Workbench without "
-            "adding another message. If the Session is busy, Avibe interrupts the "
-            "active turn and starts the durable FIFO queue head as a new turn. If "
-            "the Session is idle, Avibe starts the queue head directly."
+            "Promote the exact current P3 queue head without adding a message. "
+            "If a native Turn is active, Avibe steers that head into it; if the "
+            "Session is idle, Avibe starts that head as a new Turn. A stale head "
+            "is refused rather than replaced by the next queued item."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session send-now --help",
@@ -13690,7 +14959,13 @@ def build_parser():
     task_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller Session scope")
     task_add_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     task_add_parser.add_argument("--agent", help="Avibe Agent name to use when the task runs")
-    task_add_parser.add_argument("--cwd", help="Working directory for Sessions created by this task. Defaults to the caller's current directory.")
+    task_add_parser.add_argument(
+        "--cwd",
+        help=(
+            "Working directory for Sessions created by this task, and for a command task, "
+            "the directory its command runs in. Defaults to the caller's current directory."
+        ),
+    )
     delivery_group = task_add_parser.add_mutually_exclusive_group()
     delivery_group.add_argument(
         "--post-to",
@@ -13704,12 +14979,35 @@ def build_parser():
     schedule_group = task_add_parser.add_mutually_exclusive_group(required=True)
     schedule_group.add_argument("--cron", help="Recurring schedule in 5-field crontab format")
     schedule_group.add_argument("--at", help="One-shot timestamp in ISO 8601 format")
-    prompt_group = task_add_parser.add_mutually_exclusive_group(required=True)
+    # Not ``required=True`` any more: a command task carries no message at all, so the
+    # "message or command" choice is enforced in ``cmd_task_add`` where both inputs are
+    # visible (``missing_task_action``).
+    prompt_group = task_add_parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--message", help="Stored user message to send each time the task runs")
     prompt_group.add_argument("--message-file", help="Read stored user message from a UTF-8 text file")
     prompt_group.add_argument("--prompt", help=argparse.SUPPRESS)
     prompt_group.add_argument("--prompt-file", help=argparse.SUPPRESS)
     task_add_parser.add_argument("--timezone", help="IANA timezone name used for --cron and naive --at values")
+    task_add_parser.add_argument(
+        "--shell",
+        help="Shell command to run on schedule. Use this or pass a command after '--'.",
+    )
+    task_add_parser.add_argument(
+        "--on-failure",
+        choices=["none", "agent"],
+        default=None,
+        help="What a failed command run does: 'none' records the failure, 'agent' starts an Agent turn to triage it. Default: none",
+    )
+    task_add_parser.add_argument(
+        "--timeout",
+        type=float,
+        help="Per-run timeout in seconds for command tasks. Use 0 for no timeout. Default: 21600.",
+    )
+    task_add_parser.add_argument(
+        "command_argv",
+        nargs=argparse.REMAINDER,
+        help="-- followed by the command to run on schedule",
+    )
     _add_json_noop(task_add_parser)
 
     task_update_parser = task_subparsers.add_parser(
@@ -13736,7 +15034,10 @@ def build_parser():
     task_update_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     task_update_parser.add_argument("--agent", help="Replace the Avibe Agent used by this task")
     task_update_parser.add_argument("--clear-agent", action="store_true", help="Clear the stored Avibe Agent override")
-    task_update_parser.add_argument("--cwd", help="Set working directory for Sessions created by this task")
+    task_update_parser.add_argument(
+        "--cwd",
+        help="Set working directory for Sessions created by this task, or for a command task, where its command runs",
+    )
     update_delivery_group = task_update_parser.add_mutually_exclusive_group()
     update_delivery_group.add_argument(
         "--post-to",
@@ -13759,6 +15060,24 @@ def build_parser():
     task_update_parser.add_argument("--prompt", help=argparse.SUPPRESS)
     task_update_parser.add_argument("--prompt-file", help=argparse.SUPPRESS)
     task_update_parser.add_argument("--timezone", help="Replace the stored IANA timezone name")
+    task_update_parser.add_argument(
+        "--shell",
+        help="Replace the shell command a command task runs. Use this or pass a command after '--'.",
+    )
+    task_update_parser.add_argument(
+        "--on-failure",
+        choices=["none", "agent"],
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    task_update_parser.add_argument(
+        "--timeout",
+        type=float,
+        help="Replace the per-run timeout in seconds for a command task. Use 0 for no timeout.",
+    )
+    # No positional landing slot here: the trailing ``-- <command ...>`` tail is lifted
+    # out of argv before argparse runs, exactly as for 'vibe watch update'.
+    task_update_parser.set_defaults(command_argv=None)
     _add_json_noop(task_update_parser)
 
     task_subparsers.add_parser(

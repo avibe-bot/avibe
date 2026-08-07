@@ -162,5 +162,26 @@ scenarios:
     layer: scenario
     backend: codex
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch
+  - id: AUTH-SETUP-904
+    name: Claude explicit auth token remains selected after switching from OAuth
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_oauth_to_explicit_auth_token_reaches_next_turn
+  - id: AUTH-SETUP-905
+    name: Claude SDK probe drops a stale inherited auth token after switching from OAuth
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_oauth_to_api_key_probe_drops_stale_auth_token
+  - id: AUTH-SETUP-906
+    name: Codex connection probe reuses the persistent app-server with an ephemeral turn
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: codex
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_connection_probe_reuses_persistent_app_server
 next_priority:
   - AUTH-SETUP-301

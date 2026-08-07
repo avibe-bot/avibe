@@ -218,6 +218,20 @@ def test_vibe_agent_routes_return_structured_client_errors(monkeypatch, tmp_path
     assert invalid_delete.status_code == 400
     assert invalid_delete.get_json()["code"] == "invalid_agent_request"
 
+    client.post(
+        "/api/agents",
+        json={"name": "archive-fallback", "backend": "codex"},
+        headers=headers,
+    )
+    archived = client.delete("/api/agents/worker", headers=headers).get_json()["archived_agent"]
+    archived_edit = client.patch(
+        f"/api/agents/{archived['name']}",
+        json={"description": "changed"},
+        headers=headers,
+    )
+    assert archived_edit.status_code == 409
+    assert archived_edit.get_json()["code"] == "agent_archived_read_only"
+
 
 def test_install_job_dedupes_running_backend(monkeypatch):
     calls: list[str] = []

@@ -31,8 +31,8 @@ async def dispatch_model_hub_rpc(
     if operation == "delete_source":
         await service.delete_source(payload.get("source_id"), force=payload.get("force") is True)
         return None
-    if operation == "test_source":
-        source, discovered = await service.test_source(payload.get("source_id"))
+    if operation == "refresh_source":
+        source, discovered = await service.refresh_source(payload.get("source_id"))
         return {"source": source, "discovered": discovered}
     if operation == "list_agents":
         return service.list_agents()
@@ -79,4 +79,6 @@ async def dispatch_model_hub_rpc(
         return await service.migration_apply(payload.get("item_ids"))
     if operation == "runtime_status":
         return await service.runtime_status()
+    if operation == "runtime_start":
+        return await service.runtime_start()
     raise ModelHubError("source_not_found", status=404)

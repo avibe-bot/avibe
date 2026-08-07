@@ -4,8 +4,10 @@ import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -16,6 +18,8 @@ from config.v2_compat import to_app_config
 from config.v2_config import AgentsConfig, ClaudeConfig, RuntimeConfig, SlackConfig, V2Config
 from core import git_runtime as git_runtime_module
 from core.handlers.session_handler import SessionHandler
+from core.runtime_activation import RuntimeActivationRegistry
+from core.runtime_ownership import SessionRuntimeDisposition
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
 
@@ -25,7 +29,6 @@ class _ClaudeRuntimeConfig:
     permission_mode: str = "bypassPermissions"
     cwd: str = "/tmp/workdir"
     system_prompt: str | None = None
-    default_model: str | None = None
     cli_path: str | None = "/usr/local/bin/claude-proxy"
 
 
@@ -48,7 +51,7 @@ class _Sessions:
         return None
 
     @staticmethod
-    def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+    def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
         return "sesk8m4q2p7x"
 
 
@@ -77,6 +80,21 @@ class _Controller:
         self.receiver_tasks = {}
         self.stored_session_mappings = {}
         self._working_path = working_path
+        def ownership(target):
+            return SimpleNamespace(
+                resource_key=target.resource_key,
+                disposition=SessionRuntimeDisposition.RECLAIMABLE,
+                blocks_reclamation=False,
+                needs_session_delivery_wake=False,
+                needs_request_wake=False,
+            )
+
+        self.runtime_ownership = SimpleNamespace(
+            snapshot=ownership,
+            snapshot_many=lambda targets: tuple(
+                ownership(target) for target in targets
+            ),
+        )
 
     def get_cwd(self, context) -> str:
         return str(self._working_path)
@@ -161,38 +179,6 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert controller.claude_sessions[f"slack_C123:{tmp_path}"] is client
     assert getattr(client, "_vibe_runtime_base_session_id") == "slack_C123"
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
-
-
-def test_claude_system_prompt_follows_live_memory_enabled_state(tmp_path: Path) -> None:
-    controller = _Controller(tmp_path)
-    controller.config.memory = type("MemoryConfig", (), {"enabled": False})()
-    handler = SessionHandler(controller)
-    context = MessageContext(
-        user_id="U123",
-        channel_id="C123",
-        platform="avibe",
-        platform_specific={"memory_cli_admitted": True},
-    )
-
-    disabled = handler._build_claude_system_prompt(
-        context,
-        session_key="test::C123",
-        agent_name="claude",
-        session_anchor="slack_C123",
-        agent_system_prompt=None,
-    )
-    controller.config.memory.enabled = True
-    enabled = handler._build_claude_system_prompt(
-        context,
-        session_key="test::C123",
-        agent_name="claude",
-        session_anchor="slack_C123",
-        agent_system_prompt=None,
-    )
-
-    assert "## Personal Memory" not in disabled["append"]
-    assert "## Personal Memory" in enabled["append"]
-    assert 'vibe memory search "<query>" --json' in enabled["append"]
 
 
 def test_session_handler_injects_vendored_git_into_gitless_child_env(
@@ -360,7 +346,10 @@ def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_p
     _run_session(handler, context)
 
     assert captured["connected"] is True
-    assert captured["options"].disallowed_tools == ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
+    expected = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
+    if not session_handler_module.CLAUDE_SDK_HOOKS_AVAILABLE or session_handler_module.HookMatcher is None:
+        expected.append("Workflow")
+    assert captured["options"].disallowed_tools == expected
 
 
 def test_session_handler_ensures_agent_session_id_before_prompt(
@@ -370,7 +359,7 @@ def test_session_handler_ensures_agent_session_id_before_prompt(
 
     class _PromptSessions(_Sessions):
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             assert settings_key == "test::C123"
             assert agent_name == "claude"
             assert base_session_id == "slack_C123"
@@ -413,7 +402,7 @@ def test_session_handler_preserves_passed_agent_system_prompt(monkeypatch, tmp_p
 
     class _PromptSessions(_Sessions):
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             return "sesk8m4q2p7x"
 
     class _StubClaudeSDKClient:
@@ -484,7 +473,7 @@ def test_session_handler_recreates_cached_claude_client_when_prompt_changes(
         current_id = "sesold"
 
         @classmethod
-        def ensure_agent_session_id(cls, settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(cls, settings_key, agent_name, base_session_id, **_kwargs):
             assert settings_key == "test::C123"
             assert agent_name == "claude"
             assert base_session_id == "slack_C123"
@@ -530,7 +519,7 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
 
     class _PromptSessions(_Sessions):
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             assert settings_key == "slack::C123"
             assert agent_name == "claude"
             assert base_session_id == "slack_C123"
@@ -578,6 +567,133 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
     assert "`slack/<user_id>`" in first_client.options.system_prompt["append"]
     assert "slack/U123" not in first_client.options.system_prompt["append"]
     assert "slack/U456" not in first_client.options.system_prompt["append"]
+
+
+def test_session_handler_recreates_terminated_cached_client_before_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    idle_wait = AsyncMock()
+    handler._wait_for_claude_session_idle = idle_wait
+    context = MessageContext(user_id="U123", channel_id="C123")
+    composite_key = f"slack_C123:{tmp_path}"
+
+    first_client = _run_session(handler, context)
+    first_client.options.stderr("sandbox warning")
+    first_client._transport._process.returncode = -6
+    first_client._vibe_stderr_lines.extend(["fatal: Claude CLI aborted", "transport closed"])
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert controller.claude_sessions[composite_key] is second_client
+    assert len(captured["clients"]) == 2
+    idle_wait.assert_awaited_once_with(composite_key)
+    assert "SIGABRT (signal 6)" in caplog.text
+    assert "Claude CLI stderr for slack_C123:" in caplog.text
+    assert "Claude stderr tail:\nsandbox warning\nfatal: Claude CLI aborted\ntransport closed" in caplog.text
+
+
+def test_session_handler_waits_for_receiver_cleanup_outside_generation_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    async def exercise() -> None:
+        controller = _Controller(tmp_path)
+        handler = SessionHandler(controller)
+        composite_key = f"slack_C123:{tmp_path}"
+        release_cleanup = asyncio.Event()
+
+        class _StubClaudeSDKClient:
+            def __init__(self, options):
+                self.options = options
+                self.disconnects = 0
+                self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+                captured["clients"].append(self)
+
+            async def connect(self) -> None:
+                return None
+
+            async def disconnect(self) -> None:
+                self.disconnects += 1
+
+        monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+        monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+        context = MessageContext(user_id="U123", channel_id="C123")
+        first_client = await handler.get_or_create_claude_session(context)
+        first_client._transport._process.returncode = -6
+
+        async def receiver() -> None:
+            await release_cleanup.wait()
+            await handler.cleanup_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+            )
+
+        receiver_task = asyncio.create_task(receiver())
+        handler.receiver_tasks[composite_key] = receiver_task
+
+        eviction = asyncio.create_task(
+            handler.get_or_create_claude_session(context)
+        )
+        await asyncio.sleep(0)
+        assert not eviction.done()
+        release_cleanup.set()
+        second_client = await asyncio.wait_for(eviction, timeout=1)
+        assert second_client is not first_client
+        assert first_client.disconnects == 1
+        assert len(captured["clients"]) == 2
+        await receiver_task
+
+    asyncio.run(exercise())
+
+
+def test_session_handler_retires_model_hub_scope_for_dead_cached_client(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        controller = _Controller(tmp_path)
+        handler = SessionHandler(controller)
+        composite_key = f"slack_C123:{tmp_path}"
+        client = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=1)),
+            _vibe_model_hub_fingerprint="hub:http://127.0.0.1:18443:token",
+        )
+        handler.claude_sessions[composite_key] = client
+        handler._wait_for_claude_receiver_cleanup = AsyncMock()
+        handler._wait_for_claude_session_idle = AsyncMock()
+        handler._cleanup_session_locked = AsyncMock()
+
+        assert await handler._evict_terminated_cached_claude_session(composite_key, client)
+        handler._cleanup_session_locked.assert_awaited_once_with(
+            composite_key,
+            retire_model_hub_scope=True,
+        )
+
+    asyncio.run(exercise())
 
 
 def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp_path: Path) -> None:
@@ -648,6 +764,87 @@ def test_session_handler_injects_caller_context_env(monkeypatch, tmp_path: Path)
     assert env["AVIBE_CALLER_SOURCE"] == "agent_run"
     assert env["AVIBE_CALLER_BACKEND"] == "claude"
     assert env["AVIBE_NATIVE_SESSION_ID"] == "claude-native"
+
+
+def test_session_handler_injects_only_session_stable_creation_origin(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The creation origin a Claude session may carry, and the two ids it may not.
+
+    Round 14 gate item 3 (review comment 5121007240): a Harness definition created by
+    ``vibe task add`` inside an Agent turn has to record the conversation it came from,
+    and this env is the only hop those ids can travel. But a Claude SDK client is spawned
+    ONCE per session with a fixed environment, and that same environment is what
+    ``_reuse_cached_claude_session_if_available`` compares to decide whether the cached
+    client is still valid. So:
+
+    * the session-owned ids (platform, channel, session key, workspace) are baked in —
+      that is what makes the notice able to name the conversation and rung (3) able to
+      address it;
+    * ``AVIBE_CALLER_USER_ID`` and ``AVIBE_CALLER_MESSAGE_ID`` are NOT. The message id
+      changes every turn, so including it would respawn Claude on every message; the
+      author changes per speaker in a shared channel, and
+      ``test_session_handler_reuses_cached_claude_client_when_system_prompt_is_unchanged``
+      pins that a channel session is shared across participants — so a baked-in author
+      would later attribute another participant's definition to them and DM the wrong
+      person.
+
+    The visible cost is a Claude-created definition having no deep link (every permalink
+    grammar needs the message id). Codex and OpenCode rewrite their caller env per turn
+    and keep the full origin; that asymmetry is the unit-level
+    ``test_a_session_scoped_caller_env_drops_only_the_per_turn_origin``.
+    """
+
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    # Keep the base session anchor at ``slack_C123`` (this file's session stub asserts
+    # it): without this the message id would become the anchor, which is a different
+    # decision from the one under test.
+    controller.im_client.should_use_message_id_for_channel_session = lambda _context=None: False
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        message_id="1710000000.000200",
+        platform_specific={
+            "team_id": "T0999",
+            "is_dm": False,
+            "agent_session_target": {
+                "id": "ses-parent",
+                "agent_backend": "claude",
+                "native_session_id": "claude-native",
+            },
+        },
+    )
+
+    _run_session(handler, context)
+
+    env = captured["options"].env
+    # The Slack adapter sets neither ``context.platform`` nor a payload ``platform``, so
+    # the handler's own resolver is what supplies it — captured here as well, because a
+    # missing platform would make the whole origin unnameable.
+    assert env["AVIBE_CALLER_PLATFORM"] == "slack"
+    assert env["AVIBE_CALLER_CHANNEL_ID"] == "C123"
+    assert env["AVIBE_CALLER_SESSION_KEY"] == "slack::channel::C123"
+    assert env["AVIBE_CALLER_WORKSPACE_ID"] == "T0999"
+
+    assert "AVIBE_CALLER_USER_ID" not in env, (
+        "a shared channel session must not bake in whichever participant spoke first"
+    )
+    assert "AVIBE_CALLER_MESSAGE_ID" not in env, (
+        "a per-message id here would respawn the Claude client on every turn"
+    )
 
 
 def test_session_handler_coalesces_concurrent_claude_client_creates(
@@ -893,9 +1090,12 @@ def test_session_handler_does_not_repeat_claude_model_control_request(monkeypatc
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
-    controller.config.claude.default_model = "claude-sonnet-4-5"
     handler = SessionHandler(controller)
-    context = MessageContext(user_id="U123", channel_id="C123")
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"agent_session_target": {"model": "claude-sonnet-4-5"}},
+    )
 
     first_client = _run_session(handler, context)
     second_client = _run_session(handler, context)
@@ -1056,7 +1256,7 @@ def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env
             return None
 
         @classmethod
-        def ensure_agent_session_id(cls, settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(cls, settings_key, agent_name, base_session_id, **_kwargs):
             cls.ensured.append((settings_key, agent_name, base_session_id))
             return "ses-subagent"
 
@@ -1110,25 +1310,19 @@ def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env
     assert second_context.platform_specific["agent_session_id"] == "ses-subagent"
 
 
-def test_cached_claude_subagent_revalidates_memory_principal_and_guidance(
+def test_session_handler_recreates_terminated_cached_subagent_before_dispatch(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    clients: list[Any] = []
+    captured: dict[str, Any] = {"clients": []}
 
     class _RoutingSessions(_Sessions):
         @staticmethod
-        def get_claude_session_id(_settings_key, _base_session_id):
+        def get_agent_session_id(settings_key, base_session_id, agent_name):
             return None
 
         @staticmethod
-        def get_agent_session_id(_settings_key, _base_session_id, agent_name):
-            assert agent_name == "claude"
-            return None
-
-        @staticmethod
-        def ensure_agent_session_id(_settings_key, agent_name, _base_session_id):
-            assert agent_name == "claude"
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             return "ses-subagent"
 
     class _RoutingSettingsManager(_SettingsManager):
@@ -1137,14 +1331,15 @@ def test_cached_claude_subagent_revalidates_memory_principal_and_guidance(
             self.sessions = _RoutingSessions()
 
         @staticmethod
-        def get_channel_routing(_settings_key):
+        def get_channel_routing(settings_key):
             return type("Routing", (), {"claude_agent": "reviewer", "model": None, "reasoning_effort": None})()
 
     class _StubClaudeSDKClient:
         def __init__(self, options):
             self.options = options
             self.disconnects = 0
-            clients.append(self)
+            self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+            captured["clients"].append(self)
 
         async def connect(self) -> None:
             return None
@@ -1156,54 +1351,22 @@ def test_cached_claude_subagent_revalidates_memory_principal_and_guidance(
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
-    controller.config.platform = "avibe"
-    controller.config.memory = type("MemoryConfig", (), {"enabled": True})()
     controller.settings_manager = _RoutingSettingsManager()
-    controller.platform_settings_managers = {"avibe": controller.settings_manager}
-    principals: dict[str, str] = {}
-
-    def configure_memory_cli_session(context, *, admitted):
-        session_id = context.platform_specific["agent_session_id"]
-        if admitted:
-            principals[session_id] = context.user_id
-        else:
-            principals.pop(session_id, None)
-        return admitted
-
-    controller.configure_memory_cli_session = configure_memory_cli_session
+    controller.platform_settings_managers = {"slack": controller.settings_manager}
     handler = SessionHandler(controller)
-
-    local_context = MessageContext(
-        user_id="local",
+    context = MessageContext(
+        user_id="U123",
         channel_id="C123",
-        platform="avibe",
-        platform_specific={"routing_subagent": "reviewer", "memory_cli_admitted": True},
+        platform_specific={"routing_subagent": "reviewer", "task_trigger_kind": "agent_run"},
     )
-    local_client = _run_session(handler, local_context)
-    assert principals == {"ses-subagent": "local"}
-    assert "## Personal Memory" in str(local_client.options.system_prompt)
 
-    remote_context = MessageContext(
-        user_id="remote-user",
-        channel_id="C123",
-        platform="avibe",
-        platform_specific={"routing_subagent": "reviewer", "memory_cli_admitted": True},
-    )
-    remote_client = _run_session(handler, remote_context)
-    assert remote_client is local_client
-    assert principals == {"ses-subagent": "remote-user"}
+    first_client = _run_session(handler, context)
+    first_client._transport._process.returncode = -6
+    second_client = _run_session(handler, context)
 
-    denied_context = MessageContext(
-        user_id="remote-user",
-        channel_id="C123",
-        platform="avibe",
-        platform_specific={"routing_subagent": "reviewer"},
-    )
-    denied_client = _run_session(handler, denied_context)
-    assert denied_client is not local_client
-    assert local_client.disconnects == 1
-    assert principals == {}
-    assert "## Personal Memory" not in str(denied_client.options.system_prompt)
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
 
 
 def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypatch, tmp_path: Path) -> None:
@@ -1224,12 +1387,15 @@ def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypat
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
-    controller.config.claude.default_model = "claude-sonnet-4-5"
     handler = SessionHandler(controller)
-    context = MessageContext(user_id="U123", channel_id="C123")
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"agent_session_target": {"model": "claude-sonnet-4-5"}},
+    )
 
     client = _run_session(handler, context)
-    controller.config.claude.default_model = "claude-opus-4-1"
+    context.platform_specific["agent_session_target"]["model"] = "claude-opus-4-1"
 
     _run_session(handler, context)
     _run_session(handler, context)
@@ -1332,7 +1498,7 @@ def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp
             return None
 
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             return "sesk8m4q2p7x"
 
     class _StubClaudeSDKClient:
@@ -1448,7 +1614,7 @@ def test_session_handler_uses_scheduled_turn_source_for_dm_anchor(monkeypatch, t
             return None
 
         @staticmethod
-        def ensure_agent_session_id(settings_key, agent_name, base_session_id):
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
             return "sesk8m4q2p7x"
 
     class _ScheduledSettingsManager:
@@ -1553,12 +1719,14 @@ def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
     handler = SessionHandler(controller)
     context = MessageContext(user_id="U123", channel_id="C123")
 
-    _run_session(handler, context)
+    client = _run_session(handler, context)
 
     composite_key = f"slack_C123:{tmp_path}"
+    identity = getattr(client, "_vibe_runtime_activation_identity")
     handler.session_last_activity[composite_key] = 0.0
 
     evicted = asyncio.run(handler.evict_idle_sessions(600))
@@ -1567,6 +1735,59 @@ def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path)
     assert captured["disconnects"] == 1
     assert composite_key not in controller.claude_sessions
     assert composite_key not in handler.session_last_activity
+    assert controller.runtime_activation.current("claude", composite_key) is None
+    assert controller.runtime_activation.current(
+        "claude",
+        composite_key,
+        include_retired=True,
+    ) == identity
+
+
+def test_idle_sweep_batches_ownership_reads_off_the_controller_loop(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    loop_thread = threading.get_ident()
+    batch_threads: list[int] = []
+    single_calls: list[str] = []
+
+    def ownership(resource_key: str):
+        return SimpleNamespace(
+            resource_key=resource_key,
+            disposition=SessionRuntimeDisposition.RECLAIMABLE,
+            blocks_reclamation=False,
+            needs_session_delivery_wake=False,
+            needs_request_wake=False,
+        )
+
+    class _Provider:
+        def snapshot(self, target):
+            single_calls.append(target.resource_key)
+            return ownership(target.resource_key)
+
+        def snapshot_many(self, targets):
+            batch_threads.append(threading.get_ident())
+            return tuple(ownership(target.resource_key) for target in targets)
+
+    controller.runtime_ownership = _Provider()
+    for suffix in ("a", "b"):
+        resource_key = f"runtime-{suffix}"
+        controller.claude_sessions[resource_key] = SimpleNamespace(
+            _vibe_runtime_base_session_id=f"base-{suffix}",
+            _vibe_runtime_session_key=resource_key,
+            _vibe_runtime_workdir=f"/work/{suffix}",
+            _vibe_runtime_fallback_session_key=f"route:{suffix}",
+            _vibe_agent_session_id=f"ses-{suffix}",
+        )
+        handler.session_last_activity[resource_key] = 999.0
+
+    assert asyncio.run(handler.evict_idle_sessions(600)) == 0
+    assert single_calls == []
+    assert len(batch_threads) == 1
+    assert batch_threads[0] != loop_thread
 
 
 def test_session_handler_keeps_active_claude_session(monkeypatch, tmp_path: Path) -> None:
@@ -1626,7 +1847,12 @@ def test_evict_idle_sessions_force_evicts_stuck_active_session(monkeypatch, tmp_
 
     class _ClaudeAgent:
         @staticmethod
-        async def force_cleanup_stuck_active_session(composite_key: str) -> None:
+        async def force_cleanup_stuck_active_session(
+            composite_key: str,
+            *,
+            runtime_lock_held: bool = False,
+        ) -> None:
+            assert runtime_lock_held is True
             cleanup_calls.append(composite_key)
             handler.clear_session_tracking(composite_key)
 
@@ -2235,7 +2461,7 @@ def test_cleanup_session_preserves_new_receiver_during_disconnect(monkeypatch, t
         assert events["old_receiver_cancelled"].is_set()
         assert controller.receiver_tasks[composite_key] is new_receiver
         assert composite_key in handler.active_sessions
-        assert composite_key in handler.session_last_activity
+        assert composite_key not in handler.session_last_activity
         new_receiver.cancel()
         with pytest.raises(asyncio.CancelledError):
             await new_receiver
@@ -2369,8 +2595,17 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    async def fake_reap(native_session_id, *, keep_pid=None, cli_path=None, logger, terminate_timeout=2.0):
+    async def fake_reap(
+        native_session_id,
+        *,
+        keep_pid=None,
+        exclude_pids=None,
+        cli_path=None,
+        logger,
+        terminate_timeout=2.0,
+    ):
         captured["reap_calls"].append((native_session_id, keep_pid, cli_path))
+        captured["exclude_pids"] = exclude_pids
         return 2
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
@@ -2393,3 +2628,274 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
     assert client.disconnects == 1
     assert getattr(client, "_vibe_native_session_id") == "native-session-1"
     assert captured["reap_calls"] == [("native-session-1", None, "/usr/local/bin/claude-proxy")]
+    # The evicted client is gone from the registry, so its own pid stays reapable.
+    assert captured["exclude_pids"] == set()
+
+
+def test_cleanup_defers_duplicate_reap_while_a_client_create_is_in_flight(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An in-flight create owns a subprocess that is not yet registered.
+
+    Generation locks are per composite key, so another key can be inside
+    ``connect()`` for the same native resume id. Its pid cannot appear in
+    ``claude_sessions`` yet, so the reap must be deferred instead of running
+    against a knowingly incomplete owner set.
+    """
+    captured: dict[str, Any] = {"reap_calls": 0}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(*args, **kwargs):
+        captured["reap_calls"] += 1
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(client, "_vibe_native_session_id", "native-session-1")
+    handler.claude_session_creates["slack_C999:other"] = object()
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert captured["reap_calls"] == 0
+    assert client.disconnects == 1
+
+
+def test_evict_idle_sessions_protects_pids_of_other_live_sessions(monkeypatch, tmp_path: Path) -> None:
+    """The duplicate reap must never target a still-registered client's pid.
+
+    ``force_cleanup_stuck_active_session`` reaches cleanup without a receiver
+    task, so ``keep_pid`` is dropped and the reaper falls back to "kill every
+    process matching this native session id". Ownership of live pids is the
+    guard that survives that path.
+    """
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(
+        native_session_id,
+        *,
+        keep_pid=None,
+        exclude_pids=None,
+        cli_path=None,
+        logger,
+        terminate_timeout=2.0,
+    ):
+        captured["exclude_pids"] = exclude_pids
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(client, "_vibe_native_session_id", "native-session-1")
+
+    # A second live client resuming the same native session id, as created by
+    # the turn that follows a force eviction.
+    replacement = _StubClaudeSDKClient(None)
+    replacement._transport._process.pid = 9876
+    setattr(replacement, "_vibe_native_session_id", "native-session-1")
+    controller.claude_sessions["slack_C999:other"] = replacement
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert captured["exclude_pids"] == {9876}
+
+
+def test_cleanup_defers_duplicate_reap_when_a_live_client_pid_is_unresolved(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An owner whose pid cannot be read still owns its process.
+
+    ``_live_claude_client_pids`` can only name the pids it can resolve. If a
+    registered client is not among them the exclusion set is knowingly partial,
+    and running the process-table scan against it can select that live client's
+    process. ``reap_orphaned_claude_sessions`` already defers on the same
+    signal; duplicate cleanup must not treat a partial set as authoritative.
+    """
+    captured: dict[str, Any] = {"reap_calls": 0}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(*args, **kwargs):
+        captured["reap_calls"] += 1
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(client, "_vibe_native_session_id", "native-session-1")
+
+    # Registered, live, and resuming the same native id — but its pid cannot be
+    # resolved, so it cannot be named in ``exclude_pids``.
+    replacement = _StubClaudeSDKClient(None)
+    replacement._transport._process.pid = None
+    setattr(replacement, "_vibe_native_session_id", "native-session-1")
+    controller.claude_sessions["slack_C999:other"] = replacement
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert captured["reap_calls"] == 0
+    assert client.disconnects == 1
+
+
+def test_cleanup_skips_a_generation_a_replacement_already_took_over(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Containing a stale teardown must not become a second teardown.
+
+    ``cleanup_session`` resolves the composite key again under the generation
+    lock. A caller acting on a client that has since been replaced would
+    otherwise disconnect the healthy replacement that now owns the key.
+    """
+    captured: dict[str, Any] = {"reap_calls": 0}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.disconnects = 0
+            self._transport = type(
+                "Transport",
+                (),
+                {"_process": type("Process", (), {"pid": 4321})()},
+            )()
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    async def fake_reap(*args, **kwargs):
+        captured["reap_calls"] += 1
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    superseded = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    setattr(superseded, "_vibe_native_session_id", "native-session-1")
+
+    # A newer turn registered its own client under the same key.
+    replacement = _StubClaudeSDKClient(None)
+    setattr(replacement, "_vibe_native_session_id", "native-session-1")
+    controller.claude_sessions[composite_key] = replacement
+
+    asyncio.run(handler.cleanup_session(composite_key, expected_client=superseded))
+
+    assert replacement.disconnects == 0
+    assert superseded.disconnects == 0
+    assert captured["reap_calls"] == 0
+    assert controller.claude_sessions[composite_key] is replacement
+
+
+def test_cleanup_records_no_teardown_intent_for_an_empty_key(monkeypatch, tmp_path: Path) -> None:
+    """No generation retired means nothing to explain later.
+
+    A marker left on an already-empty key opens a 120s window in which the NEXT
+    client's genuine ``-9`` — dying inside ``connect()``, before registration
+    can clear the record — is suppressed as a service teardown.
+    """
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    composite_key = f"slack_C123:{tmp_path}"
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert composite_key not in handler.claude_intentional_teardowns
+
+
+def test_tracking_a_create_retires_the_previous_teardown_record(monkeypatch, tmp_path: Path) -> None:
+    """The marker must not outlive the start of the replacement's creation.
+
+    A new generation that exits ``-9`` inside ``connect()`` never registers, so
+    its failure is reported with ``client=None``. Clearing only at registration
+    would leave the previous teardown's key-level marker standing to classify
+    that genuine crash as our own cleanup and swallow the user-facing error.
+    """
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.claude_intentional_teardowns[composite_key] = 1000.0
+
+    async def scenario() -> bool:
+        handler._track_claude_session_create(composite_key)
+        # No client was ever handed back, so the caller has none to pass.
+        return handler.claude_teardown_is_intentional(
+            composite_key, RuntimeError("Claude Code process exited with exit code: -9")
+        )
+
+    assert asyncio.run(scenario()) is False
+    assert composite_key not in handler.claude_intentional_teardowns

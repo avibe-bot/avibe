@@ -2,19 +2,17 @@
 
 ## Status
 
-Owner-approved program contract. This file freezes the P0, P1, and P3 delivery
-semantics and the backend-native steering boundary used by the implementation
-slices below. P2 and P4 remain reserved for a separate Mailbox design.
+Implemented program contract. P0, P1, and P3 share one durable Delivery owner
+across interactive input, Harness input, queue promotion, and restart recovery.
+P2 and P4 remain reserved for a separate Mailbox design.
 
 ## Priority Semantics
 
-- **P0 interrupt** is an explicit action, never a default for ordinary input.
-  Without content it stops the active Turn. With content, the future delivery
-  owner must first persist one successor Message, then stop the active Turn and
-  start the successor as a new Turn.
+- **P0 Stop** is an explicit content-free action. It stops the exact active
+  Turn; no message-producing surface may use P0 to replace that Turn.
 - **P1 steer** delivers content into the expected currently active Turn without
-  stopping it. A future content-free P1 request atomically promotes the current
-  P3 queue head. A definitive steering failure may transfer the same Message to
+  stopping it. A content-free P1 request atomically promotes the current
+  P3 queue head. A definitive steering failure may transfer the same Delivery to
   P3; an acknowledgement-ambiguous result must be reconciled durably first.
 - **P3 queue** starts immediately when the Session is idle and otherwise remains
   FIFO until the active Turn ends. Queueing is not a hold mechanism.
@@ -87,31 +85,38 @@ These acknowledgement strengths are intentionally different because the native
 protocols expose different boundaries. The common result preserves that truth
 instead of claiming equivalent durability.
 
-## Delivery Slices
+## Source Policy
 
-1. **Native adapters (this PR):** add the shared contract and Codex, Claude, and
-   OpenCode insertion adapters. Keep every public source and Send Now behavior
-   unchanged.
-2. **P0/P1/P3 admission owner:** make the Session delivery owner perform the
-   durable claim, native steer, refusal-to-P3 transfer, unknown reconciliation,
-   content-free P1 promotion, and P0 successor-before-interrupt transition.
-3. **Result and callback ownership:** keep one terminal Result authority while
-   allowing accepted cross-Agent participants to subscribe once per callback
-   Session. A P1-to-P3 transfer joins only the future Turn.
-4. **Atomic source cutover:** switch Web Send Now, IM, Agent CLI, Watch, Show
-   Annotation, and Session Callback to their approved defaults in one release;
-   keep Task at P3 and remove the old Send Now interrupt-and-flush path then.
+| Source | Default | Behavior |
+| --- | --- | --- |
+| Web composer | P3 | Starts when idle; otherwise joins the FIFO backlog. |
+| Ordinary IM message | P1 | Steers the active Turn or starts when idle; a definitive refusal falls back to P3. |
+| Existing-Session Agent Run | P1 | Same as ordinary IM. `--queue` selects P3. `--send-now` first persists the new Run at P3, then promotes the exact FIFO head through P1; it never stops the active Turn or jumps older work. |
+| Watch, Hook, Webhook | P1 | Continues the target Session without interrupting it. |
+| Show annotation | P1 | Delivers the annotation to the current Turn when possible. |
+| Session callback | P1 | Delivers each completed child Run independently. |
+| Scheduled Task | P3 | Never interrupts or steers the work a user is already doing. |
+| Stop | Empty P0 | Stops the exact live Turn. Definitive terminal settlement immediately starts the oldest claimable P3 segment. |
+| Send Now existing head | Empty P1 | Promotes only the exact observed FIFO head. |
 
-Until slice 4 lands, Web Send Now, IM handling, CLI defaults, Watch/Task/Show and
-Callback routing, `SessionTurnManager.send_now`, queue behavior, and every source
-default retain their pre-program behavior. Existing HFR-430 coverage remains the
-contract test for Send Now interrupt-and-flush in this slice; no new scenario id
-is allocated for this invisible backend capability.
+Attachments remain part of the same Delivery. Because native steer adapters
+accept text only, an attachment-bearing P1 is preserved as P3 and starts a new
+Turn after the current one finishes.
+
+## Ownership Closure
+
+- `message_deliveries` owns every unaccepted input, queue position, attempt, and
+  receipt. No unaccepted input is a transcript Message.
+- `session_turns` owns execution and its immutable terminal snapshot.
+- `messages` contains accepted communication records only.
+- Accepted Agent Runs attached to one Turn are independent terminal subscribers.
+  The existing Run rows and their Delivery-to-Turn links are sufficient; no
+  callback table or second terminal writer is introduced.
+- One terminal snapshot settles every accepted Run once, after which each Run's
+  existing callback state produces at most one P1 callback Delivery.
 
 ## Deferred Work
 
 - P2/P4 Mailbox cursor, unread, acknowledgement, merge, and retrieval semantics
 - generic exact-id promotion or demotion
-- source-policy catalog and public surface changes
-- callback subscriber persistence and fan-out
 - authentication, authorization, ACL, and unrelated issue dependencies

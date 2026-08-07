@@ -230,6 +230,7 @@ vibe runs show                         # 在 Avibe Agent shell 内查看调用�
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # 在 Avibe Agent shell 内
+vibe task add --name nightly-sync --cron '0 3 * * *' --shell './scripts/sync.sh'   # 命令任务，不触发 Agent turn
 vibe task list
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
@@ -242,11 +243,38 @@ vibe task remove <task-id>
 - 用 `--create-session`、`--create-session-per-run`、`--same-scope` 和 `--scope-id` 控制 Session placement
 - 用 `--cron` / `--at` 控制定时方式
 - 以及 `--name`、`--timezone`、`--message-file` 等参数
+- 用 `--shell` 或写在 `--` 之后的 argv 创建不触发 Agent turn 的定时命令任务，
+  可搭配 `--on-failure {none,agent}`、按次执行的 `--timeout`
+  （默认 21600 秒，`0` 表示不限制），以及指定命令执行目录的 `--cwd`
 
 当 `vibe task add` 运行在 Avibe 已注入 caller context 的 Agent shell 内时，
 可以省略 `--session-id`。Avibe 会把任务目标默认到 `AVIBE_SESSION_ID`
 对应的调用方 Session，并在命令输出里报告这次默认。显式 `--session-id`、
 session creation 参数和 delivery 参数仍然优先。
+
+纯命令任务（`--on-failure none`，即默认值）不会套用上面这条调用方 Session 默认，
+也不接受 session、scope 或 agent 相关参数。执行成功时完全静默；执行失败会记录一条
+持久化的失败通知，并在通知中写明命令与退出码。若使用
+`--on-failure agent --message '<处理说明>'`，失败会改为触发一次携带失败报告的 Agent
+turn，并由该 turn 取代这次执行的失败通知。`vibe task update` 可以修改命令任务的
+`--shell`、argv、`--timeout` 或 `--cwd`，但在 message 形态与 command 形态之间切换、
+或修改 `--on-failure`，都会被拒绝——请删除任务后重新创建。
+
+`--cwd` 指定命令的执行目录。它是否还会影响 Session，取决于该定义是否要「创建」
+Session：
+
+- 绑定到已存在的 Session（`--session-id`，或调用方 Session 默认值），或已经预留过
+  可复用 Session 时：该参数只作用于命令。升级 Session 保留自己的工作目录——这正是
+  引入该参数要解决的场景：命令任务绑定 Session 是为了让 `--on-failure agent`
+  有地方落地，而不是为了指定命令在哪里执行。
+- 需要创建 Session 时（`--create-session`、`--create-session-per-run`）：该参数
+  同时决定这个 Session 的目录，也就是升级 turn 会和命令跑在同一个目录。如果希望
+  Session 继承目录，请改用 `--same-scope` / `--scope-id` 指定 scope 并省略 `--cwd`。
+
+不传该参数时，绑定了 Session 的命令会跟随那个 Session 的目录（该目录在触发时实时
+读取，因此在那个会话里执行 `/setcwd` 会让任务换个地方运行），其他命令则记录你执行
+`vibe task add` 时所在的目录。对 message 任务，`--cwd` 仍然用于放置它创建的
+Session，且在目标 Session 已存在时仍然会被拒绝。
 
 `--session-key` 仍兼容旧脚本，但新任务应使用当前 Avibe prompt
 里展示的 Agent Session ID。
@@ -260,20 +288,17 @@ session creation 参数和 delivery 参数仍然优先。
 vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
+vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correction in the current turn.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
-`--send-now` 只能和现有 `--session-id` 一起使用。Avibe 会先把 Agent Run
-持久化到该 Session 的队列，再执行与 Workbench“立即发送”相同的操作：通过共享
-Stop 路径打断活动 Turn，并把 FIFO 队头作为新 Turn 发送。它不会把输入注入同一个
-backend native Turn，也不会让新消息越过更早的排队工作。如果打断被拒绝，当前 Turn
-继续运行，Agent Run 保持排队。命令接受结果会显示 `delivery_intent`；Controller
-消费后，可通过 `vibe runs show <run-id>` 查看持久化的
-`metadata.delivery_outcome`（`interrupted`、`flushed`、`deferred` 或
-`stop_failed`）。
+`--send-now` 只能和现有 `--session-id` 一起使用。Avibe 会先把新的 Agent Run
+以 P3 持久化，再通过 P1 提升精确的 FIFO 队头。活动 Turn 存在时，队头会 steering
+进同一个 backend native Turn；Session 空闲时则正常启动。新消息不会越过更早的
+排队工作。`vibe session send-now` 执行相同的精确队头提升，但不会新增消息。
+两种形式都不会调用 Stop；过期或被拒绝的 steering 会保持持久化排队。
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
 使用 `--fork-session <session-id>`。新 Session 会保持源 Session 的 backend。

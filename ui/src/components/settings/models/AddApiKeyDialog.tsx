@@ -23,6 +23,7 @@ import { Field } from './dialogFields';
 import { adoptionVerdict } from './sufficiency';
 import { DEFAULT_VENDOR, VENDOR_OPTIONS } from './vendorMeta';
 import type { Source } from './types';
+import { errorMessage } from '@/lib/errorMessage';
 
 /** Nothing created yet. `skipped_by: null` rather than `[]` for the reason the
  *  reader defaults it that way: 「nobody was left out」 is a claim, and no
@@ -104,9 +105,12 @@ export const AddApiKeyDialog: React.FC<{
       // the same answer this site gave before the field existed.
       if (adoptionVerdict(adopted_by, skipped_by).kind === 'covered')
         closeTimer.current = window.setTimeout(onClose, 1500);
-    } catch (e: any) {
+    } catch (e) {
       if (submitSeq.current !== seq) return;
-      const code = e?.code || e?.message || 'discovery_failed';
+      // The engine reports a machine-readable `code`; fall back to the message
+      // and then to a generic key so the copy lookup always has something.
+      const rawCode = (e as { code?: unknown } | null | undefined)?.code;
+      const code = (typeof rawCode === 'string' ? rawCode : undefined) || errorMessage(e) || 'discovery_failed';
       setError(code === 'engine_down' ? (t('settings.models.errors.engineDown') as string) : code);
       setPhase('error');
     }

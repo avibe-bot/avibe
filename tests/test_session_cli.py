@@ -5,6 +5,8 @@ import json
 import pytest
 
 from config import paths
+from storage import message_deliveries
+from storage.background import attach_agent_run_delivery_in_connection
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, messages
@@ -114,11 +116,13 @@ def test_list_uses_shared_pagination_contract(monkeypatch, tmp_path, capsys):
     assert page2["pagination"]["has_more"] is False
 
 
+@pytest.mark.no_sqlite_template
 def test_list_on_fresh_home_returns_empty(monkeypatch, tmp_path, capsys):
     # No ensure_sqlite_state(): _open_session_engine must bootstrap the DB itself,
     # so a fresh Avibe home returns a clean empty list, not "no such table" (Codex P2).
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
+    assert not paths.get_sqlite_state_path().exists()
     code, payload = _run(cli.cmd_session_list, ["session", "list"], capsys)
     assert code == 0
     assert payload["sessions"] == []
@@ -241,7 +245,7 @@ def test_send_now_dispatches_an_existing_queue_without_adding_a_message(
     }
 
 
-def test_send_now_surfaces_a_typed_interrupt_refusal(monkeypatch, tmp_path, capsys):
+def test_send_now_surfaces_a_typed_steer_refusal(monkeypatch, tmp_path, capsys):
     from vibe import internal_client
 
     engine = _setup(monkeypatch, tmp_path)
@@ -253,8 +257,8 @@ def test_send_now_surfaces_a_typed_interrupt_refusal(monkeypatch, tmp_path, caps
             "body": {
                 "ok": False,
                 "session_id": session_id,
-                "code": "stop_failed",
-                "detail": "backend refused Stop",
+                "code": "send_now_refused",
+                "detail": "backend refused steering",
             },
         }
 
@@ -267,8 +271,8 @@ def test_send_now_surfaces_a_typed_interrupt_refusal(monkeypatch, tmp_path, caps
     )
 
     assert code == 1
-    assert payload["code"] == "stop_failed"
-    assert payload["error"] == "backend refused Stop"
+    assert payload["code"] == "send_now_refused"
+    assert payload["error"] == "backend refused steering"
     assert payload["details"]["session_id"] == "sesaaa"
     assert payload["details"]["controller_status_code"] == 409
 
@@ -340,7 +344,7 @@ def test_send_now_requires_an_explicit_target(capsys):
     assert payload["help_command"] == "vibe session send-now --help"
 
 
-def test_send_now_and_queue_controls_reject_an_im_backed_session(
+def test_send_now_accepts_im_while_queue_management_remains_workbench_only(
     monkeypatch,
     tmp_path,
     capsys,
@@ -350,8 +354,15 @@ def test_send_now_and_queue_controls_reject_an_im_backed_session(
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesim", platform="slack", native="C123")
 
-    async def _send_now(_session_id):
-        raise AssertionError("IM-backed Session must not reach the Workbench controller")
+    async def _send_now(session_id):
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "status": "accepted",
+            },
+        }
 
     monkeypatch.setattr(internal_client, "send_now", _send_now)
 
@@ -371,8 +382,8 @@ def test_send_now_and_queue_controls_reject_an_im_backed_session(
         capsys,
     )
 
-    assert send_code == 1
-    assert send_payload["code"] == "send_now_unsupported_target"
+    assert send_code == 0
+    assert send_payload["status"] == "accepted"
     assert list_code == 1
     assert list_payload["code"] == "session_queue_unsupported_target"
     assert remove_code == 1
@@ -392,20 +403,18 @@ def test_queue_list_is_paginated_in_fifo_order_and_exposes_run_identity(
     engine = _setup(monkeypatch, tmp_path)
     scope_id = _seed(engine, "sesaaa")
     with engine.begin() as conn:
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesaaa",
             text="first",
         )
-        messages_service.append(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesaaa",
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
             text="second",
             metadata={
                 "scheduled_provenance": {
@@ -416,7 +425,7 @@ def test_queue_list_is_paginated_in_fifo_order_and_exposes_run_identity(
                 }
             },
         )
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesaaa",
@@ -461,7 +470,7 @@ def test_queue_remove_deletes_only_the_named_session_row_and_notifies_web(
     scope_id = _seed(engine, "sesaaa")
     _seed(engine, "sesbbb", native="proj_b")
     with engine.begin() as conn:
-        queued = messages_service.enqueue_queued(
+        queued = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesaaa",
@@ -496,7 +505,7 @@ def test_queue_remove_deletes_only_the_named_session_row_and_notifies_web(
     assert removed["status"] == "removed"
     assert notified == ["sesaaa"]
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, "sesaaa") == []
+        assert message_deliveries.list_queued(conn, "sesaaa") == []
 
 
 def test_queue_remove_cancels_the_agent_run_owned_by_that_row(
@@ -521,16 +530,20 @@ def test_queue_remove_cancels_the_agent_run_owned_by_that_row(
         metadata={"workbench_queue_holds_run": True},
     )
     with engine.begin() as conn:
-        queued = messages_service.append(
+        queued = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesrun",
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
             text=request.message or "",
             native_message_id=f"agent_run:{request.id}",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            request.id,
+            session_id="sesrun",
+            delivery_id=queued["id"],
         )
     monkeypatch.setattr(
         cli,
@@ -551,7 +564,7 @@ def test_queue_remove_cancels_the_agent_run_owned_by_that_row(
     assert stored["status"] == "canceled"
     assert stored["cancel_requested"] is True
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, "sesrun") == []
+        assert message_deliveries.list_queued(conn, "sesrun") == []
 
 
 def test_queue_commands_reject_an_archived_session(monkeypatch, tmp_path, capsys):
