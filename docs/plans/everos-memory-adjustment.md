@@ -419,6 +419,42 @@ manual_required detected
 
 Constraint: `restart` is not a valid resolution for `manual_required` because it cannot prove the write's outcome. `clear` is not a valid resolution either because it is broader than the unknown write. The audited `operate` path above is the only sanctioned transition. Until the journal/fence is implemented in Avibe, `manual_required` keeps the fence in place and forbids auto-replay, but does not block unrelated sessions.
 
+### 5.6 Fingerprint Resolution Operation
+
+The fingerprint-specific recovery operation is a third audited `operate` action distinct from `add` and `flush`. Its `operation_kind` is `fingerprint_resolve`, and it is the only sanctioned transition for an unknown-fingerprint legacy root (§8.1.1 case 2). The shape:
+
+```text
+fingerprint_resolve detected (case-2 unknown-fingerprint legacy root)
+  → durable record: provider_root_id, fence_epoch, operation_id,
+                    operation_kind=fingerprint_resolve,
+                    last_known_state, evidence_pointer
+  → operator declares one of the following audited intents:
+      case R1 — full semantic rotation (proceed to §8.3 / §8.4):
+          take restorable snapshot, rebuild LanceDB vectors / FTS / scalar
+              indexes, recompute cluster centroids, invalidate embedding-
+              dependent OME state, reprocess profile/skill/reflection
+              derived artifacts, write new fingerprint; on failure restore
+              from snapshot.
+      case R2 — accept the legacy vector space as authoritative and
+                pin its fingerprint:
+          compute fingerprint from a verifiable legacy source (provider-
+              root sentinel artifact metadata, companion store digest, or
+              Avibe build-stamp catalogue — see §8.1.1 case 1); persist
+              the fingerprint with an audit row recording the legacy
+              evidence pointer and operator decision; on any later
+              configuration change the case-2 verdict re-arms.
+      case R3 — refuse and abort recovery (record only):
+          write the unknown-fingerprint verdict to memory_meta if not
+              already there; release no fence; require an explicit
+              operator decision before retry.
+  → resolution writes an audit row: actor, decision, evidence pointer,
+    fingerprint before/after, fence_epoch, journal phase
+  → page surfaces the audit row in the processing-record page so unknown
+    fingerprint is observable
+```
+
+The fingerprint resolution operation is closed to chat/agent/API call paths and reachable only through the same audited `operate` interface that powers Phase 4, with its own per-root maintenance lock. §5.5 cases A–F are unchanged because they remain scoped to add/flush; the case-2 legacy root cannot reach them and must go through `fingerprint_resolve`.
+
 ## 6. Processing-Record Page Design
 
 ### 6.1 Page Form
@@ -635,13 +671,13 @@ Include only factors that actually change the vector space; for example, an equi
 
 #### 8.1.1 Fingerprint Bootstrap for Existing Roots
 
-Enforcement of the semantic fingerprint lands behind a one-time migration so existing installations do not fail closed at startup. Three cases:
+Enforcement of the semantic fingerprint lands behind a one-time migration so existing installations do not fail closed at startup. The bootstrap must be honest about what the legacy persistence actually records — the current Avibe `MemoryEndpointConfig` only persists `base_url`, `model`, and `api_key` (`config/v2_config.py:280-298`), and `memory_meta` carries no historical model revision, output dimension, normalization, truncation, or vector/index schema fields (`core/memory/schema.sql:2-30`). A legacy root therefore has no verifiable record of the vector space that built its existing data; model aliases or changed runtime defaults can silently mix incompatible embeddings. Three cases:
 
-1. **Legacy root whose guarded persisted embedding configuration matches the current candidate and has no recorded configuration-change marker.** Seed the fingerprint from the guarded persisted embedding configuration (`provider`, model identity/revision, output dimension, normalization, truncation, vector/index schema revision at the time the root was created). The seed is durable in `memory_meta` and treated as equivalent to a freshly computed fingerprint until the next configuration change.
-2. **Legacy root whose configuration-change marker is set or whose persisted embedding configuration no longer matches the candidate.** Treat as an unknown fingerprint; refuse to start and require the operator to run the audited manual resolution path (Phase 4) before retry. Do not silently reseed — this would silently accept a vector-space mismatch.
+1. **Legacy root with a verifiable legacy fingerprint source.** A legacy root only enters this case when one of the following is true: (a) the provider-root sentinel artifact metadata already records a recorded embedding model identity/revision, output dimension, and vector/index schema revision; (b) a known companion store (LanceDB business table fingerprint, cluster centroid digest, or `embedding_semantic_fingerprint` row written by an earlier build that pre-dates this rule) still names the model identity/revision, output dimension, and vector/index schema revision that produced the data; or (c) an Avibe-side build stamp can be tied to a published fingerprint catalogue covering the recorded embedding endpoint. In these cases only, seed the fingerprint from the verifiable legacy source (`provider`, model identity/revision, output dimension, normalization, truncation, vector/index schema revision at the time the root was created). The seed is durable in `memory_meta` and treated as equivalent to a freshly computed fingerprint until the next configuration change.
+2. **Legacy root with no verifiable legacy fingerprint source, a recorded configuration-change marker, or a persisted embedding configuration that no longer matches the candidate.** Treat as an unknown fingerprint; refuse to start. The operator must run a fingerprint-specific recovery operation (§5.6) before retry. Do not silently reseed — that would silently accept a vector-space mismatch and poison later searches with mixed embeddings.
 3. **Newly created or freshly empty root.** Compute the fingerprint at activation time against the candidate and persist before the first `/add`.
 
-The migration is idempotent and runs once at startup when `memory_meta` lacks the fingerprint row. After bootstrap, the fail-closed rule in §8.1 applies normally; cases 1 and 3 transition into the same steady-state as the rest of §8.
+The migration is idempotent and runs once at startup when `memory_meta` lacks the fingerprint row. After bootstrap, the fail-closed rule in §8.1 applies normally; cases 1 and 3 transition into the same steady-state as the rest of §8. The case-2 verdict is itself recorded in `memory_meta` so a later boot reads the same unknown-fingerprint state without re-deciding.
 
 ### 8.2 Key-Only Rotation
 
@@ -663,26 +699,51 @@ The first version is offline-stoppage with a restorable snapshot. The sequence b
 
 ```text
 acquire maintenance lock
-→ fence capture delivery / provider calls
+→ fence capture delivery / provider calls (Avibe outbox stops accepting
+    new capture intake; provider calls from the active generation stop)
+→ quiesce writers under the lock:
+    - stop EverOS (no /add, /flush, /search, /status, /clear against the
+      active provider root — the active root is offline)
+    - pause capture acceptance at the Avibe sidecar intake (capture
+      requests are rejected with an explicit `maintenance_in_progress`
+      reason, not queued); the durable capture queue is the only home
+      that may continue to receive rows, and it must not be visible to
+      the live root
+    - drain the Avibe outbox: every pre-quiescence capture row has either
+      been committed to the legacy root (and is therefore inside the
+      snapshot window) or is explicitly marked `drained_pending_snapshot`
+      so the snapshot tool skips it; rows that arrive after this point
+      are kept out of the snapshot window and are only delivered once
+      the new sidecar starts
 → take a restorable snapshot of: Markdown tree, system.db (unprocessed_buffer
     + memcell + md_change_state), ome.db, LanceDB business tables, cluster
     centroids, the current semantic embedding fingerprint, and Avibe outbox
+    (excluding `drained_pending_snapshot` rows, which are quarantined until
+    the new sidecar is live)
 → verify snapshot integrity (checksum, file presence, sqlite backup API)
 → save and verify current root
-→ stop EverOS
-→ preserve Markdown, unprocessed_buffer, memcell, Avibe outbox
+→ preserve Markdown, unprocessed_buffer, memcell, Avibe outbox snapshot
 → rebuild LanceDB vectors and FTS/scalar indexes
 → recompute cluster centroid and cluster membership
 → rebuild or invalidate embedding-dependent OME state
 → reprocess profile/skill/reflection derived artifacts
 → write new fingerprint
 → start new sidecar
+→ replay quarantined `drained_pending_snapshot` rows against the new root
+    in their original order; rows that fail to deliver go back to the
+    durable capture queue with an explicit `pending_rotation_replay` state
 → verify projection convergence
 → on any post-snapshot failure: stop, restore from the snapshot, mark the
     operation journal as failed at the failing phase, never claim the old
-    generation is intact unless the snapshot restore actually completed
+    generation is intact unless the snapshot restore actually completed;
+    quarantined rows stay quarantined and replay is retried on the next
+    rotation or operator replay
 → on success: drop the snapshot only after projection convergence verifies
+    and quarantined rows have either delivered or returned to the durable
+    capture queue
 ```
+
+Until EverOS provides a complete rotation operation, Avibe keeps the embedding-change guard over existing data and must not falsely report a LanceDB-only rebuild as a full migration. The "old generation stays intact on failure" claim only holds when both (a) EverOS was stopped and capture acceptance paused before snapshotting and (b) the snapshot restore actually completed. An operation journal alone cannot undo already-mutated derived state, and a snapshot taken while EverOS or capture acceptance is still live can omit captures that arrived mid-snapshot.
 
 Until EverOS provides a complete rotation operation, Avibe keeps the embedding-change guard over existing data and must not falsely report a LanceDB-only rebuild as a full migration. The "old generation stays intact on failure" claim only holds when the snapshot restore actually completed; an operation journal alone cannot undo already-mutated derived state.
 
@@ -715,10 +776,18 @@ Suggested definition:
 RecallPolicy
   mode: auto | keyword | vector | hybrid | agentic
   limit: 1..N
+  max_results: 1..N (internal retrieval budget; agentic-only)
   freshness: eventual | bounded | session_overlay
   include_profile: bool
   filters: provider-neutral filter tree
 ```
+
+`limit` and `max_results` are two distinct fields with a defined relationship:
+
+- `limit` is the user-visible cap on items the adapter returns to the caller, regardless of mode.
+- `max_results` is an internal retrieval budget on how many candidates the adapter is allowed to pull from the search backend while satisfying the request; it exists so an `agentic` caller can spend retrieval work without inflating the response size or the LLM input budget. `max_results` is only meaningful when `mode=agentic`; for `keyword|vector|hybrid|auto` it is rejected at the adapter layer.
+- The adapter validates `max_results >= limit` and rejects the request when the relationship is violated. The relationship is one-way: `max_results` may be strictly greater than `limit` (extra candidates feed the reranker and the LLM), but `max_results < limit` is rejected because it cannot satisfy the response contract.
+- The adapter never silently returns more than `limit` items to the caller, never silently returns fewer than `limit` items without an explicit timeout / capability-unavailable result, and never pads results with non-candidate rows to reach `limit`. The same field and the same validation rule apply regardless of whether the call site is the UI, the CLI, or another backend module.
 
 - `mode=auto` only chooses among `keyword/vector/hybrid` and must never implicitly escalate to `agentic`;
 - `mode=keyword/vector/hybrid/agentic` are explicit choices; the caller is responsible for declaring budgets;
@@ -751,7 +820,7 @@ The Avibe-owned `RecallPolicy` must carry, when `agentic` is allowed:
 
 - `timeout_seconds`: required, declared explicitly by the caller; no implicit default; missing or zero is rejected;
 - `max_model_calls`: required, declared explicitly by the caller; no implicit default; missing or zero is rejected;
-- `max_results`: required, declared explicitly by the caller; no implicit default; missing or zero is rejected;
+- `max_results`: required when `agentic` is allowed, declared explicitly by the caller; no implicit default; missing or zero is rejected; relationship to `limit` is fixed by §9.1 (`max_results >= limit`);
 - `cost_budget_tokens`: optional; on exceed, return `capability_unavailable` immediately.
 
 On timeout or capability failure, return an explicit result (`timeout` or `capability_unavailable`) — never mask as a successful hybrid. The plan therefore does not expose a `allow_fallback_to_hybrid` switch on the Avibe-owned `RecallPolicy`; §9.2.4 forbids fallback and §14 requires `capability-unavailable` without fallback. A caller that needs hybrid must declare `mode=hybrid` directly.
