@@ -624,6 +624,19 @@ fingerprint 必须持久化在 Avibe-owned Memory metadata 中，并在每次启
 
 在 EverOS 尚未提供完整 rotation operation 之前，Avibe 保持已有数据上的 embedding change guard，不把 LanceDB-only rebuild 错报为完整迁移。
 
+### 8.4 Rotation 触发入口
+
+Rotation 由 Web UI 触发，CLI 不再单独暴露旋转命令。Web UI 入口形态：
+
+- 默认折叠，仅在 Settings → Memory 高级/危险区域可见；
+- 触发条件：
+
+  1. 检测到 `embedding_semantic_fingerprint` 改变（例如用户切换 embedding 模型、provider 配置变更）时自动浮现"重建"按钮，并标注差异来源；
+  2. 用户在设置中主动选择"重建索引"，需要二次确认（modal 列出将影响的内容、停机时长、cluster centroid 重算说明）；
+- 二次确认后由 §8.3 流程接管；失败时保持旧 generation，不进入"半重建"中间态；
+- 不暴露 CLI 等价入口；运维同事如需直接调用，复用 Web UI 后的内部 `operate` 接口，不增加新的 CLI surface；
+- 该入口只在前端点击可用，不接受来自 chat / agent / API 的远程触发，避免误用。
+
 ## 9. 四类搜索设计
 
 ### 9.1 Avibe-owned 搜索策略
@@ -668,11 +681,13 @@ EverOS DTO、filters DSL 和 response arrays 只存在于 adapter 内部。
 
 Avibe-owned `RecallPolicy` 在允许 `agentic` 时必须携带：
 
-- `timeout_seconds`：默认 30s；
-- `max_model_calls`：默认 4（包含 reranker 步骤与 reflect/merge 等内部步骤）；
-- `max_results`：默认 20；
+- `timeout_seconds`：调用方显式声明；不携带时由 adapter 转发至 EverOS，由 EverOS 默认值兜底；Avibe 不在客户端额外设置默认值；
+- `max_model_calls`：调用方显式声明；同上；
+- `max_results`：调用方显式声明；同上；
 - `cost_budget_tokens`：可选；超过则立即 `capability_unavailable`；
 - `allow_fallback_to_hybrid`：默认 false；超时和 capability 失败返回明确结果，不伪装为 hybrid 成功。
+
+约束：本次方案不引入 Avibe 客户端的默认预算数字，与 EverOS 保持一致；任何后续调整须先在调用方写明预算字段，再由 adapter 透传。Avibe 不在客户端代为赋值、不替 EverOS 做策略选择。
 
 不携带完整预算的 agentic 请求在 adapter 层 fail closed。
 
@@ -1039,8 +1054,14 @@ EverOS 1.2.3 runtime artifact、manifest/checksum 和兼容性验证是独立发
 | in-flight flush 期间新 add | provider generation；或 Avibe session fence | **Avibe session fence**，因为当前 EverOS 不接受 generation ID | watermark 无法强制，settlement 可能串 generation |
 | agentic search 显式启用 | 默认开启；或显式启用 | **显式启用**，受 §9.2.2 预算约束，详见 §9.2.1/§9.2.4 | 普通调用路径被昂贵能力污染 |
 | agentic capability gating | 三 capability 缺失时 fallback；或 capability-unavailable | **capability-unavailable**，不 fallback，详见 §9.2.4 | 静默退化为 hybrid，无法定位能力缺失 |
-| agentic 默认 timeout / max_model_calls / max_results / cost_budget_tokens | 取决于产品 | **30s / 4 / 20 / null**（默认值，§9.2.2） | 在 Phase 3 实现前需产品确认具体数字 |
+| agentic 默认 timeout / max_model_calls / max_results / cost_budget_tokens | Avibe 自定义默认；或与 EverOS 保持一致 | **与 EverOS 保持一致**，Avibe 不在客户端设置默认值；调用方必须显式声明，详见 §9.2.2 | Avibe 默认与 EverOS 默认不一致导致行为漂移 |
+| embedding rotation 触发入口 | CLI 命令；或 Web UI | **Web UI 折叠 + 二次确认**，详见 §8.4 | CLI 入口扩散误用；UI 入口暴露在主路径导致误触 |
 | 第一版是否提供 bounded wait 用户操作 | 是；或仅内部接口 | **仅内部接口**（§5.2） | 用户在 UI 看不到可控等待 |
+
+下列不在本次交付范围：
+
+- 知识库 Markdown 风格定制（schema/style 分层、用户级 / 项目级 config）：不在本次方案交付，后续如需另立计划；
+- CLI 形态的 rotation 命令：与 §8.4 决定一致，CLI 不暴露，等价操作复用 Web UI 后的内部 `operate` 接口。
 
 下列是非阻塞的产品/排期选择，采用推荐默认即可开始前置实现：
 
@@ -1049,7 +1070,7 @@ EverOS 1.2.3 runtime artifact、manifest/checksum 和兼容性验证是独立发
 3. 第一版不提供“立即可检索”的 bounded wait 用户操作，只保留内部接口语义；
 4. 第一版继续只捕获用户消息，不开启 assistant/tool/agent memory；
 5. 已采纳：为 agentic search 配置 reranker，agentic 显式启用并受预算约束；本版不开启 assistant/tool/agent capture，不修改 EverOS；
-6. embedding semantic rotation 初期允许停机，且在 journal/fence 未实现前不开放；
+6. embedding semantic rotation 初期允许停机，入口走 Web UI（详见 §8.4），且在 journal/fence 未实现前不开放；
 7. provider payload diagnostics 继续沿用现有默认开启行为，后续另做隐私决策；
 8. EverOS 1.2.3 artifact 走独立发布轨道；
 9. Cascade permanent data-quality failure 只进入 operator diagnostics，不映射全局 degraded。
