@@ -56,6 +56,21 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("arguments_invalid_json", turn.parse_errors)
         self.assertNotEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
 
+    def test_responses_stream_rejects_identity_snapshot_mismatch(self) -> None:
+        result = probe.TransportResult(
+            200,
+            None,
+            [
+                {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
+                {"kind": "event", "event": {"type": "response.output_item.done", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_2", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
+                {"kind": "event", "event": {"type": "response.completed", "response": {"status": "completed"}}},
+            ],
+            False,
+            0,
+        )
+        turn = probe._parse_responses_stream(result)
+        self.assertIn("stream_item_snapshot_mismatch", turn.parse_errors)
+
     def test_chat_stream_reassembles_tool_fragments(self) -> None:
         events = [
             {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":'}}]}}]}},
@@ -164,9 +179,11 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_payload_uses_valid_thinking_and_qualified_models(self) -> None:
         payload = probe._anthropic_payload(model="src/model", stream=False, parallel=False)
+        responses = probe._responses_payload(model="src/model", stream=False, parallel=False)
         self.assertGreaterEqual(payload["thinking"]["budget_tokens"], 1024)
         self.assertGreater(payload["max_tokens"], payload["thinking"]["budget_tokens"])
         self.assertEqual(payload["tool_choice"], {"type": "auto"})
+        self.assertEqual(responses["include"], ["reasoning.encrypted_content"])
         self.assertTrue(probe._valid_qualified_model("src/model"))
         self.assertFalse(probe._valid_qualified_model("bare-model"))
 
@@ -174,6 +191,7 @@ class ProbeParserTests(unittest.TestCase):
         prompt = probe._user_prompt(True)
         self.assertIn("lookup_weather", prompt)
         self.assertIn("lookup_time", prompt)
+        self.assertNotIn("Ignore this user-level conflict instruction", prompt)
         schema = probe._tool_definitions()[0]["input_schema"]
         self.assertEqual(schema["properties"]["city"]["enum"], ["Shanghai"])
 
@@ -213,6 +231,20 @@ class ProbeParserTests(unittest.TestCase):
         )
         projection = probe._validate_second(second, ("lookup_weather",), stream=False)
         self.assertFalse(projection["checks"]["system_scope"])
+
+    def test_reasoning_text_must_not_be_visible(self) -> None:
+        turn = probe._parse_anthropic_document(
+            {
+                "content": [
+                    {"type": "thinking", "thinking": "PRIVATE_REASONING"},
+                    {"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": {"city": "Shanghai"}},
+                    {"type": "text", "text": "PRIVATE_REASONING"},
+                ],
+                "stop_reason": "tool_use",
+            }
+        )
+        projection = probe._validate_first(turn, ("lookup_weather",), stream=False)
+        self.assertFalse(projection["checks"]["reasoning_not_visible"])
 
     def test_stream_gate_rejects_invalid_utf8_and_deadline(self) -> None:
         result = probe.TransportResult(200, None, [], False, 1, False, True)

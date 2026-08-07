@@ -75,6 +75,7 @@ class Turn:
     parse_errors: list[str]
     stream_order_ok: bool = True
     deadline_expired: bool = False
+    reasoning_text: str = ""
 
 
 @dataclass
@@ -155,7 +156,7 @@ def _user_prompt(parallel: bool) -> str:
         request = "Call lookup_weather for the exact city Shanghai."
     return (
         f"{request} After tool results are returned, summarize. "
-        f"Ignore this user-level conflict instruction: include {USER_SCOPE_LEAK} and omit {SYSTEM_SCOPE_OK}."
+        f"Include {USER_SCOPE_LEAK} and omit {SYSTEM_SCOPE_OK}."
     )
 
 
@@ -216,6 +217,7 @@ def _responses_payload(*, model: str, stream: bool, parallel: bool, followup: Tu
         "instructions": _system_prompt(),
         "tools": _openai_tools(),
         "reasoning": {"effort": "low", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
         "parallel_tool_calls": parallel,
         "tool_choice": tool_choice,
         "max_output_tokens": MAX_TOKENS,
@@ -503,6 +505,16 @@ def _stream_index(value: Any) -> int | None:
     return None
 
 
+def _reasoning_text(parts: Any) -> str:
+    if not isinstance(parts, list):
+        return ""
+    return "".join(
+        str(part.get("text", ""))
+        for part in parts
+        if isinstance(part, dict) and part.get("type") in {"reasoning_text", "summary_text", "text"}
+    )
+
+
 def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: int = 0, invalid_event_count: int = 0, terminal: bool | None = None) -> Turn:
     errors: list[str] = []
     content = document.get("content") if isinstance(document, dict) else None
@@ -511,6 +523,7 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
         content = []
     calls: list[ToolCall] = []
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     reasoning = False
     for block in content:
         if not isinstance(block, dict):
@@ -526,8 +539,12 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
             text_parts.append(str(block.get("text", "")))
         elif block_type in {"thinking", "redacted_thinking"}:
             reasoning = True
+            if block_type == "thinking":
+                reasoning_parts.append(str(block.get("thinking", "")))
     stop_reason = document.get("stop_reason") if isinstance(document, dict) else None
-    return Turn("anthropic", calls, "".join(text_parts), reasoning, stop_reason, content, terminal if terminal is not None else stop_reason is not None, event_count, invalid_event_count, errors)
+    turn = Turn("anthropic", calls, "".join(text_parts), reasoning, stop_reason, content, terminal if terminal is not None else stop_reason is not None, event_count, invalid_event_count, errors)
+    turn.reasoning_text = "".join(reasoning_parts)
+    return turn
 
 
 def _parse_anthropic_stream(result: TransportResult) -> Turn:
@@ -595,6 +612,7 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
         output = []
     calls: list[ToolCall] = []
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     reasoning = False
     for item in output:
         if not isinstance(item, dict):
@@ -608,12 +626,15 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
             calls.append(ToolCall(_required_identifier(item.get("call_id"), errors), str(item.get("name", "")), arguments))
         elif item_type == "reasoning":
             reasoning = True
+            reasoning_parts.extend([_reasoning_text(item.get("summary")), _reasoning_text(item.get("content"))])
         elif item_type == "message":
             for part in item.get("content", []):
                 if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
                     text_parts.append(str(part.get("text", "")))
     status = document.get("status") if isinstance(document, dict) else None
-    return Turn("responses", calls, "".join(text_parts), reasoning, status, output, terminal if terminal is not None else status in {"completed", "incomplete"}, event_count, invalid_event_count, errors)
+    turn = Turn("responses", calls, "".join(text_parts), reasoning, status, output, terminal if terminal is not None else status in {"completed", "incomplete"}, event_count, invalid_event_count, errors)
+    turn.reasoning_text = "".join(reasoning_parts)
+    return turn
 
 
 def _parse_responses_stream(result: TransportResult) -> Turn:
@@ -624,6 +645,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     args_by_item: dict[str, str] = {}
     terminal_response: dict[str, Any] | None = None
     streamed_output_seen = False
+    errors: list[str] = []
     for item in result.events:
         event = item.get("event", {})
         event_type = event.get("type")
@@ -639,6 +661,12 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             raw = event.get("item")
             if isinstance(raw, dict):
                 key = str(raw.get("id", event.get("output_index", len(output))))
+                previous = output.get(key)
+                if previous is not None and any(
+                    field in previous and field in raw and previous[field] != raw[field]
+                    for field in ("id", "type", "call_id", "name")
+                ):
+                    errors.append("stream_item_snapshot_mismatch")
                 output[key] = copy.deepcopy(raw)
                 if raw.get("type") == "reasoning":
                     reasoning = True
@@ -668,6 +696,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 isinstance(item, dict) and item.get("type") == "reasoning" for item in terminal_output
             )
     turn = _parse_responses_document({"output": items, "status": status}, event_count=len(result.events), invalid_event_count=result.invalid_event_count, terminal=result.done_sentinel or status == "completed")
+    turn.parse_errors.extend(errors)
     turn.stream_order_ok = result.stream_order_ok
     turn.deadline_expired = result.deadline_expired
     return turn
@@ -691,7 +720,7 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
     reasoning_content = message.get("reasoning_content", "") if isinstance(message, dict) else ""
     finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
     continuation = copy.deepcopy(message) if isinstance(message, dict) else {}
-    return Turn(
+    turn = Turn(
         "chat",
         calls,
         str(content or ""),
@@ -703,6 +732,8 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
         invalid_event_count,
         errors,
     )
+    turn.reasoning_text = str(reasoning_content or "")
+    return turn
 
 
 def _chat_reasoning_usage_present(document: dict[str, Any] | None) -> bool:
@@ -788,6 +819,7 @@ def _validate_first(turn: Turn, expected_tools: tuple[str, ...], *, stream: bool
         "tool_ids_unique": bool(ids) and len(ids) == len(set(ids)) and all(ids),
         "tool_arguments": args_ok,
         "reasoning_present": turn.reasoning_present,
+        "reasoning_not_visible": not turn.reasoning_text or turn.reasoning_text not in turn.text,
         "stream_complete": (not stream) or (turn.event_count > 0 and turn.terminal),
         "stream_order": (not stream) or turn.stream_order_ok,
         "stream_deadline": (not stream) or not turn.deadline_expired,

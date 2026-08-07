@@ -49,7 +49,9 @@ failure exits non-zero; missing credentials or an unsafe endpoint exits with a
 blocked status before network access.
 
 Anthropic thinking uses the minimum valid manual budget (`1024`) with
-`max_tokens` above that budget. OpenAI Responses uses low reasoning effort.
+`max_tokens` above that budget. OpenAI Responses uses low reasoning effort and
+requests `reasoning.encrypted_content` so stateless follow-ups can carry an
+opaque reasoning item.
 The probe records whether the requested reasoning signal remains observable. For
 Chat, it accepts either explicit `reasoning_content` or a positive standard
 `usage.completion_tokens_details.reasoning_tokens` value; it does not infer
@@ -58,9 +60,11 @@ proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The final
-gate-complete rerun passed all structural checks in all eight cases; the only
-failed checks were the requested reasoning signal in the two OpenAI-to-Anthropic
-directions.
+gate-complete rerun passed the ID/index, lifecycle, system, and reasoning
+visibility checks in all cases where a final answer was emitted; the latest
+Responses-to-Messages parallel follow-up also emitted new tool calls instead of
+a final answer. The requested reasoning signal remained absent in both
+OpenAI-to-Anthropic directions.
 
 ## S4 matrix mapping
 
@@ -76,7 +80,7 @@ success claim.
 | Streaming text | `_request` strict UTF-8 decoding, `_stream_order_ok`, and `stream_complete` |
 | Streaming tool fragments | `_parse_anthropic_stream`, `_parse_responses_stream`, `_parse_chat_stream`, and `_stream_order_ok` index/fragment checks |
 | System prompt | `_system_prompt` plus `_validate_second`: `system_marker` and `system_scope` |
-| Thinking/reasoning | `_anthropic_payload`, `_responses_payload`, `_chat_payload`, and `_validate_first`: `reasoning_present` |
+| Thinking/reasoning | `_anthropic_payload`, `_responses_payload`, `_chat_payload`, and `_validate_first`: `reasoning_present` plus `reasoning_not_visible` |
 | Context length/truncation | `probe.CONTEXT_LENGTH_NOT_VERIFIED` residual; no low-cost context-limit run was included in M0 |
 
 The live evidence in the survey used the owner-provided compatible relay. Direct
