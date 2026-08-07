@@ -732,15 +732,25 @@ acquire maintenance lock
 → replay quarantined `drained_pending_snapshot` rows against the new root
     in their original order; rows that fail to deliver go back to the
     durable capture queue with an explicit `pending_rotation_replay` state
+→ replay acknowledgements do not finalize the row into the existing
+    success-settlement path (`core/memory/store.py:491-500`); the row is
+    marked `delivered_pending_rotation_commit` with the new sidecar's
+    `add_request_id`, the `payload_text` / `payload_attachments` columns
+    stay populated, and the row remains in the durable capture queue
 → verify projection convergence
 → on any post-snapshot failure: stop, restore from the snapshot, mark the
     operation journal as failed at the failing phase, never claim the old
     generation is intact unless the snapshot restore actually completed;
     quarantined rows stay quarantined and replay is retried on the next
-    rotation or operator replay
-→ on success: drop the snapshot only after projection convergence verifies
-    and quarantined rows have either delivered or returned to the durable
-    capture queue
+    rotation or operator replay; `delivered_pending_rotation_commit` rows
+    roll back to `pending_rotation_replay` because their durable copy
+    survived in the snapshot-free queue
+→ on success: only after projection convergence verifies does the rotation
+    journal commit, and only at that point do `delivered_pending_rotation_commit`
+    rows transition through the normal success settlement; the snapshot
+    drops only after both projection convergence verifies and every
+    `delivered_pending_rotation_commit` row has either committed to the
+    normal success path or returned to the durable capture queue
 ```
 
 Until EverOS provides a complete rotation operation, Avibe keeps the embedding-change guard over existing data and must not falsely report a LanceDB-only rebuild as a full migration. The "old generation stays intact on failure" claim only holds when both (a) EverOS was stopped and capture acceptance paused before snapshotting and (b) the snapshot restore actually completed. An operation journal alone cannot undo already-mutated derived state, and a snapshot taken while EverOS or capture acceptance is still live can omit captures that arrived mid-snapshot.
@@ -784,10 +794,10 @@ RecallPolicy
 
 `limit` and `max_results` are two distinct fields with a defined relationship:
 
-- `limit` is the user-visible cap on items the adapter returns to the caller, regardless of mode.
+- `limit` is an **upper bound**, not a required count. It caps how many items the adapter will return to the caller, regardless of mode. A successful query whose underlying store holds fewer than `limit` matching records — including an empty memory store — returns the available short result with the ordinary success outcome. The adapter does not pad, fabricate, or repeat rows to reach `limit`, and it does not report `timeout` or `capability_unavailable` solely because the candidate count is short.
 - `max_results` is an internal retrieval budget on how many candidates the adapter is allowed to pull from the search backend while satisfying the request; it exists so an `agentic` caller can spend retrieval work without inflating the response size or the LLM input budget. `max_results` is only meaningful when `mode=agentic`; for `keyword|vector|hybrid|auto` it is rejected at the adapter layer.
-- The adapter validates `max_results >= limit` and rejects the request when the relationship is violated. The relationship is one-way: `max_results` may be strictly greater than `limit` (extra candidates feed the reranker and the LLM), but `max_results < limit` is rejected because it cannot satisfy the response contract.
-- The adapter never silently returns more than `limit` items to the caller, never silently returns fewer than `limit` items without an explicit timeout / capability-unavailable result, and never pads results with non-candidate rows to reach `limit`. The same field and the same validation rule apply regardless of whether the call site is the UI, the CLI, or another backend module.
+- The adapter validates `max_results >= limit` and rejects the request when the relationship is violated. The relationship is one-way: `max_results` may be strictly greater than `limit` (extra candidates feed the reranker and the LLM), but `max_results < limit` is rejected because it cannot satisfy the upper-bound contract on either side.
+- The adapter never silently returns more than `limit` items to the caller, never silently downgrades an honest short result into a timeout or capability-unavailable outcome, and never pads results with non-candidate rows to reach `limit`. The same field, the same validation rule, and the same short-result semantics apply regardless of whether the call site is the UI, the CLI, or another backend module.
 
 - `mode=auto` only chooses among `keyword/vector/hybrid` and must never implicitly escalate to `agentic`;
 - `mode=keyword/vector/hybrid/agentic` are explicit choices; the caller is responsible for declaring budgets;
@@ -980,6 +990,13 @@ Provider-call detail is kept, but the wording must be "recorded provider calls",
 - Copy operations only copy projected and scrubbed content.
 
 For operator-facing call-detail panels the projection must explicitly redact the conversation body (prompt text, response text, tool result text). Secret and path scrubbing plus byte bounds do not remove the message body, and this plan's security invariant requires that bodies are never exposed via the page or any future Avibe Cloud surface. The body-redacted projection is what the page renders; the underlying recorder may keep the body in its private store for debugging but must project through a body-redacted view before returning to the page or any UI. Existing `core/memory/everos_insight/reader.py` must therefore expose two views: a full view (internal-only, never returned to UI) and a body-redacted view (returned to the page and any external consumer).
+
+The same rule applies to the **memcell preview** rendered in the processing-record list. `_memcell_preview` (`core/memory/everos_insight/reader.py:1289-1328`) currently projects raw user text after only secret / path scrubbing, and `memory_admin_log_access` is granted to every verified UI key (`core/internal_server.py:995-1003`), which means a Cloud browser session opening this page can read conversation text that does not belong to that session's principal. The list-read path therefore must satisfy both invariants:
+
+1. **Body-redacted preview.** The list-read view is a body-redacted projection. The recorder may keep `text` / `content` / `tool result text` in its private store, but the row returned to the page must replace any conversation body with the same `[redacted]` marker used by the provider-call detail projection; metadata that is not a conversation body (timestamps, message-id, role, sender-id, item-count, capability tags, provider-call links) stays visible so the row remains usable as a processing record.
+2. **Principal-scoped list reads.** The list endpoint accepts a `principal_id` filter, defaults the filter to the requesting principal's verified UI key (or CLI scope), and refuses to render a memcell whose `sender_ids_json` does not contain that principal. The full internal view (un-redacted, all principals) is reachable only through an explicit admin capability that is not granted by `memory_admin_log_access`; the Cloud browser session therefore cannot enumerate memcells belonging to other principals even if it bypasses the redacted projection.
+
+Both invariants are checked at the adapter boundary before any row leaves `core/memory/everos_insight/reader.py`. The page renders body-redacted, principal-scoped rows only; the internal recorder is the only consumer of the full view.
 
 ### 11.5 Target Processing-Record Page Structure
 
