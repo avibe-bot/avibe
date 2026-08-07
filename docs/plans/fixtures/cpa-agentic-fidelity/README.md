@@ -60,16 +60,15 @@ proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The
-latest gate-complete rerun exercised all eight cases with no fallback: seven
-completed with HTTP 200 and one Responses-to-Messages single request ended in a
-local loopback transport failure, which is excluded from semantic evidence.
-Tool-call structure, stream lifecycle, fragments, UTF-8/JSON, and content-type
-checks passed in the successful cases. Anthropic thinking was present but
-lacked its required signature in the Messages-to-Responses single case and
-both Messages-to-Chat cases; the corrected Responses/Chat reasoning parsers
-still found no requested signal in the successful OpenAI-to-Anthropic cases.
-Exact tool-result tuples failed every latest single final turn and the
-Responses-to-Messages parallel final turn; the other parallel cases passed.
+latest gate-complete rerun exercised all eight cases with HTTP 200 and no
+fallback. Tool-call structure, stream lifecycle, fragments, UTF-8/JSON, and
+content-type checks passed. Anthropic thinking was present but lacked its
+required signature in the Messages-to-Responses single case and both
+Messages-to-Chat first responses; the corrected Responses/Chat reasoning
+parsers still found no requested signal in both OpenAI-to-Anthropic directions.
+Exact tool-result tuples failed Messages-to-Responses single, both
+Responses-to-Messages cases, and Messages-to-Chat parallel; the other final
+turns passed that gate.
 
 ## S4 matrix mapping
 
