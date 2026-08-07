@@ -127,7 +127,7 @@ Avibe should consume EverOS's four search modes through its own policy surface:
 
 Do not leak EverOS DTOs upward. Avibe exposes only provider-neutral policy; the adapter maps to EverOS.
 
-Whether the Profile target adapter switches to EverOS `/get` is decided by the profile-scope decision (decided: user-global — see §14). Until that switch ships, the current search-literal `"profile"` workaround stays. EverOS `/get` today reads a single profile row keyed by owner with no reliable project filter; without modifying EverOS, Avibe cannot promise project-scoped profile isolation. Until implementation, profile is user-global (see §9.3).
+The Profile target adapter uses the owner-keyed EverOS `/get(memory_type="profile")` path because profile scope is user-global (§14); the search-literal `"profile"` workaround stays as a fallback for hosts that prefer it. EverOS `/get` reads a single profile row keyed by owner with no reliable project filter, but that limitation is moot under the user-global scope (see §9.3).
 
 The current session's unprocessed messages can serve as short-term context, but only bound to Avibe's trusted canonical current session. Arbitrary `filters.session_id` from the caller must never be forwarded as an overlay query. The overlay must make its source explicit — EverOS `unprocessed_buffer` — and must not represent Avibe outbox content or Markdown written but not yet Cascade-projected.
 
@@ -382,17 +382,38 @@ Without caller message identity, flush operation/generation identity, or receipt
 
 ```text
 manual_required detected
-  → durable record: session, generation, fence_epoch, operation_id, last_known_state
-  → operator runs an audited manual resolution through `operate` (Phase 4):
-       case A — confirmed committed via out-of-band evidence:
-           advance watermark to the highest observed acked add;
-           release fence on the same generation; resume normal flow.
-       case B — confirmed not_committed:
-           roll the unacked add back to the outbox; release fence; allow retry.
-       case C — inconclusive but stale (> 24h or after explicit operator decision):
-           record operator decision in the journal; advance watermark conservatively;
-           release fence; do not silently auto-replay.
-  → resolution writes an audit row: actor, decision, evidence pointer, generation advanced, watermark advanced
+  → durable record: session, generation, fence_epoch, operation_id, last_known_state,
+                    operation_kind (add | flush), last_observed_outcome
+  → operator runs an audited manual resolution through `operate` (Phase 4).
+    Branches are split per operation_kind so an ambiguous /flush is settled,
+    not just an ambiguous /add:
+
+    For operation_kind = add:
+      case A — confirmed committed via out-of-band evidence:
+          advance watermark to the highest observed acked add;
+          release fence on the same generation; resume normal flow.
+      case B — confirmed not_committed:
+          roll the unacked add back to the outbox; release fence; allow retry.
+      case C — inconclusive but stale (> 24h or after explicit operator decision):
+          record operator decision in the journal; advance watermark conservatively;
+          release fence; do not silently auto-replay.
+
+    For operation_kind = flush:
+      case D — confirmed flush committed (Markdown on disk, cascade-pending OK):
+          mark flush_state=settled on the same generation;
+          advance watermark to the post-flush boundary;
+          release fence; resume normal flow.
+      case E — confirmed flush not committed:
+          restore the generation's flush_state to due (or pre-due if boundary
+              must be re-detected);
+          leave add rows in place; release fence; allow retry.
+      case F — inconclusive but stale:
+          record operator decision; mark flush_state=settled_with_caveat;
+          advance watermark conservatively; release fence;
+          do not silently auto-replay.
+
+  → resolution writes an audit row: actor, decision, evidence pointer,
+    generation advanced, watermark advanced, flush_state advanced
   → page surfaces the audit row in the processing-record page so manual_required is observable
 ```
 
@@ -612,6 +633,16 @@ The fingerprint must be persisted in Avibe-owned Memory metadata and compared ag
 
 Include only factors that actually change the vector space; for example, an equivalent proxy base-URL change must not force a rebuild on the URL string alone, but unprovable equivalence must fail closed.
 
+#### 8.1.1 Fingerprint Bootstrap for Existing Roots
+
+Enforcement of the semantic fingerprint lands behind a one-time migration so existing installations do not fail closed at startup. Three cases:
+
+1. **Legacy root whose guarded persisted embedding configuration matches the current candidate and has no recorded configuration-change marker.** Seed the fingerprint from the guarded persisted embedding configuration (`provider`, model identity/revision, output dimension, normalization, truncation, vector/index schema revision at the time the root was created). The seed is durable in `memory_meta` and treated as equivalent to a freshly computed fingerprint until the next configuration change.
+2. **Legacy root whose configuration-change marker is set or whose persisted embedding configuration no longer matches the candidate.** Treat as an unknown fingerprint; refuse to start and require the operator to run the audited manual resolution path (Phase 4) before retry. Do not silently reseed — this would silently accept a vector-space mismatch.
+3. **Newly created or freshly empty root.** Compute the fingerprint at activation time against the candidate and persist before the first `/add`.
+
+The migration is idempotent and runs once at startup when `memory_meta` lacks the fingerprint row. After bootstrap, the fail-closed rule in §8.1 applies normally; cases 1 and 3 transition into the same steady-state as the rest of §8.
+
 ### 8.2 Key-Only Rotation
 
 ```text
@@ -628,9 +659,15 @@ Does not delete Markdown, SQLite, or LanceDB; does not trigger a full rebuild.
 
 ### 8.3 Full Semantic Rotation
 
+The first version is offline-stoppage with a restorable snapshot. The sequence below always takes a verified snapshot of the current state before mutating any derived data, so a failed rotation can roll back to that snapshot instead of leaving the old generation "half-mutated". The first version does not promise atomic cutover or blue-green rebuild; those are evaluated later.
+
 ```text
 acquire maintenance lock
 → fence capture delivery / provider calls
+→ take a restorable snapshot of: Markdown tree, system.db (unprocessed_buffer
+    + memcell + md_change_state), ome.db, LanceDB business tables, cluster
+    centroids, the current semantic embedding fingerprint, and Avibe outbox
+→ verify snapshot integrity (checksum, file presence, sqlite backup API)
 → save and verify current root
 → stop EverOS
 → preserve Markdown, unprocessed_buffer, memcell, Avibe outbox
@@ -641,11 +678,13 @@ acquire maintenance lock
 → write new fingerprint
 → start new sidecar
 → verify projection convergence
+→ on any post-snapshot failure: stop, restore from the snapshot, mark the
+    operation journal as failed at the failing phase, never claim the old
+    generation is intact unless the snapshot restore actually completed
+→ on success: drop the snapshot only after projection convergence verifies
 ```
 
-The first version allows offline-stoppage rebuild. If a stronger SLA later emerges, consider shadow index / blue-green generation.
-
-Until EverOS provides a complete rotation operation, Avibe keeps the embedding-change guard over existing data and must not falsely report a LanceDB-only rebuild as a full migration.
+Until EverOS provides a complete rotation operation, Avibe keeps the embedding-change guard over existing data and must not falsely report a LanceDB-only rebuild as a full migration. The "old generation stays intact on failure" claim only holds when the snapshot restore actually completed; an operation journal alone cannot undo already-mutated derived state.
 
 ### 8.4 Rotation Entry Point
 
@@ -713,8 +752,9 @@ The Avibe-owned `RecallPolicy` must carry, when `agentic` is allowed:
 - `timeout_seconds`: required, declared explicitly by the caller; no implicit default; missing or zero is rejected;
 - `max_model_calls`: required, declared explicitly by the caller; no implicit default; missing or zero is rejected;
 - `max_results`: required, declared explicitly by the caller; no implicit default; missing or zero is rejected;
-- `cost_budget_tokens`: optional; on exceed, return `capability_unavailable` immediately;
-- `allow_fallback_to_hybrid`: default false; on timeout or capability failure, return an explicit result and never mask as a successful hybrid.
+- `cost_budget_tokens`: optional; on exceed, return `capability_unavailable` immediately.
+
+On timeout or capability failure, return an explicit result (`timeout` or `capability_unavailable`) — never mask as a successful hybrid. The plan therefore does not expose a `allow_fallback_to_hybrid` switch on the Avibe-owned `RecallPolicy`; §9.2.4 forbids fallback and §14 requires `capability-unavailable` without fallback. A caller that needs hybrid must declare `mode=hybrid` directly.
 
 Single contract: any missing or zero budget field causes the adapter to fail closed and reject the request before forwarding to EverOS. The plan does not introduce Avibe client-side default budget numbers and does not silently forward to EverOS defaults, so behavior is the same whether the call site is the UI, the CLI, or another backend module. Any later adjustment must first express the budget field at the call site and keep the fail-closed rule intact.
 
@@ -772,7 +812,7 @@ When a request with `mode=agentic` arrives:
 
 ### 9.3 Profile and Recent Messages
 
-- Profile is decided as user-global (see §14); whether to switch to EverOS `/get(memory_type="profile")` is an implementation choice once the project-isolation limitation is closed. Until then the current search-literal `"profile"` workaround stays compatible;
+- Profile is decided as user-global (see §14). Phase 3 schedules the owner-keyed `/get(memory_type="profile")` adapter path; the search-literal `"profile"` workaround remains as a fallback for hosts that prefer it. The project-isolation limitation is no longer a precondition because profile scope is user-global;
 - Relevance queries use `/search`;
 - The current session's unprocessed messages use the EverOS `unprocessed_messages` overlay;
 - Results distinguish `source=unprocessed` from `source=extracted`;
