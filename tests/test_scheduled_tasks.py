@@ -9121,6 +9121,7 @@ def test_drain_requests_reserves_watch_create_per_run_before_session_validation(
             "trigger_kind": "watch",
             "agent_name": "release-reviewer",
             "metadata": {},
+            "user_context": None,
             "_capture_dispatch_result": True,
         }
     ]
@@ -9239,6 +9240,8 @@ def test_drain_requests_records_scheduled_create_per_run_reserved_session(tmp_pa
             "task_id": task.id,
             "trigger_kind": "scheduled",
             "agent_name": "release-reviewer",
+            "metadata": {},
+            "user_context": None,
             "_capture_dispatch_result": True,
         }
     ]
@@ -9345,6 +9348,7 @@ def test_claimed_request_keeps_agent_identity_when_archive_lands_after_refresh(
                 "trigger_kind": "hook",
                 "agent_name": "pm",
                 "metadata": {},
+                "user_context": None,
                 "_capture_dispatch_result": True,
                 "agent_id": agent.id,
             }

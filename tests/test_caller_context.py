@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from core.caller_context import (
@@ -7,6 +9,8 @@ from core.caller_context import (
     AVIBE_CALLER_CHANNEL_ID_ENV,
     AVIBE_CALLER_MESSAGE_ID_ENV,
     AVIBE_CALLER_PLATFORM_ENV,
+    AVIBE_CALLER_REMOTE_ENV,
+    AVIBE_CALLER_RESOURCE_CONTEXT_ENV,
     AVIBE_CALLER_SESSION_KEY_ENV,
     AVIBE_CALLER_SOURCE_ENV,
     AVIBE_CALLER_USER_ID_ENV,
@@ -16,6 +20,7 @@ from core.caller_context import (
     AVIBE_SESSION_ID_ENV,
     caller_context_from_env,
     caller_context_from_platform_payload,
+    caller_resource_user_context,
 )
 
 
@@ -441,6 +446,73 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
         session_stable_only=True,
     )
     assert set(full) - set(scoped) == {AVIBE_CALLER_USER_ID_ENV, AVIBE_CALLER_MESSAGE_ID_ENV}
+
+
+def test_remote_workbench_caller_context_survives_env_and_claude_stable_form() -> None:
+    from modules.im import MessageContext
+
+    resource_context = {
+        "sub": "user-1",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "organization_group",
+        "vibe_organization_id": "org-1",
+        "vibe_group_ids": ["group-engineering"],
+        "claims_issued_at": 1_900_000_000,
+        "vibe_instance_authorization_revision": 41,
+        "authorization_expires_at": 1_900_043_200,
+    }
+    payload = _agent_turn_payload(
+        {
+            "message_metadata": {"resource_user_context": resource_context},
+        }
+    )
+    context = caller_context_from_platform_payload(
+        payload,
+        message=MessageContext(
+            user_id="remote:user-1",
+            channel_id="proj-1",
+            platform="avibe",
+        ),
+        fallback_platform="avibe",
+    )
+
+    assert context is not None and context.is_remote is True
+    stable = context.session_stable()
+    assert stable.user_id is None
+    assert caller_resource_user_context(stable) == resource_context
+    env = stable.to_env()
+    assert env[AVIBE_CALLER_REMOTE_ENV] == "1"
+    assert json.loads(env[AVIBE_CALLER_RESOURCE_CONTEXT_ENV]) == resource_context
+    restored = caller_context_from_env(env)
+    assert restored is not None
+    assert caller_resource_user_context(restored) == resource_context
+
+
+def test_remote_workbench_caller_without_matching_snapshot_fails_closed() -> None:
+    from modules.im import MessageContext
+
+    context = caller_context_from_platform_payload(
+        _agent_turn_payload(
+            {
+                "message_metadata": {
+                    "resource_user_context": {
+                        "sub": "different-user",
+                        "vibe_instance_role": "editor",
+                        "vibe_instance_access_source": "email",
+                    }
+                }
+            }
+        ),
+        message=MessageContext(
+            user_id="remote:user-1",
+            channel_id="proj-1",
+            platform="avibe",
+        ),
+        fallback_platform="avibe",
+    )
+
+    assert context is not None and context.is_remote is True
+    assert caller_resource_user_context(context) == {}
 
 
 def test_a_dm_loses_nothing_to_the_session_scoped_form() -> None:

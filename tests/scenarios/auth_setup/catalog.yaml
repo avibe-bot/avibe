@@ -141,6 +141,76 @@ scenarios:
     layer: scenario
     backend: claude
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_startup_cleanup_failure_emits_reset_path
+  - id: AUTH-SETUP-301
+    name: Explicit Organization management sign-in starts an interactive handoff
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_explicit_management_sign_in_starts_interactive_handoff
+  - id: AUTH-SETUP-302
+    name: Silent Organization reauthorization is attempted only once
+    status: covered
+    kind: retry
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_silent_reauthorization_stops_after_login_required
+  - id: AUTH-SETUP-303
+    name: Explicit Organization logout suppresses silent reauthorization
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_logout_suppresses_silent_reauthorization
+  - id: AUTH-SETUP-304
+    name: Organization management subject mismatch is terminal
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_subject_mismatch_is_terminal
+  - id: AUTH-SETUP-305
+    name: Invalid Organization callback state code or token requires manual sign-in
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_invalid_callback_token_requires_manual_sign_in
+  - id: AUTH-SETUP-306
+    name: Missing Cloud session or login_required requires explicit sign-in
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_silent_reauthorization_stops_after_login_required
+  - id: AUTH-SETUP-307
+    name: Remote Organization callback remains bound to the same subject
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_remote_callback_keeps_the_bound_subject
+  - id: AUTH-SETUP-308
+    name: Trusted loopback Organization login establishes the first subject
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_trusted_loopback_flow_can_establish_the_first_subject
+  - id: AUTH-SETUP-309
+    name: Unbound trusted loopback cannot start silent Organization authorization
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_unbound_loopback_requires_interactive_sign_in
+  - id: AUTH-SETUP-310
+    name: Organization subject mismatch can re-enter explicit authorization with a clean return path
+    status: covered
+    kind: retry
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_subject_mismatch_can_reenter_with_clean_return_path
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered

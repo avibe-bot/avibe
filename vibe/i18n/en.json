@@ -12,15 +12,7 @@
     "title": "Fork {title}",
     "titleUntitled": "Fork"
   },
-  "show": {
-    "event": {
-      "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
-      "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
-      "idConflict": "This Show event ID is already bound to different event contents."
-    }
-  },
   "harness": {
-    "agentInitiatedContinuation": "Agent-initiated continuation",
     "promptEcho": {
       "scheduled": "⏰ Scheduled task",
       "watch": "👀 Watch",
@@ -43,6 +35,13 @@
         "invalidCommand": "The watch worker command is invalid."
       }
     },
+    "queueCoalesced": {
+      "summary": "[Avibe Harness] The same watch/task callback fired {count} times within a rolling {window}-second window. The queued callbacks were coalesced into this single Agent turn.",
+      "messagesLabel": "Coalesced callback messages:",
+      "latestLabel": "Latest callback message after {additional} additional trigger(s):",
+      "burstHint": "This callback source is firing frequently. Inspect the related watch/task and pause, remove, or update it if it is looping."
+    },
+    "agentInitiatedContinuation": "Agent-initiated continuation",
     "command": {
       "workdirMissing": "Working directory does not exist: {cwd}",
       "supervisorExitedDuringStartup": "Command supervisor exited during startup.",
@@ -62,12 +61,6 @@
     },
     "task": {
       "resultNotRecorded": "The result of this run could not be recorded: the task was reclaimed, repointed or removed while it was running, so its stored state is unchanged."
-    },
-    "queueCoalesced": {
-      "summary": "[Avibe Harness] The same watch/task callback fired {count} times within a rolling {window}-second window. The queued callbacks were coalesced into this single Agent turn.",
-      "messagesLabel": "Coalesced callback messages:",
-      "latestLabel": "Latest callback message after {additional} additional trigger(s):",
-      "burstHint": "This callback source is firing frequently. Inspect the related watch/task and pause, remove, or update it if it is looping."
     },
     "run": {
       "interrupted": {
@@ -115,6 +108,7 @@
       "workspaceSession": "Workspace notifications",
       "workspaceSessionProtected": "This session receives Avibe's workspace failure notifications and cannot be archived or modified.",
       "workspaceSessionReadOnly": "This session only receives Avibe's workspace failure notifications — it does not accept messages.",
+      "remoteExecutionDisabled": "Remote access is read-only for Agent, Harness, terminal, and file execution in this release. Open Avibe on the machine to run this action.",
       "failureClass": "Failure class: {failureClass}",
       "lastSucceeded": "Last succeeded: {when}",
       "origin": "Created in: {origin}",
@@ -198,6 +192,54 @@
     }
   },
   "error": {
+    "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
+    "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
+    "clearSession": "Error clearing session: {error}",
+    "settingsFailed": "Failed to open settings. Please try again.",
+    "cwdChangeFailed": "Failed to open directory change dialog. Please try again.",
+    "resumeFailed": "Failed to open resume dialog. Please try again.",
+    "stopFailed": "Error sending stop command: {error}",
+    "cwdSetFailed": "Error setting working directory: {error}",
+    "cwdCreateFailed": "Cannot create directory: {error}",
+    "cwdNotDirectory": "Path exists but is not a directory: `{path}`",
+    "cwdGetFailed": "Error getting working directory: {error}",
+    "showSettings": "Error showing settings: {error}",
+    "toggleSettingFailed": "Failed to toggle setting: {error}",
+    "messageTypesInfoFailed": "Error showing message types info",
+    "helpInfoFailed": "Error showing help information",
+    "routingFailed": "Error showing routing settings: {error}",
+    "routingModalFailed": "Failed to open agent settings. Please try again.",
+    "settingsUpdateFailed": "Failed to update settings: {error}",
+    "languageUpdateFailed": "Language update failed. Please try again.",
+    "resumeSubmitFailed": "Failed to resume session: {error}",
+    "routingUpdateFailed": "Failed to update routing: {error}",
+    "updateUnavailable": "Update action is not available right now.",
+    "unknownAction": "Unknown action: {action}",
+    "processActionFailed": "Error processing action: {error}",
+    "agentNotConfigured": "Agent `{agent}` uses the {backend} backend, but that backend is not available. {hint}",
+    "agentNotConfiguredHint": {
+      "opencode": "Enable the OpenCode backend, install the OpenCode CLI, or set OPENCODE_CLI_PATH.",
+      "claude": "Enable the Claude Code backend and make sure the Claude Code CLI path is configured.",
+      "codex": "Enable the Codex backend, install the Codex CLI, or set CODEX_CLI_PATH.",
+      "generic": "Choose an enabled Agent in Agent settings, or enable the backend this Agent uses."
+    },
+    "processMessageFailed": "Error: {error}",
+    "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
+    "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
+    "sessionConnectionLost": "Connection to Claude was lost. Please try your message again.",
+    "claudeProcessSignal": "{signal} (signal {number})",
+    "claudeProcessExitCode": "exit code {code}",
+    "claudeProcessTerminated": "Claude Code process terminated ({reason}); the session was reset. Please try your message again.",
+    "claudeSessionNotFound": "Claude Code could not find the historical session `{sessionId}` in the current working directory:\n`{path}`\n\nClaude Code sessions are scoped to a working directory. This usually means the conversation was resumed after switching workdirs, or the local Claude Code session data changed. Switch back to the original working directory to continue that session, or start a new Claude Code session from the current directory.",
+    "sessionGeneric": "An error occurred: {error}",
+    "resultAttachmentUploadFailed": "Failed to upload attachment. Want me to split the result into multiple messages?",
+    "resultDeliveryFailed": "⚠️ Message delivery failed. The content may be too long or incompatible. Ask me to resend it.",
+    "fileAttachmentUploadFailedWithLink": "⚠️ I could not deliver {filename} as a WeChat file. You can download it from Avibe after signing in if prompted:\n{url}",
+    "fileAttachmentUploadFailedNoLink": "⚠️ I could not deliver {filename} as a WeChat file. Please ask me to resend it or use another channel.",
+    "opencodeQuestionToolDisabled": "OpenCode asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
+    "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
+    "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
+    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
     "settingsConflict": {
       "message": "Agent routing changed while these settings were open.",
       "hint": "Reload the settings and apply your change again."
@@ -255,55 +297,7 @@
         "hint": "Choose an Agent name without path separators."
       }
     },
-    "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
-    "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
-    "clearSession": "Error clearing session: {error}",
-    "settingsFailed": "Failed to open settings. Please try again.",
-    "cwdChangeFailed": "Failed to open directory change dialog. Please try again.",
-    "resumeFailed": "Failed to open resume dialog. Please try again.",
-    "stopFailed": "Error sending stop command: {error}",
-    "cwdSetFailed": "Error setting working directory: {error}",
-    "cwdCreateFailed": "Cannot create directory: {error}",
-    "cwdNotDirectory": "Path exists but is not a directory: `{path}`",
-    "cwdGetFailed": "Error getting working directory: {error}",
-    "showSettings": "Error showing settings: {error}",
-    "toggleSettingFailed": "Failed to toggle setting: {error}",
-    "messageTypesInfoFailed": "Error showing message types info",
-    "helpInfoFailed": "Error showing help information",
-    "routingFailed": "Error showing routing settings: {error}",
-    "routingModalFailed": "Failed to open agent settings. Please try again.",
-    "settingsUpdateFailed": "Failed to update settings: {error}",
-    "languageUpdateFailed": "Language update failed. Please try again.",
-    "resumeSubmitFailed": "Failed to resume session: {error}",
-    "routingUpdateFailed": "Failed to update routing: {error}",
-    "updateUnavailable": "Update action is not available right now.",
-    "unknownAction": "Unknown action: {action}",
-    "processActionFailed": "Error processing action: {error}",
-    "agentNotConfigured": "Agent `{agent}` uses the {backend} backend, but that backend is not available. {hint}",
-    "agentNotConfiguredHint": {
-      "opencode": "Enable the OpenCode backend, install the OpenCode CLI, or set OPENCODE_CLI_PATH.",
-      "claude": "Enable the Claude Code backend and make sure the Claude Code CLI path is configured.",
-      "codex": "Enable the Codex backend, install the Codex CLI, or set CODEX_CLI_PATH.",
-      "generic": "Choose an enabled Agent in Agent settings, or enable the backend this Agent uses."
-    },
-    "processMessageFailed": "Error: {error}",
-    "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
-    "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
-    "sessionConnectionLost": "Connection to Claude was lost. Please try your message again.",
-    "claudeProcessSignal": "{signal} (signal {number})",
-    "claudeProcessExitCode": "exit code {code}",
-    "claudeProcessTerminated": "Claude Code process terminated ({reason}); the session was reset. Please try your message again.",
     "claudeCredentialTypeInvalid": "Choose either API key or auth token for the Claude Code credential.",
-    "claudeSessionNotFound": "Claude Code could not find the historical session `{sessionId}` in the current working directory:\n`{path}`\n\nClaude Code sessions are scoped to a working directory. This usually means the conversation was resumed after switching workdirs, or the local Claude Code session data changed. Switch back to the original working directory to continue that session, or start a new Claude Code session from the current directory.",
-    "sessionGeneric": "An error occurred: {error}",
-    "resultAttachmentUploadFailed": "Failed to upload attachment. Want me to split the result into multiple messages?",
-    "resultDeliveryFailed": "⚠️ Message delivery failed. The content may be too long or incompatible. Ask me to resend it.",
-    "fileAttachmentUploadFailedWithLink": "⚠️ I could not deliver {filename} as a WeChat file. You can download it from Avibe after signing in if prompted:\n{url}",
-    "fileAttachmentUploadFailedNoLink": "⚠️ I could not deliver {filename} as a WeChat file. Please ask me to resend it or use another channel.",
-    "opencodeQuestionToolDisabled": "OpenCode asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
-    "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
-    "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
-    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
     "opencodeBackendError": "OpenCode error: {error}",
     "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted."
   },
@@ -552,7 +546,6 @@
       "claudeMethodFallback": "Choose a Claude sign-in source with `/setup claude claudeai` or `/setup claude console`.",
       "resetPrompt": "{backend} looks logged out. Use the button below to restart OAuth setup.",
       "resetPromptPlain": "{backend} looks logged out. Run `/setup {backend}` to restart OAuth setup.",
-      "apiKeyRecoveryPrompt": "{backend} rejected the configured API key. Check the API key and Base URL in Settings, save them, and retry.",
       "manualFallback": "If inline buttons are unavailable, run `/setup {backend}`.",
       "codexInstructions": "Codex setup started.\n\n1. Open this URL in your browser:\n{url}\n\n2. Enter this one-time code:\n`{code}`\n\nThe bot will keep waiting here and confirm when login finishes.",
       "claudeInstructions": "Claude setup started.\n\nOpen this URL in your browser and finish the login flow:\n{url}\n\nWhen the browser callback page shows the final `authorizationCode#state` value, send it back directly in this chat.",
@@ -564,7 +557,8 @@
       "timedOut": "{backend} setup timed out. Start setup again to retry.",
       "success": "{backend} login is active again.",
       "failed": "{backend} setup failed: {detail}",
-      "unknownFailure": "Unknown login failure."
+      "unknownFailure": "Unknown login failure.",
+      "apiKeyRecoveryPrompt": "{backend} rejected the configured API key. Check the API key and Base URL in Settings, save them, and retry."
     },
     "stop": {
       "noActiveSession": "No active session to stop for this channel."
@@ -639,6 +633,25 @@
   "permission": {
     "adminOnly": "🔒 Only admins can change bot settings. Contact an admin if you need access."
   },
+  "memory": {
+    "cli": {
+      "error": "Memory {operation} failed: {code}",
+      "status": "Memory status: {state}",
+      "counts": "Syncing: {syncing}; succeeded: {succeeded}; result unknown: {unknown}; failed: {failed}; dead: {dead}; missed: {missed}",
+      "fault": {
+        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
+        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
+      },
+      "empty": "No memory items found.",
+      "remembered": "Memory queued.",
+      "partialRestartWarning": "Memory Settings content is unavailable: the Web UI restarted while the service kept running,\n  and their shared Memory proof exists only inside the running processes.\n  Run 'vibe stop' and then 'vibe' to restart both together."
+    },
+    "alert": {
+      "credential": "Memory processing paused at {occurred_at}: the configured model endpoint is unavailable. Check API key balance and permissions. Queued captures: {queued}.",
+      "engine": "Memory processing paused at {occurred_at}: the Memory engine reported an internal error. Try repairing the Memory runtime. Queued captures: {queued}.",
+      "recovered": "Memory processing recovered at {occurred_at}. Queued captures: {queued}."
+    }
+  },
   "language": {
     "systemDefault": "(System Default)",
     "en": "English",
@@ -676,7 +689,7 @@
       "flow_not_found": "Authorization flow not found.",
       "flow_expired": "Authorization flow expired.",
       "discovery_failed": "Could not validate or discover this source.",
-      "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
+      "invalid_priority_order": "Priority must include every source exactly once.",
       "mapping_target_unavailable": "The selected model is unavailable for this backend.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
       "engine_down": "The local Model Hub runtime is unavailable.",
@@ -686,18 +699,15 @@
       "upstream_protocol_error": "The upstream response did not match the expected protocol.",
       "upstream_request_invalid": "The upstream service rejected the request.",
       "upstream_unauthorized": "The upstream service rejected authorization after refresh.",
-      "upstream_error": "The upstream service returned an error."
+      "upstream_error": "The upstream service returned an error.",
+      "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source."
     },
     "events": {
       "sourceFallback": "source",
       "switch": "{from_source}: {reason} -> switched to {to_source}",
       "cooldown": "{from_source}: {reason}; cooling down",
       "recover": "{to_source}: recovered and available",
-      "skip": "{from_source}: {reason}; skipped",
-      "mapping_applied": "{from_source} -> {model}: model mapping applied",
-      "channel_switch": "{from_source}: supply channel changed",
-      "needs_action": "{from_source}: {reason}; action required",
-      "supply_interrupted": "{model}: {reason}; model supply interrupted",
+      "status": "{from_source}: {reason}",
       "reason": {
         "quota_exhausted": "quota exhausted",
         "rate_limited": "rate limited",
@@ -715,7 +725,12 @@
         "no_enabled_source": "no source is enabled",
         "no_eligible_source": "no source is eligible",
         "model_unsupported": "no source supports this model"
-      }
+      },
+      "skip": "{from_source}: {reason}; skipped",
+      "mapping_applied": "{from_source} -> {model}: model mapping applied",
+      "channel_switch": "{from_source}: supply channel changed",
+      "needs_action": "{from_source}: {reason}; action required",
+      "supply_interrupted": "{model}: {reason}; model supply interrupted"
     },
     "launch": {
       "retry": "The next turn has already switched routes. Retry directly.",
@@ -726,6 +741,9 @@
       "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
       "model_unsupported": "No source supports model {model}. Open Models to configure one."
     }
+  },
+  "errors": {
+    "project_access_denied": "You don't have permission to start a session in this project."
   },
   "remote_access": {
     "oauth_error": {
@@ -745,6 +763,13 @@
       "oauth_time_mismatch_body": "Avibe Cloud finished the sign-in, but this machine rejected the security token because the local clock appears out of sync. Correct the system time, then try again.",
       "invalid_oauth_nonce_title": "We couldn't verify this sign-in",
       "invalid_oauth_nonce_body": "This sign-in attempt couldn't be verified, so we stopped to keep your account secure. Start over to continue."
+    }
+  },
+  "show": {
+    "event": {
+      "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
+      "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
+      "idConflict": "This Show event ID is already bound to different event contents."
     }
   }
 }

@@ -3,6 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Activity, Bot, KeyRound, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
 const TABS = [
   { to: '/agents', icon: Bot, key: 'workbench.modules.agents.title' },
@@ -19,6 +20,13 @@ export const CapabilityTabs: React.FC = () => {
   const { t } = useTranslation();
   const { pathname } = useLocation();
   const activeTabRef = useRef<HTMLAnchorElement | null>(null);
+  const { capabilities } = useInstanceAuthorization();
+  const tabs = TABS.filter(({ to }) => {
+    if (to === '/agents' || to === '/harness') return capabilities.can_manage_agents;
+    if (to === '/skills') return capabilities.can_use_skills;
+    if (to === '/vaults') return capabilities.can_use_vault_secrets;
+    return false;
+  });
 
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -26,7 +34,7 @@ export const CapabilityTabs: React.FC = () => {
 
   return (
     <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-0.5 md:hidden">
-      {TABS.map(({ to, icon: Icon, key }) => {
+      {tabs.map(({ to, icon: Icon, key }) => {
         const active = pathname.startsWith(to);
         return (
           <NavLink

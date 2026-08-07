@@ -440,8 +440,8 @@ def test_dock_route_round_trip_via_client(monkeypatch, tmp_path):
 
 def test_dock_route_blocked_for_remote_without_session(monkeypatch, tmp_path):
     """Auth parity: the Dock routes inherit ``enforce_remote_access_cookie`` — a
-    remote request without a session is bounced to the OAuth login, never served
-    as an unauthenticated native endpoint."""
+    remote API request without a session gets the shared machine-readable login
+    signal and is never served as an unauthenticated native endpoint."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
@@ -451,8 +451,9 @@ def test_dock_route_blocked_for_remote_without_session(monkeypatch, tmp_path):
         environ_base=_remote_peer(),
         follow_redirects=False,
     )
-    assert get_resp.status_code == 302
-    assert get_resp.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert get_resp.status_code == 401
+    assert get_resp.get_json()["error"] == "remote_access_login_required"
+    assert get_resp.headers.get("Location") is None
 
     # The mutating routes are gated by the same before-request hook.
     post_resp = app.test_client().post(

@@ -58,13 +58,19 @@ HEAD_TABLES = INITIAL_TABLES | {
     "agent_events",
     "show_session_events",
     "media_objects",
+    "media_object_references",
     "web_push_subscriptions",
+    "project_access_policies",
+    "project_access_bindings",
+    "remote_access_authorizations",
     "vault_secrets",
     "vault_requests",
     "vault_grants",
     "vault_audit",
     "vault_auth_factors",
     "vault_operation_challenges",
+    "resource_access_policies",
+    "resource_access_groups",
 }
 PRE_SHOW_SESSION_EVENTS_HEAD_TABLES = INITIAL_TABLES | {
     "run_definitions",
@@ -138,10 +144,28 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
     "web_push_subscriptions": {"device_id"},
+    "remote_access_authorizations": {
+        "instance_id",
+        "subject",
+        "claims_json",
+        "expires_at",
+        "created_at",
+    },
     "vault_requests": {"callback_status"},
     "vault_grants": {"agent_ready", "agent_ready_at"},
     "vault_auth_factors": {"credential_id", "public_key", "alg", "sign_count"},
     "vault_operation_challenges": {"challenge_hash", "rp_id", "origin", "expires_at", "consumed_at"},
+    "resource_access_policies": {
+        "organization_id",
+        "owner_user_id",
+        "owner_email",
+        "access_level",
+        "policy_revision",
+        "last_applied_control_plane_revision",
+        "created_by_user_id",
+        "updated_by_user_id",
+    },
+    "resource_access_groups": {"organization_id", "group_id"},
 }
 UNRELEASED_OLD_INITIAL_TABLES = [
     "session_messages",
@@ -850,6 +874,23 @@ def _ensure_vault_authz_indexes(conn: sqlite3.Connection, tables: set[str]) -> N
         )
 
 
+def _ensure_resource_access_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
+    if "resource_access_policies" in tables:
+        conn.execute(
+            "create index if not exists ix_resource_access_policies_org_level "
+            "on resource_access_policies (organization_id, access_level, resource_kind)"
+        )
+        conn.execute(
+            "create index if not exists ix_resource_access_policies_owner "
+            "on resource_access_policies (owner_user_id, resource_kind)"
+        )
+    if "resource_access_groups" in tables:
+        conn.execute(
+            "create index if not exists ix_resource_access_groups_group "
+            "on resource_access_groups (organization_id, group_id, resource_kind)"
+        )
+
+
 def _delete_historical_message_tool_calls(conn: sqlite3.Connection, tables: set[str]) -> None:
     if "messages" not in tables:
         return
@@ -878,6 +919,7 @@ def _ensure_head_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
     _ensure_messages_query_indexes(conn, tables)
     _ensure_agent_events_indexes(conn, tables)
     _ensure_vault_authz_indexes(conn, tables)
+    _ensure_resource_access_indexes(conn, tables)
 
 
 def _missing_head_schema_description(conn: sqlite3.Connection, tables: set[str]) -> str:

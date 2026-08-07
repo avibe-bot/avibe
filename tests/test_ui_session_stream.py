@@ -14,7 +14,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -172,6 +172,21 @@ def _settle_reserved_delivery(payload: dict, *, state: str) -> dict:
         return settled
 
 
+def _accepted_dispatch(session_id: str):
+    async def dispatch(payload: dict) -> dict:
+        settled = _settle_reserved_delivery(payload, state="accepted")
+        return {
+            "status_code": 202,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "delivery_state": settled["state"],
+            },
+        }
+
+    return dispatch
+
+
 def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     """The web Chat POST persists the user row AND fire-and-forgets the turn via
     ``/internal/dispatch_async``. The reply arrives over the persistent
@@ -183,21 +198,11 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
 
     _, session_id = _make_session(tmp_path)
 
-    async def dispatch(payload):
-        settled = _settle_reserved_delivery(payload, state="accepted")
-        return {
-            "status_code": 202,
-            "body": {
-                "ok": True,
-                "session_id": session_id,
-                "delivery_state": settled["state"],
-            },
-        }
-
-    dispatch_mock = AsyncMock(side_effect=dispatch)
+    dispatch_mock = AsyncMock(side_effect=_accepted_dispatch(session_id))
     with (
         patch("vibe.internal_client.dispatch_async", dispatch_mock),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
     ):
         client = app.test_client()
         headers = csrf_headers(client)
@@ -210,13 +215,145 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     payload = response.get_json()
     assert payload["author"] == "user"
     assert payload["author_id"] == "remote:user-a"
-    assert payload["metadata"]["_web_push_user_key"] == "remote:user-a"
+    assert "_web_push_user_key" not in payload["metadata"]
+    assert payload["metadata"]["_memory_cli_admitted"] is False
     assert payload["text"] == "no stream"
     # The turn was kicked off fire-and-forget with the session + text.
     dispatch_mock.assert_awaited_once()
     sent = dispatch_mock.await_args.args[0]
     assert sent["session_id"] == session_id
     assert sent["text"] == "no stream"
+    assert sent["memory_cli_admitted"] is False
+    assert sent["is_ordinary_text"] is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text": "Yes", "metadata": {"quick_reply_for": "agent-message-1"}},
+        {"text": "forwarded text", "metadata": {"forwarded": True}},
+    ],
+)
+def test_workbench_side_actions_are_not_marked_as_ordinary_memory_input(
+    isolated_state,
+    tmp_path,
+    payload,
+):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    dispatch = AsyncMock(side_effect=_accepted_dispatch(session_id))
+    with patch("vibe.internal_client.dispatch_async", dispatch):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json=payload,
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 201
+    assert dispatch.await_args.args[0]["is_ordinary_text"] is False
+
+
+
+def test_workbench_memory_text_is_persisted_and_dispatched_as_ordinary_input(
+    isolated_state,
+    tmp_path,
+):
+    from storage import messages_service
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    dispatch = AsyncMock(side_effect=_accepted_dispatch(session_id))
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+
+    with patch("vibe.internal_client.dispatch_async", dispatch):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "/memory status"},
+            headers=headers,
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+
+    assert response.status_code == 201
+    with create_sqlite_engine().connect() as conn:
+        persisted = messages_service.get_message(conn, response.get_json()["id"])
+    assert persisted is not None
+    assert persisted["text"] == "/memory status"
+    payload = dispatch.await_args.args[0]
+    assert payload["text"] == "/memory status"
+    assert payload["user_id"] == "local"
+    assert payload["message_id"] == response.get_json()["id"]
+    assert payload["memory_cli_admitted"] is True
+
+
+@pytest.mark.parametrize(
+    "session_payload,expected",
+    [
+        ({"sub": "user-a"}, "remote:user-a"),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_remote_workbench_memory_identity_requires_a_stable_subject(session_payload, expected):
+    from vibe import remote_access
+    from vibe.ui_server import app, _workbench_memory_user_id
+
+    with (
+        app.test_request_context("/chat/session", headers={"Cookie": "avibe_remote_session=session"}),
+        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
+        patch("vibe.ui_server._load_remote_access_config", return_value=object()),
+        patch.object(remote_access, "parse_session_cookie", return_value=session_payload),
+    ):
+        assert _workbench_memory_user_id() == expected
+
+
+def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
+    isolated_state,
+    tmp_path,
+):
+    import base64
+
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    dispatch = AsyncMock(side_effect=_accepted_dispatch(session_id))
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    upload = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        json={
+            "name": "diagram.png",
+            "mime": "image/png",
+            "data": base64.b64encode(b"attachment-bytes").decode("ascii"),
+        },
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+    )
+
+    with patch("vibe.internal_client.dispatch_async", dispatch):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": {
+                    "text": "remember this diagram",
+                    "attachments": [{"token": upload.get_json()["token"]}],
+                }
+            },
+            headers=headers,
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+
+    assert response.status_code == 201
+    payload = dispatch.await_args.args[0]
+    assert payload["user_id"] == "local"
+    assert payload["message_id"] == response.get_json()["id"]
+    assert len(payload["files"]) == 1
+    assert payload["files"][0]["name"] == "diagram.png"
+    assert Path(payload["files"][0]["path"]).read_bytes() == b"attachment-bytes"
 
 
 def test_route_reads_the_materialized_message_id_for_a_merged_batch(
@@ -685,7 +822,8 @@ def test_create_and_patch_session_canonicalize_agent_identity(isolated_state, tm
     cleared = cleared_response.get_json()
     assert cleared["agent_id"] is None
     assert cleared["agent_name"] is None
-    assert cleared["agent_backend"] == ""
+    # Clearing the Agent selector does not clear the durable backend pin.
+    assert cleared["agent_backend"] == "codex"
 
 
 def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
@@ -1079,6 +1217,38 @@ def test_chat_bootstrap_keeps_timeout_turn_state_unknown(isolated_state, tmp_pat
 
     assert response.status_code == 200
     assert response.get_json()["turn_state"]["in_flight"] is None
+
+
+def test_chat_bootstrap_omits_memory_from_the_generic_config(isolated_state, tmp_path):
+    """Bootstrap is reachable by an authenticated remote user over the tunnel.
+
+    Memory settings -- enablement, both processing endpoint URLs and model
+    names, and API-key-presence flags -- are served only by the
+    direct-loopback-only /api/memory/* routes, so a generic config projection
+    must not carry them. /api/config already excluded them; this endpoint did
+    not, which is the whole reason the exclusion now lives in one projection.
+    """
+
+    from vibe import internal_client
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    async def timeout(session_id_inner):
+        raise internal_client.InternalServerTimeout("slow internal turn-state")
+
+    with (
+        patch("vibe.internal_client.turn_state", timeout),
+        patch("vibe.api.get_vibe_agents", return_value={"agents": [], "default_agent_name": None}),
+    ):
+        client = app.test_client()
+        response = client.get(f"/api/sessions/{session_id}/bootstrap")
+
+    assert response.status_code == 200
+    config_payload = response.get_json()["config"]
+    # Still a real config projection, just without the Memory block.
+    assert "setup_state" in config_payload
+    assert "memory" not in config_payload
 
 
 def test_cancel_route_proxies_to_internal_socket(isolated_state, tmp_path):

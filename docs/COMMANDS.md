@@ -87,7 +87,7 @@ Notes:
 
 #### Slack
 
-- Native Slack slash commands are currently exposed only for `/start` and `/stop`.
+- Native Slack slash commands are exposed for `/start` and `/stop` after the Slack App commands are declared.
 - Other commands are typically sent as normal bot-directed messages, for example:
   - `@Avibe /resume`
   - `@Avibe /setcwd ~/work/repo`
@@ -527,6 +527,7 @@ mode. Continue with `pagination.next_command`; inspect one record with its
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
 | `vibe status` | Print runtime status JSON |
+| `vibe memory ...` | Read scoped Memory or explicitly queue context to remember through the running controller |
 | `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |

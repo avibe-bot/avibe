@@ -136,6 +136,9 @@ def main():
     macos_session_diagnostics = None
     controller = None
     try:
+        from core.memory.ui_access import initialize_process_ui_read_secret
+
+        initialize_process_ui_read_secret()
         acquire_service_instance_lock()
         lock_acquired = True
 
@@ -190,7 +193,6 @@ def main():
                 logger.info("Shutting down after signal %s", signum)
             except Exception:
                 pass
-            _stop_macos_session_diagnostics(macos_session_diagnostics)
             controller.request_shutdown(f"signal {signum}")
 
         signal.signal(signal.SIGTERM, _handle_shutdown)

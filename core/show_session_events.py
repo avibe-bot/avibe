@@ -120,6 +120,27 @@ def show_event_requests_dispatch(event: dict[str, Any]) -> bool:
     return isinstance(payload, dict) and bool(payload.get("dispatch"))
 
 
+def show_event_request_requests_dispatch(request_payload: dict[str, Any]) -> bool:
+    """Whether a raw Show event request would start an agent turn.
+
+    HTTP routes must decide before handing a request to the event store, while
+    ``show_event_requests_dispatch`` intentionally accepts the store's normalized
+    event shape. Normalize the two closed dispatching request types here so both
+    decisions use the same trigger definition.
+    """
+
+    event_type = str(request_payload.get("type") or "").strip()
+    if event_type not in SHOW_TRIGGER_KIND:
+        return False
+    return show_event_requests_dispatch(
+        {
+            "type": event_type,
+            "actor": "human",
+            "payload": _normalize_event_payload(event_type, request_payload),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class ShowSessionEventStore:
     db_path: Path | None = None

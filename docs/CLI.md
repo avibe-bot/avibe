@@ -6,6 +6,7 @@
 vibe              # Alias for vibe start
 vibe start        # Start Avibe if needed (opens web UI)
 vibe status       # Check service status
+vibe memory status # Read local Memory status from the running controller
 vibe restart      # Restart all services (use --delay-seconds when agent-triggered)
 vibe remote       # Guided Avibe Cloud remote-access setup
 vibe screenshot   # Capture a local desktop screenshot
@@ -63,6 +64,17 @@ vibe start
 - Opens the setup wizard at `http://127.0.0.1:5123`
 - **Preserves running processes** — Use `vibe restart` when you need an explicit restart
 
+**Known limitation — Memory Settings after a partial restart.** The Web UI and
+the service prove local Memory reads to each other with a secret minted once per
+launch. It reaches each child over stdin and is never written to disk, so
+`vibe start` can only align the processes it starts itself. When the service is
+already running and only the Web UI starts fresh, the pair holds no shared
+proof and the Memory Settings page reports Memory as unavailable until both are
+restarted together; the CLI prints that recovery step — run `vibe stop`, then
+`vibe`. The reverse case needs no action: a freshly started service restarts a
+surviving Web UI so the new pair shares one secret. `vibe memory ...` uses a
+separate session-scoped grant and is unaffected.
+
 ### `vibe stop`
 
 Fully stop all Avibe services.
@@ -107,6 +119,19 @@ vibe status
 }
 ```
 
+### `vibe memory`
+
+Read scoped local Memory or explicitly queue context to remember through the existing mode-0600 controller socket. This command does not start a service and has no clear, configuration, export, or delete subcommands.
+
+`status` works from a normal terminal. `profile`, `search`, and `remember` require an eligible Agent shell where Avibe has injected the current Session context; running them from a normal terminal returns `memory_access_denied`.
+
+```bash
+vibe memory status [--json]
+vibe memory profile [--json]
+vibe memory search <query> [--limit 1..20] [--json]
+vibe memory remember <text> [--json]
+```
+
 ### `vibe doctor`
 
 Run diagnostic checks on your configuration.
@@ -147,6 +172,12 @@ Start the guided Avibe Cloud remote-access setup.
 ```bash
 vibe remote
 ```
+
+In the conservative Organization release, the remote Workbench remains
+available for Organization management and authorized Project, Session, message,
+and history reads. Agent turns and runtime controls, Harness definition changes and autonomous
+execution, terminal access, and file operations remain trusted-local only; open
+Avibe on the machine to perform those actions.
 
 **Flow:**
 - The CLI explains what remote access does before asking for anything.

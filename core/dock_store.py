@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from core.chat_discovery import get_state_meta, set_state_meta
-from core.show_pages import ShowPageStore, validate_session_id
+from core.show_pages import ShowPageError, ShowPageStore, validate_session_id
 from storage.sessions_service import read_session_display_meta
 
 # The single state_meta key holding the whole dock document.
@@ -170,12 +170,82 @@ def _save(doc: dict[str, Any], db_path: Path | None) -> None:
     set_state_meta(DOCK_STATE_KEY, doc, db_path=db_path)
 
 
-def load_dock(*, db_path: Path | None = None) -> dict[str, Any]:
+def _resource_context(user_context: Any):
+    from storage.resource_access_service import resolve_resource_access_context
+
+    return resolve_resource_access_context(user_context)
+
+
+def _filter_dock_for_access(
+    doc: dict[str, Any],
+    *,
+    user_context: Any,
+    db_path: Path | None,
+) -> dict[str, Any]:
+    if user_context.is_trusted_local:
+        return doc
+    store = ShowPageStore(db_path)
+    try:
+        accessible_pins = []
+        for pin in doc["pins"]:
+            try:
+                store.require_access(pin["session_id"], user_context=user_context)
+            except ShowPageError:
+                continue
+            accessible_pins.append(pin)
+    finally:
+        store.close()
+    return _reconcile(doc["order"], accessible_pins)
+
+
+def _require_show_page_management(
+    session_ids: set[str],
+    *,
+    user_context: Any,
+    db_path: Path | None,
+) -> None:
+    if user_context.is_trusted_local or not session_ids:
+        return
+    store = ShowPageStore(db_path)
+    try:
+        for session_id in sorted(session_ids):
+            store.require_management(session_id, user_context=user_context)
+    finally:
+        store.close()
+
+
+def _merge_visible_order(
+    current_order: list[str],
+    submitted_order: list[str],
+    visible_ids: set[str],
+) -> list[str]:
+    """Replace visible order slots while retaining inaccessible docked items."""
+
+    submitted = iter(submitted_order)
+    merged: list[str] = []
+    for item in current_order:
+        if item not in visible_ids:
+            merged.append(item)
+            continue
+        replacement = next(submitted, None)
+        if replacement is not None:
+            merged.append(replacement)
+    merged.extend(submitted)
+    return merged
+
+
+def load_dock(*, db_path: Path | None = None, user_context: Any = None) -> dict[str, Any]:
     """Return the reconciled Dock document ``{order, pins}``."""
-    return _load(db_path)
+    context = _resource_context(user_context)
+    return _filter_dock_for_access(_load(db_path), user_context=context, db_path=db_path)
 
 
-def pin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str, Any]:
+def pin_show_page(
+    session_id: str,
+    *,
+    db_path: Path | None = None,
+    user_context: Any = None,
+) -> dict[str, Any]:
     """Pin a session's Show Page to the Dock (idempotent).
 
     Captures the session's current title as ``title_snapshot`` so the tile stays
@@ -184,19 +254,27 @@ def pin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str, 
     (→ 404). Never creates a page — pinning only records an existing one.
     """
     session_id = validate_session_id(session_id)
+    context = _resource_context(user_context)
     store = ShowPageStore(db_path)
     try:
-        page = store.get(session_id)
+        try:
+            store.require_management(session_id, user_context=context)
+        except ShowPageError as exc:
+            if exc.code == "show_page_not_found":
+                raise DockError("This session has no Show Page to pin.", code="show_page_not_found") from exc
+            raise
     finally:
         store.close()
-    if page is None:
-        raise DockError("This session has no Show Page to pin.", code="show_page_not_found")
 
     # Serialize the whole read-modify-write so a concurrent pin can't lost-update.
     with _DOCK_MUTATION_LOCK:
         doc = _load(db_path)
         if any(pin["session_id"] == session_id for pin in doc["pins"]):
-            return doc  # already pinned → idempotent no-op (keeps its place + snapshot)
+            return _filter_dock_for_access(
+                doc,
+                user_context=context,
+                db_path=db_path,
+            )  # already pinned → idempotent no-op (keeps its place + snapshot)
 
         # Bound the installed set to the same fixed budget reconcile clamps to, so
         # a new pin can't grow ``pins`` past what a read would keep (which would
@@ -212,10 +290,15 @@ def pin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str, 
         doc["order"].append(_show_id(session_id))
         doc = _reconcile(doc["order"], doc["pins"])
         _save(doc, db_path)
-        return doc
+        return _filter_dock_for_access(doc, user_context=context, db_path=db_path)
 
 
-def unpin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str, Any]:
+def unpin_show_page(
+    session_id: str,
+    *,
+    db_path: Path | None = None,
+    user_context: Any = None,
+) -> dict[str, Any]:
     """Remove a pinned Show Page from the Dock (idempotent; never 404s).
 
     Unpin is Dock-only — it leaves the Show Page itself, its visibility, and any
@@ -223,19 +306,31 @@ def unpin_show_page(session_id: str, *, db_path: Path | None = None) -> dict[str
     """
     sid = (session_id or "").strip()
     show_id = _show_id(sid)
+    context = _resource_context(user_context)
     with _DOCK_MUTATION_LOCK:
         doc = _load(db_path)
         pinned = any(pin["session_id"] == sid for pin in doc["pins"])
         if not pinned and show_id not in doc["order"]:
-            return doc  # nothing to remove → idempotent no-op
+            return _filter_dock_for_access(
+                doc,
+                user_context=context,
+                db_path=db_path,
+            )  # nothing to remove → idempotent no-op
+        _require_show_page_management({sid}, user_context=context, db_path=db_path)
         pins = [pin for pin in doc["pins"] if pin["session_id"] != sid]
         order = [item for item in doc["order"] if item != show_id]
         doc = _reconcile(order, pins)
         _save(doc, db_path)
-        return doc
+        return _filter_dock_for_access(doc, user_context=context, db_path=db_path)
 
 
-def set_dock_order(order: Any, *, known: Any = None, db_path: Path | None = None) -> dict[str, Any]:
+def set_dock_order(
+    order: Any,
+    *,
+    known: Any = None,
+    db_path: Path | None = None,
+    user_context: Any = None,
+) -> dict[str, Any]:
     """Persist the docked subset, in order.
 
     Under the two-layer model (§7.1c) the order is a SUBSET of the known ids
@@ -262,9 +357,12 @@ def set_dock_order(order: Any, *, known: Any = None, db_path: Path | None = None
     if len(order) != len(set(order)):
         raise DockError("Dock order has duplicate ids.", code="invalid_order")
 
+    context = _resource_context(user_context)
     with _DOCK_MUTATION_LOCK:
         doc = _load(db_path)
-        server_known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in doc["pins"]}
+        visible_doc = _filter_dock_for_access(doc, user_context=context, db_path=db_path)
+        known_doc = doc if context.is_trusted_local else visible_doc
+        server_known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in known_doc["pins"]}
         if known is not None:
             if not isinstance(known, list) or not all(isinstance(item, str) for item in known):
                 raise DockError("Dock known-set must be a list of ids.", code="invalid_order")
@@ -273,6 +371,18 @@ def set_dock_order(order: Any, *, known: Any = None, db_path: Path | None = None
         if not set(order) <= server_known:
             raise DockError("Dock order has an unknown id.", code="invalid_order")
 
-        doc = {"order": list(order), "pins": doc["pins"]}
+        affected_sessions = {
+            item.removeprefix(SHOW_PREFIX)
+            for item in {*visible_doc["order"], *order}
+            if item.startswith(SHOW_PREFIX)
+        }
+        _require_show_page_management(affected_sessions, user_context=context, db_path=db_path)
+
+        merged_order = (
+            _merge_visible_order(doc["order"], order, server_known)
+            if not context.is_trusted_local
+            else list(order)
+        )
+        doc = {"order": merged_order, "pins": doc["pins"]}
         _save(doc, db_path)
-        return doc
+        return _filter_dock_for_access(doc, user_context=context, db_path=db_path)

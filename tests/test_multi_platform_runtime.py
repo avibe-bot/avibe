@@ -776,11 +776,12 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                 "Config",
                 (),
                 {
-                    "platform": "slack",
+                    "platform": "avibe",
                     "reply_enhancements": True,
                     "show_pages_prompt": True,
                     "remote_access": None,
                     "language": "en",
+                    "memory": type("MemoryConfig", (), {"enabled": True})(),
                     "opencode": type(
                             "OpenCodeConfig",
                             (),
@@ -791,7 +792,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                     )(),
                 },
             )()
-            self.im_client = _StubClient("slack")
+            self.im_client = _StubClient("avibe")
             self.settings_manager = type("Settings", (), {"sessions": _Sessions()})()
             self.sessions = self.settings_manager.sessions
             self.processing_indicator = type("Processing", (), {"snapshot_request": lambda self, request: {}})()
@@ -831,7 +832,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
             working_path="/tmp/work",
             base_session_id="base",
             composite_session_id="base:/tmp/work",
-            session_key="slack::c",
+            session_key="avibe::c",
         )
         await agent._process_message(request)
 

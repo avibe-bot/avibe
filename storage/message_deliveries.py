@@ -29,6 +29,10 @@ from storage.models import (
 TURN_OWNER_STATES = ("starting", "active")
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
+WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
+MEMORY_USER_ID_METADATA = "_memory_user_id"
+MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
+MEMORY_CLI_ADMITTED_METADATA = "_memory_cli_admitted"
 
 
 def utc_now_iso() -> str:
@@ -352,6 +356,35 @@ def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
         "retired_at": row.get("retired_at"),
         "version": row.get("version"),
     }
+
+
+def delivery_has_remote_resource_context(row: dict[str, Any]) -> bool:
+    """Return whether an immutable Delivery snapshot records remote origin."""
+
+    metadata = delivery_payload(row).get("metadata")
+    return isinstance(metadata, dict) and isinstance(
+        metadata.get("resource_user_context"),
+        dict,
+    )
+
+
+def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """Return a Delivery payload without server-owned identity metadata."""
+
+    payload = (
+        dict(row)
+        if "content" in row and "metadata" in row
+        else delivery_payload(row)
+    )
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        payload["metadata"] = {
+            key: value
+            for key, value in metadata.items()
+            if key != "resource_user_context"
+            and not str(key).startswith(("_web_push_", "_memory_"))
+        }
+    return payload
 
 
 _MESSAGE_MERGE_IDENTITY_FIELDS = (
@@ -1097,8 +1130,30 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
         merged_content["attachments"] = attachments
     metadata = _json_object(first.get("metadata_json"))
     web_push_user_keys: list[str] = []
+    authorization_contexts: dict[str, dict[str, Any]] = {}
+    memory_user_ids: list[str] = []
+    memory_metadata_present = False
+    memory_ordinary_text = True
+    memory_cli_admitted = True
     for snapshot in snapshots:
         snapshot_metadata = _json_object(snapshot.get("metadata_json"))
+        memory_metadata_present = memory_metadata_present or any(
+            key in snapshot_metadata
+            for key in (
+                MEMORY_USER_ID_METADATA,
+                MEMORY_ORDINARY_TEXT_METADATA,
+                MEMORY_CLI_ADMITTED_METADATA,
+            )
+        )
+        memory_user_id = str(snapshot_metadata.get(MEMORY_USER_ID_METADATA) or "").strip()
+        if memory_user_id and memory_user_id not in memory_user_ids:
+            memory_user_ids.append(memory_user_id)
+        memory_ordinary_text = memory_ordinary_text and (
+            snapshot_metadata.get(MEMORY_ORDINARY_TEXT_METADATA) is True
+        )
+        memory_cli_admitted = memory_cli_admitted and (
+            snapshot_metadata.get(MEMORY_CLI_ADMITTED_METADATA) is True
+        )
         values = [snapshot_metadata.get(WEB_PUSH_USER_KEY_METADATA)]
         plural = snapshot_metadata.get(WEB_PUSH_USER_KEYS_METADATA)
         if isinstance(plural, list):
@@ -1107,12 +1162,36 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
             key = str(value or "").strip()
             if key and key not in web_push_user_keys:
                 web_push_user_keys.append(key)
+        raw_contexts = snapshot_metadata.get(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA)
+        if isinstance(raw_contexts, list):
+            for raw_context in raw_contexts:
+                if not isinstance(raw_context, dict):
+                    continue
+                user_key = str(raw_context.get("user_key") or "").strip()
+                if user_key:
+                    authorization_contexts[user_key] = raw_context
     metadata.pop(WEB_PUSH_USER_KEY_METADATA, None)
     metadata.pop(WEB_PUSH_USER_KEYS_METADATA, None)
     if len(web_push_user_keys) == 1:
         metadata[WEB_PUSH_USER_KEY_METADATA] = web_push_user_keys[0]
     elif web_push_user_keys:
         metadata[WEB_PUSH_USER_KEYS_METADATA] = web_push_user_keys
+    if memory_metadata_present:
+        metadata[MEMORY_ORDINARY_TEXT_METADATA] = memory_ordinary_text
+        metadata[MEMORY_CLI_ADMITTED_METADATA] = memory_cli_admitted
+        if len(memory_user_ids) == 1:
+            metadata[MEMORY_USER_ID_METADATA] = memory_user_ids[0]
+        else:
+            metadata.pop(MEMORY_USER_ID_METADATA, None)
+    filtered_contexts = [
+        context
+        for user_key, context in authorization_contexts.items()
+        if user_key in web_push_user_keys
+    ]
+    if filtered_contexts:
+        metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = filtered_contexts
+    else:
+        metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
     if len(deliveries) > 1:
         metadata["merged_delivery_ids"] = [str(delivery["id"]) for delivery in deliveries]
         native_ids = [

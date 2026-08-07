@@ -538,6 +538,44 @@ def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(manage
     assert stored["delivered_at"] == accepted[0]["materialized_at"]
 
 
+def test_memory_fifo_segment_merges_only_one_user(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+    queued = [
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=text,
+                    metadata={
+                        "_memory_user_id": user_id,
+                        "_memory_ordinary_text": True,
+                    },
+                ),
+                context=_context(),
+            )
+        )
+        for text, user_id in (
+            ("alice one", "remote:alice"),
+            ("alice two", "remote:alice"),
+            ("bob one", "remote:bob"),
+        )
+    ]
+
+    assert asyncio.run(manager.terminalize_turn(active_turn_id))
+    queued_starts = [(turn_id, text) for turn_id, text in starts if turn_id != active_turn_id]
+    assert len(queued_starts) == 1
+    alice_turn_id, dispatch_text = queued_starts[0]
+    assert dispatch_text == "alice one\nalice two"
+
+    first, second, third = [_row(engine, str(item.delivery_id)) for item in queued]
+    assert first["turn_id"] == alice_turn_id
+    assert second["turn_id"] == alice_turn_id
+    assert third["turn_id"] is None
+    assert third["state"] == "queued"
+
+
 def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     active_turn_id, _ = asyncio.run(_activate(manager, text="active"))

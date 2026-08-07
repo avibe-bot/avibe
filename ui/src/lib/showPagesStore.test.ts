@@ -205,6 +205,35 @@ describe('ShowPagesInventoryStore', () => {
     release();
   });
 
+  it('revalidates and removes revoked pages after authorization changes', async () => {
+    let handlers: EventHandlers | undefined;
+    const getShowPages = vi
+      .fn()
+      .mockResolvedValueOnce({ pages: [page()] })
+      .mockResolvedValueOnce({ pages: [] });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    const release = store.activate();
+    await store.reload();
+    expect(store.getSnapshot().pages).toHaveLength(1);
+
+    handlers?.onAuthorizationChanged?.({
+      project_ids: [],
+      resource_kinds: ['show_page'],
+    });
+    await store.reload();
+
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().pages).toEqual([]);
+    release();
+  });
+
   it('reconciles after a mutation instead of letting an older read overwrite it', async () => {
     const stale = deferred<{ pages: ShowPage[] }>();
     const reconciled = deferred<{ pages: ShowPage[] }>();

@@ -1,14 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { ArrowLeft, Bot, Brain, Building2, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { isStandaloneAppTab } from '../apps/appLaunch';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
+import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { AccountMenu } from './AccountMenu';
 import { LanguageSwitcher } from './LanguageSwitcher';
 import { ThemeToggle } from './ThemeToggle';
@@ -28,6 +30,7 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
+import { OrganizationShell } from '../features/organization/OrganizationShell';
 
 type ShellNavItem = {
   // Optional: a parent that only groups children (no page of its own) omits `to`
@@ -47,6 +50,10 @@ type ShellNavItem = {
   onClick?: () => void;
   variant?: 'workbench';
 };
+
+// Keep the Organization routes available for direct access while the product
+// entry points remain hidden. Re-enable every shell surface from one switch.
+const ORGANIZATION_NAV_ENABLED = false;
 
 const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
   item.match
@@ -217,10 +224,12 @@ export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
   const { totalUnread } = useWorkbenchInbox();
+  const { capabilities } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
   const [config, setConfig] = useState<any>(null);
+  const [memoryNavVisible, setMemoryNavVisible] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   // The mobile admin nav sheet (opened from the 更多 tab). Close it whenever the
@@ -244,10 +253,22 @@ export const AppShell: React.FC = () => {
   useViewportHeightVar();
 
   useEffect(() => {
+    if (!capabilities.can_manage_instance) return;
     api.getConfig().then((c: any) => {
       setConfig(c);
       setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
+  }, [api, capabilities.can_manage_instance]);
+
+  useEffect(() => {
+    const refreshMemoryNav = () => {
+      void api.getMemorySettings()
+        .then((memory) => setMemoryNavVisible(memoryNavShouldBeVisible(memory)))
+        .catch(() => setMemoryNavVisible(false));
+    };
+    refreshMemoryNav();
+    window.addEventListener('avibe:memory-settings-changed', refreshMemoryNav);
+    return () => window.removeEventListener('avibe:memory-settings-changed', refreshMemoryNav);
   }, [api]);
 
   // Global ⌘K / Ctrl+K toggles the message-search palette. Intercept the chord
@@ -271,9 +292,36 @@ export const AppShell: React.FC = () => {
     setAppsDrawerOpen(false);
   }, [location.pathname]);
 
+  if (location.pathname.startsWith('/admin/organization')) {
+    return <OrganizationShell />;
+  }
+
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
+
+  const ownerOnlyPath =
+    location.pathname === '/setup' ||
+    (location.pathname.startsWith('/admin') && !location.pathname.startsWith('/admin/organization')) ||
+    ['/agents', '/harness', '/apps/library'].some(
+      (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
+    );
+  const localSystemPath = location.pathname.startsWith('/admin/settings/service');
+  const resourceUseDenied =
+    (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
+    (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
+  const fileOnlyPath =
+    location.pathname.startsWith('/apps/files') || location.pathname.startsWith('/apps/editor');
+  const terminalOnlyPath = location.pathname.startsWith('/apps/terminal');
+  if (
+    (ownerOnlyPath && !capabilities.can_manage_instance) ||
+    (localSystemPath && !capabilities.can_use_system) ||
+    resourceUseDenied ||
+    (fileOnlyPath && !capabilities.can_use_files) ||
+    (terminalOnlyPath && !capabilities.can_use_terminal)
+  ) {
+    return <Navigate to="/" replace />;
+  }
 
   if (location.pathname === '/setup') {
     return <Outlet />;
@@ -289,6 +337,14 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
+    ...(ORGANIZATION_NAV_ENABLED
+      ? [{
+          to: '/admin/organization/overview',
+          label: t('nav.organization'),
+          icon: Building2,
+          match: (p: string) => p.startsWith('/admin/organization'),
+        }]
+      : []),
     // Permanent escape hatch to the App Library (a workbench app). Always present,
     // so the Library is reachable from the control panel even when it is undocked
     // (§7.1c #7). Matches any /apps/library path so it stays active on the route.
@@ -326,6 +382,9 @@ export const AppShell: React.FC = () => {
       icon: Bot,
       match: (p) => p.startsWith('/admin/settings/backends'),
     },
+    ...(memoryNavVisible
+      ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain }]
+      : []),
     {
       // 高级设置: the remaining Settings tabs (messaging leads). Platforms +
       // backends moved out to their own sidebar destinations above, so exclude
@@ -343,29 +402,24 @@ export const AppShell: React.FC = () => {
 
   const items: ShellNavItem[] = shellMode === 'admin' ? adminItems : [];
 
-  // A bottom tab bar can't hold the nested admin nav (6 sections, one with a
-  // submenu), so mobile keeps a trimmed 4-tab bar — back-to-workbench (emphasized
-  // green circle), 控制台, 菜单 (opens the full nested nav sheet below), 高级设置 —
-  // and the 菜单 sheet renders the same nested adminItems so every page is
-  // reachable + groups expand. See ``adminMenuOpen``.
+  // A bottom tab bar can't hold the nested admin nav, so mobile keeps a trimmed
+  // bar with Workbench, Control Panel, and More (which opens the full nested nav
+  // sheet). The Organization tab follows the same temporary visibility switch
+  // as every other shell entry point. See ``adminMenuOpen``.
   const adminMobileTabs: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
+    ...(ORGANIZATION_NAV_ENABLED
+      ? [{ to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2 }]
+      : []),
     { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
-    {
-      to: '/admin/settings/messaging',
-      label: t('nav.advancedSettings'),
-      icon: Settings,
-      match: (p) =>
-        p.startsWith('/admin/settings') &&
-        !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends') &&
-        !p.startsWith('/admin/settings/models'),
-    },
   ];
-  // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom
-  // bar (控制台 + 高级设置) — so nothing is duplicated.
-  const adminBottomBarPaths = new Set(['/admin/dashboard', '/admin/settings/messaging']);
+  // The More sheet shows the overflow: admin sections not already on the bottom
+  // bar. Keep its filtering aligned with the currently visible primary tabs.
+  const adminBottomBarPaths = new Set([
+    '/admin/dashboard',
+    ...(ORGANIZATION_NAV_ENABLED ? ['/admin/organization/overview'] : []),
+  ]);
   const adminSheetItems = adminItems
     .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))
     // Groups start expanded in the sheet (the sheet is transient — show the
@@ -379,16 +433,18 @@ export const AppShell: React.FC = () => {
   const workbenchTabs: ShellNavItem[] = [
     { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread },
     { to: '/projects', label: t('nav.projects'), icon: FolderTree },
-    {
-      to: '/agents',
+    ...(capabilities.can_manage_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets ? [{
+      to: capabilities.can_manage_agents ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
       label: t('nav.capabilities'),
       icon: LayoutGrid,
-      match: (p) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
-    },
+      match: (p: string) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
+    }] : []),
     // Apps (§7.1b): replaces the old 更多 route tab. Tapping toggles the Dock
     // drawer (the mobile Dock) rather than navigating; `grid-2x2` distinguishes
     // it from Capabilities' `layout-grid`.
-    { label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen },
+    ...(capabilities.can_use_system
+      ? [{ label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen }]
+      : []),
   ];
 
   // Chat is a full-screen detail (own composer) and Search is a full-screen
@@ -410,7 +466,7 @@ export const AppShell: React.FC = () => {
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
     <WindowManagerProvider standalone={standaloneAppTab}>
-    <DockProvider>
+    <DockProvider enabled={capabilities.can_use_system}>
     <ShowPageDragProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
@@ -427,17 +483,20 @@ export const AppShell: React.FC = () => {
               px-4 py-2.5 row height so the logo centerline lines up with the
               chat title bar. No bottom border (it read as out of place under
               the logo). Logo is size-8 to match the header's row height. */}
-          <div className="flex shrink-0 items-center gap-2.5 px-4 py-2.5">
+          <Link
+            to="/"
+            className="group flex shrink-0 items-center gap-2.5 px-4 py-2.5 transition-colors hover:bg-foreground/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint/60"
+          >
             <img
               src={logoImg}
               alt="avibe logo"
-              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]"
+              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)] transition-shadow group-hover:shadow-[0_0_20px_-3px_rgba(91,255,160,0.65)]"
             />
             <div className="min-w-0 leading-tight">
               <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
               <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
             </div>
-          </div>
+          </Link>
 
           {/* Middle: workspace label + nav list (scrolls). Carries the
               horizontal + top padding the outer container used to own; workbench
@@ -470,8 +529,18 @@ export const AppShell: React.FC = () => {
                 centered Chat composer. Workbench → Settings (control panel);
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
-              <AppsLauncher />
-              {shellMode === 'workbench' && (
+              {capabilities.can_use_system && <AppsLauncher />}
+              {shellMode === 'workbench' && ORGANIZATION_NAV_ENABLED && (
+                <Link
+                  to="/admin/organization/overview"
+                  title={t('nav.organization')}
+                  aria-label={t('nav.organization')}
+                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
+                >
+                  <Building2 className="size-[18px] text-muted group-hover:text-foreground" />
+                </Link>
+              )}
+              {shellMode === 'workbench' && capabilities.can_manage_instance && (
                 <Link
                   to="/admin/dashboard"
                   title={t('appShell.openControlPanel')}
@@ -526,7 +595,7 @@ export const AppShell: React.FC = () => {
                 />
                 {isRunning ? t('common.running') : t('common.stopped')}
               </span>
-              <VersionBadge openUpward />
+              {capabilities.can_manage_instance && <VersionBadge openUpward />}
             </div>
           </div>
         </div>
@@ -537,18 +606,33 @@ export const AppShell: React.FC = () => {
           behind them). */}
       {!isFullScreenMobile && (
         <header className="sticky top-0 z-40 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
-          <div className="flex min-w-0 items-center gap-2">
+          <Link
+            to="/"
+            className="flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+          >
             <img
               src={logoImg}
               alt="avibe logo"
               className="size-6 shrink-0 rounded-md border border-mint/30 bg-mint/[0.08] object-cover"
             />
             <span className="truncate text-[13px] font-semibold">{t('appShell.title')}</span>
-          </div>
+          </Link>
           {/* Right side: the Add-to-Home-Screen nudge (renders only on iOS Safari
               when not yet installed; null everywhere else). Version / language /
               theme / account live in the More tab. */}
-          <InstallHint />
+          <div className="flex items-center gap-1.5">
+            {ORGANIZATION_NAV_ENABLED && (
+              <Link
+                to="/admin/organization/overview"
+                title={t('nav.organization')}
+                aria-label={t('nav.organization')}
+                className="grid size-9 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
+              >
+                <Building2 className="size-[18px]" />
+              </Link>
+            )}
+            <InstallHint />
+          </div>
         </header>
       )}
 
@@ -578,7 +662,9 @@ export const AppShell: React.FC = () => {
         ) : (
           <MobileTabBar
             items={workbenchTabs}
-            center={{ onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }}
+            center={capabilities.can_chat
+              ? { onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }
+              : undefined}
           />
         )
       )}
@@ -619,15 +705,17 @@ export const AppShell: React.FC = () => {
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {shellMode === 'workbench' && (
+      {shellMode === 'workbench' && capabilities.can_use_system && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
-      <NewSessionSheet
-        open={newSessionOpen}
-        onClose={() => setNewSessionOpen(false)}
-        onOpen={() => setNewSessionOpen(true)}
-      />
+      {capabilities.can_chat && (
+        <NewSessionSheet
+          open={newSessionOpen}
+          onClose={() => setNewSessionOpen(false)}
+          onOpen={() => setNewSessionOpen(true)}
+        />
+      )}
 
       {/* ⌘K message-search palette. Mounted shell-wide so the shortcut works from
           both Workbench and Control Panel; the sidebar field is the workbench
@@ -640,7 +728,7 @@ export const AppShell: React.FC = () => {
           second launcher on top in full-screen anymore (product: avoid the fullscreen floating
           button; a Dock redesign comes later). Un-maximize via the window traffic-lights to reach
           the sidebar launcher. */}
-      <WindowLayer />
+      {capabilities.can_use_system && <WindowLayer />}
     </div>
     </ShowPageDragProvider>
     </DockProvider>

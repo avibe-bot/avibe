@@ -18,6 +18,7 @@ import { AgentsPage } from './components/workbench/AgentsPage';
 import { SkillsPage } from './components/workbench/SkillsPage';
 import { HarnessPage } from './components/workbench/HarnessPage';
 import { VaultsPage } from './components/workbench/VaultsPage';
+import { SettingsMemoryPage } from './components/settings/SettingsMemoryPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
 import { Dashboard } from './components/Dashboard';
@@ -36,6 +37,8 @@ import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPa
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
 import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
+import type { SessionInfo } from './context/ApiContext';
+import { InstanceAuthorizationProvider } from './context/InstanceAuthorizationProvider';
 import { useWindowManager } from './context/WindowManagerContext';
 import { ToastProvider } from './context/ToastProvider';
 import { ThemeProvider } from './context/ThemeProvider';
@@ -91,6 +94,18 @@ import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
+import { OrganizationOverviewPage } from './features/organization/pages/OrganizationOverviewPage';
+import { OrganizationMembersPage } from './features/organization/pages/OrganizationMembersPage';
+import {
+  OrganizationGroupDetailPage,
+  OrganizationGroupsPage,
+} from './features/organization/pages/OrganizationGroupsPages';
+import { OrganizationInstancesPage } from './features/organization/pages/OrganizationInstancesPage';
+import {
+  InstanceAccessPage,
+  InstanceProjectsPage,
+} from './features/organization/pages/OrganizationInstancePages';
+import { OrganizationResourcesPage } from './features/organization/pages/OrganizationResourcesPage';
 
 // Paths that bypass the setup guard so the wizard and diagnostics can show
 // logs / doctor output even before configuration is complete.
@@ -231,6 +246,7 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [guardStatus, setGuardStatus] = useState<GuardStatus>('loading');
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
+    const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(null);
     const bypassSetupGuard = LOGIN_CHECK_PATHS.has(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
     // route change. The wizard completes by saving config and navigating
@@ -270,10 +286,6 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     useEffect(() => {
         let cancelled = false;
 
-        if (bypassSetupGuard) {
-            return;
-        }
-
         // Reset to loading while (re)validating. On the setup-boundary
         // re-run this prevents a one-frame bounce: a stale `needs-setup`
         // on a non-/setup route would otherwise redirect to /setup before
@@ -283,8 +295,17 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
 
         getAuthSession().then(session => {
             if (cancelled) return;
+            setAuthorizationSession(session);
             if (session.remote && !session.authenticated) {
                 setGuardStatus('remote-login-required');
+                return null;
+            }
+            if (session.remote && session.authenticated && !session.capabilities.can_manage_instance) {
+                setGuardStatus('ready');
+                return null;
+            }
+            if (bypassSetupGuard) {
+                setGuardStatus('ready');
                 return null;
             }
             return getConfig().then(config => {
@@ -299,6 +320,7 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
             if (cancelled) return;
             const session = await getAuthSession().catch(() => null);
             if (cancelled) return;
+            if (session) setAuthorizationSession(session);
             if (session?.remote && !session.authenticated) {
                 setGuardStatus('remote-login-required');
                 return;
@@ -330,7 +352,6 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         // shell behind the Loading state).
     }, [authCheckVersion, bypassSetupGuard, isSetupRoute, getConfig, getAuthSession]);
 
-    if (bypassSetupGuard) return children;
     if (guardStatus === 'loading') {
         return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
     }
@@ -341,7 +362,9 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         return <AccessBlocked code={blockedCode} />;
     }
     if (guardStatus === 'needs-setup') {
-        if (location.pathname === '/setup') return children;
+        if (location.pathname === '/setup' && authorizationSession) {
+            return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
+        }
         // A wizard finish navigates from /setup to / before the re-validation
         // effect can flip `guardStatus` to loading. Without this render-time
         // bridge, the stale setup-required state immediately redirects back to
@@ -358,7 +381,10 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         }
         return <Navigate to="/setup" replace />;
     }
-    return children;
+    if (!authorizationSession) {
+        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+    }
+    return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
 };
 
 // Brief fallback while a lazy Apps route chunk loads (the pages render their own
@@ -584,6 +610,15 @@ const router = createBrowserRouter(
         {/* Control Panel mode — existing pages moved under /admin/* */}
         <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
         <Route path="/admin/dashboard" element={<Dashboard />} />
+        <Route path="/admin/organization" element={<Navigate to="/admin/organization/overview" replace />} />
+        <Route path="/admin/organization/overview" element={<OrganizationOverviewPage />} />
+        <Route path="/admin/organization/members" element={<OrganizationMembersPage />} />
+        <Route path="/admin/organization/groups" element={<OrganizationGroupsPage />} />
+        <Route path="/admin/organization/groups/:groupId" element={<OrganizationGroupDetailPage />} />
+        <Route path="/admin/organization/instances" element={<OrganizationInstancesPage />} />
+        <Route path="/admin/organization/instances/:instanceId/access" element={<InstanceAccessPage />} />
+        <Route path="/admin/organization/instances/:instanceId/projects" element={<InstanceProjectsPage />} />
+        <Route path="/admin/organization/resources" element={<OrganizationResourcesPage />} />
         <Route path="/admin/remote-access" element={<RemoteAccessPage />} />
         <Route path="/admin/groups" element={<ChannelList isPage />} />
         <Route path="/admin/users" element={<UserList />} />
@@ -612,6 +647,7 @@ const router = createBrowserRouter(
           }
         />
         <Route path="/admin/settings/dependencies" element={<SettingsDependenciesPage />} />
+        <Route path="/admin/settings/memory" element={<SettingsMemoryPage />} />
         <Route path="/admin/settings/messaging" element={<SettingsMessagingPage />} />
         <Route path="/admin/settings/diagnostics" element={<SettingsDiagnosticsPage />} />
         <Route path="/admin/settings/logs" element={<SettingsLogsPage />} />
@@ -636,6 +672,7 @@ const router = createBrowserRouter(
         <Route path="/settings/backends/codex" element={<Navigate to="/admin/settings/backends/codex" replace />} />
         <Route path="/settings/models" element={<LegacyModelHubRoute />} />
         <Route path="/settings/dependencies" element={<Navigate to="/admin/settings/dependencies" replace />} />
+        <Route path="/settings/memory" element={<Navigate to="/admin/settings/memory" replace />} />
         <Route path="/settings/messaging" element={<Navigate to="/admin/settings/messaging" replace />} />
         <Route path="/settings/diagnostics" element={<Navigate to="/admin/settings/diagnostics" replace />} />
         <Route path="/settings/logs" element={<Navigate to="/admin/settings/logs" replace />} />

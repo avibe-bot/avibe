@@ -27,8 +27,12 @@ from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
-from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.message_context import resolve_turn_sink_key
+from core.web_push_notifications import (
+    WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
+    WEB_PUSH_USER_KEY_METADATA,
+    WEB_PUSH_USER_KEYS_METADATA,
+)
 from core.native_dispatch_phase import backend_dispatch_attempted
 from core.run_settlement import (
     NON_COMPLETING_TURN_SETTLEMENTS,
@@ -134,6 +138,15 @@ _EXECUTION_ROUTING_KEYS = _FLUSH_REBUILT_KEYS | frozenset(
     }
 )
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
+MEMORY_USER_ID_METADATA = "_memory_user_id"
+MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
+_MEMORY_METADATA_KEYS = frozenset(
+    {
+        MEMORY_USER_ID_METADATA,
+        MEMORY_ORDINARY_TEXT_METADATA,
+        "_memory_cli_admitted",
+    }
+)
 
 _NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex"})
 _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS = 1
@@ -343,10 +356,27 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         return segment
 
     segment: list[dict[str, Any]] = []
+    segment_is_memory_scoped: bool | None = None
+    segment_owner: str | None = None
     for row in rows:
         if _scheduled_provenance(row) is not None:
             break
         if delivery_store.message_merge_identity(row) != message_identity:
+            break
+        metadata = row.get("metadata") or {}
+        is_memory_scoped = any(key in metadata for key in _MEMORY_METADATA_KEYS)
+        owner = str(metadata.get(MEMORY_USER_ID_METADATA) or "").strip() or None
+        if segment and (
+            is_memory_scoped != segment_is_memory_scoped
+            or (
+                is_memory_scoped
+                and (
+                    owner is None
+                    or segment_owner is None
+                    or owner != segment_owner
+                )
+            )
+        ):
             break
         native_message_id = str(row.get("native_message_id") or "").strip()
         if native_message_id:
@@ -354,6 +384,11 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 segment.append(row)
             break
         segment.append(row)
+        if len(segment) == 1:
+            segment_is_memory_scoped = is_memory_scoped
+        segment_owner = owner
+        if is_memory_scoped and owner is None:
+            break
     return segment
 
 
@@ -1802,6 +1837,25 @@ class SessionTurnManager:
             if not segment or any(row is None for row in segment):
                 return None
             delivery_rows = [row for row in segment if row is not None]
+            remote_rows = [
+                row
+                for row in delivery_rows
+                if delivery_store.delivery_has_remote_resource_context(row)
+            ]
+            if remote_rows:
+                for row in remote_rows:
+                    if not self._retire_delivery_not_written(
+                        conn,
+                        session_id,
+                        str(row["id"]),
+                        reason="remote_execution_disabled",
+                    ):
+                        raise RuntimeError("remote FIFO Delivery retirement lost")
+                    logger.warning(
+                        "retired remote-origin queued Delivery=%s before Agent dispatch",
+                        row["id"],
+                    )
+                continue
             invalid_rows = [
                 row
                 for row in delivery_rows
@@ -1947,6 +2001,80 @@ class SessionTurnManager:
             raise RuntimeError("a durable Turn has no initial Delivery batch")
         first = self._hydrate_delivery_context(context, deliveries[0])
         payloads = [delivery_store.delivery_payload(row) for row in deliveries]
+        metadata_rows = [
+            dict(payload.get("metadata") or {})
+            for payload in payloads
+        ]
+        memory_metadata_present = any(
+            any(key in metadata for key in _MEMORY_METADATA_KEYS)
+            for metadata in metadata_rows
+        )
+        memory_users = list(
+            dict.fromkeys(
+                user_id
+                for metadata in metadata_rows
+                if (user_id := str(metadata.get(MEMORY_USER_ID_METADATA) or "").strip())
+            )
+        )
+        web_push_owners = list(
+            dict.fromkeys(
+                owner
+                for metadata in metadata_rows
+                for value in (
+                    [metadata.get(WEB_PUSH_USER_KEY_METADATA)]
+                    + (
+                        metadata.get(WEB_PUSH_USER_KEYS_METADATA)
+                        if isinstance(metadata.get(WEB_PUSH_USER_KEYS_METADATA), list)
+                        else []
+                    )
+                )
+                if (owner := str(value or "").strip())
+            )
+        )
+        merged_metadata = dict(metadata_rows[0])
+        merged_metadata.pop(WEB_PUSH_USER_KEY_METADATA, None)
+        merged_metadata.pop(WEB_PUSH_USER_KEYS_METADATA, None)
+        if len(web_push_owners) == 1:
+            merged_metadata[WEB_PUSH_USER_KEY_METADATA] = web_push_owners[0]
+        elif web_push_owners:
+            merged_metadata[WEB_PUSH_USER_KEYS_METADATA] = web_push_owners
+        authorization_contexts: dict[str, dict[str, Any]] = {}
+        for metadata in metadata_rows:
+            raw_contexts = metadata.get(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA)
+            if not isinstance(raw_contexts, list):
+                continue
+            for raw_context in raw_contexts:
+                if not isinstance(raw_context, dict):
+                    continue
+                user_key = str(raw_context.get("user_key") or "").strip()
+                if user_key in web_push_owners:
+                    authorization_contexts[user_key] = raw_context
+        if authorization_contexts:
+            merged_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = list(
+                authorization_contexts.values()
+            )
+        if memory_metadata_present:
+            memory_user = memory_users[0] if len(memory_users) == 1 else None
+            memory_ordinary_text = all(
+                metadata.get(MEMORY_ORDINARY_TEXT_METADATA) is True
+                for metadata in metadata_rows
+            )
+            memory_cli_admitted = all(
+                metadata.get("_memory_cli_admitted") is True
+                for metadata in metadata_rows
+            )
+            merged_metadata[MEMORY_ORDINARY_TEXT_METADATA] = memory_ordinary_text
+            merged_metadata["_memory_cli_admitted"] = memory_cli_admitted
+            if memory_user:
+                merged_metadata[MEMORY_USER_ID_METADATA] = memory_user
+                context.user_id = memory_user
+            context.is_ordinary_text = memory_ordinary_text
+            if memory_cli_admitted:
+                context.platform_specific["memory_cli_admitted"] = True
+            else:
+                context.platform_specific.pop("memory_cli_admitted", None)
+        first["metadata"] = merged_metadata
+        context.platform_specific["message_metadata"] = merged_metadata
         attachments = [
             attachment
             for payload in payloads
@@ -3438,6 +3566,7 @@ class SessionTurnManager:
         archived_before_dispatch = False
         run_terminal_before_dispatch = False
         invalid_delivery_ids: set[str] = set()
+        remote_delivery_ids: set[str] = set()
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             latest = delivery_store.get_turn(conn, turn_id)
@@ -3470,6 +3599,11 @@ class SessionTurnManager:
                 str(row["id"])
                 for row in deliveries
                 if not self._has_resolvable_delivery_input(conn, row)
+            }
+            remote_delivery_ids = {
+                str(row["id"])
+                for row in deliveries
+                if delivery_store.delivery_has_remote_resource_context(row)
             }
             run_ids = list(
                 dict.fromkeys(
@@ -3516,6 +3650,25 @@ class SessionTurnManager:
                 evidence_kind="agent_run_terminal_before_native_dispatch",
             )
             if terminal.get("changed"):
+                await self._resume_post_terminal(str(turn["session_id"]))
+            return False
+        if remote_delivery_ids:
+            logger.warning(
+                "durable Turn=%s was blocked because it contains remote-origin input",
+                turn_id,
+            )
+            terminal = self._terminalize_durable_turn(
+                turn_id,
+                "not_written",
+                settled_by="remote_execution_disabled",
+                evidence_kind="remote_origin_before_native_dispatch",
+                retire_unwritten_delivery_ids={
+                    str(row["id"])
+                    for row in deliveries
+                },
+            )
+            if terminal.get("changed"):
+                self._publish_queue_update(str(turn["session_id"]))
                 await self._resume_post_terminal(str(turn["session_id"]))
             return False
         if invalid_delivery_ids:
