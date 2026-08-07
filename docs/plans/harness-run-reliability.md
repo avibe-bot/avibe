@@ -1332,7 +1332,7 @@ Scenario range status, verified against
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…182` — occupied by PR7R's baseline; `HFR-183…219` remains
+- PR7: `HFR-180…183` — occupied by PR7R's baseline; `HFR-184…219` remains
   reserved for end-to-end evidence
 
 Check the catalog again immediately before coding. The highest merged ID is

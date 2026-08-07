@@ -2736,6 +2736,13 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_run_terminal_truth_matrix.py::test_q2_remains_blocked_until_every_backend_lane_has_exact_attribution
+  - id: HFR-183
+    name: every PR7R question is derived from structured open-probe obligations
+    status: covered
+    kind: evidence
+    layer: contract
+    backend: shared
+    test: tests/test_run_terminal_truth_matrix.py::test_every_pr7r_question_is_derived_from_open_probe_obligations
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

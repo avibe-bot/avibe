@@ -67,7 +67,7 @@ def test_q2_remains_blocked_until_every_backend_lane_has_exact_attribution() -> 
 
 
 def test_every_pr7r_question_is_derived_from_open_probe_obligations() -> None:
-    """Every required answer is consumed from structured evidence."""
+    """HFR-183: every required answer is consumed from structured evidence."""
     assert set(PR7R_QUESTIONS) == {"Q1", "Q2", "Q3", "Q4", "Q5"}
     evidence = {
         **QUESTION_PROBES,
