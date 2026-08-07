@@ -1,5 +1,4 @@
-import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
-import type { TFunction } from 'i18next';
+import React, { Suspense, useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
@@ -28,7 +27,12 @@ import type {
   MemoryProviderCall,
   MemoryStatus,
 } from '../../../context/ApiContext';
-import { JSON_TREE_MAX_BYTES, JSON_TREE_MAX_NODES } from '../../../lib/filePreview';
+import {
+  MEMORY_LOG_ENTRY_LIMIT,
+  mergeMemoryLogEntries,
+  memoryLogEnumLabel,
+  prepareJsonPreview,
+} from './memoryLog';
 import { useMemoryResource } from './useMemoryResource';
 
 const PreviewJson = React.lazy(() => import('../../ui/preview-json'));
@@ -37,124 +41,23 @@ type MemoryLogListOk = Extract<MemoryLogListResult, { status: 'ok' }>;
 type MemoryLogDetailOk = Extract<MemoryLogDetailResult, { status: 'ok' }>;
 type MemoryLogPage = MemoryLogListOk & { requested_cursor: string | null };
 
-export const MEMORY_LOG_ENTRY_LIMIT = 200;
+type MemoryLogListState = {
+  entries: MemoryLogEntry[];
+  sections: MemoryLogSections | null;
+  nextCursor: string | null;
+};
 
-const ENUM_LABEL_KEYS = {
-  reason: {
-    missing: 'missing',
-    busy: 'busy',
-    malformed: 'malformed',
-    expired: 'expired',
-    runs_missing: 'runsMissing',
-    runs_busy: 'runsBusy',
-    runs_malformed: 'runsMalformed',
-  },
-  status: {
-    created: 'created',
-    mixed: 'mixed',
-    pending: 'pending',
-    processing: 'processing',
-    delivered: 'delivered',
-    dead: 'dead',
-    running: 'running',
-    ok: 'ok',
-    success: 'success',
-    failed: 'failed',
-    dead_letter: 'deadLetter',
-    crashed: 'crashed',
-    error: 'error',
-    present: 'present',
-    missing: 'missing',
-    not_seen: 'notSeen',
-    indexed: 'indexed',
-  },
-  callKind: {
-    llm: 'llm',
-    multimodal_llm: 'multimodalLlm',
-    embedding: 'embedding',
-  },
-  callStage: {
-    boundary: 'boundary',
-    strategy: 'strategy',
-    cascade: 'cascade',
-    episode_extract: 'episodeExtract',
-    parse: 'parse',
-  },
-} as const;
+const INITIAL_MEMORY_LOG_LIST_STATE: MemoryLogListState = {
+  entries: [],
+  sections: null,
+  nextCursor: null,
+};
 
-type EnumLabelGroup = keyof typeof ENUM_LABEL_KEYS;
-
-// Backend enums are closed for known versions. A future value stays inert text
-// instead of being mistaken for an i18n key or interpreted as markup.
-// eslint-disable-next-line react-refresh/only-export-components
-export function memoryLogEnumLabel(t: TFunction, group: EnumLabelGroup, value: string): string {
-  const labels = ENUM_LABEL_KEYS[group] as Record<string, string>;
-  const key = labels[value];
-  return key ? t(`memory.log.${group}.${key}`) : value;
-}
-
-export type JsonPreview =
-  | { mode: 'tree'; value: object; text: string }
-  | { mode: 'text'; text: string };
-
-const byteLength = (value: string): number => new TextEncoder().encode(value).byteLength;
-
-function countJsonNodes(root: unknown, limit: number): number {
-  let count = 0;
-  const stack: unknown[] = [root];
-  while (stack.length > 0) {
-    const value = stack.pop();
-    count += 1;
-    if (count > limit) return count;
-    if (value !== null && typeof value === 'object') {
-      const children = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
-      for (const child of children) stack.push(child);
-    }
-  }
-  return count;
-}
-
-// Pure helper is exported beside its sole consumer so the JSON guard stays visible at the render boundary.
-// eslint-disable-next-line react-refresh/only-export-components
-export function prepareJsonPreview(value: unknown): JsonPreview {
-  let parsed = value;
-  let text: string;
-  if (typeof value === 'string') {
-    text = value;
-    try {
-      parsed = JSON.parse(value);
-    } catch {
-      return { mode: 'text', text };
-    }
-  } else {
-    try {
-      text = JSON.stringify(value, null, 2) ?? String(value);
-    } catch {
-      return { mode: 'text', text: String(value) };
-    }
-  }
-  if (
-    parsed === null ||
-    typeof parsed !== 'object' ||
-    byteLength(text) > JSON_TREE_MAX_BYTES ||
-    countJsonNodes(parsed, JSON_TREE_MAX_NODES) > JSON_TREE_MAX_NODES
-  ) {
-    return { mode: 'text', text };
-  }
-  return { mode: 'tree', value: parsed as object, text };
-}
-
-// eslint-disable-next-line react-refresh/only-export-components
-export function mergeMemoryLogEntries(
-  current: MemoryLogEntry[],
-  incoming: MemoryLogEntry[],
-  replace: boolean,
-): MemoryLogEntry[] {
-  if (replace) return incoming.slice(0, MEMORY_LOG_ENTRY_LIMIT);
-  const seen = new Set(current.map((entry) => entry.memcell_id));
-  return [...current, ...incoming.filter((entry) => !seen.has(entry.memcell_id))]
-    .slice(0, MEMORY_LOG_ENTRY_LIMIT);
-}
+const reduceMemoryLogPage = (state: MemoryLogListState, page: MemoryLogPage): MemoryLogListState => ({
+  entries: mergeMemoryLogEntries(state.entries, page.entries, page.requested_cursor === null),
+  sections: page.sections,
+  nextCursor: page.next_cursor,
+});
 
 const JsonPayload: React.FC<{ value: unknown; label: string }> = ({ value, label }) => {
   const preview = useMemo(() => prepareJsonPreview(value), [value]);
@@ -522,10 +425,9 @@ export const MemoryLogPanel: React.FC<{
 }> = ({ enabled, status, onClearAll }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const [entries, setEntries] = useState<MemoryLogEntry[]>([]);
-  const [sections, setSections] = useState<MemoryLogSections | null>(null);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [listState, dispatchListPage] = useReducer(reduceMemoryLogPage, INITIAL_MEMORY_LOG_LIST_STATE);
   const [selected, setSelected] = useState<string | null>(null);
+  const { entries, sections, nextCursor } = listState;
 
   const readList = useCallback(async (cursor: string | null): Promise<MemoryLogListResult | MemoryLogPage> => {
     const result = await api.getMemoryLog(cursor, 20);
@@ -555,10 +457,7 @@ export const MemoryLogPanel: React.FC<{
     if (!listPage) return;
     // The resource hook has already rejected superseded responses. Mirror only
     // that accepted page into the cursor accumulator used by the list view.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setEntries((current) => mergeMemoryLogEntries(current, listPage.entries, listPage.requested_cursor === null));
-    setNextCursor(listPage.next_cursor);
-    setSections(listPage.sections);
+    dispatchListPage(listPage);
   }, [listPage]);
 
   if (!enabled) {

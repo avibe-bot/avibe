@@ -2,7 +2,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import type { MemoryProfile } from '../../../context/ApiContext';
-import { StructuredMemoryProfile, structuredProfileFromItems } from './MemoryProfilePanel';
+import { StructuredMemoryProfile } from './MemoryProfilePanel';
+import { structuredProfileFromItems } from './memoryProfile';
 
 const t = (key: string) => key;
 

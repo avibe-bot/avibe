@@ -15,11 +15,13 @@ import type {
 import {
   MemoryLogListContent,
   MemoryLogPanel,
+} from './MemoryLogPanel';
+import {
   MEMORY_LOG_ENTRY_LIMIT,
   mergeMemoryLogEntries,
   memoryLogEnumLabel,
   prepareJsonPreview,
-} from './MemoryLogPanel';
+} from './memoryLog';
 
 const api = vi.hoisted(() => ({
   getMemoryLog: vi.fn(),

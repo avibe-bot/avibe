@@ -5,15 +5,11 @@ import { Loader2, RefreshCw } from 'lucide-react';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { useApi } from '../../../context/ApiContext';
-import type { MemoryItem, MemoryItemsResult, MemoryProfile } from '../../../context/ApiContext';
+import type { MemoryItemsResult, MemoryProfile } from '../../../context/ApiContext';
 import { useMemoryResource } from './useMemoryResource';
 
 type MemoryItemsOk = Extract<MemoryItemsResult, { status: 'ok' }>;
 type Translate = (key: string) => string;
-
-/** Return the first recognized provider profile, leaving legacy raw items untouched. */
-export const structuredProfileFromItems = (items: readonly MemoryItem[] | null): MemoryProfile | null =>
-  items?.find((item) => item.kind === 'profile' && item.profile)?.profile ?? null;
 
 const ProfileDetail: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <p className="mt-1 whitespace-pre-wrap text-[12px] leading-relaxed text-muted">
