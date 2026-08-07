@@ -12,7 +12,7 @@
 
 约束：本次调整不修改 EverOS 源码。需要 EverOS 新增 caller identity、receipt lookup、replay、rotation operation 等能力的事项，只能记录为未来上游能力或 Avibe 侧的 fail-closed 降级，不能列为本次 Avibe 实现阶段的交付前提。
 
-提交形态：本文以 Avibe `dev` 分支为目标基线，落地时随实现一起走 PR 评审与合入，不直接合入 `master`。本文是本轮 Memory 调整的最新设计基线；`docs/plans/memory-processing-log-page.md`、`docs/plans/memory-architecture-deepening.md` 和 `docs/plans/everos-1.2.1-upgrade.md` 继续作为已实现历史与约束来源。
+提交形态：本文以 Avibe `dev` 分支为目标基线，落地时随实现一起走 PR 评审与合入，不直接合入 `master`。**本中文版仅作为实现期参考；所有安全契约（write-timeout 处理、body-redacted projection、audited `manual_required` 解析路径、session fence before drain、agentic 缺预算 fail-closed、full rotation 实施条件）以英文版 [`docs/plans/everos-memory-adjustment.md`](./everos-memory-adjustment.md) 为准。**本文对应的英文版本同样 supersede 旧叙述：`docs/plans/memory-processing-log-page.md`、`docs/plans/memory-architecture-deepening.md` 和 `docs/plans/everos-1.2.1-upgrade.md` 继续作为已实现历史与约束来源。
 
 由本文 supersede 的旧叙述：
 

@@ -59,7 +59,7 @@ Target policy:
 3. On `/new`, session archive, explicit session close, or explicit user request, perform a final flush;
 4. Add a maximum unflushed duration to prevent long-running sessions from never reaching a boundary;
 5. On Avibe shutdown, do not block-wait on a potentially minute-long LLM flush; persist the durable state and resume on the next start;
-6. Final flush cannot rely on a single close hook: it must first wait for the target session's outbox drain, **or acquire the session fence before the drain check and hold it through the flush** while persisting this generation's watermark; otherwise messages added after close will not see a subsequent flush trigger.
+6. Final flush cannot rely on a single close hook. The contract is strict and ordered: acquire the session fence first, then check or wait for the target session's outbox drain, and hold the fence through the flush while persisting this generation's watermark. Waiting for drain without first holding the fence is forbidden — a worker that observes a drained outbox can still start a new provider add and race into the closing generation, and messages added after close will then miss their subsequent flush trigger.
 
 The initial idle window is suggested as 5 minutes; the precise value must be confirmed against actual LLM cost and interaction feel.
 
@@ -657,8 +657,14 @@ Rotation is triggered from the Web UI; CLI no longer exposes a standalone rotate
   1. When the `embedding_semantic_fingerprint` changes (e.g. user swaps embedding model or provider config), a "rebuild" button appears automatically with the source of the difference annotated;
   2. The user actively picks "rebuild index" in settings and must pass a second confirmation modal that lists the impact, downtime window, and the cluster-centroid recomputation note;
 - After second confirmation, §8.3 takes over; on failure, keep the old generation and never enter a "half-rebuilt" intermediate state;
-- No equivalent CLI entry point is exposed; operators who need direct access reuse the internal `operate` interface exposed by the Web UI flow, with no new CLI surface;
-- The entry is reachable only via direct UI clicks; it does not accept remote triggers from chat, agent, or API to avoid misuse.
+- No equivalent CLI entry point is exposed; operators who need direct access reuse the internal `operate` interface exposed by the Web UI flow, with no new CLI surface.
+
+Server-enforceable authorization and confirmation contract (because the UI surface is reachable through the same HTTP endpoint group as trusted local and Avibe Cloud browsers — `vibe/ui_memory_routes.py:1-8` — and a literal "UI click" cannot be distinguished from a scripted request to the same endpoint):
+
+- The rotation endpoint sits behind the existing `operate` server contract: it requires an authenticated principal whose effective capability set includes `memory.rotation.execute`; the route is mounted only on the trusted local listen address by default and is rejected on Avibe Cloud with `403 capability_unavailable` unless that capability is explicitly granted;
+- The request body carries a server-issued `confirmation_token` minted only after the second confirmation modal: the modal posts a `prepare` request that returns the token, the actual `rebuild` request must echo the token in the same principal session within a 60-second TTL. Missing, mismatched, or expired tokens cause the rebuild to fail closed;
+- The endpoint is bound to a single in-flight rotation per provider root, enforced by the maintenance lock (§7.3) so no parallel scripted caller can bypass the per-call lock;
+- Chat, agent, API, and remote-channel callers have no path to mint `confirmation_token`; the `prepare` endpoint itself sits behind the same capability check and only returns a token after the modal interaction, which is not exposed to chat/agent/API surface area.
 
 ## 9. Four-Mode Search Design
 
@@ -704,13 +710,13 @@ This adjustment adopts both the reranker configuration and explicit `agentic` se
 
 The Avibe-owned `RecallPolicy` must carry, when `agentic` is allowed:
 
-- `timeout_seconds`: declared explicitly by the caller; when missing, the adapter forwards to EverOS and EverOS's default kicks in; Avibe does not set an additional client-side default;
-- `max_model_calls`: declared explicitly by the caller; same forwarding behavior;
-- `max_results`: declared explicitly by the caller; same forwarding behavior;
+- `timeout_seconds`: required, declared explicitly by the caller; no implicit default; missing or zero is rejected;
+- `max_model_calls`: required, declared explicitly by the caller; no implicit default; missing or zero is rejected;
+- `max_results`: required, declared explicitly by the caller; no implicit default; missing or zero is rejected;
 - `cost_budget_tokens`: optional; on exceed, return `capability_unavailable` immediately;
 - `allow_fallback_to_hybrid`: default false; on timeout or capability failure, return an explicit result and never mask as a successful hybrid.
 
-Constraint: this plan does not introduce Avibe client-side default budget numbers; defaults stay with EverOS. Any later adjustment must first express the budget field at the call site and then let the adapter forward transparently. Avibe does not assign defaults on the client side and does not pick a policy on EverOS's behalf.
+Single contract: any missing or zero budget field causes the adapter to fail closed and reject the request before forwarding to EverOS. The plan does not introduce Avibe client-side default budget numbers and does not silently forward to EverOS defaults, so behavior is the same whether the call site is the UI, the CLI, or another backend module. Any later adjustment must first express the budget field at the call site and keep the fail-closed rule intact.
 
 Agentic requests that do not carry the complete budget fail closed at the adapter layer.
 
@@ -975,7 +981,7 @@ EverOS 1.2.3 runtime artifact, manifest/checksum, and compatibility verification
 - Adapter maps Avibe-owned `RecallPolicy`, carrying `timeout/max_model_calls/max_results/cost_budget_tokens`;
 - `hybrid` is the default; `keyword` is the fallback; `agentic` is explicit only;
 - All three capabilities (LLM/embedding/reranker) must be available before `agentic` is allowed; otherwise return `capability_unavailable`, no fallback;
-- Profile switching to `/get` is contingent on the project-isolation gap being closed;
+- Profile switching to `/get` is no longer gated on a project-isolation gap because the profile scope is user-global (§14). The Phase 3 task is to add the owner-keyed `/get(memory_type="profile")` adapter path while keeping the search-literal fallback for hosts that prefer it, and to test the user-global contract end-to-end. Any future reopen of project-scoped profile is a separate decision with its own upstream dependency.
 - Add the unprocessed overlay bound to a trusted current session;
 - Add scope isolation, filters, overlay bypass, freshness, agentic budget, and capability-boundary tests;
 - Processing-record page's capabilities grow to include `reranker`; agentic search continues under the existing provider-call recorder policy of metadata-only logging.
@@ -994,8 +1000,9 @@ This phase does not modify EverOS and does not promise receipt/replay capabiliti
 
 ### Phase 5: Embedding Rotation
 
+- **Gate.** Full semantic rotation ships only when one of the following is true: (a) the pinned EverOS exposes a complete rotation operation covering LanceDB rebuild, cluster centroid recompute, embedding-dependent OME invalidation, and fingerprint write; or (b) Avibe ships an Avibe-owned equivalent that performs all those steps under the maintenance lock and operation journal below. Until one of those holds, the user-visible rotation button (§8.4) stays hidden and only key-only restart is exposed; the current fail-closed behavior over existing data is retained.
 - Ship key-only restart first;
-- Then ship the offline full semantic rotation;
+- Then ship the offline full semantic rotation under the gate above;
 - Cover LanceDB, cluster, OME, and embedding-dependent Markdown;
 - Use the maintenance lock, operation journal (`operation_id/phase/fingerprint/fence_epoch/owner`), and rollback / fail closed;
 - Old-epoch late writes must be rejected;
@@ -1065,7 +1072,7 @@ This phase does not modify EverOS and does not promise receipt/replay capabiliti
 - `hybrid` is the default;
 - `keyword` remains usable when embedding is unavailable;
 - `agentic` returns `capability-unavailable` when reranker/budget configuration is missing, without implicit invocation;
-- Profile `/get` target behavior is covered by tests; project isolation is not asserted as an acceptance promise before the user-global vs project-scoped decision is closed;
+- Profile `/get` target behavior is covered by tests under the user-global scope (§14); project isolation is not asserted and is not a precondition, because the profile scope decision is closed;
 - Session overlay only accesses a trusted current session and rejects arbitrary session filters;
 - user / project / session isolation tests pass (profile scope follows the decided user-global semantics);
 - Unprocessed messages and extracted memory have explicit freshness, source, and watermark / partial markers.
@@ -1093,7 +1100,7 @@ Product semantics below must be locked before the corresponding implementation p
 | New add during in-flight flush | provider generation; or Avibe session fence | **Avibe session fence**, because EverOS does not currently accept generation IDs | watermark cannot be enforced; settlement may cross generations |
 | Agentic search explicit enable | enabled by default; or explicit opt-in | **Explicit opt-in**, subject to §9.2.2 budgets, see §9.2.1/§9.2.4 | Ordinary call paths are polluted by an expensive capability |
 | Agentic capability gating | fallback on missing capabilities; or `capability-unavailable` | **`capability-unavailable`**, no fallback, see §9.2.4 | Silent regression to `hybrid` hides capability gaps |
-| Agentic default `timeout` / `max_model_calls` / `max_results` / `cost_budget_tokens` | Avibe-defined defaults; or aligned with EverOS | **Aligned with EverOS**; Avibe does not set client-side defaults; the caller must declare explicitly, see §9.2.2 | Behavior drifts if Avibe and EverOS defaults diverge |
+| Agentic `timeout` / `max_model_calls` / `max_results` missing or zero | forward to EverOS default; or fail closed | **fail closed at the adapter**, caller must declare explicitly, see §9.2.2 | Forwarding to provider defaults risks unexpected costly LLM work without an explicit budget |
 | Embedding rotation entry point | CLI command; or Web UI | **Web UI, collapsed + second confirmation**, see §8.4 | CLI entry spreads misuse; UI entry exposed on the main path causes accidental triggers |
 | First-version bounded-wait user action | Yes; or internal only | **Internal only** (§5.2) | Users see no controllable wait in the UI |
 | `manual_required` resolution operator path | none; or audited manual operation | **Audited manual operation** through `operate` (§5.5) | Without it, `manual_required` blocks the session indefinitely or forces a destructive `clear` |
