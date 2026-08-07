@@ -34,9 +34,23 @@ from tests.run_terminal_truth_evidence import (
 )
 
 _PROOF_KINDS = {"covered", "shared", "N/A", "defect", "unproven"}
+_FINDING_ID = re.compile(r"\bPR7R-F\d+\b")
+_SCENARIO_ID = re.compile(r"\bHFR-\d+\b")
+_SCENARIO_CATALOG = (
+    Path(__file__).resolve().parent
+    / "scenarios"
+    / "harness_failure_recovery"
+    / "catalog.yaml"
+)
 
 
 _CELL_KEYS = {"shared", "per_backend"}
+
+
+def _scenario_rows() -> list[dict]:
+    yaml = pytest.importorskip("yaml")
+    catalog = yaml.safe_load(_SCENARIO_CATALOG.read_text(encoding="utf-8"))
+    return catalog["scenarios"] if isinstance(catalog, dict) else catalog
 
 
 def _validate_matrix(matrix: dict) -> None:
@@ -887,8 +901,7 @@ def test_every_question_and_finding_names_a_real_consuming_test() -> None:
     referenced = {
         finding_id
         for _b, _la, _t, _o, (_kind, detail) in _CELLS
-        for finding_id in PR7R_FINDINGS
-        if finding_id in detail
+        for finding_id in _FINDING_ID.findall(detail)
     }
     assert referenced == set(PR7R_FINDINGS), referenced
     for _b, _la, _t, _o, (kind, detail) in _CELLS:
@@ -944,8 +957,15 @@ def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:
     assert set(EXACT_TURN_PROGRESS_SIGNALS) == {
         (backend, lane) for backend in BACKENDS for lane in LANES
     }
+    scenario_tests = {row["id"]: row["test"] for row in _scenario_rows()}
     for proof in EXACT_TURN_PROGRESS_SIGNALS.values():
         _validate_proof(proof)
+        kind, detail = proof
+        if kind == "defect":
+            claim = detail.rpartition(" -- ")[0]
+            scenario_ids = _SCENARIO_ID.findall(claim)
+            assert len(scenario_ids) == 1, detail
+            assert scenario_tests.get(scenario_ids[0]) == _detail_node(detail), detail
     kinds = {kind for kind, _reason in EXACT_TURN_PROGRESS_SIGNALS.values()}
     verdict = PR7R_QUESTIONS["Q2"]["verdict"]
     if kinds == {"unproven"}:
@@ -958,15 +978,7 @@ def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:
 
 def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None:
     """HFR-192: the id in a docstring is the id in the catalog, and back again."""
-    yaml = pytest.importorskip("yaml")
-    catalog_path = (
-        Path(__file__).resolve().parent
-        / "scenarios"
-        / "harness_failure_recovery"
-        / "catalog.yaml"
-    )
-    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
-    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    scenarios = _scenario_rows()
     by_id = {row["id"]: row["test"] for row in scenarios}
 
     modules = (
@@ -1014,15 +1026,7 @@ def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None
 
 def test_one_scenario_id_names_exactly_one_catalog_row() -> None:
     """HFR-202: a scenario id is a stable name, so two rows may not answer to it."""
-    yaml = pytest.importorskip("yaml")
-    catalog_path = (
-        Path(__file__).resolve().parent
-        / "scenarios"
-        / "harness_failure_recovery"
-        / "catalog.yaml"
-    )
-    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
-    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    scenarios = _scenario_rows()
 
     seen: dict[str, dict] = {}
     collisions: list[str] = []
@@ -1148,12 +1152,7 @@ def test_the_plans_verdict_carries_the_same_scope_as_the_answer() -> None:
 
 def test_the_plans_reserved_scenario_range_is_actually_free() -> None:
     """HFR-194: a reserved id block may not contain ids the catalog already owns."""
-    yaml = pytest.importorskip("yaml")
-    catalog_path = (
-        Path(__file__).resolve().parent / "scenarios" / "harness_failure_recovery" / "catalog.yaml"
-    )
-    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
-    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    scenarios = _scenario_rows()
 
     line = re.search(
         r"^- PR7: `HFR-(\d+)…(\d+)`.*?`HFR-(\d+)…(\d+)` still\s+reserved",
@@ -1213,12 +1212,7 @@ def _pr7r_owned_ids(scenarios: list[dict]) -> set[int]:
 
 def test_every_claim_about_the_occupied_range_agrees_with_the_catalog() -> None:
     """HFR-209: the plan claims its own id range three times; all three must hold."""
-    yaml = pytest.importorskip("yaml")
-    catalog_path = (
-        Path(__file__).resolve().parent / "scenarios" / "harness_failure_recovery" / "catalog.yaml"
-    )
-    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
-    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    scenarios = _scenario_rows()
     ours = _pr7r_owned_ids(scenarios)
     assert ours, "no catalog row points at a PR7R module"
     highest = max(ours)
@@ -1301,9 +1295,7 @@ def test_the_capability_index_reaches_every_module_the_catalog_cites() -> None:
     """HFR-210: the canonical navigation path must reach the cited evidence."""
     yaml = pytest.importorskip("yaml")
     scenarios_dir = Path(__file__).resolve().parent / "scenarios"
-    catalog_path = scenarios_dir / "harness_failure_recovery" / "catalog.yaml"
-    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
-    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    scenarios = _scenario_rows()
 
     index = yaml.safe_load((scenarios_dir / "INDEX.yaml").read_text(encoding="utf-8"))
     entries = index["capabilities"] if isinstance(index, dict) else index
@@ -2366,19 +2358,9 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction(tmp_path):
     )
 
 
-def test_a_scenario_id_named_in_an_answer_is_carried_as_that_answer_s_evidence(
-    tmp_path,
-) -> None:
+def test_a_scenario_id_named_in_an_answer_is_carried_as_that_answer_s_evidence() -> None:
     """HFR-203: leaning on a scenario in prose must mean citing its test."""
-    yaml = pytest.importorskip("yaml")
-    catalog_path = (
-        Path(__file__).resolve().parent
-        / "scenarios"
-        / "harness_failure_recovery"
-        / "catalog.yaml"
-    )
-    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
-    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    scenarios = _scenario_rows()
     by_id = {row["id"]: row.get("test") for row in scenarios}
 
     def _unsupported(answer: str, evidence: tuple[str, ...]) -> list[str]:
@@ -2477,15 +2459,7 @@ def _misattributed_guards(
 
 def test_a_corpus_guard_is_never_credited_with_production_behaviour() -> None:
     """HFR-204: a guard that reads this unit's text cannot drive the runtime."""
-    yaml = pytest.importorskip("yaml")
-    catalog_path = (
-        Path(__file__).resolve().parent
-        / "scenarios"
-        / "harness_failure_recovery"
-        / "catalog.yaml"
-    )
-    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
-    scenarios = catalog["scenarios"] if isinstance(catalog, dict) else catalog
+    scenarios = _scenario_rows()
     # Derived from the catalog's own ``test`` field rather than listed, so a
     # guard moved into the probes file stops being policed automatically and a
     # new guard added here starts being policed without an edit.
