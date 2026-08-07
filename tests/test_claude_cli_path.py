@@ -315,6 +315,7 @@ def test_session_handler_sets_claude_fork_session_for_pending_native_fork(monkey
     assert captured["options"].resume == "claude-source"
     assert captured["options"].fork_session is True
     assert captured["options"].extra_args == {"model": "claude-sonnet-4-5"}
+    assert captured["options"].settings == '{"autoMemoryEnabled":false}'
     assert captured["options"].effort == "high"
     assert not hasattr(client, "_vibe_native_session_id")
     prompt_value = captured["options"].system_prompt
