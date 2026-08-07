@@ -707,16 +707,31 @@ The migration is idempotent and runs once at startup when `memory_meta` lacks th
 ### 8.2 Key-Only Rotation
 
 ```text
-validate new credential
+acquire per-root maintenance lock
 → fence provider calls
+→ validate new credential
 → stop old sidecar
 → start new sidecar with new key
 → reuse original provider root
 → verify capability
 → restore claims
+→ on success: release maintenance lock
+→ on failure to start new sidecar OR on capability verification failure
+    AFTER the old sidecar has stopped:
+    - restart the old sidecar against the original provider root
+      using the original credential
+    - verify capability under the original credential
+    - only then release the maintenance lock; the provider-call fence
+      is held continuously through the failed attempt and the
+      restoration
+    - if the original sidecar cannot be restarted against the
+      original root, hold the lock, journal `key_rotation_restore_failed`,
+      and surface the failure on the processing-record page; the
+      operator chooses between another restore attempt and a fenced
+      `clear` (see §15 acceptance)
 ```
 
-Does not delete Markdown, SQLite, or LanceDB; does not trigger a full rebuild.
+Does not delete Markdown, SQLite, or LanceDB; does not trigger a full rebuild. The lock-and-fence pairing is what prevents the failure mode where the old sidecar has stopped, the new sidecar cannot start, and Avibe has no recorded plan for putting the old sidecar back: without an explicit restore arm in the sequence, the runtime can be left with no live sidecar and no released fence. The same rule applies whether the failure is a credential validation failure, a new-sidecar start failure, or a capability verification failure after the old sidecar is gone; in every case, releasing the lock requires a verified live sidecar on one of the two known credentials.
 
 ### 8.3 Full Semantic Rotation
 
@@ -818,6 +833,7 @@ Lifecycle:
 - On snapshot restoration (post-snapshot failure path), the rotation replay store stays on disk; the next rotation re-reads its `pending_rotation_replay` rows and replays them in original order against whichever sidecar is then live. `delivered_pending_rotation_commit` rows that were committed to a now-rolled-back provider root are demoted to `pending_rotation_replay` with the same `add_request_id` for audit only; the next `/add` re-attempts the delivery against the restored-or-rebuilt root.
 - A replay `/add` whose response cannot be confirmed (timeout, transport reset, or sidecar accepted-but-silent after the request was sent) is **not** marked `pending_rotation_replay` for retry. §10.1 treats write timeouts as ambiguous outcomes that auto-replay may not silently resolve; replay would risk duplicating an already-accepted memory. Such a row is marked `manual_required` with the audit pointer (the journal `operation_id`, the new sidecar's `add_request_id`, and the timeout evidence), and the rotation replay store is excluded from the live-queue feed. The row stays in the replay store until an audited `manual_required` resolution records operator intent and transitions the row to a follow-on state: case rf1 (later confirmed acknowledged) transitions `replay_state` to `delivered_pending_rotation_commit` with the confirmed `add_request_id`, then normal success-settlement runs once the rotation journal commits; case rf2 (confirmed `not_committed`) demotes the row to `pending_rotation_replay` for the next rotation; case rf3 (refuse and dispose) removes the row and records the operator decision in the audit log. The embedding fingerprint is not modified by any of these transitions — rf1 does not "pin a confirmed-acked fingerprint" because the fingerprint was already written in step 5 of §8.3 before any replay was attempted, and changing it would invalidate the new root's vector space. Boot recovery never replays a `manual_required` row.
 - On rotation success, the rotation tool drains the replay store: rows that committed through the normal success-settlement path are removed, rows that did not commit (rare; only when the success-settlement path itself rejected them) return to `pending_rotation_replay` and stay in the store for the next rotation. `manual_required` rows do not return to `pending_rotation_replay` automatically; they wait for the audited resolution.
+- On rotation-failure terminal (snapshot restore verified), the rotation tool **actively drains** `pending_rotation_replay` rows against the restored old sidecar before reopening capture acceptance, in the same fenced transaction that restarts the old sidecar and reopens intake. Reopening capture acceptance while quarantined rows are still waiting on the next rotation would let newer captures proceed against the restored old sidecar while previously-accepted captures from the same human user sit undelivered indefinitely, violating the "accepted capture is delivered, dropped, or held in a recoverable state" invariant and leaving the user-visible queue shorter than the actual pending state. The drain attempts each row against the restored sidecar in original order; rows that fail to deliver stay in the store as `pending_rotation_replay` (and surface as recoverable on the next rotation or operator action); rows that deliver transition to normal success settlement. The drain runs under the per-root maintenance lock; capture acceptance stays paused for the duration; only after the drain completes does the lock release and intake reopen. This makes "rotation failure" a true rollback to the pre-rotation state: no quarantined rows survive past the terminal transition.
 - The store's own retention invariant is that **only `pending_rotation_replay` rows are boot-replayed**. The boot recovery path reads `pending_rotation_replay` rows from the store and feeds them back into the live capture queue before any new capture is accepted. `in_flight` rows are recovered to `manual_required` (the lease has expired without an ack and we cannot prove the write was not committed); `delivered_pending_rotation_commit` rows are not boot-replayed (they have already received an ack from the new sidecar and are awaiting rotation journal commit); `manual_required` rows are not boot-replayed (auto-replay is forbidden by the no-replay contract in §10.1); `unknown` rows are recovered to `manual_required` for the same reason; `settled` rows are not boot-replayed (they have been committed through the normal success-settlement path and were supposed to have been removed from the store, so a residual `settled` row is a fault indicator logged and surfaced on the processing-record page). Rows in any state other than `pending_rotation_replay` survive across boots but stay out of the live-queue feed.
 
 This separation is what makes the round-5 claim — "quarantined rows survive snapshot restoration" — actually true. Without a separate store, the same SQLite is both the durable home for the row and the database the snapshot restores over, so restoring the snapshot is indistinguishable from deleting the row.
@@ -856,13 +872,42 @@ RecallPolicy
   wait_scope: trusted_provider_session_ref | none (required when freshness=bounded)
   target_generation: int | none (required when freshness=bounded)
   target_watermark_ms: int | none (required when freshness=bounded)
+  freshness_timeout_seconds: int | none (required when freshness=bounded;
+      bounds the §9.1 wait; not interchangeable with the agentic
+      timeout below; missing or zero is rejected)
   include_profile: bool
   filters: provider-neutral filter tree
   -- agentic-only budgets (required when mode=agentic) --
-  timeout_seconds: int (required, missing or zero is rejected)
+  timeout_seconds: int (required, missing or zero is rejected; bounds the
+      LLM step, not the freshness wait)
   max_model_calls: int (required, missing or zero is rejected)
   cost_budget_tokens: int (required, missing or zero is rejected; large
       values are accepted as effectively unlimited but must be declared)
+  -- multi-declaration support (see §9.2.1) --
+  declarations: list<RecallDeclaration> | none
+      (an explicit, ordered list of additional independently-budgeted
+       mode runs that share the same caller-facing `limit` and
+       `freshness` contract; empty or omitted means single-mode run)
+```
+
+```text
+RecallDeclaration
+  mode: keyword | vector | hybrid | agentic
+  budget: RecallBudget
+```
+
+```text
+RecallBudget
+  limit: 1..N (declaration-local upper bound; must satisfy
+      declaration_limit <= caller_limit)
+  max_results: 1..N (agentic-only)
+  freshness_timeout_seconds: int | none (required when declaration uses
+      freshness=bounded)
+  timeout_seconds: int | none (agentic-only LLM step budget)
+  max_model_calls: int | none (agentic-only)
+  cost_budget_tokens: int | none (agentic-only; missing or zero
+      rejected when the declaration uses mode=agentic)
+```
 ```
 
 `limit` and `max_results` are two distinct fields with a defined relationship:
@@ -874,8 +919,8 @@ RecallPolicy
 
 - `mode=auto` only chooses among `keyword/vector/hybrid` and must never implicitly escalate to `agentic`;
 - `mode=keyword/vector/hybrid/agentic` are explicit choices; the caller is responsible for declaring budgets;
-- `freshness=eventual` does not promise a deadline; `bounded` is best effort within the caller's deadline and returns explicit timeout/unknown on timeout; `session_overlay` binds only to a trusted current session.
-- `freshness=bounded` requires three additional fields so the adapter can implement the §14 success criterion against the right session: `wait_scope` must be the trusted provider session reference (`principal_id`, `epoch`, `project_ref`, `session_id` per §5.3), `target_generation` must name the generation that bounded recall is waiting on, and `target_watermark_ms` must be the watermark the adapter must observe before returning success. The generic `filters` tree is **not** an acceptable substitute for these fields — a filter cannot identify a session. A `bounded` request that omits any of `wait_scope` / `target_generation` / `target_watermark_ms` is rejected at the adapter layer with the same fail-closed rule as the agentic budget fields; success defined as "flush confirmed successful" (§14) cannot be implemented without naming the generation whose flush must confirm. The observation source for the target generation / watermark / flush_state is the **Avibe-owned coordinator's durable state** (`memory_meta` plus the per-session durable generation / watermark / flush_state columns), not EverOS: the sidecar's `core/memory/sidecar.py:177-200` allowlist exposes only `/health`, `/add`, `/flush`, `/search`, and `/get`, and `MemoryRuntime.status_payload()` (`core/memory/runtime.py:542-558`) is an aggregate without per-session generations or watermarks. The plan does not modify EverOS, so a per-session `/status` projection is out of scope for this plan. The adapter observes through the same coordinator-owned Avibe durable state that the capture path already writes; the session fence that the capture path holds is the same fence the bounded wait observes under; on every poll, the adapter reads the target session's `generation`, `watermark`, and `flush_state` from coordinator-owned state, and returns success only when the live generation has reached or passed `target_generation` and the live watermark has reached `target_watermark_ms`; otherwise it returns `timeout`/`unknown` at the caller's deadline.
+- `freshness=eventual` does not promise a deadline; `bounded` is best effort within the caller's `freshness_timeout_seconds` deadline and returns explicit `timeout` / `unknown` on timeout; `session_overlay` binds only to a trusted current session. The `freshness_timeout_seconds` field is independent of the agentic-only `timeout_seconds` budget: a `keyword` / `vector` / `hybrid` caller that uses `freshness=bounded` cannot borrow the agentic `timeout_seconds` because that field is rejected for non-agentic modes, and an `agentic` caller with `freshness=bounded` declares both deadlines (the freshness deadline bounds the §9.1 wait, the agentic `timeout_seconds` bounds the LLM step after the wait resolves). The deadline the adapter applies to a bounded wait is `freshness_timeout_seconds`; when omitted or zero, the adapter rejects the request at the boundary with the same fail-closed rule as the agentic budget fields.
+- `freshness=bounded` requires three additional fields so the adapter can implement the §14 success criterion against the right session: `wait_scope` must be the trusted provider session reference (`principal_id`, `epoch`, `project_ref`, `session_id` per §5.3), `target_generation` must name the generation that bounded recall is waiting on, and `target_watermark_ms` must be the watermark the adapter must observe before returning success. The generic `filters` tree is **not** an acceptable substitute for these fields — a filter cannot identify a session. A `bounded` request that omits any of `wait_scope` / `target_generation` / `target_watermark_ms` is rejected at the adapter layer with the same fail-closed rule as the agentic budget fields; success defined as "flush confirmed successful" (§14) cannot be implemented without naming the generation whose flush must confirm. The observation source for the target generation / watermark / flush_state is the **Avibe-owned coordinator's durable state** (`memory_meta` plus the per-session durable generation / watermark / flush_state columns), not EverOS: the sidecar's `core/memory/sidecar.py:177-200` allowlist exposes only `/health`, `/add`, `/flush`, `/search`, and `/get`, and `MemoryRuntime.status_payload()` (`core/memory/runtime.py:542-558`) is an aggregate without per-session generations or watermarks. The plan does not modify EverOS, so a per-session `/status` projection is out of scope for this plan. The adapter observes through the same coordinator-owned Avibe durable state that the capture path already writes; the session fence that the capture path holds is the same fence the bounded wait observes under; on every poll, the adapter reads the target session's `generation`, `watermark`, and `flush_state` from coordinator-owned state, and returns success only when **all three** of the following are true: (a) the live `generation` has reached or passed `target_generation`; (b) the live `watermark` has reached `target_watermark_ms`; (c) the live `flush_state` for that session is `settled`. A `flush_state` of `due` / `in_flight` / `unknown` / `manual_required` is not a successful freshness result even when generation and watermark look right — §14 success is a confirmed flush, not a watermark the provider has merely acknowledged. When the deadline elapses with any of generation / watermark / flush_state below the required threshold, the adapter returns `timeout`; when an unresolvable error blocks observation, it returns `unknown`. The same three-way predicate applies regardless of mode, including `agentic` (which observes bounded freshness on the same coordinator state before its LLM step).
 
 EverOS DTOs, filters DSL, and response arrays live only inside the adapter.
 
@@ -896,7 +941,7 @@ This adjustment adopts both the reranker configuration and explicit `agentic` se
 - Ordinary UI search does not call `agentic`;
 - Ordinary chat / system recall does not call `agentic`;
 - `agentic` is only enabled by an explicit caller declaration and must pass Avibe-owned policy validation;
-- A single call may declare the same mode multiple times, but each declaration is timed and budgeted independently.
+- A single `RecallPolicy` body may carry multiple independently-budgeted mode runs through the explicit `declarations: list<RecallDeclaration>` field. The top-level scalar `mode` is the primary run and remains the contract for the caller-facing response; each entry in `declarations` is an additional independently-budgeted run that shares the same `limit` and `freshness` contract but has its own `RecallBudget`. JSON duplicate-key encoding is **not** used and would be silently dropped by ordinary parsers, so the multi-run shape is modeled only through the typed list field. The adapter executes declarations in declared order, each under its own budget; the caller sees the primary run's response and the declarations' results are surfaced only through their own metadata projection (no implicit merging, no implicit fallback between declarations). Each declaration's `limit` must satisfy `declaration_limit <= caller_limit`; an `agentic` declaration must carry the full §9.2.2 budget set; a declaration that uses `freshness=bounded` must carry `freshness_timeout_seconds`. The total wall-clock budget of the request is the sum of declaration budgets plus the primary run's budget; the adapter rejects a request whose total exceeds the caller's process-level timeout. A request with no `declarations` field is a single-mode run; the existing scalar `mode` is the source of truth.
 
 #### 9.2.2 Agentic Required Budgets
 
@@ -951,7 +996,7 @@ When a request with `mode=agentic` arrives:
 
 #### 9.2.5 Privacy and Logging
 
-- `agentic` search follows the existing provider-call recorder policy: do not log full payloads; only log kind, mode, duration, provider status, and scrubbed errors;
+- `agentic` search follows the existing provider-call recorder policy of metadata-only logging — **not** the full-payload path. The default `normalize_provider_call()` (`core/memory/everos_insight/recorder.py:480-572`) serializes the normalized request and response into `request_json` / `response_json`, and `_llm_request()` bounds message content without redacting it; that path is not safe for agentic search because the LLM call carries the user's query and the retrieved memory context. Agentic search therefore uses an explicit metadata-only recorder path: a separate `record_agentic_metadata()` entry point that records only `kind=agentic_llm`, `mode`, `stage`, `model`, `status`, `duration_ms`, `prompt_tokens`, `completion_tokens`, `request_id`, `strategy_name`, `run_id`, `attempt`, `memcell_id`, `app_id`, `project_id`, `owner_id`, `md_path`, `entry_id`, `parent_type`, `parent_id`, `dropped_before`, and a scrubbed `error`. The `request_json` and `response_json` columns are written as `null` for agentic calls, with the prompt and response bytes reflected only in `request_bytes` / `response_bytes` aggregate counters. The same `_MAX_ROW_ENCODED_BYTES` budget guard applies. Contract tests assert that an agentic LLM call with a recognizable prompt substring and a recognizable retrieved-memcell substring produces a recorder row whose `request_json IS NULL` and `response_json IS NULL` and whose `request_bytes` / `response_bytes` are non-zero; the substrings must not appear in any serialized column. The existing provider-call detail projection (§11.4) continues to body-redact any non-agentic call that does retain content;
 - Agent chat memory capture is out of scope; do not enable agent case / agent skill;
 - User-memory `agentic` only returns visible records to the caller; it must not leak into other users' profiles.
 
@@ -1073,7 +1118,7 @@ The same rule applies to the **memcell preview** rendered in the processing-reco
    - the requesting browser's own principal, derived via `principal_for_user_key` of the verified UI key;
    - every IM principal whose `platform:user_id` literal was previously bound to that same browser principal through the verified alias map below.
 
-   The alias map is **explicit and audited**, not a free-form HMAC equality claim. When a Cloud browser session is paired with an IM account (Slack / Discord / Telegram / Feishu / WeChat) under the Web UI's pairing flow, the pairing records an audited alias row of the form `(browser_principal_id, platform, im_user_id, paired_at, audit_pointer)` in `memory_meta` (or a sibling alias table). The pairing flow must include a **platform-side ownership challenge** before the alias row is recorded: the human at the browser must prove control of the IM account through the platform's identity primitive (Slack / Discord / Telegram / Feishu / WeChat's verification flow) and the verification response is recorded as the audit_pointer. Without that challenge, an attacker who learns a victim's IM user-id could forge an alias and authorize themselves to read the victim's memcells; the challenge is the ownership boundary. Each alias row also carries a uniqueness rule (one browser principal can be paired to one IM account per platform per session; re-pairing revokes the prior alias) and a revocation rule (the alias can be revoked by either side; revocation removes the alias row and any subsequent list-read filter no longer includes the IM principal). The list-read path resolves the browser principal against the alias map to compute the principal set, then matches against `sender_ids_json` membership across that set. The full alias map is exposed only through the same admin capability as the full internal view; an unprivileged Cloud browser session sees only its own aliases. The default then narrows by the project scope already resolved for the request through `_memory_read_scope()`. Without this alias map and challenge, the browser list-read filter would reject every ordinary IM memcell; with them, IM captures from the same human user are surfaced, and the ownership check remains exact.
+   The alias map is **explicit and audited**, not a free-form HMAC equality claim. When a Cloud browser session is paired with an IM account (Slack / Discord / Telegram / Feishu / WeChat) under the Web UI's pairing flow, the pairing records an audited alias row of the form `(browser_principal_id, platform, im_principal_id, paired_at, audit_pointer, verification_evidence_ref)` in `memory_meta` (or a sibling alias table). The row stores the **already-derived IM principal** — `principal_for_user_key(f"{platform}:{im_user_id}")` — not the raw `im_user_id`. The raw `im_user_id` is held only in the audit_pointer / `verification_evidence_ref`, which is a scrubbed evidence pointer (challenge nonce, response digest, and platform user-id hash) produced by the platform-side ownership challenge, never the literal user-id string. Storing the raw `im_user_id` directly in the alias row would contradict §10.3's HMAC-derived identity rule and the existing `derive_principal_id()` design (`core/memory/store.py:1490-1498`) that deliberately avoids retaining the platform user key in durable state; runtime backups would acquire stable raw Slack / Discord / Telegram / Feishu / WeChat identifiers. The pairing flow must include a **platform-side ownership challenge** before the alias row is recorded: the human at the browser must prove control of the IM account through the platform's identity primitive (Slack / Discord / Telegram / Feishu / WeChat's verification flow) and the verification response is recorded as the `verification_evidence_ref`. Without that challenge, an attacker who learns a victim's IM user-id could forge an alias and authorize themselves to read the victim's memcells; the challenge is the ownership boundary. Each alias row also carries a uniqueness rule (one browser principal can be paired to one IM account per platform per session; re-pairing revokes the prior alias) and a revocation rule (the alias can be revoked by either side; revocation removes the alias row and any subsequent list-read filter no longer includes the IM principal). The list-read path resolves the browser principal against the alias map to compute the principal set, then matches against `sender_ids_json` membership across that set. The full alias map is exposed only through the same admin capability as the full internal view; an unprivileged Cloud browser session sees only its own aliases. The default then narrows by the project scope already resolved for the request through `_memory_read_scope()`. Without this alias map and challenge, the browser list-read filter would reject every ordinary IM memcell; with them, IM captures from the same human user are surfaced, and the ownership check remains exact.
 
 Both invariants are checked at the adapter boundary before any row leaves `core/memory/everos_insight/reader.py`. The page renders body-redacted, principal-scoped rows only; the internal recorder is the only consumer of the full view.
 
@@ -1186,10 +1231,11 @@ EverOS 1.2.3 runtime artifact, manifest/checksum, and compatibility verification
 - Adapter maps Avibe-owned `RecallPolicy`, carrying `timeout/max_model_calls/max_results/cost_budget_tokens`;
 - `hybrid` is the default; `keyword` is the fallback; `agentic` is explicit only;
 - All three capabilities (LLM/embedding/reranker) must be available before `agentic` is allowed; otherwise return `capability_unavailable`, no fallback;
+- **Mode-specific capability gating.** Activation and read capability are checked per mode at the shared runtime layer (`runtime.py:340-372` for `processing_healthy`, `process.py:219-223` for the start gate), so `keyword` recall is reachable when only the embedding endpoint is missing — the existing shared gates that require *both* LLM and embedding settings (`process.py:1144-1153` and the `_processing_configured()` AND-chain in `everos.py:340-372`) are split into mode-specific predicates. Specifically: `_keyword_runtime_ready()` checks only that the sidecar is alive and `/search` accepts `keyword`; `_vector_runtime_ready()` adds the embedding endpoint; `_agentic_runtime_ready()` adds the reranker + LLM + budget fields. The `processing_healthy` aggregate is replaced by per-mode readiness signals, and the page surfaces each mode's actual readiness rather than a single composite. A `keyword` request that hits an unavailable embedding endpoint must not be rejected at the runtime gate; it must reach the adapter, which then returns the keyword result against the FTS/scalar index without ever consulting the embedding endpoint. This change does not modify EverOS and does not weaken any existing LLM-only or embedding-only gate that protects `agentic` or `vector` modes;
 - Profile switching to `/get` is no longer gated on a project-isolation gap because the profile scope is user-global (§14). The Phase 3 task is to add the owner-keyed `/get(memory_type="profile")` adapter path while keeping the search-literal fallback for hosts that prefer it, and to test the user-global contract end-to-end. Any future reopen of project-scoped profile is a separate decision with its own upstream dependency.
 - Add the unprocessed overlay bound to a trusted current session;
 - Add scope isolation, filters, overlay bypass, freshness, agentic budget, and capability-boundary tests;
-- Processing-record page's capabilities grow to include `reranker`; agentic search continues under the existing provider-call recorder policy of metadata-only logging.
+- Processing-record page's capabilities grow to include `reranker`; agentic search continues under the existing provider-call recorder policy of metadata-only logging (see §9.2.5).
 
 ### Phase 4: Avibe-Side Recovery Boundary and Fault Injection
 
