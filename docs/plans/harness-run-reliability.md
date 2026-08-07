@@ -1208,38 +1208,77 @@ Thirty days of production Runs, plus an all-time check for stuck rows:
   text because a command task is silent on success; the remainder are `<silent>`
   agent replies.
 
-The old premature-success claim is therefore **disproven**, not merely unproven:
-Runs stay nonterminal too long, never too short. Per this plan's own rule, a
-disproven claim closes without code.
+Absence of stuck rows alone does not settle premature success — a Run marked
+`succeeded` before its Turn finished would also be sitting in that terminal set.
+So the settlement order was compared directly, joining `agent_runs` →
+`message_deliveries` → `session_turns` and measuring
+`agent_runs.completed_at - session_turns.terminal_at`:
+
+```text
+run settles <50ms before its Turn       84
+run settles 50-1000ms before             1
+run settles 1-60s before                 1     (worst case -1.05s)
+run settles >1s after                    9
+Turn still non-terminal when Run settled 0
+```
+
+Every one of those Turns carries `terminal_evidence_kind = terminal_result`, so
+the Turn had a real natural completion in hand. The worst case is 1.05 s of
+write ordering inside one settlement sequence, not a Run claiming success ahead
+of its execution.
+
+Coverage limit, stated plainly: 104 of 1373 Runs in the window link all the way
+through to a `session_turns` row (387 bind a Delivery at all; `watch_runtime`
+Runs are waiter commands with no agent Turn and never do). The check is
+therefore exact for Turn-bound Runs and silent about the rest.
+
+On that evidence the old premature-success claim is **disproven** for Turn-bound
+Runs rather than merely unproven — they settle late, not early. Per this plan's
+own rule, a disproven claim closes without code.
 
 ### What the same data did find
 
 18 `failed` Runs in thirty days carry no cause at all — empty `error`, `stderr`,
-`exit_code`, and `result_text`; empty `message_ids_json`, so the user was never
-told; null `callback_status`. `delivery_id` is set, so a Delivery was reserved
-and then silently abandoned. They arrive in batch sweeps:
+`exit_code`, and `result_text`. They arrive in batch sweeps, 17 in three
+multi-Run sweeps plus one settled alone:
 
 ```text
 settled_at            n   blank_cause   oldest_created      held
 2026-08-04T12:36:56   7      7/7        08-04T10:05:59     151 min
 2026-08-05T04:29:03   6      6/6        08-05T03:07:04      82 min
 2026-08-04T12:30:16   4      4/4        08-04T11:31:32      59 min
+2026-08-04T06:43:44   1      1/1        —                    —
 2026-08-04T05:59:30   3      0/3        08-04T05:52:06       7 min
+                     ──
+        blank total  18
 ```
 
 Watch-Run duration for context: `succeeded` averages 2.0 min (n=840),
 `failed_with_cause` 7.4 min (n=18), `failed_blank` 58.3 min with a 150.9 min max
 (n=18).
 
-This violates invariant 2 — infrastructure interruption owes a structured cause
-and an actionable notice. The last sweep is the control group: it wrote
+**The user was told.** All 18 carry `metadata.owed_failure_notice` with
+`state = "sent"`, `attempts = 1`, and `ack_evidence = "receipt"`. Empty
+`message_ids_json` and null `callback_status` prove nothing here: the
+failure-notice lane does not populate `message_ids_json`, and a null callback
+status can simply mean no callback was owed. Invariant 8 is satisfied and any
+fix must not re-notify these Runs.
+
+What the notice carried is the defect. Every one of those 18 stamps
+`"interrupt_reason": null, "error": null` — a notice went out with no cause in
+it. Invariant 2 owes *a structured cause and* an actionable notice; the notice
+half held and the cause half did not. The `2026-08-04T05:59:30` sweep is the
+control group: same shape, but it recorded
 `backend_runtime_exited_before_terminal`. Two settlement paths exist and only
-one records a cause.
+one supplies a reason to the notice writer.
 
 **This is an ordinary bug, tracked outside this plan.** It needs no evidence
 gate, no contract amendment, and no new owner — invariant 2 already specifies
-the required behavior. The 58-minute hold before the sweep is the root cause and
-is worth a separate look; writing a cause is triage.
+the required behavior, and the notice lane already works. The fix is to hand the
+sweep's reason to the notice writer instead of stamping `null`; it must not
+re-notify Runs whose `owed_failure_notice.state` is already `sent`. The
+58-minute hold before the sweep is the root cause behind that and is worth a
+separate look; supplying the cause is triage.
 
 ### Why PR7R was dropped
 

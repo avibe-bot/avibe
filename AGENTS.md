@@ -85,9 +85,12 @@ Invariants every change must preserve:
 
 Two consequences that are easy to get wrong:
 
-- A batch reconcile path is still bound by rule 2. Sweeping accumulated Runs to
-  `failed` without a structured cause and a user-visible notice violates it even
-  though the terminal row itself looks correct.
+- A batch reconcile path is still bound by rule 2, and sending the notice is
+  only half of it. A sweep that settles Runs to `failed` and dispatches a notice
+  carrying no `interrupt_reason` and no `error` still violates the rule: the
+  terminal row looks correct and the notice was delivered, but nothing tells the
+  user what happened. Supply the cause to the notice writer, not just the
+  terminal status.
 - Do not add a generic inactivity timeout unless every backend and lane can
   attribute observable progress to the exact Turn. Session-wide activity is
   never an acceptable substitute (rule 6).
