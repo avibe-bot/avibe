@@ -1508,3 +1508,65 @@ observations:
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails five of this unit's fixes
       and is still deliberately untouched (HFR-OBS-028).
+  - id: HFR-OBS-048
+    area: run-terminal-truth
+    summary: >-
+      Round 23, two findings, both accepted, nothing rejected. No new scenario
+      id: both are strengthenings of rows this unit already owns (HFR-180 and
+      HFR-197), so the span stays HFR-180..211, UNPROVEN_BUDGET stays 168, and
+      no cell's proof kind changes.
+      FINDING ONE, a retraction overshot and three rounds chased the wrong
+      thing. HFR-180's window needs an accepted turn suspended inside session
+      resolution while End tears the runtime down. Round 4 argued it from
+      source and wrote "the yield is unconditional and unbounded", which round
+      20 retracted because it states a false SUFFICIENT condition. Round 23
+      retracts the replacement too: "the window is CONTENTION on the generation
+      lock" is a false NECESSARY one, and rounds 21 and 22 then spent
+      themselves finding a better contender. There is no
+      good one: ``_cleanup_session_locked`` pops the client out of
+      ``claude_sessions`` synchronously, before its first ``await``, so in a
+      production run where cleanup owns the lock there is no live generation
+      left for ``_end_claude`` to find, and the client the probe saw retained
+      was the stub's own. The contender is gone. The turn parks on the
+      resolver's own suspension -- the warm-reuse path awaits
+      ``_set_claude_model_if_needed`` on the cached client, an IPC round trip
+      to a CLI that never answers -- with the client still registered and the
+      turn unstamped. Real ``get_or_create_claude_session``, real lock, real
+      ``_get_or_create_claude_session_locked``, real
+      ``_reuse_cached_claude_session_if_available``; the only double in the
+      resolution path is the SDK client's ``set_model``, which is a hung
+      backend, the defect class this unit exists for. An AST guard pins the
+      reason cleanup was retired: if the pop ever moves after an await, the
+      probe says so.
+      FINDING TWO, the substitution had migrated outward rather than gone.
+      HFR-197's part (7) built real IM-scoped Delivery and Run rows through the
+      real claim/bind/materialize path and then read them by handing a payload
+      it wrote itself to a PRIVATE derivation helper. Both ends real, the span
+      between them assumed -- so a regression that dropped attribution anywhere
+      between direct-IM admission and backend emission stayed green. The span
+      is now driven: real ``AgentService.handle_message`` on an IM request
+      carrying the durable lane's ``turn-im``, real
+      ``ClaudeAgent._adopt_pending_turn_token`` onto a reused emit context that
+      arrives holding the OTHER lane's Runs, real
+      ``_record_agent_run_terminal_result`` against a real
+      ``SQLiteBackgroundTaskStore`` on those rows. In-context attribution is
+      empty after adoption, so the durable lookup is the only source left, and
+      the proof is the far end: ``run-im1`` reaches ``succeeded`` with this
+      emit's text and message id while the Workbench lane's four Runs stay
+      ``running``. Counter-checked three ways against production -- stop
+      merging the durable ids, let admission clobber a preset ``turn_token``,
+      or make adoption merge instead of replace -- each fails with the
+      assertion that explains it.
+      THE DURABLE RULE, a stub under pressure migrates outward instead of
+      disappearing. Round 9 stubbed the store; round 10 built the rows and
+      stubbed the lane; round 12 built the lane and stubbed the CALLER. Each
+      fix moved the substitution one layer further from the claim and one layer
+      harder to see, and each round's commit read as though the claim were now
+      proven. Drive the caller production actually runs, not the helper it
+      happens to call -- and when you retract a claim, re-derive its condition
+      from production rather than inverting the sentence you are retracting.
+      Rejected: nothing. Neither finding asked for a fix to PR7R-F1 or PR7R-F2,
+      which would have been out of scope by the plan's own boundary.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails six of this unit's fixes
+      and is still deliberately untouched (HFR-OBS-028).

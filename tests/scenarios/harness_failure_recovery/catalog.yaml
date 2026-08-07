@@ -2740,6 +2740,17 @@ scenarios:
     # writes to, so `idle` is a consequence. RULE: a probe for a window must show the two
     # facts INTERLEAVED in one run; two fixtures agreeing separately prove neither, and any
     # state the subject reads must be bound to production, never asserted as a literal.
+    # Round 23 removes the contender rather than improving it. cleanup_session pops the client
+    # out of claude_sessions BEFORE its first await, so under real contention there is no live
+    # generation left for End to tear down and the retained client was the stub's. The error
+    # upstream is round 20's over-correction: retracting "the yield is unconditional" it wrote
+    # "the window is CONTENTION on the generation lock", and that is too narrow. The turn now
+    # parks on the resolver's OWN await -- the warm-reuse path's control request to a hung CLI,
+    # with the client still registered and the turn unstamped -- and no second turn exists.
+    # RULE: a retraction can overshoot. Round 4 stated a false SUFFICIENT condition and round 20
+    # replaced it with a false NECESSARY one, which sent three rounds hunting a contender the
+    # defect never needed. When you retract a claim, re-derive the condition from production
+    # instead of inverting the sentence you are retracting.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional
   - id: HFR-181
     name: codex End reports ok/ended when the canonical stop never interrupted
@@ -2889,6 +2900,18 @@ scenarios:
     # _durable_accepted_agent_run_ids looks Runs up by that context's turn_token.
     # Claude's reused receiver context replaces the list per Turn rather than
     # merging it, so a prior Turn's Runs cannot survive into the next one.
+    # Round 23 closes the last substitution in this row. Both ENDS of that derivation were
+    # real -- rows built by the real claim/bind/materialize path, read by the real manager --
+    # and the span between them was a payload the test wrote itself, handed to a private
+    # helper. Now the span is driven: real AgentService admission on an IM request carrying
+    # the durable lane's token, real _adopt_pending_turn_token onto the reused emit context,
+    # real _record_agent_run_terminal_result against a real store, and the proof is the
+    # agent_runs row reaching succeeded with this emit's text and message id while the other
+    # lane's Runs stay running. RULE: a substitution under pressure MIGRATES outward, it does
+    # not disappear. Round 9 stubbed the store, round 10 built the rows and stubbed the lane,
+    # round 12 built the lane and stubbed the CALLER -- each time one layer further from the
+    # claim and one layer harder to see. Drive the caller production would run, not the helper
+    # it happens to call.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_participating_run_attribution_is_resolved_per_turn_not_per_session
   - id: HFR-198
     name: a cited pytest node id must name a function pytest collects

@@ -288,6 +288,28 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     not a literal. The lesson is the one round 21 wrote down, aimed at round
     21: a fix inherits the blind spot of the thing it fixes, and replacing a
     fixture's WHO does not answer a question about its WHEN.
+
+    Round 23 removes the contender instead of choosing a better one, because
+    review showed that ``cleanup_session`` DESTROYS the state End has to see:
+    ``_cleanup_session_locked`` pops the client out of ``claude_sessions``
+    synchronously, before its first ``await``, so a production run in which
+    cleanup owns the lock has no live generation left for ``_end_claude`` to
+    tear down. The retained client was the stub's, not production's. The error
+    upstream of that choice is round 20's over-correction: retracting "the
+    yield is unconditional" it wrote "the window is CONTENTION on the
+    generation lock", and that is too narrow. The window is any suspension
+    inside resolution while the client is registered and the turn unstamped,
+    and production reaches one with NO contention at all -- the warm-reuse path
+    awaits ``_set_claude_model_if_needed`` on the cached client, an IPC round
+    trip to a live CLI, with that client still in ``claude_sessions``. So the
+    resolver here is real to the bottom: real ``get_or_create_claude_session``,
+    real lock, real ``_get_or_create_claude_session_locked``, real
+    ``_reuse_cached_claude_session_if_available``, and the only thing that does
+    not answer is the SDK client's own ``set_model`` -- a hung backend, which
+    is the defect class this whole unit exists for. The lesson is that a
+    retraction can overshoot: round 20 replaced a false sufficient condition
+    with a false NECESSARY one, and three rounds then went looking for a
+    contender the defect never needed.
     """
     # The race, read off production instead of assumed. ``mark_session_active``
     # is what fills ``claude_active_sessions``; it is called only after
@@ -318,13 +340,36 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     # unconditional and unbounded", and review was right about why: it is a
     # claim about SUSPENSION resting on an assertion about source text. An
     # uncontended ``asyncio.Lock`` acquires on a fast path that never returns
-    # to the event loop, so on a quiet runtime the awaited call completes in
-    # one step and nothing can interleave with it. The window is the CONTENDED
-    # lock -- which is precisely the warm second-turn state staged above -- and
-    # both halves are now DRIVEN against the real resolver instead of argued.
-    resolve_source = inspect.getsource(SessionHandler.get_or_create_claude_session)
-    assert "async with self._claude_runtime_generation_lock(composite_key):" in resolve_source
-    assert "await self._wait_for_claude_receiver_cleanup(retry.composite_key)" in resolve_source
+    # to the event loop, so on a quiet runtime an ``await`` on a free lock
+    # completes in one step and nothing can interleave with it.
+    #
+    # Round 23 retracts the REPLACEMENT sentence too -- "the window is
+    # CONTENTION on the generation lock" -- which is a false necessary
+    # condition where round 4's was a false sufficient one. Suspension inside
+    # resolution does not need a second turn; the resolver awaits on its own.
+    # Read off production, and the reason a stub cannot be the holder: the one
+    # contender rounds 21 and 22 tried, ``cleanup_session``, empties
+    # ``claude_sessions`` BEFORE it can suspend, so under real contention there
+    # is no live generation left for End to find.
+    cleanup_body = ast.parse(
+        textwrap.dedent(inspect.getsource(SessionHandler._cleanup_session_locked))
+    ).body[0]
+    _pop_line = next(
+        node.lineno
+        for node in ast.walk(cleanup_body)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "pop"
+        and "claude_sessions" in ast.unparse(node.func.value)
+    )
+    _first_await = min(
+        node.lineno for node in ast.walk(cleanup_body) if isinstance(node, ast.Await)
+    )
+    assert _pop_line < _first_await, (
+        "``_cleanup_session_locked`` now suspends before it drops the client, "
+        "so cleanup IS a usable contender again and round 23's reason for "
+        "removing it no longer holds -- reread the fixture below"
+    )
 
     # ONE handler, and everything below happens on it. Round 21 made End's own
     # ``cleanup_session`` the lock holder instead of the test, and review was
@@ -334,26 +379,74 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     # test had written empty by hand. Two green halves are not the claim. The
     # claim is that an ACCEPTED TURN and a blind End coexist, so round 22 puts
     # them in one interleaving: ``ClaudeAgent.handle_message`` is the parked
-    # caller, ``cleanup_session`` is the holder, and the set
-    # ``_resolve_live_state`` reads IS the handler's own ``active_sessions``.
-    # "Idle" is then a consequence of the parked turn not having stamped
-    # itself, which is the whole of PR7R-F1 -- not a literal this test chose.
+    # caller and the set ``_resolve_live_state`` reads IS the handler's own
+    # ``active_sessions``. "Idle" is then a consequence of the parked turn not
+    # having stamped itself, which is the whole of PR7R-F1 -- not a literal
+    # this test chose. Round 23 drops the staged holder: the suspension the
+    # turn parks on is the resolver's own, so nothing here arranges a race.
     handler = object.__new__(SessionHandler)
     handler.claude_runtime_generation_locks = {}
     handler.active_sessions = set()
     handler.session_turn_started = {}
     handler.session_last_activity = {}
+    handler.receiver_tasks = {}
+    handler.claude_system_prompts = {}
+    handler.controller = types.SimpleNamespace()
+    # Where this handler reads its CONFIGURATION from -- working path, settings
+    # scope, stored native id, system prompt. Every one of these is a lookup,
+    # none of them touches ``claude_sessions`` or ``active_sessions``, and the
+    # window is made of exactly those two. Round 23 stubs the lookups so the
+    # resolver's own body can run; rounds 20-22 stubbed the body and staged the
+    # registries, which is the inversion review caught.
+    handler.get_working_path = lambda context: "/w"
+    handler._get_settings_key = lambda context: "sk"
+    handler._get_session_key = lambda context: "sk"
+    handler._get_settings_manager = lambda context: types.SimpleNamespace(
+        get_channel_routing=lambda key: None
+    )
+    handler.sessions = types.SimpleNamespace(
+        get_claude_session_id=lambda session_key, base: "native-1"
+    )
+    handler._reserved_native_session_id = lambda context: None
+    handler._build_claude_system_prompt = lambda **kwargs: "SP"
+
+    _hung_set_model = asyncio.Event()
+    _never_answers = asyncio.Event()
+
+    async def _set_model(_desired):
+        # The live CLI never answers the control request. This is the ONE
+        # double in the resolution path and it is the unit's own subject: a
+        # backend that has stopped responding while its turn is still open.
+        _hung_set_model.set()
+        await _never_answers.wait()
+
     client = types.SimpleNamespace(
         # The turn is live; the CLI has not exited yet.
-        _transport=types.SimpleNamespace(_process=types.SimpleNamespace(returncode=None))
+        _transport=types.SimpleNamespace(_process=types.SimpleNamespace(returncode=None)),
+        set_model=_set_model,
+        # Cached on a different model, so the reuse path reaches the control
+        # request instead of short-circuiting -- production's own condition.
+        _vibe_current_model="claude-opus-4",
     )
     handler.claude_sessions = {"slack_a:/w": client}
-    handler._claude_runtime_generation_key = lambda context, subagent: "slack_a:/w"
+    # The three equality gates the real reuse path gates on, satisfied the way
+    # a genuinely reusable warm client satisfies them.
+    from modules.agents.model_hub import ModelHubLaunch
 
-    async def _resolve_locked(*args, **kwargs):
-        return client
-
-    handler._get_or_create_claude_session_locked = _resolve_locked
+    client._vibe_model_hub_fingerprint = ModelHubLaunch(
+        backend="claude", channel="direct",
+        requested_model="", target_model="", runtime_model="",
+    ).fingerprint
+    handler.claude_system_prompts["slack_a:/w"] = "SP"
+    _context = types.SimpleNamespace(
+        platform="slack",
+        platform_specific={"turn_base_session_id": "slack_a", "turn_source": "human"},
+    )
+    client._vibe_caller_env = handler._caller_env_for_context(_context)
+    client._vibe_git_path_state = handler._claude_git_path_state("/w")
+    # The key the resolver derives for itself, and the key End is told to end,
+    # are the same string -- computed, not asserted to match.
+    assert handler._claude_runtime_generation_key(_context, None) == "slack_a:/w"
 
     # REACHABILITY, which an early draft left to the reader and review was
     # right to challenge. The state this probe needs -- a client registered in
@@ -388,7 +481,7 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     # window has closed reports the closure instead of crashing somewhere
     # downstream. ``_wait_for_activity_output`` is the first await after
     # ``mark_session_active``: if session resolution ever returns during the
-    # staged window, the turn stamps itself and stops here, and it is
+    # window, the turn stamps itself and stops here, and it is
     # ``unstamped`` below that fails -- with a sentence about the race, which
     # is the assertion that should speak.
     _never = asyncio.Event()
@@ -398,8 +491,8 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
 
     agent._wait_for_activity_output = _hold
     request = types.SimpleNamespace(
-        context=None,
-        base_session_id="b1",
+        context=_context,
+        base_session_id="slack_a",
         composite_session_id="slack_a:/w",
         subagent_name=None,
         subagent_model=None,
@@ -425,39 +518,30 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     )
 
     async def _drive_the_interleave():
-        # Uncontended first. One scheduler step is enough for the whole call,
-        # which is the half that makes reading the source insufficient: the
-        # ``await`` is there and it does not suspend.
-        free = asyncio.create_task(handler.get_or_create_claude_session(None))
-        await asyncio.sleep(0)
-        uncontended = free.done()
-        assert await free is client
-
-        # Now the contention, and it is production's: ``cleanup_session``
-        # takes the generation lock for this key and holds it across its
-        # locked body. That method is not an arbitrary choice of holder -- it
-        # is the exact one End's own chain terminates on, hop by hop, as
-        # asserted further down.
-        inside_cleanup = asyncio.Event()
-        finish_cleanup = asyncio.Event()
-
-        async def _cleanup_locked(*args, **kwargs):
-            inside_cleanup.set()
-            await finish_cleanup.wait()
-
-        handler._cleanup_session_locked = _cleanup_locked
-        teardown = asyncio.create_task(handler.cleanup_session("slack_a:/w"))
-        await inside_cleanup.wait()
-
         # A real accepted turn arrives on the warm-idle session. Nothing
-        # between ``handle_message`` and the generation lock is stubbed; it
-        # parks inside session resolution, before anything stamps it active.
-        # Eight scheduler steps, so "not done" is a park and not a slow start.
+        # between ``handle_message`` and the hung control request is stubbed:
+        # real ``get_or_create_claude_session``, real generation lock, real
+        # ``_get_or_create_claude_session_locked``, real
+        # ``_reuse_cached_claude_session_if_available``. It parks inside
+        # session resolution, before anything stamps it active, and it does so
+        # with no contender -- which is round 23's whole correction.
         turn = asyncio.create_task(agent.handle_message(request))
+        # Stepped, not ``wait_for``: a resolver that stops suspending here has
+        # to be reported by the assertion that explains it, and a timeout
+        # exception reports nothing. Fifty steps is far past the handful the
+        # real path needs and still finite.
+        for _ in range(50):
+            if _hung_set_model.is_set():
+                break
+            await asyncio.sleep(0)
+        reached_control_request = _hung_set_model.is_set()
         for _ in range(8):
             await asyncio.sleep(0)
         parked = not turn.done()
         unstamped = "slack_a:/w" not in handler.active_sessions
+        # ...and the generation the resolver is holding open is still the one
+        # registered under the key, which is what makes it End's to tear down.
+        retained = handler.claude_sessions.get("slack_a:/w") is client
 
         # End arrives HERE -- with that turn still in flight, in the same
         # event loop, reading the same registries.
@@ -478,39 +562,46 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
             base_session_id="b1",
         )
 
-        # Retire the parked turn BEFORE the lock is released. Letting it
-        # resume would run it through the rest of ``handle_message`` -- the
-        # activity wait, the query, the receiver task -- none of which this
-        # probe is about, and all of which would need stubbing to reach a
-        # conclusion that is already reached.
+        # Retire the parked turn. Letting it resume would run it through the
+        # rest of ``handle_message`` -- the activity wait, the query, the
+        # receiver task -- none of which this probe is about, and all of which
+        # would need stubbing to reach a conclusion that is already reached.
         turn.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await turn
-        finish_cleanup.set()
-        await teardown
-        return uncontended, parked, unstamped, live_state, result
+        return (
+            reached_control_request, parked, unstamped, retained,
+            live_state, result,
+        )
 
-    uncontended, parked, unstamped, live_state, result = asyncio.run(
-        _drive_the_interleave()
-    )
-    assert uncontended, (
-        "an uncontended acquire suspended after all; if that changes, the "
-        "retraction above is what needs rereading, not this assertion"
+    (
+        reached_control_request, parked, unstamped, retained,
+        live_state, result,
+    ) = asyncio.run(_drive_the_interleave())
+    assert reached_control_request, (
+        "the warm-reuse path never reached the cached client's control "
+        "request, so production's own suspension point inside session "
+        "resolution has moved and this fixture no longer parks where it "
+        "claims to. Find the resolver's first await on the reuse path again, "
+        "or the window PR7R-F1 depends on is no longer demonstrated here."
     )
     assert parked, (
-        "``handle_message`` did not park inside session resolution while End's "
-        "own teardown held the generation lock, so the window PR7R-F1 depends "
-        "on is not a window and the finding needs rereading. This fails if "
-        "``cleanup_session`` stops taking the lock, which is the right way for "
-        "it to fail -- the reachability argument would be gone with it."
+        "``handle_message`` returned from session resolution instead of "
+        "parking inside it, so the window PR7R-F1 depends on is not a window "
+        "and the finding needs rereading. The suspension is production's own: "
+        "the warm-reuse path awaits a control request on the cached client."
     )
     assert unstamped, (
         "the accepted turn was already stamped active while End looked, so "
-        "the window PR7R-F1 depends on was not open. Either session resolution "
-        "returned inside the staged contention -- ``cleanup_session`` stopped "
-        "taking the generation lock -- or ``handle_message`` now stamps before "
-        "it resolves. Both close the race; both make this finding wrong, which "
-        "is the right way for this probe to fail."
+        "the window PR7R-F1 depends on was not open -- ``handle_message`` now "
+        "stamps before it resolves. That closes the race and makes this "
+        "finding wrong, which is the right way for this probe to fail."
+    )
+    assert retained, (
+        "the resolver dropped the cached client while the turn was still "
+        "inside it, so there was no live generation for End to tear down -- "
+        "which is the exact reason ``cleanup_session`` was retired as the "
+        "contender. If the reuse path now evicts here, reread the finding."
     )
     # The turn IS running -- a real ``handle_message`` is suspended mid-call
     # right now -- and the probe cannot see it.
@@ -1979,6 +2070,18 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     and the dispatcher reading through a real ``SessionTurnManager``. Both are
     kept, because they fail differently -- (1) catches a reader that stops
     passing the token, (6) catches a store that cannot keep two Turns apart.
+
+    Round 23 supplies the half round 12 faked, and it is the same fake one
+    level out. Part (7) built real IM rows and then read them by handing a
+    payload it wrote itself to a PRIVATE helper -- so both ends of the
+    derivation were real and the span between them was assumed. Part (7b)
+    drives that span: real admission, real token adoption, real emit-side
+    recorder, real store, and the proof is that the ``agent_runs`` row settles.
+    The pattern this unit keeps rediscovering is that a substitution migrates
+    outward under pressure rather than disappearing -- round 9 stubbed the
+    store, round 10 built the rows and stubbed the lane, round 12 built the
+    lane and stubbed the CALLER. Each time the stub is one layer further from
+    the claim and one layer harder to see.
     """
     from core.message_dispatcher import ConsolidatedMessageDispatcher, _owned_agent_run_ids
     from modules.agents.base import AGENT_TURN_TOKEN
@@ -2282,6 +2385,122 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     # ...and the two lanes do not leak into each other, which is the failure a
     # session-keyed read would produce and a Turn-keyed one cannot.
     assert durable.accepted_agent_run_ids_for_turn("turn-a") == ["run-a1", "run-a2"]
+
+    # (7b) Round 23. The line above is a READ, not an emit: it hands a payload
+    # this test authored to a PRIVATE derivation helper. That is enough to catch
+    # a helper that stops keying on the token, and it is not enough to catch
+    # anything BETWEEN the two ends -- if admission clobbered the durable
+    # lane's token, or if the emit-side recorder stopped consulting the durable
+    # lookup at all, every assertion above would still pass while direct-IM
+    # Runs silently stopped settling. So the join is driven instead, with no
+    # payload authored here and no stub in the middle:
+    #
+    #   real ``AgentService.handle_message``   (the layer that stamps IM turns)
+    #     -> real ``ClaudeAgent._adopt_pending_turn_token``  (the emit context)
+    #       -> real ``_record_agent_run_terminal_result``   (the emit-side call)
+    #         -> real ``SQLiteBackgroundTaskStore``    (the rows built above).
+    #
+    # The claim under test is the derivation, and a derivation is only proven
+    # by its far end: the ``agent_runs`` row for ``run-im1`` must actually reach
+    # ``succeeded`` carrying this emit's text and message id, having been named
+    # by nothing but the token that travelled the chain.
+    from core.message_output import MessageOutput
+
+    async def _drive_im_admission():
+        service, admitted = _admission_service()
+        request = _im_request("scheduled prompt", runtime_key="ses-im:/w")
+        # The durable lane's own identifier, arriving the way a Harness-started
+        # IM turn arrives: bound at claim time, before admission ever sees it.
+        request.context.platform_specific[AGENT_TURN_TOKEN] = "turn-im"
+        await asyncio.wait_for(service.handle_message("claude", request), timeout=5)
+        service.release_runtime_turn(request.context)
+        return admitted, request
+
+    admitted, im_request = asyncio.run(_drive_im_admission())
+    # Admission preserved the Turn's identity rather than minting over it. This
+    # is HFR-188's third property, re-driven at the point where it is
+    # load-bearing: everything below joins on the token the BACKEND was handed
+    # being the token the ROWS were written under.
+    assert admitted.seen[0][AGENT_TURN_TOKEN] == "turn-im", admitted.seen
+
+    # claude's emit context is reused across turns, so it arrives carrying the
+    # PREVIOUS turn's attribution -- here, the Workbench lane's ``turn-a`` and
+    # its two Runs. Adoption is production's step for making this turn's emit
+    # resolve to this turn's Run, and it is run, not simulated.
+    emit_context = types.SimpleNamespace(
+        platform="telegram",
+        platform_specific={
+            AGENT_TURN_TOKEN: "turn-a",
+            "accepted_agent_run_ids": ["run-a1", "run-a2"],
+        },
+    )
+    adopt(emit_context, types.SimpleNamespace(context=im_request.context))
+    assert emit_context.platform_specific[AGENT_TURN_TOKEN] == "turn-im"
+    # Direct IM puts no Run list on the context, so after adoption the in-context
+    # source is EMPTY and the durable lookup is the only attribution left. That
+    # is what makes the settlement below evidence for the derivation rather than
+    # for a list the test smuggled in.
+    assert _owned_agent_run_ids(emit_context.platform_specific) == []
+
+    import core.message_dispatcher as message_dispatcher_module
+
+    from storage.background import SQLiteBackgroundTaskStore
+
+    _real_store = message_dispatcher_module.SQLiteBackgroundTaskStore
+    assert _real_store is SQLiteBackgroundTaskStore, (
+        "the dispatcher no longer reaches its store through "
+        "``core.message_dispatcher.SQLiteBackgroundTaskStore``, so the binding "
+        "below would silently miss and this emit would be recorded into the "
+        "REAL user state DB instead of tmp_path -- fix the binding before "
+        "running this again"
+    )
+    message_dispatcher_module.SQLiteBackgroundTaskStore = lambda: _real_store(
+        tmp_path / "state.sqlite"
+    )
+    try:
+        live_dispatcher._record_agent_run_terminal_result(
+            emit_context,
+            "final answer",
+            "msg-im-1",
+            is_error=False,
+            output_semantics=MessageOutput(
+                completes_turn=True, idempotency_key="out-im-1"
+            ),
+        )
+    finally:
+        message_dispatcher_module.SQLiteBackgroundTaskStore = _real_store
+
+    with engine.begin() as conn:
+        settled = (
+            conn.execute(select(agent_runs).where(agent_runs.c.id == "run-im1"))
+            .mappings()
+            .one()
+        )
+        untouched = dict(
+            conn.execute(
+                select(agent_runs.c.id, agent_runs.c.status).where(
+                    agent_runs.c.id != "run-im1"
+                )
+            ).all()
+        )
+    # The far end. A backend emit on the direct-IM lane settled the Run the Turn
+    # actually participated in -- not a Run named by the test, not the Session's
+    # Runs, and not nothing.
+    assert settled["status"] == "succeeded", dict(settled)
+    assert settled["result_text"] == "final answer"
+    assert "msg-im-1" in (settled["message_ids_json"] or ""), settled["message_ids_json"]
+    # ...and the Workbench lane's Runs, sitting in the same database and named
+    # by the very context this emit STARTED from, are untouched. An adoption
+    # that merged instead of replacing is caught earlier, by the empty
+    # ``_owned_agent_run_ids`` above; what this catches is the emit itself
+    # reaching wider than the Turn -- settling by session, by store scan, or by
+    # anything else that would let one lane's terminal close another's Run.
+    assert untouched == {
+        "run-a1": "running",
+        "run-a2": "running",
+        "run-b1": "running",
+        "run-c1": "running",
+    }, untouched
 
     # Why one lane's rows carry the other's conclusion, stated rather than
     # assumed: the write path takes no branch on platform. ``_submit_scheduled_turn``

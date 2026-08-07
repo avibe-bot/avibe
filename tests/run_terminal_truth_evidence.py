@@ -939,9 +939,29 @@ RETRACTED_PHRASINGS: Final = (
         "round 4's account of the window ``PR7R-F1`` needs, asserted by "
         "matching source text. An ``await`` is not a suspension point and an "
         "uncontended ``asyncio.Lock`` acquires without yielding, so a quiet "
-        "runtime runs the resolver in one scheduler step. Contention on the "
-        "generation lock is what opens the window, and ``HFR-180`` now drives "
-        "the real resolver both ways under a live loop.",
+        "runtime runs the resolver in one scheduler step. What opens the "
+        "window is any suspension INSIDE resolution while the client is still "
+        "registered and the turn is still unstamped -- see the round 23 row "
+        "below, which retracts this row's own first replacement.",
+    ),
+    # Round 23's row, and it is the first one here that bans a RETRACTION
+    # rather than an original claim. Round 20 was right that round 4's sentence
+    # was false and wrong about what to put in its place, and the ledger has to
+    # be able to say that -- otherwise the correction of a bad claim is exempt
+    # from the rule the bad claim taught. Three rounds were spent hunting a
+    # contender because this replacement read as settled.
+    (
+        "the window is contention on the generation lock",
+        "round 23",
+        "round 20's replacement for the row above: a false NECESSARY condition "
+        "where round 4's was a false sufficient one. Production reaches the "
+        "window with no second turn at all -- the warm-reuse path awaits "
+        "``_set_claude_model_if_needed`` on the cached client, an IPC round "
+        "trip to a live CLI, with that client still in ``claude_sessions`` and "
+        "the turn unstamped. Contention is also not AVAILABLE: "
+        "``_cleanup_session_locked``, the one real contender for that lock, "
+        "pops the client before its first ``await``, so a contended run leaves "
+        "no live generation for End to tear down.",
     ),
     # Round 19's row, and it is a COUNT rather than a claim about the system.
     # Enrolled all the same: "two ways" is the sentence that told the next

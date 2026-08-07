@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-06) — first increment, revised under twenty-two review rounds
+#### PR7R status (2026-08-07) — first increment, revised under twenty-three review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
@@ -1242,7 +1242,7 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through twenty-two changed how the
+rounds and has held at 168 since; rounds four through twenty-three changed how the
 findings are demonstrated, three question verdicts, and twenty degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
@@ -2151,6 +2151,62 @@ original function and became exactly backwards two lines down, which is why the
 boundary was producing the silent direction it claimed to rule out. Re-derive
 the error direction at every site that quotes a reason; a reason is not a
 label.
+
+Round 23 — two findings, **both accepted, none rejected**; **no new scenario
+id** (both strengthen rows this unit already owns, `HFR-180` and `HFR-197`), no
+verdict move, and **no budget move**.
+
+1. **A retraction overshot, and three rounds chased the wrong thing.**
+   `HFR-180`'s window needs an accepted turn suspended inside session
+   resolution while End tears the runtime down. Round 4 argued it from source
+   and wrote *"the yield is unconditional and unbounded"*, which round 20
+   retracted because it states a false **sufficient** condition. Round 23
+   retracts the replacement too: *"the window is CONTENTION on the generation
+   lock"* is a false **necessary** one, and rounds
+   21 and 22 then spent themselves looking for a better contender. There is no
+   good one: `_cleanup_session_locked` pops the client out of `claude_sessions`
+   **synchronously, before its first `await`**, so in a production run where
+   cleanup owns the lock there is no live generation left for `_end_claude` to
+   tear down, and the client the probe saw retained was the stub's own. The
+   contender is therefore removed rather than replaced. The turn now parks on
+   the resolver's *own* suspension — the warm-reuse path awaits
+   `_set_claude_model_if_needed` on the cached client, an IPC round trip to a
+   CLI that never answers — with the client still registered and the turn
+   unstamped, and **no second turn anywhere**. Real
+   `get_or_create_claude_session`, real lock, real
+   `_get_or_create_claude_session_locked`, real
+   `_reuse_cached_claude_session_if_available`; the only double left in the
+   resolution path is the SDK client's `set_model`, which is a hung backend —
+   the defect class this unit exists for. An AST guard pins the reason cleanup
+   was retired: if that `pop` ever moves after an `await`, the probe says so.
+
+2. **The substitution had migrated outward, not disappeared.** `HFR-197`'s part
+   (7) built real IM-scoped Delivery and Run rows through the real
+   claim/bind/materialize path and then read them by handing a payload *it
+   wrote itself* to a private derivation helper. Both ends real, the span
+   between them assumed — so a regression that dropped attribution anywhere
+   between direct-IM admission and backend emission stayed green. The span is
+   now driven: real `AgentService.handle_message` on an IM request carrying the
+   durable lane's `turn-im`, real `ClaudeAgent._adopt_pending_turn_token` onto
+   a reused emit context that arrives holding the **other** lane's Runs, then
+   real `_record_agent_run_terminal_result` against a real
+   `SQLiteBackgroundTaskStore` on those rows. After adoption the in-context
+   source is empty, so the durable lookup is the only attribution left, and the
+   proof is the far end: `run-im1` reaches `succeeded` carrying this emit's text
+   and message id while the Workbench lane's four Runs stay `running`.
+   Counter-checked three ways against production — stop merging the durable
+   ids, let admission clobber a preset `turn_token`, or make adoption merge
+   instead of replace.
+
+**The durable lesson is that a stub under pressure migrates outward instead of
+disappearing.** Round 9 stubbed the store; round 10 built the rows and stubbed
+the lane; round 12 built the lane and stubbed the *caller* — each fix one layer
+further from the claim and one layer harder to see, and each round's commit
+read as though the claim were now proven. Drive the caller production actually
+runs, not the helper it happens to call. And when you retract a claim,
+re-derive its condition from production rather than inverting the sentence you
+are retracting: round 20 replaced a false sufficient condition with a false
+necessary one, and cost three rounds.
 
 Question verdicts:
 
