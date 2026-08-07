@@ -1218,10 +1218,22 @@ matrix, and the answer closes both claims.
 
 ### What was checked
 
-Thirty days of production Runs, plus an all-time check for stuck rows:
+Thirty days of production Runs, plus an all-time check for stuck rows. These are
+counts of live tables, taken while the system was serving traffic, so each block
+below carries its own timestamp and the totals do not agree across blocks by
+design — `agent_runs` grew by four rows during this investigation. The
+invariants are the claim; the counts are only what supported them at that
+instant. Re-running any of these later will give larger totals and should give
+the same invariant.
 
-- **No Run has ever been left nonterminal.** All 1553 rows are `succeeded`,
-  `failed`, or `canceled`. Zero rows sit nonterminal past two hours, all-time.
+- **No Run has ever been left nonterminal.** Snapshot 2026-08-07T07:57Z: 1557
+  rows — `succeeded` 1485, `failed` 52, `canceled` 19, and 1 `running` created
+  36 s earlier and still executing. A live row is expected and is not a
+  counterexample, which is why the claim is not "every row is terminal". The
+  time-independent form, and the one to re-check, is `select count(*) from
+  agent_runs where status not in ('succeeded','failed','canceled') and
+  julianday('now')-julianday(created_at) > 0.0833` → **0**, all-time. No Run has
+  ever aged past two hours without reaching a terminal status.
 - **No cron occurrence has been missed.** A single recent fire per definition
   would only prove the scheduler is alive today, so every expected occurrence was
   enumerated from each definition's own `created_at` and stored `timezone` and
@@ -1243,6 +1255,7 @@ So the settlement order was compared directly, joining `agent_runs` →
 `agent_runs.completed_at - session_turns.terminal_at`:
 
 ```text
+snapshot 2026-08-07T07:53Z
 run terminal 1-60s before its Turn        12     (worst case -1.054s)
 run terminal 50ms-1s before              211
 run terminal <50ms before                139
@@ -1261,11 +1274,12 @@ a real completion (`terminal_result` 382, `runner_release` 3, `service_shutdown`
 1). The worst case is 1.054 s of write ordering inside one settlement sequence,
 not a Run claiming success ahead of its execution.
 
-Coverage limit, stated plainly: 387 of 1553 Runs link all the way through to a
-`session_turns` row, which is every Run that binds a Delivery but one currently
-open. `watch_runtime` Runs are waiter commands with no agent Turn and never
-bind one. The check is therefore exact for Turn-bound Runs and silent about the
-rest.
+Coverage limit, stated plainly: at the settlement snapshot, 387 Runs linked all
+the way through to a `session_turns` row — every Run that bound a Delivery.
+`watch_runtime` Runs are waiter commands with no agent Turn and never bind one.
+The `still in flight` line is the same live Run the status block reports; four
+minutes later the join returned 389, which is the growth, not a discrepancy. The
+check is therefore exact for Turn-bound Runs and silent about the rest.
 
 On that evidence the old premature-success claim is **disproven** for Turn-bound
 Runs rather than merely unproven — they settle late, not early. Per this plan's
