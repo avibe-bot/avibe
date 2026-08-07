@@ -404,6 +404,7 @@ def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | 
     name rule can silently accept a node pytest skips. Refuse that undecidable
     assignment out loud instead.
     """
+    final_value: ast.expr | None = None
     for node in body:
         targets = (
             node.targets
@@ -424,13 +425,15 @@ def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | 
                 and _root_name(target) == attribute_of
             )
             if named:
-                if not isinstance(node.value, ast.Constant):
-                    subject = attribute_of or "module/class"
-                    raise AssertionError(
-                        f"cannot decide pytest's computed __test__ value for {subject}"
-                    )
-                return bool(node.value.value)
-    return None
+                final_value = node.value
+    if final_value is None:
+        return None
+    if not isinstance(final_value, ast.Constant):
+        subject = attribute_of or "module/class"
+        raise AssertionError(
+            f"cannot decide pytest's computed __test__ value for {subject}"
+        )
+    return bool(final_value.value)
 
 
 def _c3_merge(sequences: list[list[tuple[ast.ClassDef, tuple]]]):
@@ -805,12 +808,7 @@ def test_every_run_terminal_truth_cell_is_proven_or_named_as_a_gap(
 
 
 def test_the_unproven_count_matches_the_checked_in_budget() -> None:
-    """HFR-185: the size of the gap is a number, not an impression.
-
-    Lowering ``UNPROVEN_BUDGET`` requires writing the probe named in the cell;
-    raising it requires saying so in the same commit. Either way the reviewer
-    sees the delta instead of inferring it from prose.
-    """
+    """HFR-185: the size of the gap is a number, not an impression."""
     unproven = [cell for cell in _CELLS if cell[4][0] == "unproven"]
     assert len(unproven) == UNPROVEN_BUDGET, sorted(
         f"{b}-{la}-{t}-{o}" for b, la, t, o, _p in unproven
@@ -896,14 +894,7 @@ def test_every_question_and_finding_names_a_real_consuming_test() -> None:
 
 
 def test_a_citation_with_the_wrong_class_component_is_rejected() -> None:
-    """HFR-187: the node resolver reads the whole id, not just its last word.
-
-    The regression this pins: a class-qualified citation used to pass on the
-    strength of the function name alone, so renaming the class -- or citing a
-    class that never existed -- left the matrix pointing at a test pytest would
-    not collect, with a green guard. Both real spellings are checked too, so
-    the resolver cannot be "fixed" by rejecting everything.
-    """
+    """HFR-187: the node resolver reads the whole id, not just its last word."""
     real = (
         "tests/test_agent_stop_settlement.py::AgentStopSettlementTests::"
         "test_no_backend_stop_uses_the_terminal_turn_default"
@@ -931,15 +922,7 @@ def test_a_citation_with_the_wrong_class_component_is_rejected() -> None:
 
 
 def test_a_finding_owner_must_resolve_to_a_real_symbol() -> None:
-    """HFR-189: the owner suffix is validated, not decoration.
-
-    The regression this pins: the guard used to keep only the module path and
-    assert the FILE existed, so every owner suffix -- the part that says which
-    function a contract amendment has to change -- was unchecked. Renaming
-    ``end_running_agent``, or misspelling it here in the first place, left the
-    unit pointing confidently at nothing while the citation half of the same
-    file got full nested-symbol validation.
-    """
+    """HFR-189: the owner suffix is validated, not decoration."""
     owners = {finding["owner"] for finding in PR7R_FINDINGS.values()}
     assert owners, PR7R_FINDINGS
     for owner in owners:
@@ -954,13 +937,7 @@ def test_a_finding_owner_must_resolve_to_a_real_symbol() -> None:
 
 
 def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:
-    """HFR-190: Q2's per-backend/per-lane obligation has no missing cells.
-
-    The verdict is tied to the table rather than pinned to a literal. Q2 opened
-    once a backend was shown to carry an exact-Turn attribution, and it may only
-    close when EVERY cell does -- the plan's rule is all-or-nothing, so a partial
-    table and an ``answered`` verdict cannot both be true.
-    """
+    """HFR-190: Q2's per-backend/per-lane obligation has no missing cells."""
     assert set(EXACT_TURN_PROGRESS_SIGNALS) == {
         (backend, lane) for backend in BACKENDS for lane in LANES
     }
@@ -975,28 +952,7 @@ def test_the_q2_signal_table_is_spelled_for_every_backend_and_lane() -> None:
 
 
 def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None:
-    """HFR-192: the id in a docstring is the id in the catalog, and back again.
-
-    The regression this pins is the one review caught by hand: a test whose
-    docstring opened ``HFR-186`` while the catalog filed it under ``HFR-187``,
-    and two more that carried an id no catalog row claimed at all. Both failures
-    are invisible to every other guard here -- the matrix checks that citations
-    resolve to test FUNCTIONS, and nothing checked the reverse direction, that a
-    test announcing a scenario id is the test that id was assigned to. A
-    docstring id is how a reader navigates from a failure back to the scenario,
-    so a wrong one is worse than none.
-
-    Scope is the two PR7R modules on purpose: this asserts a convention the rest
-    of the suite does not yet follow, and widening it is a separate change. What
-    is NOT narrowed is which nodes count: the first draft walked ``tree.body``
-    for ``ast.FunctionDef`` only, so an ``async def test_*`` -- the natural shape
-    for the next probe in a unit whose subject is an async admission path -- or a
-    test method inside a class would have been skipped in silence while the
-    guard's own name promised every test. A guard that exempts the tests most
-    likely to be written next is the fourth degenerate-assertion instance in this
-    unit, so the walk recurses into classes and accepts both function kinds; the
-    node id it builds carries the class components, exactly as pytest would.
-    """
+    """HFR-192: the id in a docstring is the id in the catalog, and back again."""
     yaml = pytest.importorskip("yaml")
     catalog_path = (
         Path(__file__).resolve().parent
@@ -1052,29 +1008,7 @@ def test_every_pr7r_test_agrees_with_the_catalog_about_its_scenario_id() -> None
 
 
 def test_one_scenario_id_names_exactly_one_catalog_row() -> None:
-    """HFR-202: a scenario id is a stable name, so two rows may not answer to it.
-
-    Round 12's finding, and it is the set-collapse defect one layer above the
-    ones rounds 10 and 11 found. Every check in HFR-192 reads the catalog
-    through ``{row["id"]: row["test"]}`` or compares ``{ids}`` against
-    ``discovered`` -- both of which SHRINK a duplicate to one element. So two
-    rows carrying the same id pass the count, the tie and the orphan check,
-    while ``by_id`` keeps whichever came last and every other consumer keeps
-    whichever it happened to read. The catalog is the canonical record the plan
-    and the next unit read to decide what is proven; two canonical definitions
-    for one stable id is not a formatting problem, it is the record disagreeing
-    with itself, and the disagreement is invisible precisely because the
-    de-duplication happens before anything looks.
-
-    Scope is the WHOLE catalog rather than the PR7R modules. Everywhere else
-    this unit narrows to its own rows because it is asserting a convention the
-    rest of the suite has not adopted; uniqueness of a primary key is not a
-    convention, and ``by_id`` is built from every row regardless of scope.
-
-    What is deliberately NOT asserted: that a test is cited once. Seven tests
-    in this catalog legitimately prove more than one scenario, and a guard that
-    banned that would be a guard someone turns off.
-    """
+    """HFR-202: a scenario id is a stable name, so two rows may not answer to it."""
     yaml = pytest.importorskip("yaml")
     catalog_path = (
         Path(__file__).resolve().parent
@@ -1137,25 +1071,7 @@ def _stated_plan_verdicts(text: str) -> dict[str, str]:
 
 
 def test_the_plan_states_the_same_question_verdicts_as_the_matrix() -> None:
-    """HFR-193: the plan's verdict list and ``PR7R_QUESTIONS`` cannot disagree.
-
-    The regression this pins: round 6 moved Q2 to ``answered`` and Q5 to
-    ``open`` in the matrix and in §7's narration, and left §7's own numbered
-    "Question verdicts" block still saying Q2 blocks the inactivity timeout and
-    Q5 is answered. The plan is the contract the next implementation unit reads,
-    so a stale verdict there is worse than a stale comment -- it hands that unit
-    the opposite instruction, in the document that is supposed to be
-    authoritative, while every test stays green.
-
-    Only the verdict WORD is tied. The prose either side of it is where the
-    reasoning lives and is deliberately not machine-checked; what must not drift
-    is the one token an implementer greps for.
-
-    Round 13 adds the duplicate rule (see ``_stated_plan_verdicts``): one
-    question may state its verdict once. The fixtures below are checked before
-    the real plan, because a guard whose parse silently de-duplicates is not
-    checking the document it reports on.
-    """
+    """HFR-193: the plan's verdict list and ``PR7R_QUESTIONS`` cannot disagree."""
     good = "1. **Q1 — open.** x\n2. **Q2 — answered.** y\n"
     assert _stated_plan_verdicts(good) == {"Q1": "open", "Q2": "answered"}
     with pytest.raises(ValueError, match="Q2: the plan states its verdict more"):
@@ -1193,23 +1109,7 @@ def _plan_verdict_bullets(text: str) -> dict[str, str]:
 
 
 def test_the_plans_verdict_carries_the_same_scope_as_the_answer() -> None:
-    """HFR-208: a scope the answer states, the plan's verdict must state too.
-
-    Round 18's second finding. Round 17 narrowed Q4 to Run scope in
-    ``PR7R_QUESTIONS`` and left the plan's canonical verdict framing Q4 as
-    "whether a pre-terminal fact is durably recorded" while still calling two
-    facts established -- so the document a follow-up unit reads as the contract
-    said the Turn-level question was half answered. HFR-193 could not see it:
-    the verdict WORD agreed on both sides and the disagreement was entirely in
-    the qualifier.
-
-    This is the ledger's complement rather than a duplicate of it. The ledger
-    forbids the retracted WORDING from reappearing; nothing made the correct
-    scope appear, and a document can be free of every banned phrase by saying
-    nothing. Here the answer is the source and the plan must carry what it
-    states, so narrowing an answer in one artefact cannot leave the other
-    silently broader.
-    """
+    """HFR-208: a scope the answer states, the plan's verdict must state too."""
     fixture = (
         "1. **Q1 — open.** it is run-scoped here\n"
         "2. **Q2 — open.** nothing qualified\n"
@@ -1242,31 +1142,7 @@ def test_the_plans_verdict_carries_the_same_scope_as_the_answer() -> None:
 
 
 def test_the_plans_reserved_scenario_range_is_actually_free() -> None:
-    """HFR-194: a reserved id block may not contain ids the catalog already owns.
-
-    The regression this pins: the round-6 commit added catalog rows HFR-188 to
-    HFR-192 and left the plan's allocation summary advertising HFR-188…219 as
-    reserved. That is the one line a follow-up unit reads to pick its ids, so the
-    next probe would have been filed under an id this unit already owns -- and
-    scenario ids are stable references, so a collision is not a rename away from
-    being fixed.
-
-    Both halves are checked, because either alone is satisfiable by cheating:
-    every PR7R id must fall inside the occupied range, and no catalog id
-    anywhere may fall inside the reserved one.
-
-    Round 21 makes the first half an EQUALITY. Membership let an interior id
-    vanish in silence: delete both a guard and its catalog row -- say HFR-202 --
-    and ``ours`` is still a subset, the highest id is unchanged, the reserved
-    tail is unchanged, and ``HFR-192``'s bidirectional docstring/catalog tie is
-    satisfied because both sides went together. The plan would keep claiming
-    the whole span occupied while the evidence under one of its ids had ceased
-    to exist. Equality pins every allocated id individually, which is the only
-    reading under which "occupied" means what the allocation line says it
-    means, and it is the same discipline as ``UNPROVEN_BUDGET``: a fact that
-    may change, in writing, so that changing it is an edit somebody has to
-    make on purpose.
-    """
+    """HFR-194: a reserved id block may not contain ids the catalog already owns."""
     yaml = pytest.importorskip("yaml")
     catalog_path = (
         Path(__file__).resolve().parent / "scenarios" / "harness_failure_recovery" / "catalog.yaml"
@@ -1331,34 +1207,7 @@ def _pr7r_owned_ids(scenarios: list[dict]) -> set[int]:
 
 
 def test_every_claim_about_the_occupied_range_agrees_with_the_catalog() -> None:
-    """HFR-209: the plan claims its own id range three times; all three must hold.
-
-    Round 18 found the summary table stale and corrected it. Round 20 found the
-    opening status banner stale in that same commit, in the same words, two
-    dozen lines ABOVE the line round 18 had just fixed -- and the banner is the
-    first thing a follow-up unit reads, so the next author could take an id
-    this unit already owns and file over existing evidence. Scenario ids are
-    stable references; a collision is not a rename away from being repaired.
-
-    Three rounds of the same shape, so the remedy is not a fourth edit. The
-    range is a DERIVED fact -- it is whatever the catalog rows say it is -- and
-    nothing may assert it that this guard does not read. Equality, not "at
-    least": a range wider than the evidence hands the next unit a collision, a
-    narrower one loses evidence, so the only correct value is the exact one.
-    The reserved tail is checked the same way, because it is derived from the
-    same number and drifts with it.
-
-    Only lines CLAIMING current occupancy are read. The plan also recites the
-    span historically -- the headline range once sat at HFR-180 through 187 --
-    and hypothetically, in the note telling a later author what to do if the
-    whole block has been taken. Rewriting history to match today would destroy
-    the record that motivated ``HFR-194``.
-
-    That guard remains the other half and is not duplicated here: it reads the
-    allocation line alone, asking whether occupied abuts reserved and whether
-    reserved is empty. This one asks whether every claim agrees with the
-    catalog. Either passes while the other fails.
-    """
+    """HFR-209: the plan claims its own id range three times; all three must hold."""
     yaml = pytest.importorskip("yaml")
     catalog_path = (
         Path(__file__).resolve().parent / "scenarios" / "harness_failure_recovery" / "catalog.yaml"
@@ -1444,24 +1293,7 @@ _INDEX_DEBT = frozenset(
 
 
 def test_the_capability_index_reaches_every_module_the_catalog_cites() -> None:
-    """HFR-210: the canonical navigation path must reach the cited evidence.
-
-    The catalog is not the entry point. ``tests/scenarios/INDEX.yaml`` is, and
-    it says so in its own first line. Its ``harness_failure_recovery`` entry
-    listed neither of this unit's two modules under ``scenario_tests`` or
-    ``unit_or_contract_tests``, so a reader starting where the repository says
-    to start walked past every HFR-180 and up test while thirty-one catalog
-    rows advertised them as coverage. Coverage nobody can reach fails the way
-    coverage that does not run fails, one directory out.
-
-    Written for the whole capability rather than for PR7R's two files, because
-    a rule that names its own author is the degenerate shape this unit keeps
-    catching itself in. Doing that surfaced twenty-two older modules in the
-    same condition -- a real gap, and not this branch's to close, so it is
-    recorded in ``_INDEX_DEBT`` and pinned exactly rather than waived. What the
-    guard enforces from here is that the gap never grows and that anyone who
-    closes part of it says so.
-    """
+    """HFR-210: the canonical navigation path must reach the cited evidence."""
     yaml = pytest.importorskip("yaml")
     scenarios_dir = Path(__file__).resolve().parent / "scenarios"
     catalog_path = scenarios_dir / "harness_failure_recovery" / "catalog.yaml"
@@ -1506,24 +1338,7 @@ _CELL_COUNT_CLAIM = re.compile(
 
 
 def test_no_prose_states_a_q2_cell_count_the_table_disagrees_with() -> None:
-    """HFR-196: a sentence counting Q2's covered cells must count the real table.
-
-    The regression this pins is round 8's second finding, and it is round 7's
-    lesson recurring one artefact over. ``HFR-183``'s docstring summary still
-    read "the durable Workbench lane has the signal; direct IM mostly does not"
-    and its body still explained "4 cells covered, 2 open" -- two rounds
-    after the same test's own assertions began requiring all six to be
-    ``covered``. Nothing caught it: ``HFR-192`` reads only the scenario id out of
-    a docstring, and the assertions and the prose describing them sat in the same
-    function disagreeing with each other.
-
-    The narrowness is deliberate and is the honest description of this guard: it
-    does not police prose. It ties exactly one sentence SHAPE -- a spelled-out
-    number of cells said to be covered or open -- to the table, because that is
-    the shape that went stale, in a document and in a docstring, in successive
-    rounds. Anything a summary line asserts in other words is still on the
-    reader.
-    """
+    """HFR-196: a sentence counting Q2's covered cells must count the real table."""
     covered = sum(1 for kind, _ in EXACT_TURN_PROGRESS_SIGNALS.values() if kind == "covered")
     actual = {"covered": covered, "open": len(EXACT_TURN_PROGRESS_SIGNALS) - covered}
 
@@ -1548,41 +1363,7 @@ def test_no_prose_states_a_q2_cell_count_the_table_disagrees_with() -> None:
 
 
 def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkeypatch) -> None:
-    """HFR-198: the citation resolver's leaf rule, checked at both strictnesses.
-
-    Round 9's fourth finding, and it is the round-7 lesson again in its own
-    house: a guard's EXEMPTIONS are invisible, and this one had an exemption it
-    never re-justified. ``_assert_symbol_exists`` accepts a class leaf on
-    purpose, because a finding's OWNER may be a type. ``_assert_node_exists``
-    reused it verbatim, so a node id naming a private helper or a bare class
-    resolved happily -- a citation pointing at a real symbol that no test run
-    ever executes, which is exactly the failure mode the resolver was written to
-    prevent, displaced one level.
-
-    Both directions are asserted, because tightening the leaf rule everywhere
-    would have been the easy over-correction and would have broken the owner
-    citations that legitimately name classes.
-
-    Round 10 extended it one level out and the extension is the point of the
-    scenario now: round 9 fixed the leaf and left the CONTAINER unjudged, so
-    ``Helper::test_case`` -- a class pytest never collects, holding a function
-    named exactly like a test -- still resolved. The lesson this unit keeps
-    relearning is that a rule fixed at one nesting level does not travel; the
-    corpus below therefore names a collectible container, an uncollectible one,
-    and the same leaf under both.
-
-    Round 14 adds the one input that outranks every rule above it: ``__test__``.
-    Each level had been decided from the NAME, and pytest lets a file, a class
-    or a function overrule its own name in either direction. The fixture pins
-    all six combinations, because the tempting single-line reading -- "if the
-    flag is set, believe it" -- is wrong twice: a flagged-in class with a
-    constructor is still refused, and a flagged-out module takes everything
-    inside it down with it.
-
-    Round 26 covers a nonliteral flag. Pytest evaluates it at runtime, so the
-    static guard cannot treat it as absent and accept by name; both readers
-    refuse the undecidable node loudly.
-    """
+    """HFR-198: the citation resolver's leaf rule, checked at both strictnesses."""
     cited = {
         detail if kind == "covered" else _detail_node(detail)
         for *_dims, (kind, detail) in _CELLS
@@ -1620,6 +1401,14 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "class TestFlaggedCtor:\n"
         "    __test__ = True\n"
         "    def __init__(self): ...\n"
+        "    def test_case(self): ...\n"
+        "class TestFinalOptOut:\n"
+        "    __test__ = True\n"
+        "    __test__ = False\n"
+        "    def test_case(self): ...\n"
+        "class FinalOptIn:\n"
+        "    __test__ = False\n"
+        "    __test__ = True\n"
         "    def test_case(self): ...\n"
         "class MutedBase:\n"
         "    __test__ = False\n"
@@ -1686,7 +1475,13 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "def test_muted(): ...\n"
         "test_muted.__test__ = False\n"
         "def plain_named(): ...\n"
-        "plain_named.__test__ = True\n",
+        "plain_named.__test__ = True\n"
+        "def test_final_muted(): ...\n"
+        "test_final_muted.__test__ = True\n"
+        "test_final_muted.__test__ = False\n"
+        "def plain_final_named(): ...\n"
+        "plain_final_named.__test__ = False\n"
+        "plain_final_named.__test__ = True\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -1777,7 +1572,13 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     # is still refused, which is the case that would have turned a naive "flag
     # wins" reading into a discovery walk citing tests that never run.
     _assert_node_exists(f"{rel}::FlaggedIn::test_case")
-    for opted_out in ("TestOptOut", "OptOutTests", "TestFlaggedCtor"):
+    _assert_node_exists(f"{rel}::FinalOptIn::test_case")
+    for opted_out in (
+        "TestOptOut",
+        "OptOutTests",
+        "TestFlaggedCtor",
+        "TestFinalOptOut",
+    ):
         with pytest.raises(
             AssertionError, match=f"pytest does not collect class '{opted_out}'"
         ):
@@ -1857,8 +1658,11 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     # function it applies to -- pytest reads an attribute and does not care
     # which statement set it, so the resolver reads the enclosing body.
     _assert_node_exists(f"{rel}::plain_named")
+    _assert_node_exists(f"{rel}::plain_final_named")
     with pytest.raises(AssertionError, match="'test_muted' is opted out"):
         _assert_node_exists(f"{rel}::test_muted")
+    with pytest.raises(AssertionError, match="'test_final_muted' is opted out"):
+        _assert_node_exists(f"{rel}::test_final_muted")
 
     discovered = {suffix for suffix, _node in _collected_tests(ast.parse(
         module.read_text(encoding="utf-8")
@@ -1867,12 +1671,14 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "test_real",
         "test_async_real",
         "plain_named",
+        "plain_final_named",
         "TestGood::test_case",
         "OwnerTests::test_case",
         "CtorTests::test_case",
         "AliasedTests::test_case",
         "Derived::test_case",
         "FlaggedIn::test_case",
+        "FinalOptIn::test_case",
         "InheritedFlagIn::test_case",
         "TestOverridesBase::test_case",
         "TestMroOptIn::test_case",
@@ -1887,10 +1693,12 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "TestInheritedTwoDeep::test_case",
         "TestMroOptOut::test_case",
         "TestFlaggedCtor::test_case",
+        "TestFinalOptOut::test_case",
         "TestInheritedCtor::test_case",
         "TestInheritedCtorTwoDeep::test_case",
         "TestInheritedNew::test_case",
         "test_muted",
+        "test_final_muted",
     ):
         assert absent not in discovered, absent
 
@@ -1901,6 +1709,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     # and would have silenced the fixture above.
     muted = tmp_path / "tests" / "muted_module.py"
     muted.write_text(
+        "__test__ = True\n"
         "__test__ = False\n"
         "def test_top(): ...\n"
         "class TestInside:\n"
@@ -1928,30 +1737,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
 def test_a_base_reached_through_an_import_is_resolved_or_refused_out_loud(
     tmp_path, monkeypatch
 ) -> None:
-    """HFR-211: ancestry stops at no file boundary, and undecidable is not collectible.
-
-    Round 22, and it is the round-20/21 fixes judged by their own standard.
-    Both of them followed only bases defined in the SAME module and signed the
-    cut with ``_unittest_ancestry``'s sentence -- "a false rejection is loud, a
-    false acceptance is silent". That sentence is true where it was written,
-    because an unresolved base there means "not a TestCase" and the class is
-    dropped. Copied onto the flag and the constructor it means the reverse:
-    an unreadable ``__test__ = False`` returns ``None`` and falls through to the
-    name rule, an unreadable ``__init__`` returns ``False``, and both ACCEPT a
-    class pytest will not collect. The opt-out case does not even warn -- this
-    repo's pytest drops it in silence -- so a catalog row citing a test under
-    such a class would advertise coverage no run executes, with every guard in
-    this file green. The justification did not travel with the shape it was
-    pasted onto, which is round 21's lesson about fixes inheriting blind spots
-    aimed one layer up, at a comment.
-
-    Two answers, then. Bases resolve through absolute imports into repo files,
-    including one re-export hop and a dotted ``module.Class`` spelling; and a
-    base that still resolves to nothing raises rather than defaulting either
-    way, because "I cannot tell" is a third answer this predicate never had.
-    Checked against this repo's pytest, not reasoned: it collects exactly
-    ``TestImportedPlain`` and ``ImportedCaseTests`` out of the fixture below.
-    """
+    """HFR-211: ancestry stops at no file boundary, and undecidable is not collectible."""
     (tmp_path / "pkg").mkdir()
     (tmp_path / "tests").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
@@ -2047,22 +1833,7 @@ def test_a_base_reached_through_an_import_is_resolved_or_refused_out_loud(
 
 
 def test_a_mistyped_matrix_key_is_an_error_not_a_silent_fallback():
-    """HFR-200: an override key the expansion cannot read must fail loudly.
-
-    The expansion resolves a backend override with ``.get(backend, shared)``,
-    and a defaulted lookup cannot tell "no override was written" from "an
-    override was written under a name nobody reads". A cell carrying
-    ``per_backend={"codecs": ...}`` loses that evidence for all three real
-    backends, and every downstream check stays green: the product is still
-    3 x 2 x 4 x 7, the unproven count is unchanged, and each surviving cell
-    still names a probe. The matrix's stated purpose is that a cell written once
-    per lane is a claim about all three backends rather than a silent omission,
-    which makes a silently-dropped override the one failure it must not have.
-
-    Same shape as the degenerate guards rounds 8-11 kept finding, in the reader
-    rather than in an assertion: a lookup that cannot fail reports success for
-    an input it never handled.
-    """
+    """HFR-200: an override key the expansion cannot read must fail loudly."""
     good = {
         (lane, trigger): {
             outcome: {"shared": ("unproven", "x"), "per_backend": {"codex": ("unproven", "y")}}
@@ -2095,22 +1866,7 @@ def test_a_mistyped_matrix_key_is_an_error_not_a_silent_fallback():
 
 
 def test_a_mistyped_trigger_override_key_is_an_error_not_a_silent_fallback():
-    """HFR-207: the same rule as HFR-200, at the level HFR-200 cannot see.
-
-    HFR-200 whitelists what is INSIDE a cell. It is handed
-    ``RUN_TERMINAL_TRUTH_MATRIX``, and by then ``_build_matrix`` has already
-    read ``_TRIGGER_OVERRIDES`` with ``.get((lane, trigger), {})``. An override
-    filed under a misspelled trigger is therefore dropped BEFORE the object
-    HFR-200 inspects is built, and what HFR-200 sees is a lane default that is
-    correct in every way except that it is not the evidence someone wrote.
-
-    Round 11's docstring said the hole "exists one level up" and then fixed the
-    level it was standing on. That is the finding, and it is this unit's own
-    recurring one: a rule stated generally and enforced at the single site
-    under review. The first half of this test proves the gap is real rather
-    than asserting it -- the old guard accepts the corrupted input -- before
-    the second half shows the new one rejects it.
-    """
+    """HFR-207: the same rule as HFR-200, at the level HFR-200 cannot see."""
     typo = {("direct_im", "scheduler_att"): {"success": {"shared": ("unproven", "x")}}}
 
     # The gap, demonstrated: expansion drops it, and HFR-200's guard is happy
@@ -2451,47 +2207,7 @@ def _marker_near(prose: str, start: int, end: int) -> bool:
 
 
 def test_no_retracted_phrasing_survives_outside_its_own_retraction(tmp_path):
-    """HFR-201: a claim this unit retracted may only appear next to its retraction.
-
-    Round 11's finding is that round 10 retracted the codex overlap claim in
-    five artefacts and left it standing in the catalog -- the file that exists
-    to BE the canonical record, so a follow-up unit reading only the scenario
-    row would have taken the retracted contract as the contract. A seventh copy
-    sat unnoticed in the round-9 observation.
-
-    Rounds 7, 9 and 10 each found the same class -- a stale docstring, a stale
-    headline range, a stale document copy -- and each was fixed as a text edit
-    while the class was named only in prose. Naming a class does not enforce it;
-    the recurrence is the evidence. So the ledger is data
-    (``RETRACTED_PHRASINGS``) and this is its enforcement across every artefact
-    the unit owns.
-
-    The rule is deliberately narrow enough to be mechanical: a retracted
-    phrasing may occur in a sentence that carries a retraction marker, or in the
-    sentence right before one, and nowhere else (see ``_marker_near``, whose
-    first draft was itself too loose to fail on the real stale text). Quoting an
-    error to correct it is the point; restating it as an assertion is what
-    recurred three times.
-
-    Round 14 fixes the input rather than the rule: "its own sentence" was being
-    computed over a whole flattened file, and a YAML field ends with no full
-    stop, so several fields and the comment after them were one sentence and a
-    marker in any of them vouched for all. The corpus is now searched per prose
-    UNIT -- a scalar or comment block in YAML, a string literal or comment block
-    in Python, the whole file only in Markdown, where a wrapped paragraph really
-    is one statement.
-
-    Round 15 narrows the rule itself and finishes the input. The rule: the
-    marker had only to share the sentence, so a marker about a DIFFERENT
-    retraction rescued a restated claim at the other end of the same sentence --
-    round 11's accident one level up. The phrase must now be QUOTED too, which
-    is the difference between mentioning a claim and making one. The input:
-    Python was still flattened whole, which is both round 14's leak unfixed on
-    the other half of the corpus and the reason the quote rule could not be
-    computed there. Four rounds have now narrowed this one guard (window, whole
-    words, scope, quotation), each time because the previous width passed text
-    it was written to fail.
-    """
+    """HFR-201: a claim this unit retracted may only appear next to its retraction."""
     corpus = _pr7r_prose_corpus()
 
     # Guard the guard, on the three shapes that decided its width. Only a marker
@@ -2648,34 +2364,7 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction(tmp_path):
 def test_a_scenario_id_named_in_an_answer_is_carried_as_that_answer_s_evidence(
     tmp_path,
 ) -> None:
-    """HFR-203: leaning on a scenario in prose must mean citing its test.
-
-    Round 15's second finding. Q5's answer said "HFR-261 reconciles the case
-    where the terminal CAS refuses the transition" -- and HFR-261 is the
-    definition-write CAS that PRODUCES the refusal, filed against a CLI update
-    conflict test. The scenario that reconciles the refusal with the Run ledger
-    is HFR-264, whose test converts it into a failed Run. A follow-up unit
-    reading the answer would have gone to the producer-side guard and found
-    nothing that supports the sentence it was sent there by.
-
-    Every other citation in this unit is a NODE ID and every guard here checks
-    node ids; a scenario id written into prose was the one reference nothing
-    validated. HFR-192 would not catch it either, because it walks docstring
-    ids on tests rather than ids in an answer, and HFR-261 is a perfectly real
-    row -- existence was never the failure.
-
-    The rule is the cheapest one that would have caught it and is worth
-    obeying on its own: if an answer leans on a scenario, that scenario's test
-    belongs in the answer's ``evidence``, where the citation resolver already
-    checks it names something pytest collects. That turns a prose reference
-    into a driven one, and the fix for Q5 was to add HFR-264's test rather than
-    to reword the sentence.
-
-    Deliberately NOT extended to findings' ``detail`` or to cell reasons: those
-    name scenarios as neighbouring context ("HFR-261 closed its own CAS")
-    rather than as support, and a rule wide enough to cover them would be
-    turned off rather than obeyed. Scope is the five question answers.
-    """
+    """HFR-203: leaning on a scenario in prose must mean citing its test."""
     yaml = pytest.importorskip("yaml")
     catalog_path = (
         Path(__file__).resolve().parent
@@ -2782,45 +2471,7 @@ def _misattributed_guards(
 
 
 def test_a_corpus_guard_is_never_credited_with_production_behaviour() -> None:
-    """HFR-204: a guard that reads this unit's text cannot drive the runtime.
-
-    Round 17's second finding, and it is round 16's own fix misfiling itself.
-    Round 16 rewrote HFR-183's summary to say that codex's drop is correct
-    filtering because ``CodexAgent.handle_message`` interrupts the older turn
-    under ``_session_locks[base]``. That reading is right. The scenario it
-    credited was not: HFR-193, whose test compares the plan's verdict words
-    against ``pr7r_questions`` and reaches no runtime at all. The row that
-    covers the lock and the interrupt-before-start is HFR-195, and its own
-    catalog entry spells the sequence out. The wrong id then reached five
-    artefacts: the probe docstring, the probe's closing comment, the evidence
-    ledger row, the plan's round-16 block and the round-16 observation.
-
-    This docstring is itself subject to the rule, which is why it argues the
-    way it does -- the offending id and the production symbols it was wrongly
-    attached to are kept in separate sentences. Round 15 hit the same wall from
-    the other side and solved it the same way.
-
-    HFR-203 does not reach it -- that guard requires an ANSWER's scenario
-    citations to appear in the answer's evidence, and four of the five sites
-    are not answers. HFR-192 does not either: it walks the ids a test claims in
-    its own docstring, and HFR-183's docstring claims HFR-183. Nothing checked
-    a scenario id cited in the middle of a paragraph, which is where this unit
-    does most of its arguing.
-
-    The rule is deliberately narrow, because "is this citation apt" is not
-    computable and a rule that pretends otherwise gets deleted. What IS
-    computable is the one distinction that was violated: a scenario whose test
-    lives in this file is a CORPUS guard -- it asserts about PR7R's own prose,
-    node ids and tables, and it can never be the thing that makes production
-    serialize, interrupt or emit. So prose may not put such an id in a sentence
-    that also names a production symbol, or say it "drives" anything.
-
-    Which leaves the misattributions this cannot catch: crediting one PROBE
-    with another probe's behaviour is still unguarded, because both sides are
-    then production-facing and the rule has no handle. That gap is real and
-    named rather than papered over -- HFR-203 covers it for answers, and this
-    covers the corpus-guard half everywhere else.
-    """
+    """HFR-204: a guard that reads this unit's text cannot drive the runtime."""
     yaml = pytest.importorskip("yaml")
     catalog_path = (
         Path(__file__).resolve().parent
@@ -2898,32 +2549,7 @@ def test_a_corpus_guard_is_never_credited_with_production_behaviour() -> None:
 
 
 def test_q4s_evidence_binds_a_run_and_never_a_turn() -> None:
-    """HFR-206: a question about Turns may not rest on Run-scoped evidence.
-
-    Round 17's fourth finding. Q4 asks what a TURN carries before it goes
-    terminal, and its answer called two facts established while every test it
-    cites registers its activity with a run id and no turn id, and emits with
-    the turn-completion flag off. Nothing those tests do is Turn-scoped. The
-    answer then said so out loud in one sentence -- that the question is about
-    a Turn and the cited node answers it on a Run -- which is not a caveat but
-    the conflation itself, written down.
-
-    Two mechanisms, deliberately, because the failure has two halves and a
-    single check would only ever catch one. The retraction ledger holds the
-    sentence, so the wording cannot come back anywhere in the corpus. This
-    guard holds the EVIDENCE, so a future round cannot re-establish the claim
-    by leaving the prose alone and hoping the citations grew a Turn: it reads
-    the cited tests and asserts what scope they actually bind.
-
-    Asserted in both directions. A run binding must be present, or a test that
-    registers nothing at all would satisfy "no turn binding" and pass this
-    guard while proving less than the ones it replaced.
-
-    Scope is Q4 and only Q4. Q1 and Q2 have Turn-level evidence and would fail
-    a rule spelled this way, which is correct -- the rule is not "never bind a
-    turn", it is "this answer's evidence is Run-scoped and the answer has to
-    say so".
-    """
+    """HFR-206: a question about Turns may not rest on Run-scoped evidence."""
     activity_calls = 0
     for node_id in PR7R_QUESTIONS["Q4"]["evidence"]:
         _module_body, chain = _assert_symbol_exists(node_id)

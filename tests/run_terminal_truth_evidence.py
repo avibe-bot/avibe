@@ -1045,174 +1045,45 @@ RETRACTION_MARKERS: Final = (
 #: Turn and its participating Runs. A backend/lane with no exact signal blocks a
 #: generic inactivity timeout, and session-wide activity is never a substitute.
 EXACT_TURN_PROGRESS_SIGNALS: Final = {
-    # Claude was read the same wrong way as codex and opencode, one round later
-    # again -- three for three. ``mark_session_turn_started`` really is stamped
-    # per composite key, and the SDK really has no query/result correlation id,
-    # but neither is the event stream. The receiver is long-lived and its
-    # captured context carries an OLDER turn's tokens, so before any
-    # assistant/tool emit ``_adopt_pending_turn_token`` copies the FIFO-matched
-    # pending ``AgentRequest``'s ``turn_token`` (and the runtime turn key/token,
-    # and the Run attribution keys) onto that context. The emit therefore names
-    # the Turn it belongs to. Avibe supplies the correlation the SDK does not.
-    #
-    # "Exact" here is a FIFO position, not an id the event carries: the head of
-    # ``_pending_requests[composite_key]`` is taken to be the turn producing the
-    # event. That is a weaker mechanism than codex's ``turnId`` and it is still
-    # an exact-Turn attribution under per-key serialization -- and it is what
-    # the remediation has to build on, which is why the distinction is recorded
-    # rather than smoothed over.
-    ("claude", "durable_workbench"): covered(_Q2_SIGNALS),
-    # ...and it needs a ``turn_token`` to copy, which the previous round said it
-    # never gets on IM. That was FALSE, and it is the fourth distinct mechanism
-    # of the same recurring error: the search was a literal grep for
-    # ``"turn_token"``, and the write that matters is CONSTANT-KEYED --
-    # ``platform_specific[AGENT_TURN_TOKEN]`` in ``_stamp_runtime_turn``
-    # (modules/agents/service.py:1015), called unconditionally by
-    # ``AgentService.handle_message`` BEFORE the backend is invoked. That is the
-    # shared admission layer every backend and BOTH lanes pass through, so a
-    # plain IM request carries a freshly generated per-Turn token by the time
-    # the adopt path looks for one. Driven, not read: the probe runs the real
-    # ``handle_message`` twice and asserts the two tokens differ.
-    #
-    # Round 12 pays the other half of that bill. The Turn token was driven on
-    # this lane; the RUNS the question also asks about were not -- every row
-    # behind ``_Q2_RUNS`` was stamped ``platform="avibe"``, and the IM cells
-    # rode a belief that the Delivery/Turn write path is platform-blind. It is
-    # (the three writers gate on session id, state and turn id, never on
-    # platform), and ``_Q2_RUNS`` now builds a telegram-scoped Session with a
-    # bound ``agent_runs`` row and reads the identical per-Turn attribution off
-    # it. The exception is sessionless CLI dispatch, which writes no Delivery
-    # and no Turn: empty attribution, and outside both lanes by definition.
-    # Round 27 narrows the RUN half at the next undriven boundary. HFR-197
-    # exercises the real receiver and dispatcher, but inserts the admitted
-    # request into ``_pending_requests`` itself. It therefore does not prove
-    # that Claude's production ``handle_message`` enqueue connects a direct-IM
-    # request to the receiver that emits its terminal frame.
+    # The signal exists on each live path, but Q2 also requires the bound Run
+    # context to survive the backend's production handoff into the dispatcher.
+    # The current Claude probes seed that handoff; the current Codex probes
+    # either register requests manually or replace the emitter.
+    ("claude", "durable_workbench"): unproven(
+        "No probe drives a bound durable Run through ClaudeAgent.handle_message's "
+        "production pending-request enqueue and the real receiver/dispatcher. "
+        "Probe: drive that complete path and assert the emitted context settles "
+        "the exact participating Run via Claude's production enqueue."
+    ),
     ("claude", "direct_im"): unproven(
-        "Shared admission stamps an exact Turn token, and HFR-197 drives the "
-        "real Claude receiver and dispatcher only after seeding the pending "
-        "request. Probe: bind an IM-scoped Run, drive ClaudeAgent.handle_message "
-        "through its real pending-request enqueue, feed a terminal frame to the "
-        "real receiver, and assert the emitted context settles that exact Run "
-        "via Claude's production enqueue."
+        "No probe drives a bound direct-IM Run through ClaudeAgent.handle_message's "
+        "production pending-request enqueue and the real receiver/dispatcher. "
+        "Probe: drive that complete path and assert the emitted context settles "
+        "the exact participating Run via Claude's production enqueue."
     ),
-    # Codex is the exception, and the first draft of this table got it wrong by
-    # reading only the base-session projection. The app-server's ``item/*`` and
-    # ``turn/*`` notifications carry a ``turnId`` in their params, and
-    # ``_find_request_for_notification`` resolves the participating Run's
-    # request from THAT id through ``get_request_for_turn`` -- a per-turn map,
-    # not a per-session one. The exact-Turn signal therefore exists. An earlier
-    # round said the signal is then DISCARDED by ``should_emit_progress``, which
-    # gates on the single ``_active_turns[base]`` slot. That claim has now been
-    # argued three times -- over-claim (round 6), reinstated (round 8),
-    # RETRACTED (round 9) -- and only round 9 drove it. The key-space split is
-    # real: the gate keys on the composite ``<base>:<working_path>`` and
-    # ``_active_turns`` keys on the base alone, so a working-path change does
-    # get two requests past the shared gate at once. What rounds 6 and 8 both
-    # missed is the code BETWEEN those two facts.
-    # ``CodexAgent.handle_message`` holds ``_session_locks[base]`` -- the
-    # registry's key space -- across its whole body, and inside it sends
-    # ``turn/interrupt`` for any active turn before ``turn/start``. So the two
-    # requests are SERIALIZED before they reach the backend, and the muted turn
-    # has been interrupted. That is correct filtering. The real consequence of
-    # the split is narrower: a cwd change turns "queue and run after" into
-    # "interrupt and replace". All of it is driven in
-    # ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``.
-    # Round 10 narrows it once more, from the same projection habit: "the turns
-    # never overlap" was read off the registry, and the protocol note
-    # (docs/plans/codex-app-server-refactor.md, step 2) says an insertion must
-    # WAIT for ``turn/completed(interrupted)`` before ``turn/start``. Production
-    # does not wait, so turn-1 is still executing on the backend while turn-2 is
-    # registered -- the window exists. It is harmless because both of its
-    # arrivals are handled, and the same probe now drives them through the real
-    # ``CodexEventHandler``: the interrupted turn's late tail is dropped by the
-    # named guard in ``_on_item_completed`` while the live turn's lands, and its
-    # late ``turn/completed`` is popped and released with nothing emitted rather
-    # than mistaken for the new turn's result. Serialization at the lock is a
-    # weaker property than non-overlap, and it is the one that is true.
-    # The cell is ``covered`` because the question is whether the exact-Turn
-    # signal EXISTS, and it does: the ``turnId`` is on the notification and
-    # ``_find_request_for_notification`` resolves it before any filtering. One
-    # consumer still throws attribution away -- the activity timestamp stamped
-    # per SESSION rather than per Turn -- and that one is unretracted.
-    ("codex", "durable_workbench"): covered(_Q2_SIGNALS),
-    # The ``turnId`` is on the notification whatever surface asked for the
-    # turn, so the signal half does not depend on the lane. Round 26 reopens the
-    # RUN half: the integrated HFR-197 path drives Claude's receiver only, while
-    # the Codex probe stops at registry resolution. A Codex handler that drops
-    # ``tracked_request.context`` would therefore leave both probes green.
+    ("codex", "durable_workbench"): unproven(
+        "Codex notifications carry an exact turnId, but no probe drives a bound "
+        "durable Run through CodexEventHandler and the real dispatcher. Probe: "
+        "deliver a real Codex output through that path and assert the emitted "
+        "context settles the exact participating Run."
+    ),
     ("codex", "direct_im"): unproven(
-        "Codex notifications carry an exact turnId, but no probe drives a real "
-        "direct-IM Run through CodexEventHandler and the dispatcher. Probe: "
-        "bind an IM-scoped Run, deliver a Codex frame through its real handler, "
-        "and assert the emitted context settles that exact Run."
+        "Codex notifications carry an exact turnId, but no probe drives a bound "
+        "direct-IM Run through CodexEventHandler and the real dispatcher. Probe: "
+        "deliver a real Codex output through that path and assert the emitted "
+        "context settles the exact participating Run."
     ),
-    # OpenCode was read the same wrong way as codex, one round later, and for
-    # the same reason: ``_active_requests[base]`` is a LIVENESS map -- one
-    # asyncio task per base session -- and reading a lossy projection told us
-    # nothing about the event stream. ``OpenCodePollLoop.run_prompt_poll``
-    # receives the exact ``AgentRequest`` and emits every tool call and
-    # assistant message with ``request.context``, and ``_process_message``
-    # reads that same context's ``turn_token`` as ``logical_turn_id`` before
-    # polling starts. So each progress emit carries its own Turn's token.
-    #
-    # Round 17 reopens both opencode cells, and the reason is the FIFTH
-    # instance of this unit's recurring error -- reading one path and
-    # generalizing to the lane. ``run_prompt_poll`` was walked; the sibling
-    # ``run_restored_poll_loop`` was not, and after a restart that is the one
-    # that runs. It rebuilds its context from the persisted snapshot via
-    # ``ProcessingIndicatorHandle.from_snapshot``, whose rebuild is a fixed
-    # three-key allowlist -- platform, is_dm, context_token. ``turn_token``,
-    # the runtime turn token and ``accepted_agent_run_ids`` are all dropped,
-    # and all three of the restored loop's emits pass that stripped context.
-    # The whole module mentions neither ``turn_token`` nor ``logical_turn_id``,
-    # so nothing puts the identity back.
-    #
-    # The sharper half, and the reason this is a defect rather than a gap: the
-    # identity IS persisted. ``_process_message`` writes ``logical_turn_id``
-    # into the very dict handed to the rebuild, under the steering snapshot
-    # key, and the restore path reads it back for steering. So the Turn
-    # survives the restart and is discarded at the rebuild.
-    # ``additional_steer_targets`` builds its restored targets with
-    # ``context=None``, which is production's own admission of the same thing.
-    #
-    # Round 18 retracted what this comment said next -- "a one-line remediation
-    # on a path that already holds the value" -- as a claim about the Turn
-    # doing duty for a claim about the cell, which fails on Runs too. The
-    # snapshot holds the Turn and holds no run id at all (``HFR-205`` asserts
-    # the absence), so the Runs come back only from a durable read keyed on the
-    # recovered Turn, ``accepted_agent_run_ids_for_turn``, and only for
-    # participants carrying an accepted Delivery row. Two remediations, and the
-    # reach of the second one is not established here.
+    # Live OpenCode emits carry request.context. Restart restoration rebuilds a
+    # three-key context that drops the persisted Turn and accepted Run ids.
     ("opencode", "durable_workbench"): defect(
         "HFR-205: restart discards the persisted Turn id at handle rebuild -- "
         + _Q2_RESTORED
     ),
-    # ...and the same admission stamp settles the LIVE half of this lane too.
-    # The previous round named ``SessionTurnManager`` and
-    # ``core/services/dispatch.py`` as the only writers; both are Workbench
-    # owners, which is what made the lane split look real. ``_stamp_runtime_turn``
-    # is a third writer and it is upstream of both, so ``logical_turn_id`` is
-    # NOT empty on IM -- ``_process_message`` reads a token that the admission
-    # layer put there. Round 12 adds the Run half on real IM rows, for the
-    # reason given on ``("claude", "direct_im")``.
-    #
-    # The restart defect above is lane-blind, though, and that is exactly why
-    # this cell moves with its sibling: the discard is in the shared handle
-    # rebuild, which reads the persisted dict and never asks which surface
-    # wrote it. A live IM turn is attributed; the same turn after a daemon
-    # restart is not. ``_Q2_ADMISSION`` still holds for the live half and is
-    # kept in the question's evidence -- the cell is a defect because the lane
-    # is not covered end to end, not because the admission stamp was wrong.
     ("opencode", "direct_im"): defect(
         "HFR-205: restart discards the persisted Turn id at handle rebuild -- "
         + _Q2_RESTORED
     ),
 }
-
-
-# ----- the five questions --------------------------------------------------
-
 #: Verdicts must be one of ``answered`` (the evidence settles it),
 #: ``open`` (the probe exists and disagrees or is partial), or ``blocked``
 #: (no evidence yet). Every entry names at least one consuming test.
@@ -1256,181 +1127,19 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "TWO of the six cells can: claude/direct_im and codex/direct_im are "
-            "unproven, and the two opencode cells are defects as of round 17. "
-            "This answer said "
-            "ALL SIX for four rounds; "
-            "that wording is retracted and enrolled, and the reason it was "
-            "wrong is the same reading error the rest of this answer is a "
-            "history of, committed once more. See the closing paragraph -- the "
-            "clauses below are about the LIVE path and they still hold. "
-            "It took four corrections to get to the live-path answer "
-            "because the same error was made four times in four "
-            "different disguises. The first three: each "
-            "time, a backend's base-session PROJECTION was read -- "
-            "``_active_turns[base]`` for codex, ``_active_requests[base]`` for "
-            "opencode, ``session_turn_started[composite_key]`` for claude -- "
-            "and a conclusion about the EVENT STREAM was drawn from a lossy "
-            "liveness map. All three event streams carry a Turn. Codex's "
-            "``item/*`` notifications carry a ``turnId`` and "
-            "``_find_request_for_notification`` resolves the participating "
-            "Run's request from it. OpenCode's poll loop is handed the exact "
-            "``AgentRequest`` and emits with ``request.context``, whose "
-            "``turn_token`` ``_process_message`` has already read as "
-            "``logical_turn_id``. Claude's long-lived receiver adopts the "
-            "FIFO-matched pending request's ``turn_token`` onto the emit "
-            "context before any assistant/tool output, so Avibe supplies the "
-            "correlation the SDK lacks. The FOURTH error was this table's own "
-            "previous verdict: it held claude and opencode ``direct_im`` open "
-            "on the ground that ``turn_token`` is stamped only by "
-            "``core/session_turns.py`` and the streaming turn dispatch, both "
-            "Workbench owners. That was arrived at by grepping the LITERAL "
-            "string ``\"turn_token\"``, and the write that matters is "
-            "CONSTANT-KEYED: ``platform_specific[AGENT_TURN_TOKEN]``, written "
-            "by ``AgentService._stamp_runtime_turn`` "
-            "(modules/agents/service.py:1015) which "
-            "``AgentService.handle_message`` calls unconditionally, before the "
-            "backend runs, on every request from every lane. So the claimed "
-            "lane split does not exist: a plain IM request carries a "
-            "freshly-generated per-Turn token by the time claude's adopt path "
-            "looks for one and by the time opencode reads ``logical_turn_id``. "
-            "This is now DRIVEN rather than read -- the probe calls the real "
-            "``handle_message`` twice on one runtime key and asserts the two "
-            "tokens differ, i.e. per-Turn and not per-session, and that a "
-            "pre-existing Workbench token is preserved rather than overwritten. "
-            "What remains is NOT attribution but its downstream use, and round "
-            "8 made that residual bigger and round 9 made it smaller again. "
-            "The FIFTH error was the SHAPE of the answer rather than a fact in "
-            "it: this question asks about the exact Turn AND PARTICIPATING "
-            "RUNS, every probe asserted Turn tokens, and the verdict was "
-            "written as though the conjunction had been checked. It had not "
-            "been. It holds for claude and codex on the durable lane, and the "
-            "mechanism is a derivation: "
-            "``_owned_agent_run_ids`` reads ``accepted_agent_run_ids`` off the "
-            "emit context, and ``_durable_accepted_agent_run_ids`` looks Runs "
-            "up per ``turn_token`` from that SAME payload, so Run attribution "
-            "is exactly as exact as the Turn. HFR-197 drives the Claude "
-            "receiver and dispatcher after seeding its pending request, "
-            "including the case that would smear Runs across Turns if its "
-            "reused context merged rather than replaced. Claude's direct-IM "
-            "cell remains open because no probe drives the production enqueue; "
-            "Codex's direct-IM cell remains open because its probe resolves the "
-            "registry request but never drives ``CodexEventHandler`` through "
-            "the dispatcher with the accepted Run. "
-            "The SIXTH correction is a retraction of round 8's. Codex does NOT "
-            "discard its signal at ``should_emit_progress``. The key spaces do "
-            "differ -- the gate keys on ``BaseAgent.runtime_turn_key``, the "
-            "composite ``<base>:<working_path>``, and ``_active_turns`` keys on "
-            "the base session alone -- so a working-path change does get two "
-            "requests past the shared gate. But ``CodexAgent.handle_message`` "
-            "holds ``_session_locks[base]``, the REGISTRY's key space, across "
-            "its whole body and sends ``turn/interrupt`` for any active turn "
-            "before ``turn/start``. The two requests are SERIALIZED before they "
-            "reach the backend and the muted turn has been interrupted, which "
-            "is correct filtering. Rounds 6, 8 and "
-            "9 all argued this claim from the two ENDS of a mechanism without "
-            "running the code between them; a claim that flips three times is "
-            "one whose subject was never driven end to end. "
-            "The SEVENTH correction, round 10, is the same projection habit at "
-            "its last hiding place. Round 9 wrote \"there is no window in which "
-            "two codex turns are live\", and read that off the REGISTRY's one "
-            "slot. Codex's own protocol note "
-            "(docs/plans/codex-app-server-refactor.md, insertion step 2) "
-            "requires waiting for ``turn/completed`` with interrupted status "
-            "before ``turn/start``; production sends interrupt and start with "
-            "no wait between them, so turn-1 is still executing on the backend "
-            "while turn-2 is registered. The window EXISTS, and it is harmless "
-            "for a reason the registry cannot show: both of its arrivals are "
-            "handled. The probe now drives them through the real "
-            "``CodexEventHandler`` -- the interrupted turn's late "
-            "``item/completed`` is dropped by the named guard in "
-            "``_on_item_completed`` while the live turn's is kept, and its late "
-            "``turn/completed`` is popped, ack-removed and stream-released with "
-            "NOTHING emitted, so it is never mistaken for the new turn's "
-            "result. Q2 asks whether the exact-Turn signal EXISTS, and the "
-            "window does not touch that; what it corrects is the basis, from a "
-            "projection's one slot to the handlers that actually meet the "
-            "overlap. One byproduct is pinned in the probe: the ack removal for "
-            "an interrupted turn happens TWICE, eagerly at "
-            "``clear_pending(active_turn)`` and again when the completion "
-            "lands. What the key split "
-            "really costs is narrower: a cwd change turns queue-and-run-after "
-            "into interrupt-and-replace, and "
-            "``runtime_turn_keys_for_session_key`` cannot address the replaced "
-            "turn. "
-            "The EIGHTH correction, round 12, is not a fact in this answer but "
-            "how much of it was DRIVEN, and it lands on the Run half. Every "
-            "probe behind the Run clause built its rows with "
-            "``platform=\"avibe\"`` -- the Workbench surface -- so the three "
-            "``direct_im`` cells asserted per-Turn RUN attribution on the "
-            "strength of a belief that the write path takes no branch on "
-            "platform. The belief holds, and it was cheap to check, and cheap "
-            "to check is not checked: ``_submit_scheduled_turn`` inserts the "
-            "Delivery, binds the Run through "
-            "``attach_agent_run_delivery_in_connection`` and calls ``deliver`` "
-            "gated on the SESSION id (core/internal_server.py); "
-            "``_start_persisted_turn`` hydrates the accepted ids and stamps "
-            "``platform_specific['turn_token']`` (core/session_turns.py); and "
-            "``accepted_agent_run_ids_for_turn`` filters on ``state`` and "
-            "``turn_id`` alone (storage/message_deliveries.py). Not one of the "
-            "three reads a platform. It is now driven rather than believed: "
-            "the probe builds a telegram-scoped Scope and Session, takes a real "
-            "Delivery through claim, native bind and materialized acceptance, "
-            "binds an ``agent_runs`` row to it, and gets back the same exact "
-            "per-Turn attribution the Workbench rows give. Two schema facts "
-            "surface only on that lane and are pinned with it: acceptance "
-            "MATERIALIZES the snapshot into a ``messages`` row, so "
-            "``messages.scope_id`` needs a real Scope and ``messages.session_id`` "
-            "is a DEFERRED foreign key that fails at COMMIT rather than at "
-            "insert -- which is why the Workbench probe, passing "
-            "``scope_id=None`` and persisting no Message, never met either. "
-            "The one write path that does bypass all of this is sessionless "
-            "CLI dispatch (core/internal_server.py), which persists neither "
-            "Delivery nor Turn and so has EMPTY attribution rather than wrong "
-            "attribution; it sits outside both lanes as this unit defines them, "
-            "since ``direct_im`` and ``durable_workbench`` are each "
-            "Session-scoped by their own wording. "
-            "The NINTH correction, round 17, reopens the question, and it is "
-            "the fifth instance of reading one path and generalizing to the "
-            "lane. Everything above walks LIVE dispatch. OpenCode has a second "
-            "entry point that was never walked -- ``run_restored_poll_loop``, "
-            "the one that runs after a daemon restart -- and it rebuilds its "
-            "emit context from the persisted snapshot through "
-            "``ProcessingIndicatorHandle.from_snapshot``, whose rebuild is a "
-            "fixed three-key allowlist. ``turn_token``, the runtime turn token "
-            "and ``accepted_agent_run_ids`` are dropped; all three of that "
-            "loop's emits pass the stripped context; and the module names "
-            "neither ``turn_token`` nor ``logical_turn_id`` anywhere, so "
-            "nothing restores them. Both halves of this question fail there at "
-            "once, Turn and Runs, on both opencode lanes -- the discard is in "
-            "the shared handle rebuild and reads no platform. "
-            "It is a DEFECT and not a gap, because the identity is not "
-            "missing from the snapshot: ``_process_message`` writes "
-            "``logical_turn_id`` into the very dict the rebuild is handed, "
-            "under the native steering key, and the restore path reads it back "
-            "to steer. The Turn survives the restart and is thrown away one "
-            "call later. ``additional_steer_targets`` constructing its "
-            "restored targets with ``context=None`` is production stating the "
-            "same thing in its own words. Round 18 retracted the sentence "
-            "that used to sit here, \"Remediation is one line at the rebuild, "
-            "not a persistence change\": it is true of the Turn and false of "
-            "the Runs, which ``HFR-205`` shows are not in the snapshot in any "
-            "form. The Turn half is the rebuild reading the steering key it is "
-            "already handed. The Run half is a durable read -- "
-            "``accepted_agent_run_ids_for_turn`` resolves participants from "
-            "the Deliveries accepted against that Turn -- and it reaches only "
-            "participants that HAVE such a Delivery row, which for the "
-            "restored OpenCode loop this unit has not established. "
-            "A generic inactivity timeout remains BLOCKED on the all-path "
-            "attribution question: Codex's direct-IM Run half is unproven and "
-            "OpenCode loses both Turn and Runs across restart. The live event "
-            "streams still carry exact Turn signals on all backends; once the "
-            "Run and restart gaps close, the remaining live-path remediation "
-            "is a per-Turn activity timestamp instead of a per-session one. "
-            "Note claude's attribution "
-            "is a FIFO POSITION rather than an id the event carries: exact "
-            "under per-key serialization, weaker than codex's ``turnId``, and "
-            "the remediation has to build on it as it is."
+            "Six cells are open. Claude and Codex each have an exact-Turn "
+            "signal on live dispatch, but neither backend has a probe carrying "
+            "a bound participating Run through its production backend handoff "
+            "and real dispatcher on either lane. Those four cells are unproven. "
+            "OpenCode's live loop emits request.context, but its restart path "
+            "rebuilds a context that drops the persisted Turn and accepted Run "
+            "ids; both OpenCode cells are defects. "
+            "Claude correlation is FIFO-based, so its enqueue and receiver must "
+            "be driven together. Codex notifications carry turnId, so its event "
+            "handler and dispatcher must be driven together. Until those four "
+            "backend paths and the OpenCode restart path are covered, a generic "
+            "inactivity timeout remains blocked; per-session activity is not a "
+            "substitute for exact Turn and Run attribution."
         ),
         "evidence": (
             _Q2_SIGNALS,

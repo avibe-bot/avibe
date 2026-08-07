@@ -139,127 +139,7 @@ def _first_reference_line(func, method_name: str) -> int:
 
 
 def test_end_skips_the_canonical_stop_while_a_live_claude_turn_is_unstamped():
-    """HFR-180 / PR7R-F1: End skips the canonical stop when the probe is blind.
-
-    ``ClaudeAgent.handle_message`` calls ``mark_session_active`` only after
-    ``get_or_create_claude_session`` returns, so a turn accepted while that call
-    is still in flight is NOT in ``claude_active_sessions``. On
-    the direct-IM / agent-run lane there is also no ``session_turns`` entry to
-    fall back on -- that projection only exists for the Workbench lane -- so
-    ``_resolve_live_state`` has nothing left to read and answers ``idle``.
-
-    End takes the idle branch instead of ``handle_stop``, the only path that
-    emits ``stopped`` -> ``canceled``. The real teardown then waits behind the
-    parked resolver's generation lock. This probe does not release that
-    resolver, so it does not claim what teardown or the classifier eventually
-    records.
-
-    What this does NOT claim is the Run's final status. Reaching it needs an
-    IM-scoped Harness Run driven to settlement, which is the probe named in the
-    IM ``user_stop`` / ``resultless_termination`` cells. An earlier draft
-    asserted ``backend_refresh`` here on the strength of two constant lookups
-    from ``SETTLEMENT_TERMINAL_STATUS`` -- those pass no matter what End does,
-    and the claim was wrong besides: ``SETTLED_BY_BACKEND_REFRESH`` is emitted
-    by ``SessionTurnManager.release_for_backend_refresh``, on the other lane.
-
-    Round 3 closed two ways this probe could have outlived its own defect. The
-    race used to be POSTULATED -- an empty ``claude_active_sessions`` handed in
-    by the fixture -- so the day ``handle_message`` starts stamping the live set
-    before it creates the session, the window closes and this test still passes,
-    still reporting F1 as reproduced. The ordering is now read out of
-    production. And the teardown marker used to be stamped by the probe itself
-    after a structural check of the LAST hop only; the four hops in between,
-    one of which dispatches by a getattr on a string name, were a comment.
-
-    Round 4 answered the reachability challenge the ordering check left open:
-    an ordering is not a window unless the fixture's combination of registries
-    can actually occur. Review argued it cannot, on the grounds that
-    ``claude_sessions`` is populated only at the end of session creation, so a
-    cold start has no client for End to tear down. That is right about a COLD
-    start and it is not this state. The state staged here is warm-idle --
-    ``mark_session_idle`` drops the key from the live set and keeps the client
-    -- and the second turn on a warm session waits on the per-generation async
-    lock inside ``get_or_create_claude_session`` before anything stamps it
-    active. Both halves are now driven or read off production below.
-
-    Round 20 retracted "the yield is unconditional and unbounded", which round
-    4 wrote and which was a claim about suspension standing on a match against
-    source text. An ``await`` is not a suspension point, and an uncontended
-    ``asyncio.Lock`` acquires without ever yielding, so a quiet runtime runs
-    the whole resolver in one scheduler step and the window does not exist
-    there. What makes it a window is CONTENTION on the generation lock, which
-    is the warm second turn this fixture already describes -- so the real
-    resolver is now run twice under a live event loop, once with the lock free
-    and once with it held, and the two outcomes are asserted. The uncontended
-    case is asserted as FINISHING, not as a wart to be tolerated: it is the
-    half that shows why reading the source could not carry the claim.
-
-    Round 21 changes who HOLDS the lock, which is the difference between "the
-    resolver can be blocked" and "production blocks it". Round 20 took it by
-    hand, and a lock held by the test says nothing about whether an accepted
-    turn ever meets contention. Production has three owners of this key's
-    generation lock -- session resolution itself, ``cleanup_session``, and the
-    idle-reclamation sweep -- and the middle one is where End's chain
-    terminates, hop for hop, as asserted below. So the holder is now End's own
-    teardown and the parked caller is the real resolver: both sides acquire and
-    release through production, and only the two innermost bodies are stubbed.
-
-    Round 22 puts the halves in ONE interleaving, which is what round 21 still
-    owed. Fixing the holder left the two facts staged apart -- contention on a
-    throwaway handler calling ``get_or_create_claude_session`` directly, End
-    afterwards on a different fixture reading a live set written empty by hand
-    -- and two separately green facts do not add up to "an accepted turn and a
-    blind End coexist". So there is one handler now, the parked caller is
-    ``ClaudeAgent.handle_message`` with nothing stubbed between it and the
-    generation lock, End runs inside the same event loop while that turn is
-    suspended, and the set ``_resolve_live_state`` reads is the handler's own
-    ``active_sessions`` -- so ``idle`` is a consequence of the parked turn,
-    not a literal. The lesson is the one round 21 wrote down, aimed at round
-    21: a fix inherits the blind spot of the thing it fixes, and replacing a
-    fixture's WHO does not answer a question about its WHEN.
-
-    Round 23 removes the contender instead of choosing a better one, because
-    review showed that ``cleanup_session`` DESTROYS the state End has to see:
-    ``_cleanup_session_locked`` pops the client out of ``claude_sessions``
-    synchronously, before its first ``await``, so a production run in which
-    cleanup owns the lock has no live generation left for ``_end_claude`` to
-    tear down. The retained client was the stub's, not production's. The error
-    upstream of that choice is round 20's over-correction: retracting "the
-    yield is unconditional" it wrote "the window is CONTENTION on the
-    generation lock", and that is too narrow. The window is any suspension
-    inside resolution while the client is registered and the turn unstamped,
-    and production reaches one with NO contention at all -- the warm-reuse path
-    awaits ``_set_claude_model_if_needed`` on the cached client, an IPC round
-    trip to a live CLI, with that client still in ``claude_sessions``. So the
-    resolver here is real to the bottom: real ``get_or_create_claude_session``,
-    real lock, real ``_get_or_create_claude_session_locked``, real
-    ``_reuse_cached_claude_session_if_available``, and the only thing that does
-    not answer is the SDK client's own ``set_model`` -- a hung backend, which
-    is the defect class this whole unit exists for. The lesson is that a
-    retraction can overshoot: round 20 replaced a false sufficient condition
-    with a false NECESSARY one, and three rounds then went looking for a
-    contender the defect never needed.
-
-    Round 25 makes the OTHER half real, and it is round 23's own correction
-    read back onto what round 23 left standing. Rounds 21-23 kept moving the
-    parked caller closer to production and left End as an ``_AsyncFlag``, then
-    reported that End's payload as production's answer -- the substituted thing
-    quoted as evidence. It is not: ``end_runtime_session`` reaches
-    ``cleanup_session`` with no ``runtime_lock_held``, so real End re-acquires
-    the generation lock this resolver is holding and gets nowhere while the
-    window is open. So the probe now runs that real ``cleanup_session`` against
-    that real parked resolver and watches it fail to reach the locked body,
-    and the ``ended`` payload is demoted to what it always was, a statement
-    about the ROUTE ``end_running_agent`` chose -- which is decided from the
-    live state it recomputes, before any End is awaited, and is therefore
-    production's own regardless of what the End then does.
-
-    Round 26 stops at that boundary. The same real End task is not released
-    through teardown and classification, so the earlier causal claim about the
-    intentional marker is retracted rather than reconstructed from a separate
-    handler. This scenario covers the blind live-state decision, skipped
-    canonical stop, and blocked teardown only.
-    """
+    """HFR-180 / PR7R-F1: End skips the canonical stop when the probe is blind."""
     # The race, read off production instead of assumed. ``mark_session_active``
     # is what fills ``claude_active_sessions``; it is called only after
     # ``get_or_create_claude_session`` returns, so a turn accepted while that
@@ -711,40 +591,7 @@ def _codex_end_controller(
 
 
 def test_codex_end_reports_ended_when_the_canonical_stop_never_interrupted():
-    """HFR-181 / PR7R-F2: End discards the interrupt outcome it already has.
-
-    Clearing a stale-active codex row whose app-server died is deliberate --
-    ``test_end_active_codex_clears_stale_row_even_when_stop_fails`` owns that
-    behavior and it should stay. This probe is about a live turn, and round 4
-    located the defect a level more precisely than the first filing did.
-
-    ``_end_codex`` DOES compute and return ``interrupted``. The loss happens one
-    frame up: on the failed-stop branch ``end_running_agent`` writes
-    ``{"ok": True, "action": "ended", "backend": "codex"}`` as a fresh literal
-    and copies only ``process_killed`` out of the teardown result. So the
-    signal is not missing from the system -- it is produced, and then dropped
-    by the caller that is supposed to report it.
-
-    The demonstration is two runs against the SAME fixture whose only difference
-    is whether ``turn/interrupt`` succeeds. One leaves the backend turn genuinely
-    running, the other genuinely interrupts it, and both return a byte-identical
-    payload. A caller cannot distinguish them, which is what makes this a
-    reporting defect rather than a teardown one.
-
-    Round 5 fixed what "genuinely running" required. The fixture used to make
-    this session the cwd's last, which means ``_end_codex`` stops the shared
-    app-server -- so the failed-interrupt run's turn died anyway, by process
-    kill, and ``ended`` was a true report in both runs. The turn only survives a
-    failed interrupt when a co-tenant session keeps the transport up, so that is
-    what the primary pair stages, and the survival is asserted rather than
-    assumed: the transport is never stopped and is still registered afterwards.
-
-    Scope: this builds only the codex session/turn registries and a transport,
-    so there is no Run row and the probe claims nothing about the Run's terminal
-    state. An earlier draft said the Run "is never settled"; that was inferred
-    from the missing interrupt, not observed. The IM lane's ``user_stop`` cells
-    carry the probe that would settle it.
-    """
+    """HFR-181 / PR7R-F2: End discards the interrupt outcome it already has."""
     def _run(*, interrupt_raises: bool, co_tenant: bool):
         cleared: dict = {}
         sent: list = []
@@ -951,38 +798,7 @@ def _per_run_provenance_sites(
 
 
 def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
-    """HFR-182 / Q3: a Turn's accepted-run record cannot discriminate.
-
-    Scoped deliberately to the half this reaches. ``_attach_accepted_agent_runs``
-    is DOWNSTREAM of the decision it would be tempting to test here: it appends
-    ids already attributed to a Turn, so driving it twice proves nothing about
-    whether a cron Run and a manual CLI Run coalesce. That question belongs to
-    ``SessionTurnManager._hydrate_delivery_batch_context``, which folds a
-    Delivery batch into one context, and the matrix carries it as an open probe.
-
-    What IS provable here is the consequence, and it holds however the merge
-    happens: the Turn keeps a flat list of run ids and nothing per-Run. There is
-    one Turn-level ``source_kind``, a later participant does not restamp it, and
-    a cancellation consulting it would therefore answer for a Run that may not
-    be the one it is about.
-
-    Round 10 corrected the wording of exactly that sentence. It used to say the
-    label is "whatever the FIRST participant stamped" -- which this fixture
-    PRELOADS and cannot possibly establish, so the assertion's own message was
-    claiming the conclusion the docstring two paragraphs down concedes is not
-    reached here. The driven fact is the weaker and still useful one: the append
-    path does not write the label, so whoever set it keeps it. Who that is stays
-    with ``_hydrate_delivery_batch_context`` and stays an open probe.
-
-    Scope, narrowed again in round 3. An earlier draft ended "no per-Run timeout
-    policy can be specified against that record", and quietly promoted "the
-    PROJECTION lacks the inputs" into "the inputs do not exist". They do: every
-    accepted id is the primary key of an ``agent_runs`` row that carries
-    ``source_kind``, ``source_actor`` and ``definition_id``, and the definition
-    carries the timeout fields. The gap is a join, not an absence -- so the
-    probe now asserts BOTH halves, and the open question becomes the narrower
-    and more useful one of whether the cancellation site performs that join.
-    """
+    """HFR-182 / Q3: a Turn's accepted-run record cannot discriminate."""
     manager = object.__new__(SessionTurnManager)
     projected = types.SimpleNamespace(
         logical_turn_id="turn-1",
@@ -1129,64 +945,7 @@ def test_the_accepted_run_batch_records_no_per_run_source_or_deadline():
 
 
 def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
-    """HFR-183 / Q2: every backend and lane carries an exact-Turn signal LIVE.
-
-    The plan forbids a generic inactivity timeout unless every backend and lane
-    has an exact-Turn progress signal, and states that session-wide activity is
-    never an acceptable substitute.
-
-    Scope, and round 17 narrowed it: everything below walks a LIVE dispatch
-    path. OpenCode has a second entry point after a daemon restart, which this
-    probe never reached and which discards the identity; that is
-    ``test_a_restored_opencode_poll_loop_emits_without_its_turn_identity`` and
-    the two opencode cells are ``defect`` because of it. The closing section
-    here reads the table, so it enforces that split rather than restating this
-    paragraph.
-
-    This probe has now corrected itself three times, ALWAYS THE SAME WAY, and
-    that pattern is worth more than the verdict. Draft 1 read
-    ``EXACT_TURN_PROGRESS_SIGNALS`` back to itself. Draft 2 exercised three real
-    structures but looked only at each backend's base-session PROJECTION and
-    concluded from a lossy liveness map that no exact signal existed anywhere;
-    codex's did, one level up, in the notification. Draft 3 fixed codex and left
-    the identical mistake standing for opencode -- ``_active_requests[base]`` is
-    also a liveness map, and the poll loop it indexes emits with
-    ``request.context``. Draft 4 fixed opencode and left it standing for claude:
-    ``session_turn_started[composite_key]`` is a projection too, and claude's
-    long-lived receiver adopts the FIFO-matched pending request's ``turn_token``
-    onto the emit context before any assistant/tool output. Three backends,
-    three identical misreadings, each caught only after the previous one was
-    named. So the probe now checks the projection AND the event stream for every
-    backend, and says which is which.
-
-    "The attribution is discarded" and "the attribution does not exist" call
-    for different fixes, which is what makes the distinction load-bearing.
-
-    Draft 5 was a fourth instance of the same shape and is the reason this
-    summary was stale for two rounds: it concluded the answer splits by LANE,
-    on the ground that ``turn_token`` is stamped only by ``SessionTurnManager``
-    and the streaming turn dispatch, both Workbench owners. That came from
-    grepping the LITERAL string and missing the constant-keyed write in
-    ``AgentService._stamp_runtime_turn``, which every request on every lane
-    passes through. There is no lane split on the live path, and round 17
-    narrows the wording draft 5 landed on -- "all six cells" carry an exact-Turn
-    signal was true of what this probe walks and is retracted as a statement
-    about the unit, since the restart path is neither. Driven in
-    ``test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im``.
-
-    What is NOT settled by that is what the consumer does with the signal.
-    Round 8 said, and round 9 RETRACTED, "for codex it drops it". The settled
-    reading is that ``should_emit_progress`` returning False for the older turn
-    is correct filtering of a turn ``handle_message`` has already interrupted --
-    HFR-195 drives both halves, the serialization at the lock and what becomes
-    of that turn's late events, and the closing section here shows the slot the
-    drop reads.
-
-    Claude's attribution is a FIFO POSITION, not an id the event carries: the
-    head of ``_pending_requests[composite_key]`` is taken to be the turn
-    producing the event. Exact under per-key serialization, weaker than codex's,
-    and asserted as such rather than smoothed into "claude has a turn id too".
-    """
+    """HFR-183 / Q2: every backend and lane carries an exact-Turn signal LIVE."""
     # Claude, part one -- the PROJECTION, which is all the first three drafts of
     # this probe looked at. The progress baseline is stamped per COMPOSITE KEY,
     # and the method has no parameter that could carry a Turn.
@@ -1397,20 +1156,20 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
     # that is precisely the belief round 17 falsified.
     expectations = {
         ("claude", "durable_workbench"): (
-            "covered",
-            "test_which_backends_attribute_a_progress_event_to_an_exact_turn",
+            "unproven",
+            "via Claude's production enqueue.",
         ),
         ("claude", "direct_im"): (
             "unproven",
             "via Claude's production enqueue.",
         ),
         ("codex", "durable_workbench"): (
-            "covered",
-            "test_which_backends_attribute_a_progress_event_to_an_exact_turn",
+            "unproven",
+            "settles the exact participating Run.",
         ),
         ("codex", "direct_im"): (
             "unproven",
-            "settles that exact Run.",
+            "settles the exact participating Run.",
         ),
         ("opencode", "durable_workbench"): (
             "defect",
@@ -1483,29 +1242,7 @@ def _admission_service():
 
 
 def test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im():
-    """HFR-188 / Q2: direct IM gets an exact Turn token from AgentService.
-
-    This probe exists because the previous answer to Q2 was wrong, and wrong in
-    a fourth distinct way. Rounds 2-4 each read a lossy base-session PROJECTION
-    and concluded the event stream carried nothing. This was a different mistake
-    with the same shape: the writers of ``turn_token`` were found by grepping the
-    LITERAL string, which turns up ``core/session_turns.py`` and
-    ``core/services/dispatch.py`` -- both Workbench owners -- and misses the
-    single most central writer, because ``AgentService`` writes
-    ``platform_specific[AGENT_TURN_TOKEN]`` through the constant. The layer the
-    grep skipped is the one EVERY request passes through, on every lane.
-
-    So "nothing stamps a ``turn_token`` into an IM context" was false. It is
-    replaced here by driving the real ``AgentService.handle_message`` with an
-    IM-scoped request rather than by reading source. Three properties, because a
-    token is only useful if it is present, exact, and non-destructive:
-
-    1. it is on the context BEFORE the backend is invoked;
-    2. a second turn on the SAME runtime key gets a DIFFERENT token -- otherwise
-       it would be a session id in disguise and would attribute nothing;
-    3. an existing Workbench ``turn_token`` is preserved, so the durable lane's
-       own identifier is not clobbered by the admission stamp.
-    """
+    """HFR-188 / Q2: direct IM gets an exact Turn token from AgentService."""
     from modules.agents.base import (
         AGENT_RUNTIME_TURN_KEY,
         AGENT_RUNTIME_TURN_TOKEN,
@@ -1560,42 +1297,7 @@ def test_the_shared_admission_layer_stamps_a_turn_token_on_direct_im():
 
 
 def test_one_runtime_key_admits_one_live_turn_at_a_time():
-    """HFR-191 / Q2: the admission gate serializes turns per runtime key.
-
-    Review challenged the codex half of the Q2 probe on reachability, and the
-    challenge holds. That probe registers two turns for one base session and
-    shows ``should_emit_progress`` dropping the older one -- but if production
-    cannot have two LIVE turns on one key, the older id is stale by the time the
-    newer one is active, and dropping it is correct filtering rather than a
-    discarded signal. Same standard this unit applied to PR7R-F1 in round 4: an
-    ordering is not a defect until the state is shown to occur.
-
-    It does not occur ON ONE RUNTIME KEY, and that qualifier is the whole of
-    what this test proves. The gate is acquired in ``handle_message`` before the
-    backend is invoked and is NOT released when the backend returns -- the
-    outbound dispatcher releases it at terminal delivery -- so a second turn on
-    the same key cannot enter the backend while the first is live. Driven here
-    rather than read off the production comment that says so.
-
-    Round eight had to add the qualifier because round six dropped it and
-    concluded codex's ``should_emit_progress`` is therefore lossless. It is not:
-    the gate key and the codex turn slot are DIFFERENT KEY SPACES, so "one live
-    turn per gate key" says nothing about "one live turn per slot". That is
-    ``test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot``, and
-    this test deliberately stops at its own key.
-
-    The second half is the half that carries the claim, and the first draft of
-    this probe was missing it. Holding a lock ACROSS a call is what any mutex
-    does; what Q2 turns on is the gate outliving the call, because a backend
-    returning from turn submission is not a turn ending -- codex and claude both
-    return while the turn is still executing, and it is that window in which a
-    second live turn would have to be excluded. A probe that only blocks inside
-    the backend stays green under the exact regression it should catch: add a
-    release when the backend returns and native turns can overlap while the
-    assertions still pass. So the release is driven in two steps -- let the first
-    backend call RETURN, then assert the second is still shut out, and only then
-    release explicitly.
-    """
+    """HFR-191 / Q2: the admission gate serializes turns per runtime key."""
     from modules.agents.base import AGENT_TURN_TOKEN
 
     async def _drive():
@@ -1647,64 +1349,7 @@ def test_one_runtime_key_admits_one_live_turn_at_a_time():
 
 
 def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
-    """HFR-195 / Q2: a cwd change splits the gate, and codex's own lock catches it.
-
-    This closes the probe the codex cell has been carrying since round four --
-    "whether any state can put two live turns on one base session" -- and the
-    answer is no, but not for the reason the shared gate suggested.
-
-    Two identifiers that look like the same thing are not. The admission gate
-    keys on ``BaseAgent.runtime_turn_key``, the COMPOSITE identity
-    ``<base>:<working_path>``; codex's ``_active_turns`` keys on
-    ``request.base_session_id`` ALONE. Same session, two working paths, and the
-    gate hands out two permits where the registry has one slot. That much is
-    real and is driven in parts (1)-(3) below.
-
-    What round eight then inferred from it -- that the second turn silently
-    mutes a first turn which is still running -- is RETRACTED here, and part (4)
-    is what retracts it. ``CodexAgent.handle_message`` wraps its whole body in
-    ``self._session_locks[request.base_session_id]``, which is the registry's
-    key space, not the gate's; and inside that lock it sends ``turn/interrupt``
-    for any active turn before ``turn/start``. So the second request cannot even
-    reach the backend until the first has registered, and when it does reach it
-    the first turn is interrupted first. ``should_emit_progress`` returning
-    False for turn-1 is therefore correct filtering of an interrupted turn, not
-    a discarded live signal.
-
-    The real consequence of the key split is smaller and different: a cwd change
-    converts "queue behind the gate and run after" into "interrupt the running
-    turn and replace it". That is a behavioural difference worth recording, and
-    it is what part (4) actually observes.
-
-    This claim has now flipped three times -- correct, defective, correct --
-    across rounds six, eight and nine, and every flip was argued from the two
-    ends of a mechanism rather than from the mechanism. Rounds six and eight
-    both reasoned about ``_active_turns`` and about the gate without ever
-    running ``handle_message``, which is the code that sits between them. A
-    claim that keeps flipping is not an unlucky claim; it is a claim whose
-    subject was never driven end to end. So part (4) drives it, on the real
-    method, with only the collaborators it needs to reach the network stubbed.
-
-    Round ten narrows the answer once more, and the narrowing is the same shape
-    as every earlier flip. "There is no window in which two codex turns are
-    live" was asserted from the REGISTRY -- one slot, therefore one turn -- and
-    that reading is too strong, because the registry is an in-process projection
-    of a backend that has its own opinion. ``docs/plans/codex-app-server-refactor.md`` specifies three steps
-    for insertion: interrupt, WAIT for the interrupted completion, then start.
-    Production does the first and third. So between ``turn/interrupt`` and the
-    ``turn/completed(interrupted)`` that answers it, turn-1 IS still executing
-    on the backend while turn-2 is registered. The window exists.
-
-    What makes it harmless is not the registry but the two handlers that meet
-    the window's arrivals, and part (4b) drives both through the real
-    ``CodexEventHandler``: turn-1's late tail is dropped by the named guard in
-    ``_on_item_completed`` while turn-2's lands, and turn-1's late
-    ``turn/completed`` is handled as an interruption -- popped, ack removed,
-    stream released, nothing emitted -- rather than mistaken for turn-2's
-    result. Q2 asks whether attribution EXISTS, and it does; the window changes
-    where it comes from, not whether it holds. The stronger sentence is
-    retracted because it was true of the projection and not of the system.
-    """
+    """HFR-195 / Q2: a cwd change splits the gate, and codex's own lock catches it."""
     import inspect as _inspect
 
     from modules.agents.base import BaseAgent
@@ -2024,68 +1669,7 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
 
 
 def test_claude_receiver_resolves_participating_run_attribution_per_turn(tmp_path):
-    """HFR-197 / Q2: Claude's receiver-side participating Runs path.
-
-    Q2 asks which events can be attributed to the exact Turn AND PARTICIPATING
-    RUNS. Every probe before this one answered the first half and none answered
-    the second, and the verdict was written as though the two were one claim.
-    They are not: a Turn token is a token, and a Run id is a row.
-
-    They are, however, joined by a mechanism, and the mechanism is what makes
-    the second half cheap once the first is settled. Emission-time Run
-    attribution has exactly two sources on the emit context:
-
-      * ``_owned_agent_run_ids`` reads ``accepted_agent_run_ids`` straight off
-        ``context.platform_specific``; and
-      * ``_durable_accepted_agent_run_ids`` reads the ``turn_token`` off the
-        SAME payload and looks the Runs up per Turn in the delivery store.
-
-    So Run attribution is derived from Turn attribution, per emit. This probe
-    drives that claim through Claude's real receiver after seeding its pending
-    request. It does not drive ``ClaudeAgent.handle_message`` and therefore does
-    not prove the production enqueue half of the direct-IM path. A derivation
-    can be exact at one end and lossy at the other -- if the durable read were
-    keyed by session, or if the in-context list survived a Turn change, the Runs
-    would smear across Turns even though the tokens did not. Both direct-IM
-    backend cells remain open until their real enqueue/event path carries the
-    accepted Run through the dispatcher.
-
-    Round 10 supplied the half round 9 faked. Parts (1) through (5) drive the
-    dispatcher against a ``_Turns`` stub, which shows that the READER asks per
-    Turn but says nothing about whether the STORE can answer per Turn -- a stub
-    that returns fabricated ids for fabricated tokens is green whether or not a
-    Run is ever bound to a Turn at all. Part (6) therefore builds the rows: real
-    schema, real claim/bind/materialize path, real ``attach_agent_run_delivery``,
-    and the dispatcher reading through a real ``SessionTurnManager``. Both are
-    kept, because they fail differently -- (1) catches a reader that stops
-    passing the token, (6) catches a store that cannot keep two Turns apart.
-
-    Round 23 supplies the half round 12 faked, and it is the same fake one
-    level out. Part (7) built real IM rows and then read them by handing a
-    payload it wrote itself to a PRIVATE helper -- so both ends of the
-    derivation were real and the span between them was assumed. Part (7b)
-    drives that span, and the proof is that the ``agent_runs`` row settles.
-    The pattern this unit keeps rediscovering is that a substitution migrates
-    outward under pressure rather than disappearing -- round 9 stubbed the
-    store, round 10 built the rows and stubbed the lane, round 12 built the
-    lane and stubbed the CALLER. Each time the stub is one layer further from
-    the claim and one layer harder to see.
-
-    Round 24 is that same sentence read as a prediction and found true of round
-    23 itself. Round 23 drove admission, adoption, the recorder and the store,
-    and stopped one call short: it invoked the PRIVATE recorder directly, so no
-    backend output ever traversed its own emission or the public dispatcher
-    path, and a backend that stopped forwarding the Turn context or a
-    dispatcher that stopped invoking the recorder would both have left the
-    probe green. Part (7b) now starts where production starts -- at
-    ``BaseAgent.emit_result_message`` -- and substitutes only the IM surface.
-    That is not a fifth layer of the same retreat; it is the end of the chain,
-    because the next thing out is the network. Two properties come free from
-    driving the public path and are asserted because they are unreachable from
-    the recorder: the delivered message id is the PLATFORM's answer rather than
-    a literal, and the runtime turn gate is really consulted and really
-    released.
-    """
+    """HFR-197 / Q2: Claude's receiver-side participating Runs path."""
     from core.message_dispatcher import ConsolidatedMessageDispatcher, _owned_agent_run_ids
     from modules.agents.base import (
         AGENT_RUNTIME_TURN_KEY,
@@ -2760,32 +2344,7 @@ def test_claude_receiver_resolves_participating_run_attribution_per_turn(tmp_pat
 
 
 def test_no_step_of_the_durable_reservation_path_settles_the_run(tmp_path):
-    """HFR-199 / Q1: the reservation half, driven against real rows.
-
-    Round 10's first-priority finding, and it is the stubbed-store lesson in
-    the other half of the unit. Q1's answer said, and this test SUPERSEDED,
-    "a Delivery reservation and an
-    ownership transfer both leave the Run ``running``" -- it cited a scheduler
-    test that replaces ``submit_scheduled`` with a ``SimpleNamespace`` returning
-    ``queue_persisted=True, delivery_owner_transferred=True``. No Delivery is
-    reserved there and no Run row is read: what that test establishes is the
-    SCHEDULER'S REACTION to a reported reservation, which is a fact about the
-    caller, not about the boundary Q1 asks after. A store that settled the Run
-    the moment its Delivery was reserved would have left it green.
-
-    So the reservation is taken for real here -- real schema, real
-    ``enqueue_queued``, real ``attach_agent_run_delivery_in_connection``, real
-    claim/bind/materialize -- and the Run row is re-read after every single
-    step. The trace is the assertion, rather than one check at the end, because
-    "still nonterminal afterwards" and "never terminal in between" are different
-    claims and only the second one is what a terminal-truth matrix can use.
-
-    One fact fell out that the answer did not previously contain, and it is the
-    sharper half: terminalizing the TURN does not settle the Run either. The
-    settlement is a separate write, so a path that ends a Turn without calling
-    it leaves a live Run with no owner -- which is Q4's subject, recorded here
-    because this is where it became visible rather than argued.
-    """
+    """HFR-199 / Q1: the reservation half, driven against real rows."""
     from sqlalchemy import select
 
     from storage import message_deliveries as durable_deliveries
@@ -2879,46 +2438,7 @@ def test_no_step_of_the_durable_reservation_path_settles_the_run(tmp_path):
 
 
 def test_a_restored_opencode_poll_loop_emits_without_its_turn_identity():
-    """HFR-205 / Q2: restart strips the Turn off OpenCode's emit context.
-
-    Round 17's first finding, and it is the fifth instance of this unit's
-    oldest reading error in a new place. HFR-183 established that opencode's
-    progress emits carry a Turn -- and established it by walking exactly one
-    function, ``run_prompt_poll``. There is a second emitting entry point.
-    ``run_restored_poll_loop`` is what continues a poll that a restart
-    interrupted, it emits tool calls and assistant output like the live loop
-    does, and its context is not the live ``AgentRequest``'s: it is rebuilt by
-    ``ProcessingIndicatorHandle.from_snapshot``, which reads ``platform``,
-    ``is_dm`` and ``context_token`` out of ``platform_specific`` and drops
-    everything else -- ``turn_token`` and ``accepted_agent_run_ids`` included.
-
-    So a whole production path emits progress that cannot name its Turn or its
-    Runs, and the previous rounds' answer to Q2 -- "all six cells carry an
-    exact-Turn signal" -- is narrowed by this probe: it was true of the live
-    path and asserted of the cell.
-
-    The sharper half is what makes this a DEFECT rather than a gap. The turn id
-    is not lost in persistence: ``OpenCodeAgent`` writes it into the SAME
-    snapshot dict, under ``_STEERING_SNAPSHOT_KEY``, as ``logical_turn_id``,
-    and the restore path reads that key back for steering while handing the
-    emit context nothing. Production says so itself -- restored
-    ``additional_steer_targets`` are built with ``context=None``. The identity
-    survives the restart and is discarded at the rebuild.
-
-    Round 18 retracted this docstring's next sentence, "which is a one-line
-    remediation and a different one from persist more", because it generalised
-    from the Turn to the cell. The assertions below say why: the Turn is in the
-    snapshot, and ``run-1`` is not in it in any form, so the Run half has
-    nothing to read back. It has a durable source instead --
-    ``accepted_agent_run_ids_for_turn`` over the Deliveries accepted against
-    the recovered Turn -- which is a second remediation, and one that reaches a
-    participant only if it has such a Delivery.
-
-    This probe is a CHARACTERIZATION test in the sense this file's header
-    means: it asserts the current, wrong behaviour so the gap is executable.
-    It is NOT one of the two PR7R-F1/F2 probes and does not widen this unit's
-    scope -- PR7R adds no writer, and nothing here restamps the context.
-    """
+    """HFR-205 / Q2: restart strips the Turn off OpenCode's emit context."""
     from core.processing_indicator import ProcessingIndicatorHandle
     from modules.im import MessageContext
     from modules.agents.opencode.agent import _STEERING_SNAPSHOT_KEY
@@ -3054,8 +2574,7 @@ def test_a_restored_opencode_poll_loop_emits_without_its_turn_identity():
         assert detail.endswith(
             "test_a_restored_opencode_poll_loop_emits_without_its_turn_identity"
         ), (lane, detail)
-    # The other four are untouched by this: claude and codex attribute from the
-    # event stream and the notification, neither of which is rebuilt from a
-    # processing-indicator snapshot.
+    # Claude and Codex are unproven at their backend handoffs, independently of
+    # this OpenCode restart defect.
     for cell in (("claude", "durable_workbench"), ("codex", "durable_workbench")):
-        assert EXACT_TURN_PROGRESS_SIGNALS[cell][0] == "covered", cell
+        assert EXACT_TURN_PROGRESS_SIGNALS[cell][0] == "unproven", cell
