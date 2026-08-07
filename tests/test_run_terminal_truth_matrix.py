@@ -495,8 +495,12 @@ def _resolved_test_flag(node: ast.ClassDef, module_body) -> object:
     line = _linearized_ancestry(node, module_body)
     if line is None:
         return None
-    for cls, _body in line:
-        own = _test_flag(cls.body)
+    for cls, defining_module in line:
+        statements = list(defining_module)
+        index = next(i for i, statement in enumerate(statements) if statement is cls)
+        own = _test_flag(statements[index + 1 :], attribute_of=cls.name)
+        if own is _UNSET:
+            own = _test_flag(cls.body)
         if own is not _UNSET:
             return own
     return _UNSET
@@ -569,6 +573,30 @@ def _decorator_target(decorator: ast.expr, module_body) -> str | None:
     return _dotted_target(expression, module_body)
 
 
+def _unconditionally_skipped(
+    node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef, module_body
+) -> bool:
+    for decorator in node.decorator_list:
+        target = _decorator_target(decorator, module_body)
+        if target in {"pytest.mark.skip", "unittest.skip"}:
+            return True
+        if (
+            target in {"pytest.mark.skipif", "unittest.skipIf"}
+            and isinstance(decorator, ast.Call)
+            and decorator.args
+            and isinstance(decorator.args[0], ast.Constant)
+            and bool(decorator.args[0].value)
+        ):
+            return True
+    return False
+
+
+def _skipped_class(node: ast.ClassDef, module_body) -> bool:
+    line = _linearized_ancestry(node, module_body)
+    assert line is not None, f"cannot resolve MRO for {node.name!r}"
+    return any(_unconditionally_skipped(cls, body) for cls, body in line)
+
+
 def _executable_test(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     enclosing: list[ast.stmt],
@@ -577,19 +605,10 @@ def _executable_test(
     flag = _test_flag(enclosing, attribute_of=node.name)
     if _opted_out(flag) or not (node.name.startswith("test_") or flag is True):
         return False
-    for decorator in node.decorator_list:
-        target = _decorator_target(decorator, module_body)
-        if target in {"pytest.fixture", "pytest.mark.skip", "unittest.skip"}:
-            return False
-        if (
-            target in {"pytest.mark.skipif", "unittest.skipIf"}
-            and isinstance(decorator, ast.Call)
-            and decorator.args
-            and isinstance(decorator.args[0], ast.Constant)
-            and bool(decorator.args[0].value)
-        ):
-            return False
-    return True
+    return not any(
+        _decorator_target(decorator, module_body) == "pytest.fixture"
+        for decorator in node.decorator_list
+    ) and not _unconditionally_skipped(node, module_body)
 
 
 def _bound_names(node: ast.stmt) -> set[str]:
@@ -635,7 +654,7 @@ def _collected_tests(
     found: list[tuple[str, ast.stmt]] = []
     for node in body:
         if isinstance(node, ast.ClassDef):
-            if _collectible_class(node, module):
+            if _collectible_class(node, module) and not _skipped_class(node, module):
                 for method, enclosing, defining_module in _class_methods(
                     node, module
                 ):
@@ -697,6 +716,10 @@ def _assert_node_exists(node_id: str) -> None:
             f"{node_id}: pytest does not collect class {container.name!r} "
             f"(not Test*-named, no resolved unittest TestCase base, or opted out "
             f"with ``__test__``), so nothing inside it runs"
+        )
+        assert not _skipped_class(container, module_body), (
+            f"{node_id}: an unconditional skip on class {container.name!r} "
+            f"prevents this test from executing"
         )
     assert isinstance(leaf, (ast.FunctionDef, ast.AsyncFunctionDef)), (
         f"{node_id}: a node id must name a test function, not a "
@@ -1266,15 +1289,19 @@ _WORD_COUNTS = {
     "all six": 6,
 }
 _CELL_COUNT_CLAIM = re.compile(
-    r"\b(one|two|three|four|five|six|all six)\s+cells?\s+(?:are\s+|is\s+)?(covered|open)\b",
+    r"\b(one|two|three|four|five|six|all six)\s+cells?\s+"
+    r"(?:are\s+|is\s+)?(covered|open|unproven|defects?)\b",
     re.IGNORECASE,
 )
 
 
 def test_no_prose_states_a_q2_cell_count_the_table_disagrees_with() -> None:
-    """HFR-196: a sentence counting Q2's covered cells must count the real table."""
-    covered = sum(1 for kind, _ in EXACT_TURN_PROGRESS_SIGNALS.values() if kind == "covered")
-    actual = {"covered": covered, "open": len(EXACT_TURN_PROGRESS_SIGNALS) - covered}
+    """HFR-196: every stated Q2 cell count must match the real table."""
+    actual = {
+        kind: sum(1 for cell_kind, _ in EXACT_TURN_PROGRESS_SIGNALS.values() if cell_kind == kind)
+        for kind in ("covered", "unproven", "defect")
+    }
+    actual["open"] = len(EXACT_TURN_PROGRESS_SIGNALS) - actual["covered"]
 
     repo_root = Path(__file__).resolve().parents[1]
     sources = (
@@ -1289,9 +1316,10 @@ def test_no_prose_states_a_q2_cell_count_the_table_disagrees_with() -> None:
         text = (repo_root / rel).read_text(encoding="utf-8").replace("`", "")
         for word, kind in _CELL_COUNT_CLAIM.findall(text):
             checked += 1
-            assert _WORD_COUNTS[word.lower()] == actual[kind.lower()], (
+            kind = kind.lower().removesuffix("s")
+            assert _WORD_COUNTS[word.lower()] == actual[kind], (
                 f"{rel} says {word} cells {kind}; the table has "
-                f"{actual[kind.lower()]}"
+                f"{actual[kind]}"
             )
     assert checked, "no cell-count claim found at all -- this guard is asserting nothing"
 
@@ -1341,6 +1369,9 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "    __test__ = True\n"
         "    __test__ = False\n"
         "    def test_case(self): ...\n"
+        "class TestAssignedOptOut:\n"
+        "    def test_case(self): ...\n"
+        "TestAssignedOptOut.__test__ = False\n"
         "class FinalOptIn:\n"
         "    __test__ = False\n"
         "    __test__ = True\n"
@@ -1399,6 +1430,9 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "    def method(self): ...\n"
         "    def test_case(self): ...\n"
         "class TestGood:\n"
+        "    def test_case(self): ...\n"
+        "@pytest.mark.skip(reason='never executes')\n"
+        "class TestSkippedClass:\n"
         "    def test_case(self): ...\n"
         "class OwnerTests(unittest.IsolatedAsyncioTestCase):\n"
         "    async def test_case(self): ...\n"
@@ -1530,11 +1564,14 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "OptOutTests",
         "TestFlaggedCtor",
         "TestFinalOptOut",
+        "TestAssignedOptOut",
     ):
         with pytest.raises(
             AssertionError, match=f"pytest does not collect class '{opted_out}'"
         ):
             _assert_node_exists(f"{rel}::{opted_out}::test_case")
+    with pytest.raises(AssertionError, match="unconditional skip on class"):
+        _assert_node_exists(f"{rel}::TestSkippedClass::test_case")
 
     # Round 20: the same flag reached through a BASE. pytest reads an
     # attribute, and attributes are inherited, so ``TestInheritedOptOut`` is
@@ -1647,6 +1684,8 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "TestMroOptOut::test_case",
         "TestFlaggedCtor::test_case",
         "TestFinalOptOut::test_case",
+        "TestAssignedOptOut::test_case",
+        "TestSkippedClass::test_case",
         "TestInheritedCtor::test_case",
         "TestInheritedCtorTwoDeep::test_case",
         "TestInheritedNew::test_case",
@@ -2512,12 +2551,16 @@ def test_q4s_evidence_binds_a_run_and_never_a_turn() -> None:
             f"all -- the answer rests on the Activity output batch"
         )
         for call in starts:
-            passed = {keyword.arg for keyword in call.keywords}
+            passed = {keyword.arg: keyword.value for keyword in call.keywords}
             activity_calls += 1
             assert "run_id" in passed, (node_id, sorted(passed))
             assert "turn_id" not in passed, (
                 f"{node_id}: this activity binds a turn, so Q4's evidence is no "
                 f"longer Run-scoped and the answer's scope disclaimer is stale"
+            )
+            backend = passed.get("backend")
+            assert isinstance(backend, ast.Constant) and backend.value == "claude", (
+                f"{node_id}: Q4 is Claude-only, but this activity is not"
             )
     assert activity_calls, "no activity registration inspected at all"
 
