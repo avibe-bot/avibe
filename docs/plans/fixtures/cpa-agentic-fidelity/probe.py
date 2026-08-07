@@ -169,8 +169,17 @@ def _tool_output(call: ToolCall) -> str:
 
 
 def _tool_output_pair_present(text: str, call: ToolCall) -> bool:
+    expected = _tool_output(call)
+    segments: list[str] = []
+    for line in text.splitlines() or [text]:
+        chunks = line.split("tool=")
+        if len(chunks) == 1:
+            segments.append(line)
+        else:
+            segments.extend(f"tool={chunk}" for chunk in chunks[1:])
+    if any(expected in segment for segment in segments):
+        return True
     marker = TOOL_OUTPUTS.get(call.name, "TOOL_OUTPUT_MISSING")
-    segments = [segment for segment in text.splitlines() if segment.strip()] or [text]
     return any(call.name in segment and call.call_id in segment and marker in segment for segment in segments)
 
 
@@ -523,10 +532,20 @@ def _parse_arguments(value: Any) -> tuple[Any, str | None]:
         return value, None
     if not isinstance(value, str):
         return value, "arguments_not_object_or_json"
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"duplicate argument key: {key}")
+            result[key] = item
+        return result
+
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(value, object_pairs_hook=reject_duplicate_keys)
     except json.JSONDecodeError:
         return value, "arguments_invalid_json"
+    except ValueError:
+        return value, "arguments_duplicate_key"
     return parsed, None if isinstance(parsed, dict) else "arguments_not_object"
 
 
@@ -595,6 +614,7 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
     blocks: dict[int, dict[str, Any]] = {}
     stop_reason: str | None = None
     errors: list[str] = []
+    text_delta_count = 0
     for item in result.events:
         event = item.get("event", {})
         event_type = event.get("type")
@@ -604,6 +624,9 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                 errors.append("stream_index_invalid")
                 continue
             block = copy.deepcopy(event.get("content_block", {}))
+            if not isinstance(block, dict):
+                errors.append("content_block_invalid")
+                continue
             block.setdefault("type", "")
             if block.get("type") == "tool_use":
                 block["_arguments"] = ""
@@ -619,7 +642,13 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
             if delta_type == "input_json_delta":
                 block["_arguments"] = block.get("_arguments", "") + str(delta.get("partial_json", ""))
             elif delta_type == "text_delta":
-                block["text"] = block.get("text", "") + str(delta.get("text", ""))
+                text = delta.get("text")
+                if not isinstance(text, str):
+                    errors.append("stream_text_delta_invalid")
+                else:
+                    if text:
+                        text_delta_count += 1
+                    block["text"] = block.get("text", "") + text
             elif delta_type == "thinking_delta":
                 block["thinking"] = block.get("thinking", "") + str(delta.get("thinking", ""))
             elif delta_type == "signature_delta":
@@ -646,6 +675,7 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
     turn.stream_order_ok = result.stream_order_ok
     turn.deadline_expired = result.deadline_expired
     turn.content_type_ok = result.content_type_ok
+    turn.stream_text_delta_count = text_delta_count
     return turn
 
 
@@ -955,7 +985,7 @@ def _validate_second(
         "stream_order": (not stream) or turn.stream_order_ok,
         "stream_deadline": (not stream) or not turn.deadline_expired,
         "stream_content_type": (not stream) or turn.content_type_ok,
-        "stream_text_deltas": (not stream) or turn.protocol != "responses" or turn.stream_text_delta_count > 0,
+        "stream_text_deltas": (not stream) or turn.protocol not in {"responses", "anthropic"} or turn.stream_text_delta_count > 0,
     }
     return {"checks": checks, "stop_reason": turn.stop_reason, "tool_call_count": len(turn.tool_calls), "text_length": len(turn.text), "reasoning_present": turn.reasoning_present, "event_count": turn.event_count}
 
@@ -1066,9 +1096,13 @@ def _preflight() -> list[str]:
     missing.extend(f"model:{protocol}" for protocol, value in MODELS.items() if not _valid_qualified_model(value))
     if ANTHROPIC_FALLBACK_MODEL and not _valid_qualified_model(ANTHROPIC_FALLBACK_MODEL):
         missing.append("model:anthropic_fallback")
-    parsed = urllib.parse.urlsplit(BASE_URL)
+    try:
+        parsed = urllib.parse.urlsplit(BASE_URL)
+    except ValueError:
+        parsed = None
     loopback = (
-        parsed.scheme == "http"
+        parsed is not None
+        and parsed.scheme == "http"
         and parsed.hostname == "127.0.0.1"
         and parsed.username is None
         and parsed.password is None

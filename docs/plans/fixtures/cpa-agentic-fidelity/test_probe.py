@@ -128,6 +128,21 @@ class ProbeParserTests(unittest.TestCase):
         projection = probe._validate_second(turn, ("lookup_weather", "lookup_time"), stream=False, expected_calls=calls)
         self.assertFalse(projection["checks"]["tool_output_call_pairs"])
 
+    def test_tool_result_tuple_check_rejects_swaps_on_one_line(self) -> None:
+        calls = [
+            probe.ToolCall("call_weather", "lookup_weather", {"city": "Shanghai"}),
+            probe.ToolCall("call_time", "lookup_time", {"city": "Shanghai"}),
+        ]
+        text = " ".join(
+            [
+                probe._tool_output(calls[0]).replace("call_weather", "call_time"),
+                probe._tool_output(calls[1]).replace("call_time", "call_weather"),
+            ]
+        )
+        turn = probe._parse_anthropic_document({"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"})
+        projection = probe._validate_second(turn, ("lookup_weather", "lookup_time"), stream=False, expected_calls=calls)
+        self.assertFalse(projection["checks"]["tool_output_call_pairs"])
+
     def test_empty_responses_reasoning_item_is_not_a_signal(self) -> None:
         turn = probe._parse_responses_document(
             {"output": [{"type": "reasoning", "summary": [], "content": []}, {"type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}], "status": "completed"}
@@ -139,6 +154,11 @@ class ProbeParserTests(unittest.TestCase):
             {"output": [{"type": "reasoning", "encrypted_content": "opaque"}], "status": "completed"}
         )
         self.assertTrue(turn.reasoning_present)
+
+    def test_duplicate_argument_keys_are_rejected(self) -> None:
+        arguments, error = probe._parse_arguments('{"city":"Paris","city":"Shanghai"}')
+        self.assertEqual(arguments, '{"city":"Paris","city":"Shanghai"}')
+        self.assertEqual(error, "arguments_duplicate_key")
 
     def test_malformed_chat_function_is_a_parse_error(self) -> None:
         turn = probe._parse_chat_document(
@@ -187,6 +207,35 @@ class ProbeParserTests(unittest.TestCase):
             {"content": [{"type": "thinking", "thinking": "internal"}, {"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": {"city": "Shanghai"}}], "stop_reason": "tool_use"}
         )
         self.assertIn("thinking_signature_missing", turn.parse_errors)
+
+    def test_anthropic_stream_requires_text_delta_for_final_text(self) -> None:
+        events = [
+            {"kind": "event", "type": "message_start", "event": {"type": "message_start"}},
+            {"kind": "event", "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "snapshot"}}},
+            {"kind": "event", "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
+            {"kind": "event", "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, events, True, 0, True))
+        projection = probe._validate_second(turn, ("lookup_weather",), stream=True)
+        self.assertFalse(projection["checks"]["stream_text_deltas"])
+
+    def test_malformed_anthropic_block_snapshot_is_a_parse_error(self) -> None:
+        events = [
+            {"kind": "event", "type": "message_start", "event": {"type": "message_start"}},
+            {"kind": "event", "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": None}},
+            {"kind": "event", "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, events, True, 0, False))
+        self.assertIn("content_block_invalid", turn.parse_errors)
+
+    def test_malformed_base_url_is_blocked_preflight(self) -> None:
+        original_base_url = probe.BASE_URL
+        try:
+            probe.BASE_URL = "http://["
+            missing = probe._preflight()
+        finally:
+            probe.BASE_URL = original_base_url
+        self.assertIn("CPA_BASE_URL must be exact http://127.0.0.1[:port]", missing)
 
     def test_responses_stream_does_not_duplicate_text_snapshot(self) -> None:
         events = [
