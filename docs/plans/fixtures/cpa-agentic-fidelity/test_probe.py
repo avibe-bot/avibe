@@ -71,6 +71,21 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_responses_stream(result)
         self.assertIn("stream_item_snapshot_mismatch", turn.parse_errors)
 
+    def test_responses_stream_requires_argument_fragments(self) -> None:
+        result = probe.TransportResult(
+            200,
+            None,
+            [
+                {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
+                {"kind": "event", "event": {"type": "response.output_item.done", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
+                {"kind": "event", "event": {"type": "response.completed", "response": {"status": "completed"}}},
+            ],
+            False,
+            0,
+        )
+        turn = probe._parse_responses_stream(result)
+        self.assertIn("stream_arguments_missing", turn.parse_errors)
+
     def test_chat_stream_reassembles_tool_fragments(self) -> None:
         events = [
             {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":'}}]}}]}},
@@ -79,6 +94,61 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
         self.assertTrue(turn.terminal)
+
+    def test_chat_stream_requires_argument_fragments(self) -> None:
+        events = [
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "lookup_weather"}}]}}]}},
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+        ]
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertIn("stream_arguments_missing", turn.parse_errors)
+
+    def test_responses_stream_requires_text_delta_for_final_text(self) -> None:
+        result = probe.TransportResult(
+            200,
+            None,
+            [
+                {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "msg_1", "type": "message"}}},
+                {"kind": "event", "event": {"type": "response.output_item.done", "item": {"id": "msg_1", "type": "message", "content": [{"type": "output_text", "text": "answer"}]}}},
+                {"kind": "event", "event": {"type": "response.completed", "response": {"status": "completed"}}},
+            ],
+            False,
+            0,
+        )
+        turn = probe._parse_responses_stream(result)
+        projection = probe._validate_second(turn, ("lookup_weather",), stream=True)
+        self.assertFalse(projection["checks"]["stream_text_deltas"])
+
+    def test_sse_rejects_nonfinite_json_constants(self) -> None:
+        events: list[dict[str, object]] = []
+        invalid = [0]
+        probe._flush_sse(['{"type":"message_start","ignored":NaN}'], None, events, invalid)
+        self.assertEqual(events, [])
+        self.assertEqual(invalid, [1])
+
+    def test_stream_requires_event_stream_content_type(self) -> None:
+        class Response:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+        class Opener:
+            def open(self, request, timeout):
+                return Response()
+
+        original_opener = probe.OPENER
+        try:
+            probe.OPENER = Opener()
+            result = probe._request("/v1/messages", {}, client_protocol="anthropic", stream=True)
+        finally:
+            probe.OPENER = original_opener
+        self.assertFalse(result.content_type_ok)
+        self.assertEqual(result.invalid_event_count, 1)
 
     def test_chat_usage_reasoning_tokens_count_as_reasoning_signal(self) -> None:
         turn = probe._parse_chat_document(
@@ -257,6 +327,7 @@ class ProbeParserTests(unittest.TestCase):
     def test_stream_deadline_expires_while_partial_line_keeps_arriving(self) -> None:
         class Response:
             status = 200
+            headers = {"Content-Type": "text/event-stream"}
 
             def __enter__(self):
                 return self
@@ -352,6 +423,47 @@ class ProbeParserTests(unittest.TestCase):
         projection = json.dumps(result)
         self.assertNotIn("primary/model", projection)
         self.assertNotIn("fallback/model", projection)
+
+    def test_second_turn_model_substitution_is_blocked(self) -> None:
+        original_request = probe._request
+        original_retries = probe.MAX_503_RETRIES
+        original_model = probe.MODELS["anthropic"]
+        original_fallback = probe.ANTHROPIC_FALLBACK_MODEL
+        calls = [0]
+
+        def fake_request(*args, **kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                return probe.TransportResult(
+                    200,
+                    {"choices": [{"message": {"content": "", "reasoning_content": "r", "tool_calls": [{"id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}, "finish_reason": "tool_calls"}]},
+                    [],
+                    False,
+                    0,
+                )
+            if calls[0] == 2:
+                return probe.TransportResult(503, None, [], False, 0)
+            return probe.TransportResult(
+                200,
+                {"choices": [{"message": {"content": f"{probe.SYSTEM_MARKER} {probe.SYSTEM_SCOPE_OK} WEATHER_OK"}, "finish_reason": "stop"}]},
+                [],
+                False,
+                0,
+            )
+
+        try:
+            probe._request = fake_request
+            probe.MAX_503_RETRIES = 1
+            probe.MODELS["anthropic"] = "primary/model"
+            probe.ANTHROPIC_FALLBACK_MODEL = "fallback/model"
+            result = probe._run_case(probe.CaseSpec("mixed", "chat", "anthropic", "/v1/chat/completions", False, False))
+        finally:
+            probe._request = original_request
+            probe.MAX_503_RETRIES = original_retries
+            probe.MODELS["anthropic"] = original_model
+            probe.ANTHROPIC_FALLBACK_MODEL = original_fallback
+        self.assertEqual(result["blocked"], "model changed between turns")
+        self.assertEqual(result["evidence_model_scope"], "mixed")
 
 
 if __name__ == "__main__":

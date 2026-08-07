@@ -76,6 +76,8 @@ class Turn:
     stream_order_ok: bool = True
     deadline_expired: bool = False
     reasoning_text: str = ""
+    stream_text_delta_count: int = 0
+    content_type_ok: bool = True
 
 
 @dataclass
@@ -87,6 +89,7 @@ class TransportResult:
     invalid_event_count: int
     stream_order_ok: bool = True
     deadline_expired: bool = False
+    content_type_ok: bool = True
 
 
 @dataclass(frozen=True)
@@ -272,9 +275,13 @@ def _flush_sse(data_lines: list[str], event_name: str | None, events: list[dict[
     if data == "[DONE]":
         events.append({"kind": "done", "type": event_name, "sequence": len(events)})
         return True
+
+    def reject_nonfinite(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant: {value}")
+
     try:
-        parsed = json.loads(data)
-    except json.JSONDecodeError:
+        parsed = json.loads(data, parse_constant=reject_nonfinite)
+    except (json.JSONDecodeError, ValueError):
         invalid[0] += 1
         return False
     if isinstance(parsed, dict):
@@ -428,6 +435,9 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     return TransportResult(status, None, [], False, 1)
                 return TransportResult(status, document if isinstance(document, dict) else None, [], False, 0)
+            content_type = str(getattr(response, "headers", {}).get("Content-Type", ""))
+            if content_type.split(";", 1)[0].strip().lower() != "text/event-stream":
+                return TransportResult(status, None, [], False, 1, False, False, False)
             events: list[dict[str, Any]] = []
             data_lines: list[str] = []
             event_name: str | None = None
@@ -473,7 +483,7 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
                 if invalid[0]:
                     return TransportResult(status, None, events, done, invalid[0], False, False)
             done = _flush_sse(data_lines, event_name, events, invalid) or done
-            return TransportResult(status, None, events, done, invalid[0], _stream_order_ok(client_protocol, events), False)
+            return TransportResult(status, None, events, done, invalid[0], _stream_order_ok(client_protocol, events), False, True)
     except urllib.error.HTTPError as error:
         return TransportResult(error.code, None, [], False, 0)
     except (OSError, TimeoutError, urllib.error.URLError):
@@ -601,6 +611,7 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
     turn.parse_errors.extend(errors)
     turn.stream_order_ok = result.stream_order_ok
     turn.deadline_expired = result.deadline_expired
+    turn.content_type_ok = result.content_type_ok
     return turn
 
 
@@ -643,6 +654,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     reasoning = False
     status: str | None = None
     args_by_item: dict[str, str] = {}
+    argument_fragment_items: set[str] = set()
+    text_delta_count = 0
+    snapshot_text_parts: list[str] = []
     terminal_response: dict[str, Any] | None = None
     streamed_output_seen = False
     errors: list[str] = []
@@ -670,24 +684,45 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 output[key] = copy.deepcopy(raw)
                 if raw.get("type") == "reasoning":
                     reasoning = True
+                elif raw.get("type") == "message":
+                    for part in raw.get("content", []):
+                        if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
+                            snapshot_text_parts.append(str(part.get("text", "")))
         elif event_type == "response.function_call_arguments.delta":
             key = str(event.get("item_id", event.get("output_index", "")))
-            args_by_item[key] = args_by_item.get(key, "") + str(event.get("delta", ""))
+            delta = event.get("delta")
+            if not isinstance(delta, str):
+                errors.append("stream_arguments_invalid")
+                continue
+            if delta:
+                argument_fragment_items.add(key)
+            args_by_item[key] = args_by_item.get(key, "") + delta
         elif event_type in {"response.output_text.delta", "response.reasoning_summary_text.delta"}:
             if event_type.startswith("response.reasoning"):
                 reasoning = True
             else:
-                text_parts.append(str(event.get("delta", "")))
+                delta = event.get("delta")
+                if not isinstance(delta, str):
+                    errors.append("stream_text_delta_invalid")
+                    continue
+                if delta:
+                    text_delta_count += 1
+                text_parts.append(delta)
         elif event_type in {"response.completed", "response.done"}:
             terminal_response = event.get("response") if isinstance(event.get("response"), dict) else None
             status = str(terminal_response.get("status") or "completed") if terminal_response else "completed"
     items: list[dict[str, Any]] = []
     for key, raw in output.items():
-        if raw.get("type") == "function_call" and key in args_by_item:
-            raw["arguments"] = args_by_item[key]
+        if raw.get("type") == "function_call":
+            if key not in argument_fragment_items:
+                errors.append("stream_arguments_missing")
+            if key in args_by_item:
+                raw["arguments"] = args_by_item[key]
         items.append(raw)
     if text_parts:
         items.append({"type": "message", "content": [{"type": "output_text", "text": "".join(text_parts)}]})
+    if snapshot_text_parts and "".join(snapshot_text_parts) != "".join(text_parts):
+        errors.append("stream_text_snapshot_mismatch")
     if not streamed_output_seen and not items and terminal_response is not None:
         terminal_output = terminal_response.get("output")
         if isinstance(terminal_output, list):
@@ -699,6 +734,8 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     turn.parse_errors.extend(errors)
     turn.stream_order_ok = result.stream_order_ok
     turn.deadline_expired = result.deadline_expired
+    turn.stream_text_delta_count = text_delta_count
+    turn.content_type_ok = result.content_type_ok
     return turn
 
 
@@ -750,6 +787,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
     errors: list[str] = []
+    argument_fragment_indexes: set[int] = set()
     for item in result.events:
         event = item.get("event", {})
         if isinstance(event.get("usage"), dict):
@@ -780,7 +818,15 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             if function.get("name"):
                 call["function"]["name"] += str(function["name"])
             if function.get("arguments"):
-                call["function"]["arguments"] += str(function["arguments"])
+                fragment = function["arguments"]
+                if not isinstance(fragment, str):
+                    errors.append("stream_arguments_invalid")
+                else:
+                    argument_fragment_indexes.add(index)
+                    call["function"]["arguments"] += fragment
+    for index in calls:
+        if index not in argument_fragment_indexes:
+            errors.append("stream_arguments_missing")
     message = {"role": "assistant", "content": "".join(content), "tool_calls": [calls[index] for index in sorted(calls)]}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)
@@ -791,6 +837,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     turn.parse_errors.extend(errors)
     turn.stream_order_ok = result.stream_order_ok
     turn.deadline_expired = result.deadline_expired
+    turn.content_type_ok = result.content_type_ok
     return turn
 
 
@@ -803,6 +850,7 @@ def _parse_turn(protocol: str, result: TransportResult, *, stream: bool) -> Turn
         turn = _parse_chat_stream(result) if stream else _parse_chat_document(result.document, invalid_event_count=result.invalid_event_count)
     turn.stream_order_ok = result.stream_order_ok
     turn.deadline_expired = result.deadline_expired
+    turn.content_type_ok = result.content_type_ok
     return turn
 
 
@@ -823,6 +871,7 @@ def _validate_first(turn: Turn, expected_tools: tuple[str, ...], *, stream: bool
         "stream_complete": (not stream) or (turn.event_count > 0 and turn.terminal),
         "stream_order": (not stream) or turn.stream_order_ok,
         "stream_deadline": (not stream) or not turn.deadline_expired,
+        "stream_content_type": (not stream) or turn.content_type_ok,
     }
     return {"checks": checks, "stop_reason": turn.stop_reason, "tool_call_count": len(turn.tool_calls), "tool_names": names, "reasoning_present": turn.reasoning_present, "event_count": turn.event_count}
 
@@ -840,6 +889,8 @@ def _validate_second(turn: Turn, expected_tools: tuple[str, ...], *, stream: boo
         "stream_complete": (not stream) or (turn.event_count > 0 and turn.terminal),
         "stream_order": (not stream) or turn.stream_order_ok,
         "stream_deadline": (not stream) or not turn.deadline_expired,
+        "stream_content_type": (not stream) or turn.content_type_ok,
+        "stream_text_deltas": (not stream) or turn.protocol != "responses" or turn.stream_text_delta_count > 0,
     }
     return {"checks": checks, "stop_reason": turn.stop_reason, "tool_call_count": len(turn.tool_calls), "text_length": len(turn.text), "reasoning_present": turn.reasoning_present, "event_count": turn.event_count}
 
@@ -887,6 +938,17 @@ def _run_case(spec: CaseSpec) -> dict[str, Any]:
     second: dict[str, Any] = {"skipped": True, "checks": {"not_run": False}}
     if first_turn.tool_calls:
         second_result, second_model_used, second_blocked = _request_with_retries(spec, _build_payload(spec, model_used, followup=first_turn), model_used)
+        if second_model_used != model_used:
+            return {
+                "case": spec.name,
+                "status": first_result.status,
+                "second_status": second_result.status,
+                "fallback_used": fallback_used,
+                "evidence_model_scope": "mixed",
+                "blocked": "model changed between turns",
+                "first": first,
+                "checks": first["checks"],
+            }
         fallback_used = fallback_used or second_model_used != model
         if second_blocked:
             return {
