@@ -218,5 +218,11 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_start_clears_every_receipt_merged_into_its_turn
+  - id: MESSAGE-DELIVERY-310
+    name: Steer acceptance creates its Message before linking a Show event
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_steer_acceptance_materializes_message_before_show_event_link
 next_priority:
-  - MESSAGE-DELIVERY-310
+  - MESSAGE-DELIVERY-311

@@ -1327,6 +1327,7 @@ def materialize_steer_acceptance(
             )
         ).scalar_one()
     ) + 1
+    _insert_message(conn, message_id=message_id, snapshot=snapshot, accepted_at=now)
     accepted: list[dict[str, Any]] = []
     for offset, row in enumerate(rows):
         saved = cas_delivery(
@@ -1368,7 +1369,6 @@ def materialize_steer_acceptance(
             .where(show_session_events.c.message_id.is_(None))
             .values(message_id=message_id)
         )
-    _insert_message(conn, message_id=message_id, snapshot=snapshot, accepted_at=now)
     return accepted
 
 
