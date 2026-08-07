@@ -1,0 +1,1147 @@
+# EverOS Memory Integration Adjustment (Discussion Baseline)
+
+> Status: discussion baseline, not yet implemented
+>
+> Date: 2026-08-08
+>
+> Target branch: Avibe `dev`
+>
+> Related repository: EverOS at <https://github.com/avibe-bot/EverOS> (pinned revision listed in §2)
+
+This document captures the research conclusions from the current Avibe ↔ EverOS Memory integration as a shared baseline for subsequent design, implementation, and review. It only defines direction, constraints, and migration order; it does not claim that any code is finished, nor does it describe capabilities EverOS does not currently expose as if they exist.
+
+Constraint: this adjustment does not modify EverOS source code. Anything that requires EverOS to gain caller identity, receipt lookup, replay, rotation operation, or similar capabilities is recorded either as a future upstream capability or as a fail-closed Avibe-side downgrade, and is not a delivery prerequisite for this implementation phase.
+
+Submission form: this plan targets the Avibe `dev` branch. Implementation lands together with code changes via the standard PR review flow into `dev`; it does not merge directly to `master`. This plan is the latest design baseline for the Memory adjustment cycle. `docs/plans/memory-processing-log-page.md`, `docs/plans/memory-architecture-deepening.md`, and `docs/plans/everos-1.2.1-upgrade.md` continue to serve as already-implemented history and constraint sources.
+
+Sections superseded by this plan:
+
+- `memory-processing-log-page.md`: treats the log page as the Memory status console, an independent status model, and the source of full provider-call payload records;
+- `memory-architecture-deepening.md`: keeps an independent Memory status page, derives composite `ready/syncing/degraded` status, and mixes `status_payload.data_exists` with drain/embedding safety gates inside a user-visible status payload;
+- `everos-1.2.1-upgrade.md`: per-delivery flush was required by the chat mode at the time; this plan removes that behavior and replaces it with idle/close/max-age triggers.
+
+Sections retained from prior plans:
+
+- `data_exists`, `/status`, CLI machine-readable fields, drain/embedding safety gates, the provider-root sentinel and owned-clear flow, `memory_capture_queue` durable enqueue and recovery, and the EverOS real-wheel contract test suite;
+- the `everos-1.2.1-upgrade.md` derivation path where `project_id` is an HMAC digest of the Agent Session cwd and the permission isolation model;
+- the existing processing-record page's precise memcell/capture/OME/provider-call linkage.
+
+## 1. Conclusion Summary
+
+### 1.1 Integration Form
+
+Continue using **Avibe-managed EverOS child process + Unix Domain Socket (UDS) HTTP**. Do not switch to in-process Python imports of EverOS.
+
+This HTTP is not a public-facing service and not a TCP service on the host — it is a private IPC mechanism:
+
+```text
+Avibe main process
+    │ httpx + Unix Domain Socket
+    ▼
+Avibe-managed EverOS child process
+    ├── Markdown
+    ├── SQLite
+    ├── LanceDB
+    ├── Cascade
+    └── OME
+```
+
+The current UDS sidecar, child-process lifecycle, credential isolation, and TCP-listener checks already form a sound foundation and should be retained. What needs adjustment is the upper interface and internal responsibilities, not the transport.
+
+### 1.2 Flush Timing
+
+Remove the "flush after every successful add" behavior.
+
+Target policy:
+
+1. Normal messages only call EverOS `/add` and let EverOS perform natural-boundary detection;
+2. After a session idle timeout, perform a flush;
+3. On `/new`, session archive, explicit session close, or explicit user request, perform a final flush;
+4. Add a maximum unflushed duration to prevent long-running sessions from never reaching a boundary;
+5. On Avibe shutdown, do not block-wait on a potentially minute-long LLM flush; persist the durable state and resume on the next start;
+6. Final flush cannot rely on a single close hook: it must first wait for the target session's outbox drain, **or acquire the session fence before the drain check and hold it through the flush** while persisting this generation's watermark; otherwise messages added after close will not see a subsequent flush trigger.
+
+The initial idle window is suggested as 5 minutes; the precise value must be confirmed against actual LLM cost and interaction feel.
+
+### 1.3 Processing-Record Page and the Minimum Internal Reliability Loop
+
+Do not maintain a separate status page that tries to express a complete Memory state. Fold the status summary into the existing processing-record page; the page only shows what can be reliably read right now:
+
+- the most recent EverOS `/health` summary;
+- EverOS version and capabilities;
+- Cascade health, pending count, retryable/permanent failure counts (if `/health` exposes them);
+- recorder state;
+- the existing capture → add/flush → memcell → OME → indexing pipeline;
+- confirmed anomalies, recovery records, and data-unavailable notices.
+
+Do not modify EverOS and do not add a new EverOS business-metrics contract. The current `/metrics` only carries HTTP request counters and durations and is not a core data source for the Memory page. The page must label every fact with its observation time and distinguish current summary, historical record, expired data, and unavailable data.
+
+The outbox and sidecar lifecycle are retained but kept at the minimum loop required for reliability:
+
+- outbox: local persistence, claim, call `/add`, bounded retries, success settlement that clears the payload, boot recovery;
+- lifecycle: start/stop the managed EverOS child, UDS availability, crash recovery, call fencing during clear/restart;
+- do not maintain a complex metrics tree for the page;
+- do not derive a composite `ready/syncing/degraded` from multiple sources;
+- do not add processing-endpoint probes or deep provider-root scans to ordinary log-page reads; the existing `/status` route keeps the drain/embedding safety-gate and contract checks for now, and is revisited once call sites migrate.
+
+In short, simplifying the page does not delete the reliability mechanisms — reliability state stays internal to delivery and recovery; the user surface only shows what can be directly confirmed.
+
+### 1.4 Data Protection and Rebuild
+
+EverOS Markdown is the source of truth for already-extracted business memory; LanceDB is a derived index that can be rebuilt. The full safety boundary is not "Markdown + unprocessed buffer" alone; it must include:
+
+```text
+Avibe capture outbox
++ EverOS unprocessed_buffer
++ EverOS memcell
++ Markdown
+```
+
+Until `/add` is acknowledged, the Avibe outbox is the recovery source. After a message reaches EverOS, content not yet bounded stays in `unprocessed_buffer`; raw dialog units after boundary live in `memcell`; extracted business memory lands in Markdown.
+
+Forbidden:
+
+- deleting the entire EverOS `.index`;
+- deleting `.index/lancedb` and expecting automatic recovery;
+- recursively deleting a provider root from inside Avibe.
+
+Index recovery must call EverOS's controlled rebuild operation and respect the maintenance lock and queue-reset order.
+
+### 1.5 Embedding Key and Model Change
+
+- **API key only**: semantics do not change; no rebuild required — restart the EverOS child process and reuse the original provider root.
+- **Model, effective dimension, normalization, truncation, preprocessing, or actual model semantics change**: treat as a new embedding space; full rebuild of every embedding-dependent derived state is required.
+
+A full rebuild is not LanceDB alone. Cluster centroids live in EverOS SQLite and are also vector-derived state, so they must be recomputed or explicitly invalidated. Profile, agent skill, and reflection artifacts derived from clusters/embedding must also be folded into the rebuild plan.
+
+Until a complete rotation operation is in place, retain the current fail-closed behavior and refuse to silently mix vector spaces over existing data.
+
+### 1.6 The Four Search Modes
+
+Avibe should consume EverOS's four search modes through its own policy surface:
+
+- `keyword`: precise terms, IDs, error codes, command names;
+- `vector`: semantic similarity and paraphrases;
+- `hybrid`: the default general-purpose search;
+- `agentic`: complex multi-step reasoning searches; enabled explicitly and constrained by capability, cost, and timeout.
+
+Do not leak EverOS DTOs upward. Avibe exposes only provider-neutral policy; the adapter maps to EverOS.
+
+Whether the Profile target adapter switches to EverOS `/get` is decided by the profile-scope decision (decided: user-global — see §14). Until that switch ships, the current search-literal `"profile"` workaround stays. EverOS `/get` today reads a single profile row keyed by owner with no reliable project filter; without modifying EverOS, Avibe cannot promise project-scoped profile isolation. Until implementation, profile is user-global (see §9.3).
+
+The current session's unprocessed messages can serve as short-term context, but only bound to Avibe's trusted canonical current session. Arbitrary `filters.session_id` from the caller must never be forwarded as an overlay query. The overlay must make its source explicit — EverOS `unprocessed_buffer` — and must not represent Avibe outbox content or Markdown written but not yet Cascade-projected.
+
+## 2. Research Scope and Version Baseline
+
+This plan is based on the following source state:
+
+- Avibe `dev`: `fbd406eab933fc84e88b10a4a6087c793ab6fc11`, verified against `origin/dev`;
+- EverOS: `https://github.com/avibe-bot/EverOS`, pinned revision `48fc908` (current `origin/main`) for the canonical reference. The author's local working tree additionally held `560fb80` plus user-prepared knowledge-base files; the local-only files are not part of the plan's evidence and contributors should rely on the remote-pinned revision plus the Avibe-side source references for verification.
+- EverOS `v1.2.3` release notes are the only delta between the author's local tree and `origin/main` at the time of writing and do not change the code surface this plan depends on.
+
+The current Avibe runtime still pins EverOS 1.2.1:
+
+- `core/memory/artifact.py:35-42`
+- `scripts/memory_runtime/pyproject.toml`
+
+The EverOS source metadata is already 1.2.3 and requires Python 3.12:
+
+- `EverOS/pyproject.toml:1-8`
+
+Therefore the 1.2.3 upgrade is independent runtime artifact, compatibility, and release work; it cannot be completed by pointing Avibe at the author's local working tree.
+
+## 3. Current Implementation Facts
+
+### 3.1 Avibe Current Call Path
+
+Current Memory is mostly built from:
+
+| Module | Current responsibility |
+|---|---|
+| `core/memory/runtime.py` | Controller-owned lifecycle, artifact activation, sidecar supervision, worker start/stop, config reconcile |
+| `core/memory/module.py` | Provider-independent capture/search/profile/status/clear |
+| `core/memory/everos.py` | EverOS HTTP requests, response mapping, provider error classification |
+| `core/memory/sidecar.py` | In-child route/shape/attachment validation and EverOS app start wrapper |
+| `core/memory/process.py` | Python runtime, child process, UDS, owner/reaping, startup health check |
+| `core/memory/store.py` | Avibe-local capture queue, delivery, flush observation, recovery |
+| `core/memory/worker.py` | Queue claim, EverOS add, per-message flush, breaker, boot recovery |
+| `core/memory/everos_insight/` | Provider-call recorder, processing log, version-coupled read adapter |
+
+The most valuable existing seam is `MemoryProviderPort`, but today the worker still carries too much EverOS lifecycle semantics. The follow-up should split session-flush and status-collection into internal modules without enlarging the upper interface.
+
+### 3.2 Current Flush Defect
+
+`MemoryWorker.drain()` calls `_flush_session()` after every successful delivery:
+
+- `core/memory/worker.py:168-182`
+- `core/memory/worker.py:287-315`
+
+This breaks EverOS's design of recognizing natural boundaries across continuous messages, increases LLM invocations, and fragments a continuous conversation into overly thin memory cells.
+
+### 3.3 Current Search Limits
+
+Avibe's current `EverOSPort` sends only:
+
+```json
+{
+  "method": "hybrid",
+  "include_profile": true,
+  "enable_llm_rerank": false
+}
+```
+
+Relevant locations:
+
+- `core/memory/everos.py:386-413`
+- `core/memory/sidecar.py:296-311`
+
+The sidecar guard also restricts:
+
+- user-owner only;
+- `hybrid` only;
+- cannot pass filters/radius/min_score;
+- profile fetched via search query `"profile"`.
+
+### 3.4 Current Status Model
+
+Avibe's current status is assembled from:
+
+- local queue stats;
+- provider `/health`;
+- processing-endpoint probes;
+- disk space;
+- runtime error;
+- provider root/data existence;
+- recorder health;
+- flush observations.
+
+Main locations:
+
+- `core/memory/module.py:348-420`
+- `core/memory/module.py:592-635`
+- `core/memory/runtime.py:542-580`
+- `core/memory/runtime.py:1407-1429`
+
+Not all of this should be deleted, but it should not be re-executed on every status request.
+
+### 3.5 Current EverOS Metrics and Health
+
+EverOS `/metrics` is currently produced only by the Prometheus HTTP middleware:
+
+- `EverOS/src/everos/core/middleware/prometheus.py:25-41`
+- `EverOS/src/everos/entrypoints/api/routes/metrics.py:14-20`
+
+It carries only:
+
+- HTTP request counter;
+- HTTP request duration histogram.
+
+EverOS `/health` exposes capabilities and cascade health, but its `status="ok"` is explicitly liveness, not full business readiness:
+
+- `EverOS/src/everos/entrypoints/api/routes/health.py:78-90`
+- `EverOS/src/everos/entrypoints/api/routes/health.py:109-150`
+
+Therefore this page simplification does not depend on `/metrics` and does not wait for EverOS to add business metrics. Avibe may remove the page-facing complex status collection and composite derivation, but must keep the minimum internal state needed for outbox delivery and sidecar lifecycle.
+
+## 4. Target Architecture: One Deep Module, Multiple Internal Implementations
+
+### 4.1 Avibe Public Interface
+
+Recommended consolidation to three operations:
+
+```text
+capture(CaptureRequest) -> CaptureReceipt
+recall(RecallRequest) -> RecallResult
+operate(MemoryOperation) -> OperationReceipt
+```
+
+`operate` initially covers owner/admin-gated `restart` and `clear` only; projection rebuild, embedding rotation, and other operations that need stronger journal/fence/reconciliation stay as internal operations and are not exposed as ordinary public API.
+
+The status page no longer relies on a new, semantically heavy `snapshot()` interface. The processing-record page uses the existing log reader and lightly reads EverOS `/health` at the top.
+
+#### `capture`
+
+- The return value means Avibe has written the message to the local durable outbox;
+- Does not wait on EverOS, LLM, embedding, extraction, or Cascade;
+- Idempotent on a stable source-message identity;
+- Does not promise immediate searchability after return.
+
+#### `recall`
+
+- Uses the Avibe-owned `RecallRequest`;
+- Allows specifying the search policy and freshness policy;
+- Returns an Avibe-owned result, not an EverOS DTO;
+- May carry freshness metadata such as `unprocessed` and `eventual`.
+
+#### `operate`
+
+- Unifies maintenance operations: `restart`, `clear`, projection rebuild, embedding rotation;
+- Long operations return an operation identity;
+- Lifecycle exclusivity and data safety are owned inside Memory;
+- No new global status machine per operation; the page only shows confirmed operation results and processing records.
+
+### 4.2 Internal Modules
+
+```text
+Avibe Memory interface
+    │
+    ├── Durable capture store
+    ├── SessionFlushCoordinator
+    ├── ProcessingRecordView
+    ├── MaintenanceCoordinator
+    │
+    ▼
+MemoryEngine seam
+    │
+    ▼
+EverOS UDS HTTP adapter
+    │
+    ▼
+Pinned EverOS child runtime
+```
+
+Upper layers must not know about `/add`, `/flush`, `include_profile`, LanceDB, Cascade, OME, or EverOS error envelopes. Those live in the adapter or internal coordinators.
+
+## 5. Flush Target Design
+
+### 5.1 Target Sequence
+
+```text
+message
+  │
+  ▼
+Avibe durable outbox
+  │
+  ▼
+EverOS /add
+  │
+  ├── status=accumulated: stays in EverOS unprocessed_buffer
+  └── status=extracted: EverOS has completed a boundary extraction
+  │
+  ▼
+natural session boundary / idle / explicit close
+  │
+  ▼
+EverOS /flush
+  │
+  ▼
+Markdown is on disk
+  │
+  ▼
+Cascade asynchronously projects to LanceDB
+```
+
+`/add` success does not mean searchable; `/flush` success does not mean LanceDB has projected. The UI and callers must preserve eventual-consistency semantics.
+
+### 5.2 Flush Triggers
+
+| Trigger | Fires? | Note |
+|---|---:|---|
+| Every successful add | No | Avoid fragmenting continuous dialog |
+| EverOS `/add` natural boundary | Decided by EverOS | Avibe does not append pointless flushes |
+| Session idle timeout | Yes | Initial proposal: 5 minutes |
+| `/new` or session close | Yes | final flush |
+| Session archive | Yes | Hook into the unified lifecycle |
+| User explicitly requests immediate memory landing | Yes | Internal interface keeps bounded-wait semantics; first-version UI does not expose it; revisit after Phase 3 product decisions |
+| Maximum unflushed age / message count | Yes | Prevent unbounded accumulation |
+| Avibe shutdown | No synchronous wait | Persist `due` state and resume on next start |
+
+### 5.3 Flush Generation Invariants
+
+Each `(app, project, session)` owns an independent flush generation. The canonical key must be uniform across capture, add, flush, log, and recovery paths; do not mix `(session, project)`, `(app, project, session)`, or any principal/epoch-augmented variants across modules.
+
+- Before flush begins, **acquire the session fence first**, then either stop new provider adds for the target session or wait for its outbox drain; the fence is retained through the flush so any concurrent worker that observes a drained outbox cannot start a new provider add without entering the next generation;
+- Persist generation, the watermark of confirmed adds, and the fence epoch;
+- During an in-flight flush, new messages can only enter the next generation;
+- Settlement may only update the fenced generation, not all historical delivery rows of the session/project;
+- At most one flush per session at a time;
+- `unknown` outcomes cannot auto-replay without bound;
+- A new worker first recovers `in_flight` then processes `due` / `not_attempted` with batched backoff to avoid restart storms;
+- Different sessions may run concurrently but are bounded by the global provider concurrency cap.
+
+### 5.4 Upstream Recovery Gap
+
+EverOS's boundary logic writes memcell first, then replaces the unprocessed buffer, then runs the downstream pipeline:
+
+- `EverOS/src/everos/service/_boundary.py:154-198`
+- `EverOS/src/everos/service/memorize.py:236-279`
+
+If the process crashes between these steps, memcell may exist, buffer state may have shifted, and Markdown / OME pipelines may not have completed. This means exactly-once extraction cannot be claimed under those conditions.
+
+Without caller message identity, flush operation/generation identity, or receipt lookup on the EverOS side, Avibe cannot treat an unknown outcome as safely replayable. Target recovery contract:
+
+- `unknown` means the provider may have committed;
+- Avibe persists `unknown`, the generation, and the fence; it does not auto-replay;
+- Auto-progression is only allowed with proven `not_committed` or a valid receipt/reconciliation;
+- When confirmation is impossible, hold at `manual_required` rather than permanently masking success or running unbounded at-least-once replay;
+- Extraction receipt/ledger, caller stable identity, and memcell-to-Markdown replay belong to a future EverOS capability and are not a prerequisite for the "no EverOS modification" implementation phase.
+
+### 5.5 Manual Resolution Path for `manual_required`
+
+`manual_required` is a fence, not a permanent stuck state. When an add or flush lands here, the operator must have an audited resolution path that lets the watermark and fence advance without resorting to `restart` (which cannot tell whether the write committed) or `clear` (which is destructively broader). The shape:
+
+```text
+manual_required detected
+  → durable record: session, generation, fence_epoch, operation_id, last_known_state
+  → operator runs an audited manual resolution through `operate` (Phase 4):
+       case A — confirmed committed via out-of-band evidence:
+           advance watermark to the highest observed acked add;
+           release fence on the same generation; resume normal flow.
+       case B — confirmed not_committed:
+           roll the unacked add back to the outbox; release fence; allow retry.
+       case C — inconclusive but stale (> 24h or after explicit operator decision):
+           record operator decision in the journal; advance watermark conservatively;
+           release fence; do not silently auto-replay.
+  → resolution writes an audit row: actor, decision, evidence pointer, generation advanced, watermark advanced
+  → page surfaces the audit row in the processing-record page so manual_required is observable
+```
+
+Constraint: `restart` is not a valid resolution for `manual_required` because it cannot prove the write's outcome. `clear` is not a valid resolution either because it is broader than the unknown write. The audited `operate` path above is the only sanctioned transition. Until the journal/fence is implemented in Avibe, `manual_required` keeps the fence in place and forbids auto-replay, but does not block unrelated sessions.
+
+## 6. Processing-Record Page Design
+
+### 6.1 Page Form
+
+Delete the standalone Memory status page; fold the status summary into the processing-record page:
+
+```text
+Memory
+├── Processing record
+│   ├── EverOS runtime summary
+│   ├── Recent pipeline
+│   ├── Anomalies and recovery
+│   └── Diagnostic detail
+├── Profile
+├── Search
+└── Settings
+```
+
+The top of the page shows only the most recent successfully-read EverOS `/health` summary:
+
+- EverOS version;
+- capabilities: LLM, embedding, reranker, parser, agentic;
+- Cascade `healthy`, `pending`, retryable/permanent failure counts;
+- Cascade reasons;
+- Avibe recorder state.
+
+Every summary must carry `observed_at` or an equivalent observation time. Reads that fail, are missing, or are stale must render as `unknown/unavailable`; they cannot be promoted into `ready` or "all memory is done."
+
+### 6.2 Pipeline
+
+Continue using the existing processing log; do not add a new EverOS business-metrics protocol or a private SQLite status interface:
+
+```text
+capture
+  → add / flush
+  → memcell
+  → episode
+  → OME strategy
+  → profile / skill
+  → indexing
+```
+
+Only show records that the existing provenance can confirm. For missing database, lock, format error, or stale link cases, render the affected step as unavailable and keep the rest.
+
+### 6.3 Deleting the Composite Status Derivation
+
+The following are no longer part of the user-visible status model and must not be recomputed on ordinary log-page reads:
+
+- `ready/syncing/degraded` composite state tree;
+- full pending/succeeded/dead/missed metric tree for the Avibe outbox;
+- provider-root existence checks and deep scans;
+- processing-endpoint active probes;
+- cross-interface precedence;
+- using one successful `/health` to claim Memory pipeline ready.
+
+The `/status` route stays as an internal contract (CLI, UI settings, save validation, drain/embedding safety gate all depend on it), and its probes plus `data_exists` derivation are out of scope for this simplification; the new processing-record read path does not trigger them.
+
+The page may show directly confirmed single facts — the most recent `/health` failure, a specific add/flush failure, a specific recorder degraded — but it must not combine them into a total state beyond what the source semantics justify.
+
+### 6.4 `/metrics` Handling
+
+EverOS `/metrics` today only carries HTTP request counter and duration histogram:
+
+- `EverOS/src/everos/core/middleware/prometheus.py:25-41`
+- `EverOS/src/everos/entrypoints/api/routes/metrics.py:14-20`
+
+Under the "no EverOS modification" constraint, do not make `/metrics` a core Memory-page dependency and do not maintain an Avibe-side private EverOS business-metrics protocol. If EverOS later offers a stable business-metrics surface, it can become an optional data source — but it is not a prerequisite for this adjustment.
+
+### 6.5 Minimum Responsibility for Outbox and Lifecycle
+
+#### Outbox minimum loop
+
+The outbox only:
+
+1. persists the capture payload;
+2. deduplicates by a stable identity;
+3. claims a pending delivery row;
+4. calls EverOS `/add`;
+5. applies bounded retries to confirmed-retryable errors;
+6. only allows success settlement and sensitive payload cleanup on a structurally complete, status-supported provider ack; malformed 2xx is treated as `unknown`/`manual_required` with the recoverable data preserved;
+7. resumes incomplete claims after Avibe restart.
+
+To support idle/max-age flush, Avibe-owned durable state must at minimum add: `generation`, `first_unflushed_at`, `last_add_ack_at`, `due_at`, `next_attempt_at`, `flush_state`, `watermark`, and `fence_epoch`. The idle timer is owned by a long-running Avibe controller/runtime task; restart recovers `due` sessions from the database and processes them in batches under the global concurrency cap and backoff window to avoid restart storms. Continuous new messages update idle `due` only — they must not reset `first_unflushed_at`, otherwise max-age starves. When `/add` returns `status=extracted`, that acknowledgement advances the watermark for the current generation and recomputes the next generation's `first_unflushed_at` from any remaining unacked messages; this prevents a long-running session where natural-boundary extractions dominate from inheriting the age of already-extracted messages and repeatedly hitting max-age.
+
+The outbox does NOT:
+
+- compute global Memory ready status;
+- interpret EverOS Cascade/OME internal state;
+- supply a full business-metrics dashboard for the UI;
+- replace EverOS's Markdown, memcell, or unprocessed buffer.
+
+#### Lifecycle minimum loop
+
+Lifecycle only:
+
+1. prepares and starts the managed EverOS child;
+2. confirms UDS availability;
+3. reaps and restarts on exit or loss;
+4. stops the old child on restart/clear/config swap to prevent shared-root concurrent use;
+5. on shutdown, stops the worker, recorder, and child.
+
+Lifecycle does NOT:
+
+- derive a complex Memory state through layered probes;
+- privately scan EverOS internal queues;
+- maintain a second provider-state database;
+- guarantee a real-time "all stages converged" promise to the page.
+
+These two modules remain internal reliability mechanisms; their state is not extended into a product-level status model that users must understand.
+
+## 7. Data Persistence, Backup, and Rebuild
+
+### 7.1 Data Layers
+
+| Layer | Role | Reconstructible from Markdown? | Protection requirement |
+|---|---|---:|---|
+| Avibe capture outbox | Local durable intake before `/add` | No | Must protect until provider receipt or explicit recovery |
+| EverOS `unprocessed_buffer` | Received but not yet bounded raw messages | No | Must protect |
+| EverOS `memcell` | Raw dialog units after boundary | Today, do not assume Markdown-rebuildable | Must protect until extraction recovery contract is in place |
+| Markdown | Source of truth for already-extracted business memory | Itself | Must protect |
+| `md_change_state` | Cascade queue and LSN | Reconstructible, but controlled reset is safer | Reset in order during rebuild |
+| OME SQLite | Async strategy run state | Partly reconstructible | Decide replay during maintenance |
+| LanceDB | Vector / BM25 / scalar derived index | Rebuildable from Markdown | Never `rm`; use EverOS rebuild |
+| Cluster centroid | Embedding-derived SQLite vectors | Not a normal index | Must be recomputed or invalidated on rotation |
+
+### 7.2 Backup Scope
+
+The safest default backup is a consistent snapshot of the entire provider root plus Avibe-owned state and the attachments directory. The paths must be resolved relative to the effective Avibe home (`config.paths.get_vibe_remote_dir()`), not hardcoded as `~/.avibe/...`. Concretely:
+
+```text
+{avibe_home}/state/memory/memory.sqlite
+{avibe_home}/memory/everos-root/
+{avibe_home}/memory/call-log/call-log.db
+{avibe_home}/attachments/avibe/
+```
+
+If `AVIBE_HOME` points outside the default home, or a legacy home remains active because migration could not complete, hardcoded literal paths can produce an apparently successful backup that omits the live capture database, provider root, call log, or attachments. Always resolve via `get_vibe_remote_dir()` (or the resolved runtime home) at backup time, including after a legacy rename.
+
+The capture queue today only stores attachment URI/metadata (`core/memory/attachments.py:12-59`) and does not copy attachment bytes; if the backup strategy does not include attachment originals, accepted captures cannot be replayed. Before implementation the attachment policy must be explicit: Workbench uploads already live in the Avibe-owned private attachment store; the default recommendation is to pin a durable attachment reference into the pending capture row at acceptance time and to include that directory in the consistency snapshot, with explicit size/retention and recovery validation. If the product does not provide attachment copy or backup guarantees, capture can only declare that metadata is saved and cannot promise attachment recoverability.
+
+Must cover at minimum:
+
+- Markdown;
+- `system.db` unprocessed buffer and memcell;
+- Avibe capture queue;
+- attachment bytes (if capture is allowed as a recoverable input);
+- OME state (if exact recovery of async tasks is required);
+- call log (if processing diagnostics must be preserved).
+
+Never copy a live SQLite file mid-write; pause the relevant process or use SQLite backup/snapshot semantics, and let the attachment snapshot and the queue snapshot share an explicit consistency fence.
+
+### 7.3 Projection Rebuild
+
+Applies to LanceDB corruption, schema drift, or index drift. Today EverOS exposes this only as a CLI maintenance operation; it is not a regular business HTTP operation that Avibe can call. Avibe must not describe "calling controlled rebuild" as if it were an existing API capability.
+
+1. Create and persist an `operation_id`, operation phase, provider-root fingerprint, fence epoch, and owner;
+2. Acquire the exclusive maintenance lease;
+3. Fence Avibe new delivery and old-epoch provider calls;
+4. Stop the EverOS server;
+5. Reset the Cascade queue first;
+6. Delete and rebuild only the LanceDB business tables;
+7. Scan all Markdown;
+8. Wait for and verify Cascade drain;
+9. Update the operation journal with each phase's result;
+10. Start the sidecar and resume delivery;
+11. On startup, follow the journal to resume, roll back, or fail closed; mid-flight crash must not be treated as success.
+
+All destructive phases must have fault-injection tests. Late writes from the old epoch must be rejected or discarded and never written into the new generation/root.
+
+EverOS's current controlled implementation already fixes the order: "reset queue first, then drop tables":
+
+- `EverOS/src/everos/entrypoints/cli/commands/cascade.py:494-529`
+
+Avibe must not copy the underlying logic itself; it must call the controlled EverOS operation.
+
+### 7.4 Disallowed Recovery Actions
+
+```text
+rm -rf .index
+rm -rf .index/lancedb
+```
+
+Reason:
+
+- Deleting the entire `.index` deletes the not-yet-extracted `unprocessed_buffer`;
+- Deleting only LanceDB leaves a done queue so the scanner considers files already processed and the index can be restored empty.
+
+EverOS `docs/storage_layout.md` and `docs/how-memory-works.md` still contain the older "entire `.index` is deletable" wording and should be unified upstream to the stricter recovery contract.
+
+## 8. Embedding Rotation
+
+### 8.1 Semantic Fingerprint
+
+Suggested definition:
+
+```text
+embedding_semantic_fingerprint = hash(
+    provider semantic identity,
+    effective model identity/revision,
+    output dimension,
+    dimensions parameter,
+    normalization,
+    truncation,
+    preprocessing/tokenizer revision,
+    vector/index schema revision,
+)
+```
+
+The API key is not part of the fingerprint.
+
+The fingerprint must be persisted in Avibe-owned Memory metadata and compared against the candidate configuration at every startup and reconcile; it cannot live only in-process. Unknown model identity, missing fingerprint, or unprovable semantic equivalence must fail closed. The provider-root sentinel may record the artifact fingerprint that created the runtime, but it does not replace the semantic embedding fingerprint.
+
+Include only factors that actually change the vector space; for example, an equivalent proxy base-URL change must not force a rebuild on the URL string alone, but unprovable equivalence must fail closed.
+
+### 8.2 Key-Only Rotation
+
+```text
+validate new credential
+→ fence provider calls
+→ stop old sidecar
+→ start new sidecar with new key
+→ reuse original provider root
+→ verify capability
+→ restore claims
+```
+
+Does not delete Markdown, SQLite, or LanceDB; does not trigger a full rebuild.
+
+### 8.3 Full Semantic Rotation
+
+```text
+acquire maintenance lock
+→ fence capture delivery / provider calls
+→ save and verify current root
+→ stop EverOS
+→ preserve Markdown, unprocessed_buffer, memcell, Avibe outbox
+→ rebuild LanceDB vectors and FTS/scalar indexes
+→ recompute cluster centroid and cluster membership
+→ rebuild or invalidate embedding-dependent OME state
+→ reprocess profile/skill/reflection derived artifacts
+→ write new fingerprint
+→ start new sidecar
+→ verify projection convergence
+```
+
+The first version allows offline-stoppage rebuild. If a stronger SLA later emerges, consider shadow index / blue-green generation.
+
+Until EverOS provides a complete rotation operation, Avibe keeps the embedding-change guard over existing data and must not falsely report a LanceDB-only rebuild as a full migration.
+
+### 8.4 Rotation Entry Point
+
+Rotation is triggered from the Web UI; CLI no longer exposes a standalone rotate command. The UI entry shape:
+
+- Collapsed by default; only visible in the advanced/dangerous region of Settings → Memory;
+- Trigger conditions:
+
+  1. When the `embedding_semantic_fingerprint` changes (e.g. user swaps embedding model or provider config), a "rebuild" button appears automatically with the source of the difference annotated;
+  2. The user actively picks "rebuild index" in settings and must pass a second confirmation modal that lists the impact, downtime window, and the cluster-centroid recomputation note;
+- After second confirmation, §8.3 takes over; on failure, keep the old generation and never enter a "half-rebuilt" intermediate state;
+- No equivalent CLI entry point is exposed; operators who need direct access reuse the internal `operate` interface exposed by the Web UI flow, with no new CLI surface;
+- The entry is reachable only via direct UI clicks; it does not accept remote triggers from chat, agent, or API to avoid misuse.
+
+## 9. Four-Mode Search Design
+
+### 9.1 Avibe-Owned Search Policy
+
+Suggested definition:
+
+```text
+RecallPolicy
+  mode: auto | keyword | vector | hybrid | agentic
+  limit: 1..N
+  freshness: eventual | bounded | session_overlay
+  include_profile: bool
+  filters: provider-neutral filter tree
+```
+
+- `mode=auto` only chooses among `keyword/vector/hybrid` and must never implicitly escalate to `agentic`;
+- `mode=keyword/vector/hybrid/agentic` are explicit choices; the caller is responsible for declaring budgets;
+- `freshness=eventual` does not promise a deadline; `bounded` is best effort within the caller's deadline and returns explicit timeout/unknown on timeout; `session_overlay` binds only to a trusted current session.
+
+EverOS DTOs, filters DSL, and response arrays live only inside the adapter.
+
+### 9.2 Mode Selection
+
+| Mode | Use case | Capability requirement | Default-ness |
+|---|---|---|---|
+| `keyword` | Precise names, IDs, error codes, commands, terms | BM25 / index | Fallback when embedding is unavailable |
+| `vector` | Paraphrase, semantic similarity, multilingual | embedding | Explicit / policy choice |
+| `hybrid` | General recall, balancing precision and semantics | embedding + BM25 | Default |
+| `agentic` | Multi-hop, complex reasoning, multiple retrievals | LLM + embedding + reranker | Explicit opt-in |
+
+This adjustment adopts both the reranker configuration and explicit `agentic` search. The extra LLM / reranker latency and call cost is accepted as a product-level semantic cost.
+
+#### 9.2.1 Agentic Default and Trigger Policy
+
+- `auto` does not implicitly choose `agentic`; only `keyword/vector/hybrid` are reachable via `auto`;
+- Ordinary UI search does not call `agentic`;
+- Ordinary chat / system recall does not call `agentic`;
+- `agentic` is only enabled by an explicit caller declaration and must pass Avibe-owned policy validation;
+- A single call may declare the same mode multiple times, but each declaration is timed and budgeted independently.
+
+#### 9.2.2 Agentic Required Budgets
+
+The Avibe-owned `RecallPolicy` must carry, when `agentic` is allowed:
+
+- `timeout_seconds`: declared explicitly by the caller; when missing, the adapter forwards to EverOS and EverOS's default kicks in; Avibe does not set an additional client-side default;
+- `max_model_calls`: declared explicitly by the caller; same forwarding behavior;
+- `max_results`: declared explicitly by the caller; same forwarding behavior;
+- `cost_budget_tokens`: optional; on exceed, return `capability_unavailable` immediately;
+- `allow_fallback_to_hybrid`: default false; on timeout or capability failure, return an explicit result and never mask as a successful hybrid.
+
+Constraint: this plan does not introduce Avibe client-side default budget numbers; defaults stay with EverOS. Any later adjustment must first express the budget field at the call site and then let the adapter forward transparently. Avibe does not assign defaults on the client side and does not pick a policy on EverOS's behalf.
+
+Agentic requests that do not carry the complete budget fail closed at the adapter layer.
+
+#### 9.2.3 Reranker Configuration
+
+New Avibe configuration:
+
+```text
+memory:
+  processing:
+    reranker:
+      enabled: true
+      base_url: https://...
+      model: ...
+      api_key: ...
+      timeout_seconds: 20
+      max_concurrent: 4
+```
+
+Behavior:
+
+- The API key enters only the managed EverOS child environment, the same as LLM and embedding;
+- API-key change triggers a sidecar restart only and does not enter the semantic embedding fingerprint;
+- Model change records a `reranker_config_fingerprint` only and does not rebuild LanceDB;
+- When missing or disabled, the `agentic` capability is unavailable;
+- UI/API responses expose only `enabled`, `configured`, and `available`; never the key or secret;
+- The `/health` summary's capabilities list grows to include `reranker`, so the processing-record page and inspection scripts can locate it;
+- The processing-record page shows capability status only, never vendor configuration.
+
+#### 9.2.4 Capability Gating
+
+When a request with `mode=agentic` arrives:
+
+- LLM, embedding, and reranker must all be available before allowing it through;
+- If any one is unavailable, return `capability_unavailable` with the missing provider named;
+- No fallback to `hybrid`;
+- No implicit trigger via agentic configuration;
+- The request body only accepts methods on the allowlist; anything else is rejected by the sidecar route guard — this is an independent gate from capability gating.
+
+#### 9.2.5 Privacy and Logging
+
+- `agentic` search follows the existing provider-call recorder policy: do not log full payloads; only log kind, mode, duration, provider status, and scrubbed errors;
+- Agent chat memory capture is out of scope; do not enable agent case / agent skill;
+- User-memory `agentic` only returns visible records to the caller; it must not leak into other users' profiles.
+
+#### 9.2.6 Out-of-Scope (Explicit Non-Goals)
+
+- Do not enable assistant/tool/agent capture;
+- Do not switch Memory capture provenance;
+- Do not change owner scope;
+- Do not modify EverOS source code;
+- Do not promise `agentic` capability always available before EverOS upstream supports it.
+
+### 9.3 Profile and Recent Messages
+
+- Profile is decided as user-global (see §14); whether to switch to EverOS `/get(memory_type="profile")` is an implementation choice once the project-isolation limitation is closed. Until then the current search-literal `"profile"` workaround stays compatible;
+- Relevance queries use `/search`;
+- The current session's unprocessed messages use the EverOS `unprocessed_messages` overlay;
+- Results distinguish `source=unprocessed` from `source=extracted`;
+- Unprocessed messages must not be mis-labeled as already-extracted long-term memory.
+- `eventual` does not promise a deadline; `bounded` is best effort within the caller's deadline, must return explicit timeout/unknown, and must not claim completion; `session_overlay` only accepts a trusted current session and must surface the data source and partial state.
+- The overlay does not cover messages still in the Avibe outbox, nor Markdown written but not yet Cascade-projected; if read-your-write is required, define a target watermark and wait scope explicitly.
+
+## 10. Errors, Concurrency, and Security
+
+### 10.1 Error Classification
+
+The adapter must classify errors primarily by EverOS `error.code`:
+
+- Network error, timeout, `EXTERNAL_SERVICE_UNAVAILABLE`: bounded exponential-backoff retry;
+- `INVALID_INPUT`, `BAD_REQUEST`, `UNSUPPORTED_FORMAT`: do not retry;
+- `PROVIDER_NOT_CONFIGURED`: do not retry until the configuration is fixed;
+- `CAPABILITY_UNAVAILABLE`: permanent capability gap, do not blindly retry as if it were HTTP 503;
+- Unknown add/flush outcome: record as `unknown`, treat as "may have committed"; without receipt/reconciliation or a proven `not_committed`, do not auto-replay; transition to `manual_required` and do not claim extraction success;
+- **Write timeouts on `/add` or `/flush`** are treated as ambiguous outcomes, not as retryable network errors. Once the request may have reached EverOS but no response was confirmed, retries are forbidden; the call falls through to the `unknown` rule above. Only failures proven to occur before submission, or read-side timeouts, are retry-eligible. This avoids duplicate accepted messages or duplicate extraction work, and keeps the `unknown`/`manual_required` rule consistent.
+
+The current `EverOSPort` still relies heavily on HTTP status; that should be consolidated later.
+
+### 10.2 Concurrency Rules
+
+- `add`/`flush` for the same `(app, project, session)` are serial;
+- Different sessions may run concurrently;
+- One provider root permits only one EverOS process;
+- `clear`, `rebuild`, `rotation`, and `artifact cutover` are mutually exclusive;
+- No SQLite transaction may span HTTP / LLM / model calls;
+- The maintenance lease must be acquired before the session lease, with a fixed lock order.
+
+### 10.3 Security Boundary
+
+Continue to enforce:
+
+- owner-only UDS;
+- exact route / shape validation;
+- HMAC-derived principal/project; never store raw platform IDs or working paths as provider identity;
+- attachment-root containment and symlink checks;
+- child-environment allowlist;
+- response body, item count, nesting depth, and string length limits;
+- never expose raw message bodies, secrets, user IDs, or high-cardinality session labels.
+
+Provider-call log is the processing-record page's diagnostic data source, not a general-purpose metric system. It is retained because today's UI log and provenance reads depend on it, but it must not be coupled to the new global status machine.
+
+## 11. Improvements to the Existing Processing-Record Page
+
+The existing log page's core display logic is sound: memcell-centric, showing capture, add/flush, OME processing, provider calls, and index linkage. It should shift from "Memory status console" to "processing record and diagnostic page" without being rebuilt.
+
+### 11.1 Retained Core Logic
+
+Keep:
+
+- memcell list and pagination;
+- memcell preview, time, and message count;
+- the detail page's precise capture → memcell → OME run → provider-call linkage;
+- scope / principal / project access control;
+- provider-call bounded, scrubbed request/response expansion;
+- fail-closed notice for missing, stale, truncated, and unavailable data;
+- count, byte-size, and nesting-depth limits on list and detail.
+
+These answer "how was this memory processed" and align with the new page's positioning.
+
+### 11.2 Distinguishing the Four Data Semantics
+
+The page and backend types must distinguish:
+
+| Data semantic | Example | Display rule |
+|---|---|---|
+| Historical processing fact | memcell, capture, precisely linked run/call | Goes into the historical timeline |
+| Data-source availability | Whether EverOS DB, capture queue, and call log are readable | Label as `Source availability`, not "system health" |
+| Current snapshot | Current profile, current indexing row, current error | Show separately as `Current snapshot`; never put into the historical timeline |
+| Derived or incomplete data | Run aggregation, profile trigger relations, stale call log | Mark as `inferred/expired/omitted`; never treat as complete events |
+
+Today `current_state` should be renamed to `Current snapshot` and visually separated from the historical steps.
+
+Today `sections` should be renamed to `Source availability` and only express whether the relevant data sources are readable; `partial` must not map to a global `Memory degraded`.
+
+### 11.3 List-Page Activity Summary
+
+Today's `run_summary` is derived from OME `run_record` aggregation, not a complete lifecycle fact. Recommendation:
+
+- The list page only keeps a compact "processing activity" summary;
+- Do not show complex run-status combinations;
+- Detailed run status lives on the memcell detail page;
+- `authorized_call_count` is renamed to "Recorded calls" or "Linked calls" to avoid implying full provider-call coverage.
+
+### 11.4 Provider-Call Display Boundary
+
+Provider-call detail is kept, but the wording must be "recorded provider calls", not "all calls":
+
+- When the recorder is degraded, warn that some calls may be missing;
+- When the call log is stale, show `expired`;
+- Provider payload continues to show only scrubbed, bounded fields;
+- Continue to forbid raw sidecar stdout/stderr, attachment bytes, embedding vectors, and unprocessed secrets;
+- Copy operations only copy projected and scrubbed content.
+
+For operator-facing call-detail panels the projection must explicitly redact the conversation body (prompt text, response text, tool result text). Secret and path scrubbing plus byte bounds do not remove the message body, and this plan's security invariant requires that bodies are never exposed via the page or any future Avibe Cloud surface. The body-redacted projection is what the page renders; the underlying recorder may keep the body in its private store for debugging but must project through a body-redacted view before returning to the page or any UI. Existing `core/memory/everos_insight/reader.py` must therefore expose two views: a full view (internal-only, never returned to UI) and a body-redacted view (returned to the page and any external consumer).
+
+### 11.5 Target Processing-Record Page Structure
+
+```text
+Processing record
+
+┌────────────────────────────────────┐
+│ EverOS runtime summary             │
+│ version · capabilities · cascade   │
+│ recorder · observed_at             │
+└────────────────────────────────────┘
+
+┌────────────────────────────────────┐
+│ Source availability                │
+│ EverOS · capture · call log        │
+└────────────────────────────────────┘
+
+┌────────────────────────────────────┐
+│ Memcell list                       │
+│ time · preview · message count · activity │
+└────────────────────────────────────┘
+
+Detail:
+  Memcell overview
+  ├── Historical pipeline
+  ├── Recorded provider calls
+  ├── Current snapshot
+  └── Missing/stale/truncated notes
+```
+
+The top EverOS runtime summary only lightly reads the existing `/health`; it does not introduce a new EverOS interface and does not expose the full internal outbox/lifecycle state tree.
+
+### 11.6 Misleading Wording to Delete
+
+Do not derive global state from:
+
+- a single memcell's successful run;
+- linked/recorded call counts;
+- zero Cascade pending;
+- a recent `/health` success;
+- the existence of a profile file.
+
+Each of these can only prove its own single fact; it cannot prove "all messages processed", "all OME done", or "all indexing converged".
+
+### 11.7 EverOS Private Schema Dependency
+
+The existing `core/memory/everos_insight/reader.py` directly reads the pinned EverOS `system.db`, `ome.db`, `md_change_state`, memcell, and provider-call provenance. This log adapter may stay, but it must:
+
+- declare itself a pinned-runtime adapter, not a stable EverOS public API;
+- run real-wheel contract tests on every EverOS upgrade;
+- fail closed to `unavailable/partial` on schema or field mismatch; never return fabricated success;
+- centralize message-id derivation, run-event fields, and owner/scope relations inside the adapter;
+- not expand private-read logic into a global status machine.
+
+### 11.8 Processing-Record Page Acceptance Focus
+
+- List and detail can show precise, verifiable processing facts around memcells;
+- Current snapshot is visually, type-wise, and text-wise separated from the historical timeline;
+- `Source availability` is not interpreted as global Memory health;
+- Provider calls are explicitly labeled as recorded, possibly stale, or possibly missing;
+- `run_summary` stays compact in the list and can be expanded in detail;
+- The EverOS `/health` summary carries observation time and lists capabilities: LLM, embedding, reranker, parser, agentic;
+- Private schema read failure renders as `unavailable/partial`, never as `ready/degraded`;
+- Existing permission, scrub, pagination, and response-boundary rules continue to hold.
+
+## 12. Phased Implementation Plan
+
+### Phase 0: Close Reliability and Compatibility Contracts First
+
+This phase does not require EverOS 1.2.3 to be in place. Define and test the Avibe-side contract first:
+
+- `unknown` provider outcome → `manual_required`, no auto-replay;
+- Final flush acquires the session fence before drain check;
+- Canonical `(app, project, session)` key, generation, watermark, fence epoch;
+- Idle / max-age durable `due`, boot recovery, batched backoff;
+- Attachment acceptance, private copy, backup scope;
+- Profile scope (decided user-global), session overlay authorization, freshness semantics;
+- Existing status payload, `data_exists`, CLI machine-readable fields stay compatible;
+- Define the processing-record page's data boundary and pinned-runtime adapter contract;
+- Audited manual resolution operation for `manual_required` per §5.5.
+
+EverOS 1.2.3 runtime artifact, manifest/checksum, and compatibility verification is an independent release track; it can proceed in parallel and does not block stopping per-message flush or simplifying the processing-record page.
+
+### Phase 1: Merge the Status Page and Processing-Record Page
+
+- Remove the user-visible narrative of the standalone Memory status page; keep the existing `/status`, `data_exists`, CLI, and internal machine-readable contract;
+- Read the existing EverOS `/health` summary at the top of the processing-record page;
+- Show EverOS version, capabilities, Cascade summary, recorder state, and observation time;
+- Keep the existing processing log, anomalies, and recovery records;
+- Do not modify EverOS; do not add a business-metrics protocol;
+- Delete user-visible composite status derivation, provider probes, and provider-root deep scans; do not delete the internal checks required by the drain/embedding safety gate;
+- Keep the internal outbox/lifecycle delivery and child supervision capability, but do not expose its full counter tree to the page;
+- Old status fields stay compatible first; new source/observed_at/unknown information is added additively.
+
+### Phase 2: Session Flush Coordinator
+
+- Add durable session flush state;
+- Remove the post-add flush;
+- Add idle, max-age, and explicit-close flush;
+- Wire `/new`, archive, and session close;
+- Add boot recovery and unknown fencing;
+- Add same-session generation / concurrency tests.
+
+### Phase 3: Search Policy Expansion
+
+- Add reranker configuration and the Avibe-owned config write;
+- Open the sidecar allowlist to validate `keyword/vector/hybrid/agentic` methods;
+- Adapter maps Avibe-owned `RecallPolicy`, carrying `timeout/max_model_calls/max_results/cost_budget_tokens`;
+- `hybrid` is the default; `keyword` is the fallback; `agentic` is explicit only;
+- All three capabilities (LLM/embedding/reranker) must be available before `agentic` is allowed; otherwise return `capability_unavailable`, no fallback;
+- Profile switching to `/get` is contingent on the project-isolation gap being closed;
+- Add the unprocessed overlay bound to a trusted current session;
+- Add scope isolation, filters, overlay bypass, freshness, agentic budget, and capability-boundary tests;
+- Processing-record page's capabilities grow to include `reranker`; agentic search continues under the existing provider-call recorder policy of metadata-only logging.
+
+### Phase 4: Avibe-Side Recovery Boundary and Fault Injection
+
+This phase does not modify EverOS and does not promise receipt/replay capabilities EverOS does not yet have:
+
+- `unknown` add/flush without receipt stays at `manual_required`, no auto-replay;
+- Ship the audited manual resolution operation described in §5.5 with journal-backed audit rows;
+- Make explicit the security prerequisites for payload scrub, attachment retention, and durable-home transfer;
+- Inject faults for Avibe enqueue, add timeout, flush timeout, sidecar crash, and controller restart;
+- For the crash window after EverOS boundary but before Markdown, verify only fail-closed visibility, do not fabricate an exactly-once fix;
+- Promote Avibe-controlled durability invariants to contract tests;
+- Caller stable identity, receipt lookup, and memcell-to-Markdown replay are recorded as future EverOS upstream capabilities.
+
+### Phase 5: Embedding Rotation
+
+- Ship key-only restart first;
+- Then ship the offline full semantic rotation;
+- Cover LanceDB, cluster, OME, and embedding-dependent Markdown;
+- Use the maintenance lock, operation journal (`operation_id/phase/fingerprint/fence_epoch/owner`), and rollback / fail closed;
+- Old-epoch late writes must be rejected;
+- Blue-green rebuild is evaluated later.
+
+### Phase 6: Release and Verification
+
+- Focused unit / contract tests;
+- EverOS real-wheel contract tests;
+- Runtime artifact checksum / architecture / version tests;
+- UI build;
+- User-visible behavior is verified with the local Incus regression environment; do not restart the local coding-agent `vibe` service.
+
+## 13. Acceptance Criteria
+
+### Flush
+
+- Continuous messages do not trigger one flush each;
+- Multiple messages from a single session can collapse into a natural memory cell;
+- Idle / close / max-age triggers are reliable;
+- Final flush acquires the session fence before checking drain, with the fence held through the flush;
+- Generation uses a uniform `(app, project, session)` key, watermark, and fence epoch;
+- New messages during an in-flight flush are neither lost nor mixed into the wrong generation;
+- `due`/`unknown` session state persists and resumes in batches after restart;
+- `unknown` without receipt enters `manual_required` and is not auto-replayed;
+- An `extracted` ack advances the watermark and recomputes the next generation's age from remaining messages;
+- Shutdown does not block on LLM flush indefinitely.
+
+### Processing-Record Page
+
+- The standalone status page is removed; the status summary is folded into the processing-record page;
+- The page only shows what `/health` and the existing processing log can directly confirm;
+- Every runtime summary carries observation time; reads that fail or are stale render `unknown/unavailable`;
+- `/health.status="ok"` is not promoted into "all Memory pipeline ready";
+- Ordinary page reads do not trigger processing-endpoint probes or provider-root deep scans;
+- The outbox/lifecycle full counter tree and internal state machine are not exposed as a user-visible dashboard;
+- Bodies, secrets, and unrelated internal identifiers are never exposed;
+- Recorder degraded / corrupt is still visible and recoverable on the processing-record page;
+- Provider-call detail uses the body-redacted projection (see §11.4).
+
+### Minimum Reliability
+
+- Outbox keeps durable enqueue, idempotency, claim, bounded retry, success settlement, and boot recovery;
+- Lifecycle keeps child start/stop, UDS, crash recovery, and maintenance operation fence;
+- The outbox/lifecycle responsibility for global `ready/syncing/degraded` derivation is removed;
+- After simplification, an accepted capture cannot be lost just because the provider is temporarily unavailable;
+- A single provider root cannot be used by two managed EverOS children simultaneously.
+
+### Data and Rebuild
+
+- Accepted Avibe capture lives in at least one recoverable durable home;
+- Attachment capture is only marked recoverable when the bytes sit in an Avibe-owned durable store and have been pinned by the pending capture, or the product explicitly accepts non-replayable semantics;
+- Mis-deleting `.index` is not described as harmless by any doc or code;
+- Projection rebuild does not delete `unprocessed_buffer` or memcell;
+- After a LanceDB rebuild, the done queue does not produce an empty index;
+- Embedding key-only change does not trigger a full rebuild;
+- Semantic change does not mix two vector spaces;
+- Rotation handles cluster centroid and embedding-dependent OME state;
+- Rebuild / rotation operation journal can resume, roll back, or fail closed after a crash;
+- Status payload, `data_exists`, and CLI machine-readable fields stay compatible after page simplification.
+
+### Search
+
+- `keyword/vector/hybrid/agentic` have real adapter contract tests;
+- `agentic` with missing reranker/LLM/embedding returns `capability_unavailable` without fallback;
+- `agentic` explicit timeout returns an explicit timeout, never masquerades as `hybrid`;
+- `hybrid` is the default;
+- `keyword` remains usable when embedding is unavailable;
+- `agentic` returns `capability-unavailable` when reranker/budget configuration is missing, without implicit invocation;
+- Profile `/get` target behavior is covered by tests; project isolation is not asserted as an acceptance promise before the user-global vs project-scoped decision is closed;
+- Session overlay only accesses a trusted current session and rejects arbitrary session filters;
+- user / project / session isolation tests pass (profile scope follows the decided user-global semantics);
+- Unprocessed messages and extracted memory have explicit freshness, source, and watermark / partial markers.
+
+### Manual Resolution
+
+- `manual_required` is observable on the processing-record page (audit row + decision row);
+- `restart` cannot be used to clear `manual_required`;
+- `clear` cannot be used to clear `manual_required`;
+- The audited `operate` path advances watermark and fence without mixing generations;
+- Audit rows are durable and survive restart;
+- Unrelated sessions are not blocked by a `manual_required` fence.
+
+## 14. Decisions That Require Product Confirmation
+
+Product semantics below must be locked before the corresponding implementation phase. The technical safety defaults are already in this plan and are not open options:
+
+| Decision | Options | Decided default | Consequence of leaving it open |
+|---|---|---|---|
+| Profile scope | user-global; or project-scoped | **user-global**, explicitly stated in the UI; do not modify EverOS | `/get` reads a single owner-keyed row today and cannot prove project isolation (see §9.3) |
+| `bounded` success criterion | flush confirmed successful; or LanceDB visible | **flush confirmed successful**, result still labeled `indexing eventual`; do not promise immediate searchability | wait/overlay semantics drift |
+| `unknown` without receipt | `manual_required`; or at-least-once replay | **`manual_required`**, no auto-replay | Cannot safely choose between duplicate memory and a permanent stall |
+| Attachment recovery SLA | pin-before-accept and include in backup; or metadata only | **pin-before-accept**, attachments directory folded into the consistency snapshot | accepted captures may be unreplayable |
+| Final flush when outbox has not drained | wait for the target session to drain; or fence subsequent adds | **Fence first, then short-wait drain; on timeout, persist `due` and block old-generation adds under the fence** | Post-close adds may miss flush |
+| New add during in-flight flush | provider generation; or Avibe session fence | **Avibe session fence**, because EverOS does not currently accept generation IDs | watermark cannot be enforced; settlement may cross generations |
+| Agentic search explicit enable | enabled by default; or explicit opt-in | **Explicit opt-in**, subject to §9.2.2 budgets, see §9.2.1/§9.2.4 | Ordinary call paths are polluted by an expensive capability |
+| Agentic capability gating | fallback on missing capabilities; or `capability-unavailable` | **`capability-unavailable`**, no fallback, see §9.2.4 | Silent regression to `hybrid` hides capability gaps |
+| Agentic default `timeout` / `max_model_calls` / `max_results` / `cost_budget_tokens` | Avibe-defined defaults; or aligned with EverOS | **Aligned with EverOS**; Avibe does not set client-side defaults; the caller must declare explicitly, see §9.2.2 | Behavior drifts if Avibe and EverOS defaults diverge |
+| Embedding rotation entry point | CLI command; or Web UI | **Web UI, collapsed + second confirmation**, see §8.4 | CLI entry spreads misuse; UI entry exposed on the main path causes accidental triggers |
+| First-version bounded-wait user action | Yes; or internal only | **Internal only** (§5.2) | Users see no controllable wait in the UI |
+| `manual_required` resolution operator path | none; or audited manual operation | **Audited manual operation** through `operate` (§5.5) | Without it, `manual_required` blocks the session indefinitely or forces a destructive `clear` |
+
+Out of scope for this plan:
+
+- Knowledge-base Markdown style customization (schema/style split, user-level / project-level config): not delivered by this plan; open a separate plan if needed.
+- A CLI-shaped rotation command: consistent with §8.4, no CLI surface; equivalent operations reuse the internal `operate` interface exposed by the Web UI flow.
+
+Non-blocking product / schedule choices; the recommended defaults are safe to proceed with:
+
+1. Idle flush defaults to 5 minutes, max-age defaults to 30 minutes;
+2. `/new`, archive, and explicit session close all trigger final flush;
+3. The first version does not provide a "searchable immediately" bounded-wait user action; the internal-interface semantics stay;
+4. The first version continues to capture user messages only; no assistant / tool / agent memory;
+5. Adopted: configure reranker for `agentic` search, with `agentic` explicit opt-in and budget-constrained; this version does not enable assistant / tool / agent capture and does not modify EverOS;
+6. Embedding semantic rotation allows downtime initially; the entry is via Web UI (see §8.4), and is not opened until journal/fence ship;
+7. Provider-payload diagnostics continue under today's default-enabled behavior; privacy review is a separate track;
+8. EverOS 1.2.3 artifact ships on an independent release track;
+9. Cascade permanent data-quality failure is operator diagnostics only and does not map to a global degraded state.
+
+## 15. Key Source References
+
+### Avibe
+
+- `core/memory/everos.py`: EverOS UDS HTTP adapter, search, and error mapping;
+- `core/memory/sidecar.py`: sidecar route/shape guard;
+- `core/memory/process.py`: managed child, UDS, and lifecycle;
+- `core/memory/worker.py`: current per-message flush and queue drain;
+- `core/memory/store.py`: capture queue, flush observation, boot recovery;
+- `core/memory/module.py`: current Memory interface and status precedence;
+- `core/memory/runtime.py`: controller-owned lifecycle, embedding guard, and status payload;
+- `core/memory/everos_insight/`: provider-call recorder and processing log;
+- `docs/plans/everos-1.2.1-upgrade.md`: completed history of the EverOS 1.2.1 / `project_id` upgrade;
+- `docs/plans/memory-architecture-deepening.md`: completed history of the Memory deep-module refactor.
+
+### EverOS (pinned revision `48fc908`)
+
+- `CONTEXT.md`: integration domain glossary;
+- `EVEROS_INTEGRATION_zh.md`: integration contract and operations guidance;
+- `src/everos/service/memorize.py`: add/flush scheduling;
+- `src/everos/service/_boundary.py`: buffer, memcell, and boundary order;
+- `src/everos/service/_session_lock.py`: same-session concurrency semantics;
+- `src/everos/entrypoints/api/routes/health.py`: health / liveness / readiness;
+- `src/everos/entrypoints/api/routes/metrics.py`: Prometheus endpoint;
+- `src/everos/core/middleware/prometheus.py`: current HTTP metrics;
+- `src/everos/entrypoints/cli/commands/cascade.py`: controlled projection rebuild;
+- `src/everos/infra/persistence/sqlite/tables/unprocessed_buffer.py`: unprocessed messages;
+- `src/everos/infra/persistence/sqlite/tables/memcell.py`: raw dialog archive after boundary;
+- `src/everos/infra/persistence/sqlite/tables/cluster.py`: embedding-derived cluster centroid;
+- `src/everos/memory/search/dto.py`: four-mode search and request semantics.
