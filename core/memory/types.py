@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 from core.memory.presentation import MemoryStatusBuckets
@@ -11,6 +12,34 @@ from core.memory.presentation import MemoryStatusBuckets
 
 MemoryKind = Literal["profile", "episode", "fact"]
 MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
+MemoryOperationKind = Literal["add", "flush", "fingerprint_resolve"]
+MemorySettlementSource = Literal[
+    "add",
+    "natural_boundary",
+    "flush",
+    "migration",
+    "manual",
+]
+MemorySettlementOutcome = Literal[
+    "succeeded",
+    "rejected",
+    "unknown",
+    "manual_required",
+    "committed",
+    "not_committed",
+    "settled_with_caveat",
+]
+MemoryObservedOutcome = MemorySettlementOutcome | Literal["in_flight"]
+MemoryFlushState = Literal[
+    "not_due",
+    "due",
+    "in_flight",
+    "settled",
+    "manual_required",
+    "settled_with_caveat",
+]
+RecallMode = Literal["auto", "keyword", "vector", "hybrid", "agentic"]
+RecallFreshness = Literal["eventual", "bounded", "session_overlay"]
 MemoryFailureKind = Literal[
     "delivery_abandoned",
     "distillation_rejected",
@@ -69,6 +98,290 @@ def is_memory_error_code(value: object) -> bool:
 
 
 @dataclass(frozen=True)
+class ProviderSessionRef:
+    """The canonical Avibe identity sent to and fenced around EverOS.
+
+    ``session_id`` is the opaque provider session value.  Callers may retain a
+    logical session id while constructing this value, but durable projections
+    use the serialized four-part reference and never an ``app``-based key.
+    """
+
+    principal_id: str
+    epoch: int
+    project_ref: str
+    session_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.principal_id, str) or not self.principal_id:
+            raise ValueError("provider session principal_id must be non-empty")
+        if (
+            isinstance(self.epoch, bool)
+            or not isinstance(self.epoch, int)
+            or self.epoch < 0
+        ):
+            raise ValueError("provider session epoch must be a non-negative integer")
+        if not isinstance(self.project_ref, str) or not self.project_ref:
+            raise ValueError("provider session project_ref must be non-empty")
+        if not isinstance(self.session_id, str) or not self.session_id:
+            raise ValueError("provider session session_id must be non-empty")
+
+    def as_tuple(self) -> tuple[str, int, str, str]:
+        """Return the identity in its canonical ordering."""
+
+        return (self.principal_id, self.epoch, self.project_ref, self.session_id)
+
+    def as_dict(self) -> dict[str, str | int]:
+        """Return a JSON-ready projection with no origin ``app`` dimension."""
+
+        return {
+            "principal_id": self.principal_id,
+            "epoch": self.epoch,
+            "project_ref": self.project_ref,
+            "session_id": self.session_id,
+        }
+
+    def serialize(self) -> str:
+        """Serialize the reference deterministically for Avibe-owned SQLite."""
+
+        return json.dumps(
+            self.as_dict(),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    to_json = serialize
+
+    @classmethod
+    def deserialize(cls, value: str) -> "ProviderSessionRef":
+        """Parse a canonical serialized reference without accepting extra fields."""
+
+        try:
+            payload = json.loads(value)
+        except (TypeError, ValueError):
+            raise ValueError("invalid provider session reference") from None
+        if not isinstance(payload, dict) or set(payload) != {
+            "principal_id",
+            "epoch",
+            "project_ref",
+            "session_id",
+        }:
+            raise ValueError("invalid provider session reference")
+        return cls(
+            principal_id=payload["principal_id"],
+            epoch=payload["epoch"],
+            project_ref=payload["project_ref"],
+            session_id=payload["session_id"],
+        )
+
+    from_serialized = deserialize
+
+
+@dataclass(frozen=True)
+class CaptureTarget:
+    """The trusted target for a later bounded-freshness recall."""
+
+    session_ref: ProviderSessionRef
+    target_generation: int
+    target_watermark_ms: int
+
+
+@dataclass(frozen=True)
+class MemorySessionState:
+    """Durable coordinator state for one canonical provider session."""
+
+    provider_session_ref: ProviderSessionRef
+    generation: int = 0
+    first_unflushed_at: str | None = None
+    last_add_ack_at: str | None = None
+    due_at: str | None = None
+    next_attempt_at: str | None = None
+    flush_state: MemoryFlushState = "not_due"
+    watermark: int = 0
+    fence_epoch: int = 0
+    fence_owner: str | None = None
+    fence_acquired_at: str | None = None
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class MemorySettlementRecord:
+    """Append-only Avibe record of an add/flush outcome or manual decision."""
+
+    provider_session_ref: ProviderSessionRef
+    generation: int
+    fence_epoch: int
+    operation_id: str
+    operation_kind: MemoryOperationKind
+    outcome: MemorySettlementOutcome
+    observed_at: str
+    last_known_state: str | None = None
+    last_observed_outcome: MemoryObservedOutcome | None = None
+    request_id: str | None = None
+    error_code: MemoryErrorCode | None = None
+    watermark_before: int | None = None
+    watermark_after: int | None = None
+    actor: str | None = None
+    decision: str | None = None
+    evidence_ref: str | None = None
+    settled_at: str | None = None
+    confirmed_watermark_ms: int | None = None
+    flush_state: MemoryFlushState | None = None
+    source: MemorySettlementSource | None = None
+    settlement_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+
+@dataclass(frozen=True)
+class RecallBudget:
+    """Per-run budget fields reserved for the later recall adapter."""
+
+    limit: int = 10
+    max_results: int | None = None
+    freshness_timeout_seconds: int | None = None
+    timeout_seconds: int | None = None
+    max_model_calls: int | None = None
+    cost_budget_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.limit, int) or isinstance(self.limit, bool) or self.limit < 1:
+            raise ValueError("recall declaration limit must be positive")
+        for name, value in (
+            ("max_results", self.max_results),
+            ("freshness_timeout_seconds", self.freshness_timeout_seconds),
+            ("timeout_seconds", self.timeout_seconds),
+            ("max_model_calls", self.max_model_calls),
+            ("cost_budget_tokens", self.cost_budget_tokens),
+        ):
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 1
+            ):
+                raise ValueError(f"recall declaration {name} must be positive")
+
+
+@dataclass(frozen=True)
+class RecallDeclaration:
+    """One additional explicitly ordered recall run."""
+
+    mode: Literal["keyword", "vector", "hybrid", "agentic"]
+    budget: RecallBudget
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"keyword", "vector", "hybrid", "agentic"}:
+            raise ValueError("invalid recall declaration mode")
+        if self.mode != "agentic" and any(
+            value is not None
+            for value in (
+                self.budget.max_results,
+                self.budget.timeout_seconds,
+                self.budget.max_model_calls,
+                self.budget.cost_budget_tokens,
+            )
+        ):
+            raise ValueError("agentic budget is only valid for agentic declarations")
+        if self.mode == "agentic" and any(
+            value is None
+            for value in (
+                self.budget.max_results,
+                self.budget.timeout_seconds,
+                self.budget.max_model_calls,
+                self.budget.cost_budget_tokens,
+            )
+        ):
+            raise ValueError("agentic declarations require complete budgets")
+
+
+@dataclass(frozen=True)
+class RecallPolicy:
+    """Avibe-owned search policy shape reserved for the later recall phases."""
+
+    mode: Literal["auto", "keyword", "vector", "hybrid", "agentic"] = "hybrid"
+    limit: int = 10
+    max_results: int | None = None
+    freshness: RecallFreshness = "eventual"
+    freshness_timeout_seconds: int | None = None
+    wait_scope: ProviderSessionRef | None = None
+    target_generation: int | None = None
+    target_watermark_ms: int | None = None
+    include_profile: bool = False
+    filters: dict[str, Any] | None = None
+    process_timeout_seconds: int = 30
+    timeout_seconds: int | None = None
+    max_model_calls: int | None = None
+    cost_budget_tokens: int | None = None
+    declarations: tuple[RecallDeclaration, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"auto", "keyword", "vector", "hybrid", "agentic"}:
+            raise ValueError("invalid Memory recall mode")
+        if self.freshness not in {"eventual", "bounded", "session_overlay"}:
+            raise ValueError("invalid Memory recall freshness")
+        if not isinstance(self.limit, int) or isinstance(self.limit, bool) or self.limit < 1:
+            raise ValueError("recall limit must be positive")
+        if self.max_results is not None:
+            if (
+                not isinstance(self.max_results, int)
+                or isinstance(self.max_results, bool)
+                or self.max_results < 1
+            ):
+                raise ValueError("recall max_results must be positive")
+            if self.mode != "agentic":
+                raise ValueError("max_results is only valid for agentic recall")
+            if self.max_results < self.limit:
+                raise ValueError("recall max_results must cover the recall limit")
+        if (
+            not isinstance(self.process_timeout_seconds, int)
+            or isinstance(self.process_timeout_seconds, bool)
+            or self.process_timeout_seconds < 1
+        ):
+            raise ValueError("recall process timeout must be positive")
+        bounded_target = (
+            self.wait_scope,
+            self.target_generation,
+            self.target_watermark_ms,
+        )
+        if self.freshness == "bounded":
+            if any(value is None for value in bounded_target):
+                raise ValueError("bounded recall requires a complete session target")
+            if (
+                self.freshness_timeout_seconds is None
+                or not isinstance(self.freshness_timeout_seconds, int)
+                or isinstance(self.freshness_timeout_seconds, bool)
+                or self.freshness_timeout_seconds < 1
+            ):
+                raise ValueError("bounded recall requires a positive freshness timeout")
+        elif any(value is not None for value in bounded_target):
+            raise ValueError("session target is only valid for bounded recall")
+        elif self.freshness_timeout_seconds is not None:
+            raise ValueError("freshness timeout is only valid for bounded recall")
+        if self.target_generation is not None and (
+            not isinstance(self.target_generation, int)
+            or isinstance(self.target_generation, bool)
+            or self.target_generation < 0
+        ):
+            raise ValueError("recall target generation must be non-negative")
+        if self.target_watermark_ms is not None and (
+            not isinstance(self.target_watermark_ms, int)
+            or isinstance(self.target_watermark_ms, bool)
+            or self.target_watermark_ms < 0
+        ):
+            raise ValueError("recall target watermark must be non-negative")
+        if self.mode == "agentic":
+            if any(
+                value is None
+                or not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 1
+                for value in (self.timeout_seconds, self.max_model_calls, self.cost_budget_tokens)
+            ):
+                raise ValueError("agentic recall requires positive budgets")
+        elif any(
+            value is not None
+            for value in (self.timeout_seconds, self.max_model_calls, self.cost_budget_tokens)
+        ):
+            raise ValueError("agentic budgets are only valid for agentic recall")
+
+
+@dataclass(frozen=True)
 class CaptureAttachment:
     """One Workbench-owned local file forwarded unchanged to the provider."""
 
@@ -88,6 +401,7 @@ class CaptureRequest:
     text: str
     occurred_at_ms: int
     attachments: tuple[CaptureAttachment, ...] = ()
+    app: str | None = None
 
 
 def encode_capture_attachments(attachments: tuple[CaptureAttachment, ...]) -> str | None:
@@ -139,11 +453,45 @@ def decode_capture_attachments(payload: str | None) -> tuple[CaptureAttachment, 
 @dataclass(frozen=True)
 class CaptureAccepted:
     status: Literal["accepted"] = "accepted"
+    session_ref: ProviderSessionRef | None = field(default=None, compare=False)
+    target_generation: int | None = field(default=None, compare=False)
+    target_watermark_ms: int | None = field(default=None, compare=False)
+
+    @property
+    def target(self) -> CaptureTarget | None:
+        if (
+            self.session_ref is None
+            or self.target_generation is None
+            or self.target_watermark_ms is None
+        ):
+            return None
+        return CaptureTarget(
+            session_ref=self.session_ref,
+            target_generation=self.target_generation,
+            target_watermark_ms=self.target_watermark_ms,
+        )
 
 
 @dataclass(frozen=True)
 class CaptureDuplicate:
     status: Literal["duplicate"] = "duplicate"
+    session_ref: ProviderSessionRef | None = field(default=None, compare=False)
+    target_generation: int | None = field(default=None, compare=False)
+    target_watermark_ms: int | None = field(default=None, compare=False)
+
+    @property
+    def target(self) -> CaptureTarget | None:
+        if (
+            self.session_ref is None
+            or self.target_generation is None
+            or self.target_watermark_ms is None
+        ):
+            return None
+        return CaptureTarget(
+            session_ref=self.session_ref,
+            target_generation=self.target_generation,
+            target_watermark_ms=self.target_watermark_ms,
+        )
 
 
 @dataclass(frozen=True)
@@ -305,3 +653,10 @@ class ClearCompleted:
 
 
 ClearReceipt: TypeAlias = ClearCompleted | OperationFailed
+
+
+# Short names are kept as public aliases so later coordinator modules can use
+# the domain vocabulary without coupling callers to the storage projection's
+# implementation prefix.
+SessionFlushState = MemorySessionState
+SettlementRecord = MemorySettlementRecord

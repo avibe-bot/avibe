@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
     source_message_digest TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL,
     session_id TEXT NOT NULL,
+    provider_session_ref TEXT,
+    target_generation INTEGER CHECK (target_generation IS NULL OR target_generation >= 0),
+    target_watermark_ms INTEGER CHECK (
+        target_watermark_ms IS NULL OR target_watermark_ms >= 0
+    ),
     principal_id TEXT NOT NULL CHECK (
         length(principal_id) = 34
         AND substr(principal_id, 1, 2) = 'u-'
@@ -44,6 +49,7 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
         AND substr(project_ref, 3) NOT GLOB '*[^0-9a-f]*'
     ),
     provenance TEXT NOT NULL CHECK (provenance IN ('user_input', 'agent')),
+    app TEXT,
     payload_text TEXT,
     payload_attachments TEXT,
     occurred_at_ms INTEGER NOT NULL,
@@ -85,3 +91,88 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
 
 CREATE INDEX IF NOT EXISTS ix_memory_capture_due
     ON memory_capture_queue (epoch, state, next_retry_at);
+
+-- Version 2 coordination state.  The queue remains the compatibility source
+-- for delivery history; these tables are the append-safe foundation for the
+-- later session flush coordinator and bounded freshness reads.
+CREATE TABLE IF NOT EXISTS memory_session_flush_state (
+    provider_session_ref TEXT PRIMARY KEY,
+    principal_id TEXT NOT NULL CHECK (
+        length(principal_id) = 34
+        AND substr(principal_id, 1, 2) = 'u-'
+        AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
+    ),
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    project_ref TEXT NOT NULL CHECK (
+        length(project_ref) = 34
+        AND substr(project_ref, 1, 2) = 'p-'
+        AND substr(project_ref, 3) NOT GLOB '*[^0-9a-f]*'
+    ),
+    session_id TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    first_unflushed_at TEXT,
+    last_add_ack_at TEXT,
+    due_at TEXT,
+    next_attempt_at TEXT,
+    flush_state TEXT NOT NULL DEFAULT 'not_due' CHECK (
+        flush_state IN (
+            'not_due', 'due', 'in_flight', 'settled',
+            'manual_required', 'settled_with_caveat'
+        )
+    ),
+    watermark INTEGER NOT NULL DEFAULT 0 CHECK (watermark >= 0),
+    fence_epoch INTEGER NOT NULL DEFAULT 0 CHECK (fence_epoch >= 0),
+    fence_owner TEXT,
+    fence_acquired_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE (principal_id, epoch, project_ref, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_memory_session_flush_due
+    ON memory_session_flush_state (flush_state, due_at, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS memory_flush_settlements (
+    settlement_id TEXT PRIMARY KEY,
+    provider_session_ref TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    fence_epoch INTEGER NOT NULL CHECK (fence_epoch >= 0),
+    operation_id TEXT NOT NULL,
+    operation_kind TEXT NOT NULL CHECK (
+        operation_kind IN ('add', 'flush', 'fingerprint_resolve')
+    ),
+    outcome TEXT NOT NULL CHECK (
+        outcome IN (
+            'succeeded', 'rejected', 'unknown', 'manual_required',
+            'committed', 'not_committed', 'settled_with_caveat'
+        )
+    ),
+    last_known_state TEXT,
+    last_observed_outcome TEXT,
+    request_id TEXT,
+    error_code TEXT,
+    watermark_before INTEGER CHECK (watermark_before IS NULL OR watermark_before >= 0),
+    watermark_after INTEGER CHECK (watermark_after IS NULL OR watermark_after >= 0),
+    actor TEXT,
+    decision TEXT,
+    evidence_ref TEXT,
+    observed_at TEXT NOT NULL,
+    settled_at TEXT NOT NULL,
+    confirmed_watermark_ms INTEGER CHECK (
+        confirmed_watermark_ms IS NULL OR confirmed_watermark_ms >= 0
+    ),
+    flush_state TEXT CHECK (
+        flush_state IS NULL OR flush_state IN (
+            'not_due', 'due', 'in_flight', 'settled',
+            'manual_required', 'settled_with_caveat'
+        )
+    ),
+    source TEXT CHECK (
+        source IS NULL OR source IN (
+            'add', 'natural_boundary', 'flush', 'migration', 'manual'
+        )
+    ),
+    UNIQUE (provider_session_ref, generation, operation_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_memory_flush_settlements_session
+    ON memory_flush_settlements (provider_session_ref, generation, observed_at);

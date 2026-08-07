@@ -161,6 +161,21 @@ async def test_capture_excludes_active_clear_and_status_prioritizes_clearing(tmp
     assert store.list_queue_rows() == ()
 
 
+async def test_capture_receipts_expose_the_pinned_bounded_target(tmp_path: Path) -> None:
+    module, _store, _provider = _module(tmp_path)
+
+    first = await module.capture(_request(source="bounded-target"))
+    duplicate = await module.capture(_request(source="bounded-target", occurred_at_ms=99_000))
+
+    assert isinstance(first, CaptureAccepted)
+    assert isinstance(duplicate, CaptureDuplicate)
+    assert first.target is not None
+    assert duplicate.target == first.target
+    assert first.target.session_ref.session_id.startswith("src--")
+    assert first.target.target_generation == 0
+    assert first.target.target_watermark_ms == 1_000
+
+
 async def test_capture_normalizes_deduplicates_and_never_persists_raw_ids(tmp_path: Path) -> None:
     module, store, _provider = _module(tmp_path)
     request = _request(

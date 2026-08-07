@@ -278,7 +278,7 @@ class MemoryWorker:
         settled = await self._store_call(
             self._store.settle,
             row,
-            Delivered(add_request_id=ack.request_id),
+            Delivered(add_request_id=ack.request_id, add_status=ack.status),
             lease_owner=self._boot_id,
             now=self._current_time(),
         )

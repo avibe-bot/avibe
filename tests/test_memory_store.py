@@ -24,6 +24,7 @@ from core.memory.store import (
     derive_principal_id,
     _keyed_digest,
 )
+from core.memory.types import MemorySettlementRecord, ProviderSessionRef
 
 
 PROJECT = "p-22222222222222222222222222222222"
@@ -92,7 +93,13 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             row[1]
             for row in conn.execute("PRAGMA index_list('memory_capture_queue')")
         }
-        assert {"memory_meta", "memory_capture_queue"}.issubset(tables)
+        assert {
+            "memory_meta",
+            "memory_capture_queue",
+            "memory_session_flush_state",
+            "memory_flush_settlements",
+        }.issubset(tables)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         assert "ix_memory_capture_due" in indexes
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
@@ -107,6 +114,9 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "flush_error_code",
             "flush_request_id",
             "flush_observed_at",
+            "provider_session_ref",
+            "target_generation",
+            "target_watermark_ms",
         }.issubset(queue_columns)
         assert {
             "processing_fault_kind",
@@ -123,6 +133,27 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
                 ) VALUES ('invalid', 0, 'src', 'payload', 1, 1, 'delivered', 'now')
                 """
             )
+
+
+def test_provider_session_ref_round_trips_without_app_identity() -> None:
+    reference = ProviderSessionRef(
+        principal_id="u-11111111111111111111111111111111",
+        epoch=7,
+        project_ref=PROJECT,
+        session_id="src--provider-session--e7",
+    )
+
+    encoded = reference.serialize()
+    assert "app" not in encoded
+    assert ProviderSessionRef.deserialize(encoded) == reference
+    assert reference.as_tuple() == (
+        "u-11111111111111111111111111111111",
+        7,
+        PROJECT,
+        "src--provider-session--e7",
+    )
+    with pytest.raises(ValueError):
+        ProviderSessionRef.deserialize('{"principal_id":"u-only"}')
 
 
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
@@ -170,6 +201,201 @@ def test_reused_memory_session_anchor_is_namespaced_by_project(tmp_path: Path) -
     assert first.row is not None and second.row is not None
     assert first.row.session_id != second.row.session_id
     assert first.row.project_ref != second.row.project_ref
+
+
+def test_capture_target_is_pinned_and_settlement_is_per_generation(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    accepted = _enqueue(store, "target", occurred_at_ms=1_000)
+    assert accepted.row is not None
+    assert accepted.provider_session_ref == accepted.row.provider_session_ref
+    assert accepted.target_generation == 0
+    assert accepted.target_watermark_ms == accepted.row.provider_timestamp_ms
+
+    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+    assert store.settle(
+        row,
+        Delivered(add_request_id="add-target", add_status="accumulated"),
+        lease_owner="boot",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
+    session_ref = accepted.provider_session_ref
+    assert session_ref is not None
+    assert store.mark_flush_in_flight(row.session_id, PROJECT) == 1
+    assert store.record_flush_verdict(
+        row.session_id,
+        PROJECT,
+        FlushSucceeded(request_id="flush-target", status="extracted"),
+        now="2026-01-01T00:00:03.000Z",
+    ) == 1
+
+    state = store.get_session_flush_state(session_ref)
+    assert state is not None
+    assert state.generation == 0
+    assert state.flush_state == "settled"
+    assert state.watermark == accepted.row.provider_timestamp_ms
+    settlements = store.list_flush_settlements(session_ref, generation=0)
+    assert {record.operation_kind for record in settlements} == {"add", "flush"}
+    assert any(
+        record.source == "flush"
+        and record.confirmed_watermark_ms == accepted.row.provider_timestamp_ms
+        for record in settlements
+    )
+
+    duplicate = _enqueue(store, "target", occurred_at_ms=99_000)
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.target_generation == accepted.target_generation
+    assert duplicate.target_watermark_ms == accepted.target_watermark_ms
+
+
+def test_stale_settlement_is_retained_without_mutating_live_state(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    accepted = _enqueue(store, "stale")
+    assert accepted.provider_session_ref is not None
+    before = store.get_session_flush_state(accepted.provider_session_ref)
+    assert before is not None
+
+    assert store.record_settlement(
+        MemorySettlementRecord(
+            provider_session_ref=accepted.provider_session_ref,
+            generation=before.generation + 1,
+            fence_epoch=before.fence_epoch + 1,
+            operation_id="future-generation",
+            operation_kind="flush",
+            outcome="unknown",
+            observed_at="2026-01-01T00:00:01.000Z",
+        )
+    ) is True
+
+    after = store.get_session_flush_state(accepted.provider_session_ref)
+    assert after == before
+    assert len(store.list_flush_settlements(accepted.provider_session_ref)) == 1
+
+
+def _create_v1_store(database: Path) -> None:
+    database.parent.mkdir(parents=True, exist_ok=True)
+    principal = "u-11111111111111111111111111111111"
+    project = PROJECT
+    with sqlite3.connect(database) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE memory_meta (
+                singleton INTEGER PRIMARY KEY,
+                epoch INTEGER NOT NULL,
+                clear_in_progress INTEGER NOT NULL,
+                scope_key BLOB NOT NULL,
+                provider_root_id TEXT NOT NULL,
+                last_provider_timestamp_ms INTEGER NOT NULL,
+                missed_count INTEGER NOT NULL,
+                last_success_at TEXT,
+                last_error TEXT,
+                last_error_at TEXT,
+                processing_fault_kind TEXT,
+                processing_fault_since TEXT,
+                processing_alert_active INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE memory_capture_queue (
+                source_message_digest TEXT PRIMARY KEY,
+                epoch INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                project_ref TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                payload_text TEXT,
+                payload_attachments TEXT,
+                occurred_at_ms INTEGER NOT NULL,
+                provider_timestamp_ms INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT,
+                lease_owner TEXT,
+                lease_at TEXT,
+                last_error TEXT,
+                add_request_id TEXT,
+                flush_observation TEXT,
+                flush_status TEXT,
+                flush_error_code TEXT,
+                flush_request_id TEXT,
+                flush_observed_at TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_meta (
+                singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                last_provider_timestamp_ms, missed_count, updated_at
+            ) VALUES (1, 0, 0, ?, 'legacy-root', 2000, 0, '2026-01-01T00:00:00.000Z')
+            """,
+            (bytes.fromhex("11" * 32),),
+        )
+        conn.executemany(
+            """
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id, principal_id, project_ref,
+                provenance, payload_text, occurred_at_ms, provider_timestamp_ms,
+                state, attempts, created_at, completed_at, flush_observation,
+                flush_observed_at
+            ) VALUES (?, 0, 'legacy-wire', ?, ?, 'user_input', ?, ?, ?, ?, 0, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "legacy-unknown",
+                    principal,
+                    project,
+                    None,
+                    1_000,
+                    1_000,
+                    "delivered",
+                    "2026-01-01T00:00:00.100Z",
+                    "2026-01-01T00:00:00.200Z",
+                    "unknown",
+                    "2026-01-01T00:00:00.200Z",
+                ),
+                (
+                    "legacy-in-flight",
+                    principal,
+                    project,
+                    "recoverable payload",
+                    2_000,
+                    2_000,
+                    "processing",
+                    "2026-01-01T00:00:00.300Z",
+                    None,
+                    "in_flight",
+                    None,
+                ),
+            ],
+        )
+        conn.execute("PRAGMA user_version = 0")
+
+
+def test_v1_store_migrates_unknown_rows_conservatively_and_idempotently(tmp_path: Path) -> None:
+    database = _store_path(tmp_path)
+    _create_v1_store(database)
+
+    store = MemoryStore(database)
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        queue_columns = {row[1] for row in conn.execute("PRAGMA table_info(memory_capture_queue)")}
+        assert {"provider_session_ref", "target_generation", "target_watermark_ms", "app"} <= queue_columns
+
+    rows = store.list_queue_rows()
+    assert [row.flush_observation for row in rows] == ["unknown", "in_flight"]
+    assert all(row.provider_session_ref is not None for row in rows)
+    state = store.list_session_flush_states()
+    assert len(state) == 1
+    assert state[0].flush_state == "manual_required"
+    assert state[0].fence_epoch == 1
+    settlements = store.list_flush_settlements()
+    assert len(settlements) == 2
+    assert {record.outcome for record in settlements} == {"manual_required"}
+
+    MemoryStore(database)
+    assert len(store.list_flush_settlements()) == 2
 
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))

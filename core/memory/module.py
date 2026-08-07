@@ -251,6 +251,7 @@ class MemoryModule:
                 provenance=request.provenance,
                 payload_text=normalized_text,
                 payload_attachments=encode_capture_attachments(request.attachments),
+                app=request.app,
                 occurred_at_ms=request.occurred_at_ms,
                 max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
                 nonterminal_limit=MAX_NONTERMINAL_QUEUE_ROWS,
@@ -261,9 +262,17 @@ class MemoryModule:
             return OperationFailed(error="memory_store_unavailable")
 
         if result.outcome == "accepted":
-            return CaptureAccepted()
+            return CaptureAccepted(
+                session_ref=result.provider_session_ref,
+                target_generation=result.target_generation,
+                target_watermark_ms=result.target_watermark_ms,
+            )
         if result.outcome == "duplicate":
-            return CaptureDuplicate()
+            return CaptureDuplicate(
+                session_ref=result.provider_session_ref,
+                target_generation=result.target_generation,
+                target_watermark_ms=result.target_watermark_ms,
+            )
         if result.outcome == "queue_full":
             return CaptureSkipped(reason="memory_queue_full")
         if result.outcome == "timestamp_invalid":
