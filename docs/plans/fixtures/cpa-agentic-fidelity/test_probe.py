@@ -61,7 +61,7 @@ class ProbeParserTests(unittest.TestCase):
     def test_case_round_trip_is_driven_by_first_response(self) -> None:
         requests: list[dict[str, object]] = []
 
-        def fake_request(path: str, payload: dict[str, object], *, stream: bool) -> probe.TransportResult:
+        def fake_request(path: str, payload: dict[str, object], *, client_protocol: str, stream: bool) -> probe.TransportResult:
             requests.append(payload)
             if len(requests) == 1:
                 return probe.TransportResult(
@@ -79,7 +79,7 @@ class ProbeParserTests(unittest.TestCase):
                 )
             return probe.TransportResult(
                 200,
-                {"content": [{"type": "text", "text": f"{probe.SYSTEM_MARKER} WEATHER_OK"}], "stop_reason": "end_turn"},
+                {"content": [{"type": "text", "text": f"{probe.SYSTEM_MARKER} {probe.SYSTEM_SCOPE_OK} WEATHER_OK"}], "stop_reason": "end_turn"},
                 [],
                 False,
                 0,
@@ -108,6 +108,44 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(payload["tool_choice"], {"type": "auto"})
         self.assertTrue(probe._valid_qualified_model("src/model"))
         self.assertFalse(probe._valid_qualified_model("bare-model"))
+
+    def test_parallel_prompt_names_both_tools_and_city_is_constrained(self) -> None:
+        prompt = probe._user_prompt(True)
+        self.assertIn("lookup_weather", prompt)
+        self.assertIn("lookup_time", prompt)
+        schema = probe._tool_definitions()[0]["input_schema"]
+        self.assertEqual(schema["properties"]["city"]["enum"], ["Shanghai"])
+
+    def test_stream_order_rejects_lifecycle_violation(self) -> None:
+        ordered = [
+            {"kind": "event", "sequence": 0, "event": {"type": "content_block_start", "index": 0}},
+            {"kind": "event", "sequence": 1, "event": {"type": "content_block_delta", "index": 0}},
+            {"kind": "event", "sequence": 2, "event": {"type": "content_block_stop", "index": 0}},
+            {"kind": "event", "sequence": 3, "event": {"type": "message_stop"}},
+        ]
+        invalid = [ordered[1], ordered[0], ordered[2], ordered[3]]
+        self.assertTrue(probe._stream_order_ok("anthropic", ordered))
+        self.assertFalse(probe._stream_order_ok("anthropic", invalid))
+
+    def test_protocol_stop_reasons_are_required(self) -> None:
+        first = probe._parse_chat_document({"choices": [{"message": {"tool_calls": []}, "finish_reason": "stop"}]})
+        projection = probe._validate_first(first, ("lookup_weather",), stream=False)
+        self.assertFalse(projection["checks"]["stop_reason"])
+
+    def test_system_scope_rejects_user_conflict_marker(self) -> None:
+        second = probe._parse_anthropic_document(
+            {"content": [{"type": "text", "text": f"{probe.SYSTEM_MARKER} {probe.SYSTEM_SCOPE_OK} {probe.USER_SCOPE_LEAK} WEATHER_OK"}], "stop_reason": "end_turn"}
+        )
+        projection = probe._validate_second(second, ("lookup_weather",), stream=False)
+        self.assertFalse(projection["checks"]["system_scope"])
+
+    def test_stream_gate_rejects_invalid_utf8_and_deadline(self) -> None:
+        result = probe.TransportResult(200, None, [], False, 1, False, True)
+        turn = probe._parse_turn("anthropic", result, stream=True)
+        projection = probe._validate_first(turn, ("lookup_weather",), stream=True)
+        self.assertFalse(projection["checks"]["parsed"])
+        self.assertFalse(projection["checks"]["stream_order"])
+        self.assertFalse(projection["checks"]["stream_deadline"])
 
 
 if __name__ == "__main__":
