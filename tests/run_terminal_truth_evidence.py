@@ -55,12 +55,30 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
 }
 
 QUESTION_PROBES: Final = {
-    "Q1": (("unproven", "direct-IM terminal-settlement boundary"),),
-    "Q3": (
-        ("unproven", "mixed-source Turn coalescing"),
-        ("unproven", "Turn-level cancellation cardinality"),
+    "Q1": tuple(
+        RUN_TERMINAL_TRUTH_MATRIX[(backend, lane, trigger)][outcome]
+        for backend in BACKENDS
+        for lane in LANES
+        for trigger in TRIGGERS
+        for outcome in OUTCOMES
     ),
-    "Q4": (("unproven", "cross-backend pre-terminal evidence precedence"),),
+    "Q3": tuple(
+        (
+            "unproven",
+            f"Probe: record {backend}/{lane} mixed-source Turn membership and "
+            "Turn-level cancellation cardinality.",
+        )
+        for backend in BACKENDS
+        for lane in LANES
+    ),
+    "Q4": tuple(
+        (
+            "unproven",
+            f"Probe: establish {backend}/{lane} pre-terminal evidence precedence.",
+        )
+        for backend in BACKENDS
+        for lane in LANES
+    ),
     "Q5": (("unproven", "bounded-history crash-window reconciliation"),),
 }
 
@@ -68,10 +86,16 @@ QUESTION_PROBES: Final = {
 def _question(
     open_verdict: str, probes: tuple[tuple[str, str], ...]
 ) -> dict[str, str | tuple[str, ...]]:
+    unsupported = {status for status, _ in probes} - {"unproven", "covered"}
+    if unsupported:
+        raise ValueError(f"Unsupported proof status: {sorted(unsupported)}")
     open_probes = tuple(label for status, label in probes if status == "unproven")
+    resolved_evidence = tuple(label for status, label in probes if status == "covered")
     return {
         "verdict": open_verdict if open_probes else "answered",
-        "answer": open_probes,
+        "answer": open_probes or resolved_evidence,
+        "open_blockers": open_probes,
+        "resolved_evidence": resolved_evidence,
     }
 
 

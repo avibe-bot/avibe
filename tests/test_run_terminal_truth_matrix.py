@@ -12,6 +12,7 @@ from tests.run_terminal_truth_evidence import (
     RUN_TERMINAL_TRUTH_MATRIX,
     TRIGGERS,
     UNPROVEN_BUDGET,
+    _question,
 )
 
 
@@ -81,15 +82,38 @@ def test_q2_remains_blocked_until_every_backend_lane_has_exact_attribution() -> 
 def test_every_pr7r_question_is_derived_from_open_probe_obligations() -> None:
     """HFR-183: every required answer is consumed from structured evidence."""
     assert set(PR7R_QUESTIONS) == {"Q1", "Q2", "Q3", "Q4", "Q5"}
+    assert QUESTION_PROBES["Q1"] == tuple(proof for *_, proof in _cells())
     evidence = {
         **QUESTION_PROBES,
         "Q2": tuple(EXACT_TURN_PROGRESS_SIGNALS.values()),
     }
     for question, probes in evidence.items():
         open_probes = tuple(label for status, label in probes if status == "unproven")
-        assert PR7R_QUESTIONS[question]["answer"] == open_probes
+        resolved_evidence = tuple(
+            label for status, label in probes if status == "covered"
+        )
+        assert PR7R_QUESTIONS[question]["answer"] == (
+            open_probes or resolved_evidence
+        )
+        assert PR7R_QUESTIONS[question]["open_blockers"] == open_probes
+        assert PR7R_QUESTIONS[question]["resolved_evidence"] == resolved_evidence
         assert PR7R_QUESTIONS[question]["verdict"] == (
             ("blocked" if question == "Q2" else "open")
             if open_probes
             else "answered"
         )
+    assert _question(
+        "open",
+        (("covered", "observed conclusion"), ("unproven", "remaining probe")),
+    ) == {
+        "verdict": "open",
+        "answer": ("remaining probe",),
+        "open_blockers": ("remaining probe",),
+        "resolved_evidence": ("observed conclusion",),
+    }
+    assert _question("open", (("covered", "observed conclusion"),)) == {
+        "verdict": "answered",
+        "answer": ("observed conclusion",),
+        "open_blockers": (),
+        "resolved_evidence": ("observed conclusion",),
+    }
