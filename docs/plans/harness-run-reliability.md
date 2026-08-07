@@ -41,7 +41,9 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; PR4B unopened — its crash-matrix gate was never run |
-| Scheduled/watch terminal-time truth and cron liveness | **Closed 2026-08-07 — not reproduced.** See §7 |
+| Cron liveness | **Closed 2026-08-07 — not reproduced.** See §7 |
+| Terminal-time truth, Turn-bound Runs | **Closed 2026-08-07 — disproven.** See §7 |
+| Terminal-order truth, non-Turn Runs (`watch`, `scheduled`, command) | **Open.** No durable second row exists to check settlement against; carried as a residual in §7 |
 
 The post-plan architecture is load-bearing (now also recorded in `AGENTS.md`):
 
@@ -1242,10 +1244,18 @@ the same invariant.
   therefore measured too — `completed_at - created_at` over every settled Run:
 
   ```text
-  succeeded  n=1482  avg 12.2 min  max 1035.0 min   29 over 2h
+  succeeded  n=1484  avg 12.2 min  max 1035.0 min   29 over 2h
   failed     n=  52  avg 21.4 min  max  150.9 min    1 over 2h
   canceled   n=  19  avg 15.0 min  max   65.7 min    0 over 2h
   ```
+
+  Snapshot 2026-08-07T08:21Z, so the totals differ from the 07:57Z block above
+  by 24 minutes of growth: `succeeded` 1489 of which 1484 carry a
+  `completed_at`, `failed` 52 of 52, `canceled` 19 of 19, 1 live. The five
+  successes without a `completed_at` are the same five noted under the coverage
+  limit below; they are excluded from the durations because there is nothing to
+  subtract, which is exactly why the timed count is five short of the status
+  count at any instant.
 
   Thirty Runs did exceed two hours, and every one is accounted for. 29 are
   `watch_runtime` Runs — a waiter that blocks for nine hours is doing its job,
@@ -1286,6 +1296,23 @@ still in flight (run running, turn active)  1
 total                                    387
 Runs terminal while their Turn was not     0
 ```
+
+Ordering is only half the claim: a Run marked `succeeded` after its Turn
+*failed* would sit in these buckets and satisfy every predicate above. So the
+two statuses were cross-tabulated directly:
+
+```text
+run.status   x  session_turns.terminal_outcome      n
+succeeded    x  completed                         355
+failed       x  failed                             23
+canceled     x  canceled                           12
+running      x  (null, still active)                1
+                                                 ----
+off-diagonal                                        0
+```
+
+A perfect diagonal, all-time: no Run has ever carried a status its Turn did not
+produce. That is the semantic half; the buckets below are the ordering half.
 
 The buckets are exhaustive over the join — they sum to the full 387, with the
 one live row named rather than filtered away. The last line is checked against
@@ -1346,12 +1373,12 @@ Watch-Run duration for context: `succeeded` averages 2.0 min (n=840),
 `failed_with_cause` 7.4 min (n=18), `failed_blank` 58.3 min with a 150.9 min max
 (n=18).
 
-**The user was told.** All 18 carry `metadata.owed_failure_notice` with
-`state = "sent"`, `attempts = 1`, and `ack_evidence = "receipt"`. Empty
+**The user was mostly told.** 14 of the 18 carry
+`metadata.owed_failure_notice` with `state = "sent"`, `attempts = 1`, and
+`ack_evidence = "receipt"`; the remaining 4 carry `state = "skipped"`. Empty
 `message_ids_json` and null `callback_status` prove nothing here: the
 failure-notice lane does not populate `message_ids_json`, and a null callback
-status can simply mean no callback was owed. Invariant 8 is satisfied and any
-fix must not re-notify these Runs.
+status can simply mean no callback was owed. Any fix must not re-notify the 14.
 
 What the notice carried is the defect. Every one of those 18 stamps
 `"interrupt_reason": null, "error": null` — a notice went out with no cause in
@@ -1361,13 +1388,38 @@ control group: same shape, but it recorded
 `backend_runtime_exited_before_terminal`. Two settlement paths exist and only
 one supplies a reason to the notice writer.
 
-**This is an ordinary bug, tracked outside this plan.** It needs no evidence
-gate, no contract amendment, and no new owner — invariant 2 already specifies
-the required behavior, and the notice lane already works. The fix is to hand the
-sweep's reason to the notice writer instead of stamping `null`; it must not
-re-notify Runs whose `owed_failure_notice.state` is already `sent`. The
-58-minute hold before the sweep is the root cause behind that and is worth a
-separate look; supplying the cause is triage.
+**The writer is unidentified, and that is the first step — not "pass the
+reason".** An earlier revision of this section prescribed handing the sweep's
+reason to the notice writer. That prescription was wrong: the two obvious
+candidates on `master` already do it, and neither can have written these rows.
+
+- `SQLiteBackgroundTaskStore.sweep_stale_runs` settles through
+  `settle_run_terminal` with both `error=error_texts.get(reason)` and
+  `metadata={"interrupt_reason": reason}`. It also excludes `watch_runtime`
+  outright and restricts its `running` class to `run_type == "agent_run"`.
+- `recover_processing_runs` writes `error` and `interrupt_reason` atomically,
+  and requires `delivery_id IS NULL`.
+- All three `settle_without_result` call sites pass an `interrupt_reason` or a
+  delivery outcome.
+
+Every one of the 18 rows is `run_type = "watch"`, `source_kind = "watch"`,
+`delivery_id` **set**, `pid` set, and carries no `interrupt_reason`,
+`failure_code`, or `ok` anywhere in `metadata_json` — not merely a null inside
+the notice. Each named writer's own predicate excludes that shape, so none of
+them produced these rows.
+
+Timing narrows it further, and may close it: the 18 settle on 2026-08-04 (12)
+and 2026-08-05 (6) — the exact days PR3 (#1155) and PR4 (#1173) merged and
+replaced this machinery. These rows are plausibly artifacts of the writer those
+PRs removed.
+
+**So the follow-up is an ordinary bug whose first task is identification, not a
+fix.** Determine whether any path on current `master` can still settle a
+Turn-bound `watch` Run to `failed` with no cause in `metadata_json`. If none
+can, close it as already fixed and record that. If one can, then invariant 2
+already specifies the behavior and the fix is to supply the cause — without
+re-notifying the 14 rows whose notice is already `sent`. The 58-minute hold
+before the sweep is worth a separate look either way.
 
 ### Why PR7R was dropped
 
