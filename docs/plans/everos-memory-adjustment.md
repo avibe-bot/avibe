@@ -348,13 +348,13 @@ Cascade asynchronously projects to LanceDB
 
 ### 5.3 Flush Generation Invariants
 
-Each `(principal_id, epoch, app, project, session)` owns an independent flush generation. The canonical key is the **provider session reference** derived as `_provider_session_ref(scope_key, principal_id, project_ref, session_id, meta.epoch)` (`core/memory/store.py:302-308`); the same reference is what the worker passes to both `/add` and `/flush` (`core/memory/worker.py:240-250, 287-298`), so the identity Avibe fences and flushes is the same identity EverOS sees on the wire. A logical session identifier alone is not sufficient: two principals reusing one logical session ID, or one session surviving an epoch change (e.g. after a manual restart), must not collide on the same fence. The canonical key therefore preserves principal_id and epoch:
+Each `(principal_id, epoch, project_ref, session_id)` owns an independent flush generation. The `app` value is retained as origin metadata, but it is not an alternate flush identity. The canonical key is the **provider session reference** derived as `_provider_session_ref(scope_key, principal_id, project_ref, session_id, meta.epoch)` (`core/memory/store.py:302-308`); the same reference is what the worker passes to both `/add` and `/flush` (`core/memory/worker.py:240-250, 287-298`), so the identity Avibe fences and flushes is the same identity EverOS sees on the wire. A logical session identifier alone is not sufficient: two principals reusing one logical session ID, or one session surviving an epoch change (e.g. after a manual restart), must not collide on the same fence. The canonical key therefore preserves principal_id and epoch:
 
 - `principal_id`: derived `u-…` value, derived from `runtime.principal_for_user_key()` for UI callers and asserted for CLI / API callers (see §11.4);
 - `epoch`: the current `memory_meta.epoch` value at enqueue time, taken from `meta.epoch` in `MemoryStore.enqueue_request`;
 - `project_ref`: scope identifier matching the project filter that the read adapter enforces (§11.4);
 - `session_id`: the logical session identifier supplied by the caller, kept as the human-facing label;
-- `app`: the backend or surface identifier that originated the capture (UI, CLI, agent, IM).
+- `app`: the backend or surface identifier that originated the capture (UI, CLI, agent, IM), retained for provenance but excluded from `provider_session_ref`.
 
 The canonical key must be uniform across capture, add, flush, log, and recovery paths. Mixing `(session, project)`, `(app, project, session)`, or any principal/epoch-augmented variants across modules is forbidden — fence, watermark, recovery, and EverOS wire identity must all reference the same derived `provider_session_ref`. Whenever the enqueue path reads `principal_id`, `project_ref`, `session_id`, or `meta.epoch`, the resulting tuple is recorded as the canonical session reference; coordinator code (fence acquisition, flush marker, recovery scan, processing-record projection) keys off that reference, never off the bare logical `session_id` alone.
 
@@ -719,15 +719,16 @@ acquire maintenance lock
       the live root
     - drain the Avibe outbox: every pre-quiescence capture row has either
       been committed to the legacy root (and is therefore inside the
-      snapshot window) or is explicitly marked `drained_pending_snapshot`
-      so the snapshot tool skips it; rows that arrive after this point
-      are kept out of the snapshot window and are only delivered once
-      the new sidecar starts
+      snapshot window) or is durably moved to the rotation replay store
+      with `pending_rotation_replay` before it is removed from the
+      snapshot-covered outbox; rows that arrive after this point are kept
+      out of the snapshot window and are only delivered once the new
+      sidecar starts
 → take a restorable snapshot of: Markdown tree, system.db (unprocessed_buffer
     + memcell + md_change_state), ome.db, LanceDB business tables, cluster
     centroids, the current semantic embedding fingerprint, and Avibe outbox
-    (excluding `drained_pending_snapshot` rows, which are quarantined until
-    the new sidecar is live)
+    (the already-moved `pending_rotation_replay` rows are outside this
+    snapshot and remain quarantined until the new sidecar is live)
 → verify snapshot integrity (checksum, file presence, sqlite backup API)
 → save and verify current root
 → preserve Markdown, unprocessed_buffer, memcell, Avibe outbox snapshot
@@ -766,7 +767,7 @@ The rotation replay store is a separate SQLite database outside `state/memory/me
 
 Lifecycle:
 
-- A row enters the rotation replay store only when the rotation tool marks it `drained_pending_snapshot` (§8.3) or when a replay acknowledgement transitions it from the live capture queue into `delivered_pending_rotation_commit`.
+- A row enters the rotation replay store as part of the fenced quarantine move in §8.3: the replay-store copy is written and verified before the source row is removed from the snapshot-covered outbox. A crash between those steps may leave an idempotent duplicate in the live queue, but must never leave the row only in the database being restored. Replay acknowledgements transition rows to `delivered_pending_rotation_commit` in this store.
 - The rotation replay store is **not** backed up by the rotation snapshot and is **not** wiped by `clear` or `restart` of the live capture queue. A `clear` of the live queue never reaches this store, so quarantined rows survive the operator's `clear` action.
 - On snapshot restoration (post-snapshot failure path), the rotation replay store stays on disk; the next rotation re-reads its `pending_rotation_replay` rows and replays them in original order against whichever sidecar is then live. `delivered_pending_rotation_commit` rows that were committed to a now-rolled-back provider root are demoted to `pending_rotation_replay` with the same `add_request_id` for audit only; the next `/add` re-attempts the delivery against the restored-or-rebuilt root.
 - On rotation success, the rotation tool drains the replay store: rows that committed through the normal success-settlement path are removed, rows that did not commit (rare; only when the success-settlement path itself rejected them) return to `pending_rotation_replay` and stay in the store for the next rotation.
@@ -1016,7 +1017,7 @@ For operator-facing call-detail panels the projection must explicitly redact the
 The same rule applies to the **memcell preview** rendered in the processing-record list. `_memcell_preview` (`core/memory/everos_insight/reader.py:1289-1328`) currently projects raw user text after only secret / path scrubbing, and `memory_admin_log_access` is granted to every verified UI key (`core/internal_server.py:995-1003`), which means a Cloud browser session opening this page can read conversation text that does not belong to that session's principal. The list-read path therefore must satisfy both invariants:
 
 1. **Body-redacted preview.** The list-read view is a body-redacted projection. The recorder may keep `text` / `content` / `tool result text` in its private store, but the row returned to the page must replace any conversation body with the same `[redacted]` marker used by the provider-call detail projection; metadata that is not a conversation body (timestamps, message-id, role, sender-id, item-count, capability tags, provider-call links) stays visible so the row remains usable as a processing record.
-2. **Principal-scoped list reads.** The list endpoint accepts a `principal_id` filter, defaults the filter to the requesting principal's verified UI key, and refuses to render a memcell whose `sender_ids_json` does not contain that principal. The full internal view (un-redacted, all principals) is reachable only through an explicit admin capability that is not granted by `memory_admin_log_access`; the Cloud browser session therefore cannot enumerate memcells belonging to other principals even if it bypasses the redacted projection. The default is derived through the same chain `_memory_read_scope()` already uses: the verified UI key is mapped via `runtime.principal_for_user_key()` (`core/memory/store.py:208`) to the `u-…` derived principal that `sender_ids_json` actually contains, then narrowed by the project scope already resolved for the request. `_verified_memory_ui_user_key()` returns values such as `avibe:local` or `avibe:remote:…` (`core/internal_server.py:943-968`), so a literal default to that string would never match any `sender_ids_json` row; passing the raw UI key through `principal_for_user_key` and keeping the project scope resolves both forms of mismatch and prevents the ownership check from silently rejecting every row in the list.
+2. **Principal-scoped list reads.** The list endpoint accepts a `principal_id` filter, defaults the filter to the principal derived from the requesting principal's verified UI key, and refuses to render a memcell whose `sender_ids_json` does not contain that principal. The full internal view (un-redacted, all principals) is reachable only through an explicit admin capability that is not granted by `memory_admin_log_access`; the Cloud browser session therefore cannot enumerate memcells belonging to other principals even if it bypasses the redacted projection. The default is derived through the same chain `_memory_read_scope()` already uses: the verified UI key is mapped via `runtime.principal_for_user_key()` (`core/memory/store.py:208`) to the `u-…` derived principal that `sender_ids_json` actually contains, then narrowed by the project scope already resolved for the request. `_verified_memory_ui_user_key()` returns values such as `avibe:local` or `avibe:remote:…` (`core/internal_server.py:943-968`), so a literal default to that string would never match any `sender_ids_json` row; passing the raw UI key through `principal_for_user_key` and keeping the project scope resolves both forms of mismatch and prevents the ownership check from silently rejecting every row in the list.
 
 Both invariants are checked at the adapter boundary before any row leaves `core/memory/everos_insight/reader.py`. The page renders body-redacted, principal-scoped rows only; the internal recorder is the only consumer of the full view.
 
