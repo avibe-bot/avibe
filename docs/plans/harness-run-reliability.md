@@ -3,9 +3,12 @@
 Status (2026-08-07): **ARCHIVED — complete through PR4.** PR1, PR2, PR5, PR6,
 #1139's Activity-output settlement closure, PR3 (#1155), and PR4 (#1173) all
 merged. PR7/PR7R is dropped and #1212 is closed; see §7. No further unit opens
-from this plan. PR4B stays unopened: it was always gated on a reproducer, and
-nothing has requested it — but that is not the same as disproven, because the
-crash matrix it was gated on was never run. See the delta note in §6.
+from this plan **except PR4B**, which stays conditional rather than closed: it
+was always gated on a reproducer and nothing has requested it, but that is not
+the same as disproven, because the crash matrix it was gated on was never run.
+The gate in §6 still stands and still requires its contract review if the matrix
+reproduces something or the symptom appears in the field. Everything else —
+PR7/PR7R included — is closed.
 
 **The Run/Delivery/Turn/Activity ownership rules and invariants now live in
 `AGENTS.md` §2 "Harness Run Ownership (load-bearing)".** Read those there before
@@ -1232,8 +1235,26 @@ the same invariant.
   counterexample, which is why the claim is not "every row is terminal". The
   time-independent form, and the one to re-check, is `select count(*) from
   agent_runs where status not in ('succeeded','failed','canceled') and
-  julianday('now')-julianday(created_at) > 0.0833` → **0**, all-time. No Run has
-  ever aged past two hours without reaching a terminal status.
+  julianday('now')-julianday(created_at) > 0.0833` → **0**, all-time.
+
+  That query only sees Runs nonterminal *now*, so on its own it cannot rule out a
+  Run that sat nonterminal for hours and then settled. Terminal lifetimes were
+  therefore measured too — `completed_at - created_at` over every settled Run:
+
+  ```text
+  succeeded  n=1482  avg 12.2 min  max 1035.0 min   29 over 2h
+  failed     n=  52  avg 21.4 min  max  150.9 min    1 over 2h
+  canceled   n=  19  avg 15.0 min  max   65.7 min    0 over 2h
+  ```
+
+  Thirty Runs did exceed two hours, and every one is accounted for. 29 are
+  `watch_runtime` Runs — a waiter that blocks for nine hours is doing its job,
+  not stuck, and each has `started_at == created_at` with execution filling the
+  whole lifetime. The 30th is the 150.9-minute `failed` Run below, which is the
+  blank-cause sweep this section reports as a real defect. So the claim is not
+  "no Run ran long" — long Runs are expected under invariant 7. It is that no
+  Run was ever *stranded*: every long lifetime is either a waiter waiting or the
+  one already-recorded defect.
 - **No cron occurrence has been missed.** A single recent fire per definition
   would only prove the scheduler is alive today, so every expected occurrence was
   enumerated from each definition's own `created_at` and stored `timezone` and
@@ -1284,6 +1305,25 @@ check is therefore exact for Turn-bound Runs and silent about the rest.
 On that evidence the old premature-success claim is **disproven** for Turn-bound
 Runs rather than merely unproven — they settle late, not early. Per this plan's
 own rule, a disproven claim closes without code.
+
+Scope of that closure, stated so it is not read wider than it is: it covers
+Turn-bound Runs only. The other 1168 terminal Runs — `watch`, `watch_runtime`,
+`scheduled`, and background `agent_run` — bind no Delivery and therefore no
+Turn, so there is no second durable row to compare their settlement against.
+`exit_code` cannot substitute: it is populated on 6 of those 1168. Their
+timestamps are unremarkable (16 rows have an absent or inverted `started_at` /
+`completed_at` pair; 7 are watch Runs settled in the same second they were
+created without ever starting, 5 are successes with no `completed_at`, and 4 are
+`agent_run` cancellations of unstarted work, which invariant 3 permits), but
+"unremarkable" is not ordering evidence.
+
+**Residual, carried past this plan:** command and watch execution paths have no
+durable record proving the Run settled only after the owning process reached its
+outcome. Nothing observed suggests they do not — but nothing here proves they
+do, and classifying their empty `result_text` as intentional (below) says
+something about output, not about ordering. Anyone adding a durable terminal
+marker to those paths closes this; until then invariant 1 is enforced by review
+rather than by evidence for non-Turn Runs.
 
 ### What the same data did find
 

@@ -75,6 +75,11 @@ Invariants every change must preserve:
    Run in the same session must not keep stuck work alive.
 7. **No turn-duration timeout.** A healthy turn may run for hours. Bounds may
    apply to inactivity and post-turn delivery, never to productive execution.
+   Known exception, not yet resolved: `OpenCodePollLoop` fixes a deadline from
+   `active_turn_timeout_seconds` (default 90 min) at turn start and
+   `_settle_active_turn_timeout` aborts the native session when it expires,
+   regardless of progress. Treat that as a defect to remove, not as precedent —
+   do not add a second one, and do not assume OpenCode already allows long turns.
 8. **Failures remain visible.** Reconcile paths must use #1072's durable notice
    path; a terminal row alone is not the exit criterion.
 9. **One output batch has one receipt.** Preserve #1139's stable receipt,
