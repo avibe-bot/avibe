@@ -54,6 +54,14 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
 
 
+def _reject_nonfinite(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+class _DuplicateKeyError(ValueError):
+    pass
+
+
 @dataclass
 class ToolCall:
     call_id: str
@@ -177,10 +185,7 @@ def _tool_output_pair_present(text: str, call: ToolCall) -> bool:
             segments.append(line)
         else:
             segments.extend(f"tool={chunk}" for chunk in chunks[1:])
-    if any(expected in segment for segment in segments):
-        return True
-    marker = TOOL_OUTPUTS.get(call.name, "TOOL_OUTPUT_MISSING")
-    return any(call.name in segment and call.call_id in segment and marker in segment for segment in segments)
+    return any(expected in segment for segment in segments)
 
 
 def _anthropic_payload(*, model: str, stream: bool, parallel: bool, followup: Turn | None = None) -> dict[str, Any]:
@@ -296,16 +301,13 @@ def _flush_sse(data_lines: list[str], event_name: str | None, events: list[dict[
         events.append({"kind": "done", "type": event_name, "sequence": len(events)})
         return True
 
-    def reject_nonfinite(value: str) -> None:
-        raise ValueError(f"non-finite JSON constant: {value}")
-
     try:
-        parsed = json.loads(data, parse_constant=reject_nonfinite)
+        parsed = json.loads(data, parse_constant=_reject_nonfinite)
     except (json.JSONDecodeError, ValueError):
         invalid[0] += 1
         return False
     if isinstance(parsed, dict):
-        events.append({"kind": "event", "type": parsed.get("type"), "event": parsed, "sequence": len(events)})
+        events.append({"kind": "event", "type": event_name, "event": parsed, "sequence": len(events)})
     else:
         invalid[0] += 1
     return False
@@ -350,6 +352,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if message_started:
                     return False
                 message_started = True
+            elif event_type == "error":
+                return False
             elif event_type == "content_block_start":
                 if not message_started:
                     return False
@@ -378,10 +382,15 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if open_blocks:
                     return False
                 message_stop = index
+            elif event_type == "message_delta":
+                if not message_started or open_blocks:
+                    return False
         return message_started and message_stop is not None and message_stop == len(events) - 1
     if protocol == "responses":
         added: set[str] = set()
         closed: set[str] = set()
+        response_started = False
+        output_started = False
         terminal = None
         for index, item in enumerate(events):
             if item.get("kind") == "done":
@@ -392,28 +401,41 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 return False
             if terminal is not None:
                 return False
-            if event_type == "response.output_item.added":
+            if event_type in {"response.created", "response.in_progress"}:
+                if output_started:
+                    return False
+                response_started = True
+            elif event_type == "response.output_item.added":
+                if not response_started:
+                    return False
                 raw = event.get("item", {})
                 item_id = str(raw.get("id", event.get("output_index", "")))
                 if not item_id or item_id in added or item_id in closed:
                     return False
                 added.add(item_id)
+                output_started = True
             elif event_type == "response.function_call_arguments.delta":
+                if not response_started:
+                    return False
                 item_id = str(event.get("item_id", event.get("output_index", "")))
                 if item_id not in added or item_id in closed:
                     return False
             elif event_type in {"response.output_text.delta", "response.reasoning_summary_text.delta"}:
+                if not response_started:
+                    return False
                 item_id = str(event.get("item_id", event.get("output_index", "")))
-                if item_id and item_id in closed:
+                if item_id not in added or item_id in closed:
                     return False
             elif event_type == "response.output_item.done":
+                if not response_started:
+                    return False
                 raw = event.get("item", {})
                 item_id = str(raw.get("id", event.get("output_index", "")))
                 if item_id not in added or item_id in closed:
                     return False
                 closed.add(item_id)
             elif event_type in {"response.completed", "response.done"}:
-                if added != closed:
+                if not response_started or added != closed or not isinstance(event.get("response"), dict):
                     return False
                 terminal = index
         return terminal is not None and terminal == len(events) - 1
@@ -468,8 +490,8 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
             status = response.status
             if not stream:
                 try:
-                    document = json.loads(response.read().decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
+                    document = json.loads(response.read().decode("utf-8"), parse_constant=_reject_nonfinite)
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                     return TransportResult(status, None, [], False, 1)
                 return TransportResult(status, document if isinstance(document, dict) else None, [], False, 0)
             content_type = str(getattr(response, "headers", {}).get("Content-Type", ""))
@@ -536,16 +558,16 @@ def _parse_arguments(value: Any) -> tuple[Any, str | None]:
         result: dict[str, Any] = {}
         for key, item in pairs:
             if key in result:
-                raise ValueError(f"duplicate argument key: {key}")
+                raise _DuplicateKeyError(f"duplicate argument key: {key}")
             result[key] = item
         return result
 
     try:
-        parsed = json.loads(value, object_pairs_hook=reject_duplicate_keys)
-    except json.JSONDecodeError:
-        return value, "arguments_invalid_json"
-    except ValueError:
+        parsed = json.loads(value, object_pairs_hook=reject_duplicate_keys, parse_constant=_reject_nonfinite)
+    except _DuplicateKeyError:
         return value, "arguments_duplicate_key"
+    except (json.JSONDecodeError, ValueError):
+        return value, "arguments_invalid_json"
     return parsed, None if isinstance(parsed, dict) else "arguments_not_object"
 
 
@@ -598,12 +620,21 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
             calls.append(ToolCall(_required_identifier(block.get("id"), errors), str(block.get("name", "")), arguments))
         elif block_type == "text":
             text_parts.append(str(block.get("text", "")))
-        elif block_type in {"thinking", "redacted_thinking"}:
-            reasoning = True
-            if block_type == "thinking":
-                if not isinstance(block.get("signature"), str) or not block["signature"]:
-                    errors.append("thinking_signature_missing")
-                reasoning_parts.append(str(block.get("thinking", "")))
+        elif block_type == "thinking":
+            thinking = block.get("thinking")
+            if not isinstance(thinking, str) or not thinking:
+                errors.append("thinking_payload_missing")
+            else:
+                reasoning = True
+                reasoning_parts.append(thinking)
+            if not isinstance(block.get("signature"), str) or not block["signature"]:
+                errors.append("thinking_signature_missing")
+        elif block_type == "redacted_thinking":
+            data = block.get("data")
+            if not isinstance(data, str) or not data:
+                errors.append("redacted_thinking_payload_missing")
+            else:
+                reasoning = True
     stop_reason = document.get("stop_reason") if isinstance(document, dict) else None
     turn = Turn("anthropic", calls, "".join(text_parts), reasoning, stop_reason, content, terminal if terminal is not None else stop_reason is not None, event_count, invalid_event_count, errors)
     turn.reasoning_text = "".join(reasoning_parts)
@@ -618,7 +649,9 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
     for item in result.events:
         event = item.get("event", {})
         event_type = event.get("type")
-        if event_type == "content_block_start":
+        if event_type == "error":
+            errors.append("stream_error_event")
+        elif event_type == "content_block_start":
             index = _stream_index(event.get("index"))
             if index is None:
                 errors.append("stream_index_invalid")
@@ -855,7 +888,7 @@ def _chat_reasoning_usage_present(document: dict[str, Any] | None) -> bool:
     usage = document.get("usage") if isinstance(document, dict) else None
     details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
     reasoning_tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
-    return isinstance(reasoning_tokens, (int, float)) and reasoning_tokens > 0
+    return type(reasoning_tokens) is int and reasoning_tokens > 0
 
 
 def _parse_chat_stream(result: TransportResult) -> Turn:
@@ -866,6 +899,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     usage: dict[str, Any] | None = None
     errors: list[str] = []
     argument_fragment_indexes: set[int] = set()
+    assistant_role_seen = False
     for item in result.events:
         event = item.get("event", {})
         if isinstance(event.get("usage"), dict):
@@ -875,6 +909,11 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             continue
         choice = choices[0]
         delta = choice.get("delta", {})
+        if isinstance(delta, dict) and "role" in delta:
+            if delta.get("role") != "assistant":
+                errors.append("assistant_role_invalid")
+            else:
+                assistant_role_seen = True
         if delta.get("content"):
             content.append(str(delta["content"]))
         if delta.get("reasoning_content"):
@@ -910,6 +949,8 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     for index in calls:
         if index not in argument_fragment_indexes:
             errors.append("stream_arguments_missing")
+    if not assistant_role_seen:
+        errors.append("assistant_role_missing")
     message = {"role": "assistant", "content": "".join(content), "tool_calls": [calls[index] for index in sorted(calls)]}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)

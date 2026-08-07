@@ -61,13 +61,14 @@ target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The
 latest gate-complete rerun covered all eight cases with HTTP 200 and no
-fallback. ID/index, lifecycle, stream-content, and call-ID association checks
-passed. Anthropic thinking was present but lacked its required signature in the
-Messages-to-Responses single case and both Messages-to-Chat cases; the
-requested reasoning signal remained absent in both OpenAI-to-Anthropic
-directions. The Chat-to-Messages single final response also did not preserve
-the required system marker or exact tool-result tuple, while its parallel
-counterpart passed those gates.
+fallback. Tool-call structure, stream lifecycle, fragments, UTF-8/JSON, and
+content-type checks passed. Anthropic thinking was present but lacked its
+required signature in the Messages-to-Responses single case and both
+Messages-to-Chat cases; the requested reasoning signal remained absent in both
+OpenAI-to-Anthropic directions. Exact tool-result tuples and system scope also
+failed in several final turns; only the Messages-to-Chat parallel final turn
+preserved both, and Chat-to-Messages parallel preserved the exact tuples but
+not system scope.
 
 ## S4 matrix mapping
 
@@ -77,13 +78,13 @@ success claim.
 
 | S4 capability row | Probe case or assertion |
 | --- | --- |
-| Single tool call | `_validate_first`: `expected_tool_count`, `tool_names`, `tool_arguments`, `tool_ids_unique`, and protocol `stop_reason` |
+| Single tool call | `_request` strict JSON plus `_validate_first`: `expected_tool_count`, `tool_names`, `tool_arguments`, `tool_ids_unique`, and protocol `stop_reason` |
 | Parallel tools | `CaseSpec.expected_tools`, `_user_prompt(True)`, and the same `_validate_first` tool invariants |
-| Multi-turn loop | `_run_case` observed `first_turn.tool_calls` plus `_validate_second`: `no_followup_tool_calls`, `tool_outputs`, and `_tool_output_pair_present` call-ID association |
-| Streaming text | `_request` strict UTF-8 and `text/event-stream` checks, `_parse_anthropic_stream`/`_parse_responses_stream` `stream_text_delta_count` and snapshot comparison, `_stream_order_ok`, and `stream_complete` |
-| Streaming tool fragments | `_parse_anthropic_stream`, `_parse_responses_stream`, `_parse_chat_stream`, and `_stream_order_ok` index, ID, argument-fragment, and lifecycle checks |
+| Multi-turn loop | `_run_case` observed `first_turn.tool_calls` plus `_validate_second`: `no_followup_tool_calls`, `tool_outputs`, and `_tool_output_pair_present` exact call-ID/result tuple association |
+| Streaming text | `_request` strict UTF-8/JSON and `text/event-stream` checks, `_parse_anthropic_stream`/`_parse_responses_stream` `stream_text_delta_count` and snapshot comparison, `_parse_chat_stream` assistant-role preservation, `_stream_order_ok`, and `stream_complete` |
+| Streaming tool fragments | `_parse_anthropic_stream`, `_parse_responses_stream`, `_parse_chat_stream`, and `_stream_order_ok` opening/terminal envelopes, error events, item/index/ID continuity, argument fragments, and monotonic lifecycle checks |
 | System prompt | `_system_prompt` plus `_validate_second`: `system_marker` and `system_scope` |
-| Thinking/reasoning | `_anthropic_payload`, `_responses_payload`, `_chat_payload`, `_parse_anthropic_document` signature validation, `_reasoning_item_has_signal`, and `_validate_first`: `reasoning_present` plus `reasoning_not_visible` |
+| Thinking/reasoning | `_anthropic_payload`, `_responses_payload`, `_chat_payload`, `_parse_anthropic_document` payload/signature validation, `_reasoning_item_has_signal`, `_chat_reasoning_usage_present` integer-token gate, and `_validate_first`: `reasoning_present` plus `reasoning_not_visible` |
 | Context length/truncation | `probe.CONTEXT_LENGTH_NOT_VERIFIED` residual; no low-cost context-limit run was included in M0 |
 
 The live evidence in the survey used the owner-provided compatible relay. Direct

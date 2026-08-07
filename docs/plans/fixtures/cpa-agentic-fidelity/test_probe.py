@@ -160,6 +160,11 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(arguments, '{"city":"Paris","city":"Shanghai"}')
         self.assertEqual(error, "arguments_duplicate_key")
 
+    def test_nonfinite_tool_argument_is_invalid_json(self) -> None:
+        arguments, error = probe._parse_arguments('{"city":"Shanghai","score":NaN}')
+        self.assertEqual(arguments, '{"city":"Shanghai","score":NaN}')
+        self.assertEqual(error, "arguments_invalid_json")
+
     def test_malformed_chat_function_is_a_parse_error(self) -> None:
         turn = probe._parse_chat_document(
             {"choices": [{"message": {"tool_calls": [{"id": "call_1", "type": "function", "function": None}]}, "finish_reason": "tool_calls"}]}
@@ -193,6 +198,13 @@ class ProbeParserTests(unittest.TestCase):
         events = [
             {"kind": "event", "sequence": 0, "type": "wrong_name", "event": {"type": "message_start"}},
         ]
+        self.assertFalse(probe._stream_order_ok("anthropic", events))
+
+    def test_sse_parser_preserves_wire_event_name(self) -> None:
+        events: list[dict[str, object]] = []
+        invalid = [0]
+        probe._flush_sse(['{"type":"message_start"}'], "wrong_name", events, invalid)
+        self.assertEqual(events[0]["type"], "wrong_name")
         self.assertFalse(probe._stream_order_ok("anthropic", events))
 
     def test_chat_stream_rejects_non_function_tool_type(self) -> None:
@@ -270,6 +282,33 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(invalid, [1])
 
+    def test_nonstream_rejects_nonfinite_json_constants(self) -> None:
+        class Response:
+            status = 200
+            headers: dict[str, str] = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self) -> bytes:
+                return b'{"usage":{"completion_tokens_details":{"reasoning_tokens":Infinity}}}'
+
+        class Opener:
+            def open(self, request, timeout):
+                return Response()
+
+        original_opener = probe.OPENER
+        try:
+            probe.OPENER = Opener()
+            result = probe._request("/v1/chat/completions", {}, client_protocol="chat", stream=False)
+        finally:
+            probe.OPENER = original_opener
+        self.assertIsNone(result.document)
+        self.assertEqual(result.invalid_event_count, 1)
+
     def test_stream_requires_event_stream_content_type(self) -> None:
         class Response:
             status = 200
@@ -302,6 +341,14 @@ class ProbeParserTests(unittest.TestCase):
             }
         )
         self.assertTrue(turn.reasoning_present)
+
+    def test_chat_reasoning_usage_requires_positive_integer(self) -> None:
+        for value in (True, 1.5, 0, -1):
+            document = {
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "tool_calls"}],
+                "usage": {"completion_tokens_details": {"reasoning_tokens": value}},
+            }
+            self.assertFalse(probe._parse_chat_document(document).reasoning_present)
 
     def test_missing_tool_ids_are_rejected_before_string_conversion(self) -> None:
         anthropic = probe._parse_anthropic_document(
@@ -420,6 +467,76 @@ class ProbeParserTests(unittest.TestCase):
         invalid = [ordered[2], ordered[0], ordered[3], ordered[4]]
         self.assertTrue(probe._stream_order_ok("anthropic", ordered))
         self.assertFalse(probe._stream_order_ok("anthropic", invalid))
+
+    def test_anthropic_message_delta_requires_started_closed_message(self) -> None:
+        before_start = [
+            {"kind": "event", "sequence": 0, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}},
+            {"kind": "event", "sequence": 1, "type": "message_start", "event": {"type": "message_start"}},
+            {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        while_open = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start"}},
+            {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0}},
+            {"kind": "event", "sequence": 2, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}},
+            {"kind": "event", "sequence": 3, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
+            {"kind": "event", "sequence": 4, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        self.assertFalse(probe._stream_order_ok("anthropic", before_start))
+        self.assertFalse(probe._stream_order_ok("anthropic", while_open))
+
+    def test_anthropic_error_event_invalidates_stream(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start"}},
+            {"kind": "event", "sequence": 1, "type": "error", "event": {"type": "error", "error": {"type": "overloaded_error"}}},
+            {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        self.assertFalse(probe._stream_order_ok("anthropic", events))
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, events, True, 0, False))
+        self.assertIn("stream_error_event", turn.parse_errors)
+
+    def test_responses_stream_rejects_delta_before_item_creation(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "event", "sequence": 1, "type": "response.output_text.delta", "event": {"type": "response.output_text.delta", "item_id": "msg_1", "delta": "early"}},
+            {"kind": "event", "sequence": 2, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "item": {"id": "msg_1", "type": "message"}}},
+            {"kind": "event", "sequence": 3, "type": "response.output_item.done", "event": {"type": "response.output_item.done", "item": {"id": "msg_1", "type": "message"}}},
+            {"kind": "event", "sequence": 4, "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed"}}},
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", events))
+
+    def test_responses_stream_requires_opening_and_terminal_envelopes(self) -> None:
+        missing_opening = [
+            {"kind": "event", "sequence": 0, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "item": {"id": "msg_1", "type": "message"}}},
+            {"kind": "event", "sequence": 1, "type": "response.output_item.done", "event": {"type": "response.output_item.done", "item": {"id": "msg_1", "type": "message"}}},
+            {"kind": "event", "sequence": 2, "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed"}}},
+        ]
+        missing_terminal_response = [
+            {"kind": "event", "sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "event", "sequence": 1, "type": "response.completed", "event": {"type": "response.completed"}},
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", missing_opening))
+        self.assertFalse(probe._stream_order_ok("responses", missing_terminal_response))
+
+    def test_anthropic_reasoning_blocks_require_payload(self) -> None:
+        thinking = probe._parse_anthropic_document(
+            {"content": [{"type": "thinking", "thinking": "", "signature": "sig"}], "stop_reason": "tool_use"}
+        )
+        redacted = probe._parse_anthropic_document(
+            {"content": [{"type": "redacted_thinking", "data": ""}], "stop_reason": "tool_use"}
+        )
+        self.assertFalse(thinking.reasoning_present)
+        self.assertIn("thinking_payload_missing", thinking.parse_errors)
+        self.assertFalse(redacted.reasoning_present)
+        self.assertIn("redacted_thinking_payload_missing", redacted.parse_errors)
+
+    def test_chat_stream_requires_assistant_role(self) -> None:
+        invalid = [
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"role": "user"}}]}},
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {}, "finish_reason": "stop"}]}},
+            {"kind": "done", "type": None},
+        ]
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, invalid, True, 0))
+        self.assertIn("assistant_role_invalid", turn.parse_errors)
 
     def test_chat_stream_order_rejects_content_after_finish(self) -> None:
         allowed = [
