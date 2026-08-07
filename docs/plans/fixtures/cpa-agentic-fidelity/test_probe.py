@@ -74,6 +74,37 @@ class ProbeParserTests(unittest.TestCase):
         )
         self.assertTrue(turn.reasoning_present)
 
+    def test_missing_tool_ids_are_rejected_before_string_conversion(self) -> None:
+        anthropic = probe._parse_anthropic_document(
+            {"content": [{"type": "tool_use", "id": None, "name": "lookup_weather", "input": {"city": "Shanghai"}}], "stop_reason": "tool_use"}
+        )
+        responses = probe._parse_responses_document(
+            {"output": [{"type": "function_call", "call_id": None, "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}], "status": "completed"}
+        )
+        chat = probe._parse_chat_document(
+            {"choices": [{"message": {"tool_calls": [{"id": None, "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}, "finish_reason": "tool_calls"}]}
+        )
+        for turn in (anthropic, responses, chat):
+            self.assertIn("tool_call_id_invalid", turn.parse_errors)
+            self.assertFalse(probe._validate_first(turn, ("lookup_weather",), stream=False)["checks"]["parsed"])
+
+    def test_malformed_stream_indexes_fail_without_parser_exceptions(self) -> None:
+        anthropic_events = [
+            {"kind": "event", "sequence": 0, "event": {"type": "content_block_start", "index": None, "content_block": {"type": "tool_use", "id": "call_1", "name": "lookup_weather"}}},
+            {"kind": "event", "sequence": 1, "event": {"type": "message_stop"}},
+        ]
+        chat_events = [
+            {"kind": "event", "sequence": 0, "event": {"choices": [{"delta": {"tool_calls": [{"index": None, "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}}]}},
+            {"kind": "event", "sequence": 1, "event": {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "done", "sequence": 2},
+        ]
+        self.assertFalse(probe._stream_order_ok("anthropic", anthropic_events))
+        self.assertFalse(probe._stream_order_ok("chat", chat_events))
+        anthropic_turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, anthropic_events, True, 0, False))
+        chat_turn = probe._parse_chat_stream(probe.TransportResult(200, None, chat_events, True, 0, False))
+        self.assertIn("stream_index_invalid", anthropic_turn.parse_errors)
+        self.assertIn("stream_index_invalid", chat_turn.parse_errors)
+
     def test_loopback_opener_has_no_environment_proxy(self) -> None:
         proxy_handlers = [handler for handler in probe.OPENER.handlers if isinstance(handler, probe.urllib.request.ProxyHandler)]
         self.assertEqual(proxy_handlers, [])

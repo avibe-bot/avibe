@@ -35,6 +35,7 @@ THINKING_BUDGET = 1024
 MAX_TOKENS = 1280
 TOOL_OUTPUTS = {"lookup_weather": "WEATHER_OK", "lookup_time": "TIME_OK"}
 STREAM_TOTAL_TIMEOUT = 90
+CONTEXT_LENGTH_NOT_VERIFIED = "context_length_not_verified"
 STOP_REASONS = {
     "anthropic": {"first": {"tool_use"}, "final": {"end_turn"}},
     "responses": {"first": {"completed"}, "final": {"completed"}},
@@ -314,17 +315,23 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             if message_stop is not None:
                 return False
             if event_type == "content_block_start":
-                block_index = int(event.get("index", -1))
+                block_index = _stream_index(event.get("index"))
+                if block_index is None:
+                    return False
                 if block_index < last_start or block_index in open_blocks or block_index in closed_blocks:
                     return False
                 open_blocks.add(block_index)
                 last_start = block_index
             elif event_type == "content_block_delta":
-                block_index = int(event.get("index", -1))
+                block_index = _stream_index(event.get("index"))
+                if block_index is None:
+                    return False
                 if block_index not in open_blocks:
                     return False
             elif event_type == "content_block_stop":
-                block_index = int(event.get("index", -1))
+                block_index = _stream_index(event.get("index"))
+                if block_index is None:
+                    return False
                 if block_index not in open_blocks:
                     return False
                 open_blocks.remove(block_index)
@@ -388,7 +395,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             choice = choices[0]
             delta = choice.get("delta", {})
             for call in delta.get("tool_calls", []) if isinstance(delta, dict) else []:
-                tool_index = int(call.get("index", 0))
+                tool_index = _stream_index(call.get("index"))
+                if tool_index is None:
+                    return False
                 if tool_index < last_tool_index:
                     return False
                 last_tool_index = max(last_tool_index, tool_index)
@@ -481,6 +490,19 @@ def _parse_arguments(value: Any) -> tuple[Any, str | None]:
     return parsed, None if isinstance(parsed, dict) else "arguments_not_object"
 
 
+def _required_identifier(value: Any, errors: list[str]) -> str:
+    if not isinstance(value, str) or not value:
+        errors.append("tool_call_id_invalid")
+        return ""
+    return value
+
+
+def _stream_index(value: Any) -> int | None:
+    if type(value) is int and value >= 0:
+        return value
+    return None
+
+
 def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: int = 0, invalid_event_count: int = 0, terminal: bool | None = None) -> Turn:
     errors: list[str] = []
     content = document.get("content") if isinstance(document, dict) else None
@@ -499,7 +521,7 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
             arguments, error = _parse_arguments(block.get("input"))
             if error:
                 errors.append(error)
-            calls.append(ToolCall(str(block.get("id", "")), str(block.get("name", "")), arguments))
+            calls.append(ToolCall(_required_identifier(block.get("id"), errors), str(block.get("name", "")), arguments))
         elif block_type == "text":
             text_parts.append(str(block.get("text", "")))
         elif block_type in {"thinking", "redacted_thinking"}:
@@ -516,14 +538,20 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
         event = item.get("event", {})
         event_type = event.get("type")
         if event_type == "content_block_start":
-            index = int(event.get("index", len(blocks)))
+            index = _stream_index(event.get("index"))
+            if index is None:
+                errors.append("stream_index_invalid")
+                continue
             block = copy.deepcopy(event.get("content_block", {}))
             block.setdefault("type", "")
             if block.get("type") == "tool_use":
                 block["_arguments"] = ""
             blocks[index] = block
         elif event_type == "content_block_delta":
-            index = int(event.get("index", 0))
+            index = _stream_index(event.get("index"))
+            if index is None:
+                errors.append("stream_index_invalid")
+                continue
             block = blocks.setdefault(index, {"type": ""})
             delta = event.get("delta", {})
             delta_type = delta.get("type")
@@ -577,7 +605,7 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
             arguments, error = _parse_arguments(item.get("arguments"))
             if error:
                 errors.append(error)
-            calls.append(ToolCall(str(item.get("call_id", "")), str(item.get("name", "")), arguments))
+            calls.append(ToolCall(_required_identifier(item.get("call_id"), errors), str(item.get("name", "")), arguments))
         elif item_type == "reasoning":
             reasoning = True
         elif item_type == "message":
@@ -658,7 +686,7 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
         arguments, error = _parse_arguments(function.get("arguments"))
         if error:
             errors.append(error)
-        calls.append(ToolCall(str(raw.get("id", "")), str(function.get("name", "")), arguments))
+        calls.append(ToolCall(_required_identifier(raw.get("id"), errors), str(function.get("name", "")), arguments))
     content = message.get("content", "") if isinstance(message, dict) else ""
     reasoning_content = message.get("reasoning_content", "") if isinstance(message, dict) else ""
     finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
@@ -690,6 +718,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     calls: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
+    errors: list[str] = []
     for item in result.events:
         event = item.get("event", {})
         if isinstance(event.get("usage"), dict):
@@ -706,10 +735,16 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
         if choice.get("finish_reason"):
             finish_reason = choice["finish_reason"]
         for raw in delta.get("tool_calls", []) if isinstance(delta, dict) else []:
-            index = int(raw.get("index", 0))
+            index = _stream_index(raw.get("index"))
+            if index is None:
+                errors.append("stream_index_invalid")
+                continue
             call = calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-            if raw.get("id"):
-                call["id"] = raw["id"]
+            if "id" in raw:
+                if not isinstance(raw["id"], str) or not raw["id"]:
+                    errors.append("tool_call_id_invalid")
+                else:
+                    call["id"] = raw["id"]
             function = raw.get("function", {})
             if function.get("name"):
                 call["function"]["name"] += str(function["name"])
@@ -722,6 +757,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     if usage is not None:
         document["usage"] = usage
     turn = _parse_chat_document(document, event_count=len(result.events), invalid_event_count=result.invalid_event_count, terminal=result.done_sentinel or finish_reason is not None)
+    turn.parse_errors.extend(errors)
     turn.stream_order_ok = result.stream_order_ok
     turn.deadline_expired = result.deadline_expired
     return turn
@@ -902,7 +938,7 @@ def main() -> int:
     results = [_run_case(case) for case in _build_cases()]
     blocked = any(result.get("blocked") for result in results)
     ok = not blocked and all(all(result["checks"].values()) for result in results)
-    print(json.dumps({"ok": ok, "blocked": blocked, "results": results}, sort_keys=True))
+    print(json.dumps({"ok": ok, "blocked": blocked, "not_verified": [CONTEXT_LENGTH_NOT_VERIFIED], "results": results}, sort_keys=True))
     return 2 if blocked else (0 if ok else 1)
 
 
