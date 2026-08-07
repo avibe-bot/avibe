@@ -118,6 +118,27 @@ def _expand() -> list[tuple[str, str, str, str, tuple[str, str]]]:
 _CELLS = _expand()
 
 
+def _bound_names(node: ast.stmt) -> set[str]:
+    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+        return {node.name}
+    targets = (
+        node.targets
+        if isinstance(node, ast.Assign)
+        else [node.target]
+        if isinstance(node, ast.AnnAssign)
+        else []
+    )
+    return {target.id for target in targets if isinstance(target, ast.Name)}
+
+
+def _bindings(body: list[ast.stmt]) -> dict[str, ast.stmt]:
+    bindings: dict[str, ast.stmt] = {}
+    for node in body:
+        for name in _bound_names(node):
+            bindings[name] = node
+    return bindings
+
+
 def _assert_symbol_exists(
     qualified: str, *, leaf_is_class: bool = False
 ) -> tuple[list[ast.stmt], list[ast.AST]]:
@@ -139,15 +160,8 @@ def _assert_symbol_exists(
             if is_leaf and not leaf_is_class
             else (ast.ClassDef,)
         )
-        match = next(
-            (
-                node
-                for node in scope
-                if isinstance(node, wanted) and node.name == name
-            ),
-            None,
-        )
-        assert match is not None, (
+        match = _bindings(scope).get(name)
+        assert isinstance(match, wanted), (
             f"{qualified}: no {'symbol' if is_leaf and not leaf_is_class else 'class'} "
             f"named {name!r} at this level"
         )
@@ -580,13 +594,14 @@ def _unconditionally_skipped(
         target = _decorator_target(decorator, module_body)
         if target in {"pytest.mark.skip", "unittest.skip"}:
             return True
-        if (
-            target in {"pytest.mark.skipif", "unittest.skipIf"}
-            and isinstance(decorator, ast.Call)
-            and decorator.args
-            and isinstance(decorator.args[0], ast.Constant)
-            and bool(decorator.args[0].value)
-        ):
+        if target not in {"pytest.mark.skipif", "unittest.skipIf"}:
+            continue
+        condition = decorator.args[0] if isinstance(decorator, ast.Call) and decorator.args else None
+        if not isinstance(condition, ast.Constant) or isinstance(condition.value, str):
+            raise AssertionError(
+                f"cannot decide computed skip condition on {node.name!r}"
+            )
+        if bool(condition.value):
             return True
     return False
 
@@ -611,29 +626,13 @@ def _executable_test(
     ) and not _unconditionally_skipped(node, module_body)
 
 
-def _bound_names(node: ast.stmt) -> set[str]:
-    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-        return {node.name}
-    targets = (
-        node.targets
-        if isinstance(node, ast.Assign)
-        else [node.target]
-        if isinstance(node, ast.AnnAssign)
-        else []
-    )
-    return {target.id for target in targets if isinstance(target, ast.Name)}
-
-
 def _class_methods(node: ast.ClassDef, module_body):
     """Methods visible on a class, with their defining class and module."""
     line = _linearized_ancestry(node, module_body)
     assert line is not None, f"cannot resolve MRO for {node.name!r}"
     seen: set[str] = set()
     for cls, defining_module in line:
-        bindings: dict[str, ast.stmt] = {}
-        for child in cls.body:
-            for name in _bound_names(child):
-                bindings[name] = child
+        bindings = _bindings(cls.body)
         for name, child in bindings.items():
             if name not in seen and isinstance(
                 child, (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -652,7 +651,7 @@ def _collected_tests(
     if module_body is None and _opted_out(_test_flag(body)):
         return []
     found: list[tuple[str, ast.stmt]] = []
-    for node in body:
+    for node in _bindings(body).values():
         if isinstance(node, ast.ClassDef):
             if _collectible_class(node, module) and not _skipped_class(node, module):
                 for method, enclosing, defining_module in _class_methods(
@@ -662,7 +661,7 @@ def _collected_tests(
                         found.append(
                             ("::".join(prefix + (node.name, method.name)), method)
                         )
-                for child in node.body:
+                for child in _bindings(node.body).values():
                     if isinstance(child, ast.ClassDef):
                         found.extend(
                             _collected_tests(
@@ -1434,6 +1433,11 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "@pytest.mark.skip(reason='never executes')\n"
         "class TestSkippedClass:\n"
         "    def test_case(self): ...\n"
+        "class TestRedefinedSkipped:\n"
+        "    def test_case(self): ...\n"
+        "@pytest.mark.skip(reason='final binding')\n"
+        "class TestRedefinedSkipped:\n"
+        "    def test_case(self): ...\n"
         "class OwnerTests(unittest.IsolatedAsyncioTestCase):\n"
         "    async def test_case(self): ...\n"
         "class TestCtor:\n"
@@ -1452,6 +1456,11 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "def test_fixture(): ...\n"
         "@pytest.mark.skip(reason='never executes')\n"
         "def test_skipped(): ...\n"
+        "def test_redefined_skipped(): ...\n"
+        "@pytest.mark.skip(reason='final binding')\n"
+        "def test_redefined_skipped(): ...\n"
+        "def test_reassigned(): ...\n"
+        "test_reassigned = None\n"
         "def test_muted(): ...\n"
         "test_muted.__test__ = False\n"
         "def plain_named(): ...\n"
@@ -1469,12 +1478,16 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
 
     computed = tmp_path / "tests" / "computed_module.py"
     computed.write_text(
+        "import os\n"
+        "import pytest\n"
         "FLAG = False\n"
         "class TestComputedOptOut:\n"
         "    __test__ = FLAG\n"
         "    def test_case(self): ...\n"
         "def test_computed_muted(): ...\n"
-        "test_computed_muted.__test__ = FLAG\n",
+        "test_computed_muted.__test__ = FLAG\n"
+        "@pytest.mark.skipif(os.name == 'nt', reason='platform-specific')\n"
+        "def test_computed_skip(): ...\n",
         encoding="utf-8",
     )
     computed_rel = Path("tests/computed_module.py")
@@ -1572,6 +1585,11 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
             _assert_node_exists(f"{rel}::{opted_out}::test_case")
     with pytest.raises(AssertionError, match="unconditional skip on class"):
         _assert_node_exists(f"{rel}::TestSkippedClass::test_case")
+    with pytest.raises(AssertionError, match="unconditional skip on class"):
+        _assert_node_exists(f"{rel}::TestRedefinedSkipped::test_case")
+    for final_non_test in ("test_redefined_skipped", "test_reassigned"):
+        with pytest.raises(AssertionError):
+            _assert_node_exists(f"{rel}::{final_non_test}")
 
     # Round 20: the same flag reached through a BASE. pytest reads an
     # attribute, and attributes are inherited, so ``TestInheritedOptOut`` is
@@ -1607,6 +1625,8 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         AssertionError, match="cannot decide pytest's computed __test__ value"
     ):
         _collected_tests(ast.parse(computed.read_text(encoding="utf-8")).body)
+    with pytest.raises(AssertionError, match="cannot decide computed skip condition"):
+        _assert_node_exists(f"{computed_rel}::test_computed_skip")
 
     # Round 25: the ORDER the inherited flag is read in, which round 20 left
     # depth-first and round 22 carried across module boundaries unexamined.
@@ -1686,12 +1706,15 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "TestFinalOptOut::test_case",
         "TestAssignedOptOut::test_case",
         "TestSkippedClass::test_case",
+        "TestRedefinedSkipped::test_case",
         "TestInheritedCtor::test_case",
         "TestInheritedCtorTwoDeep::test_case",
         "TestInheritedNew::test_case",
         "LiteralTruthyOptIn::test_case",
         "test_fixture",
         "test_skipped",
+        "test_redefined_skipped",
+        "test_reassigned",
         "test_muted",
         "test_final_muted",
     ):
