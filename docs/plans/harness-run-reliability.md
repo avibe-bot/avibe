@@ -3,13 +3,23 @@
 Status (2026-08-07): **ARCHIVED — complete through PR4.** PR1, PR2, PR5, PR6,
 #1139's Activity-output settlement closure, PR3 (#1155), and PR4 (#1173) all
 merged. PR7/PR7R is dropped and #1212 is closed; see §7. No further unit opens
-from this plan. PR4B is likewise dropped — it was gated on a current-master
-reproducer that thirty days of production data did not produce.
+from this plan. PR4B stays unopened: it was always gated on a reproducer, and
+nothing has requested it — but that is not the same as disproven, because the
+crash matrix it was gated on was never run. See the delta note in §6.
 
-**The still-binding rules now live in `AGENTS.md` §2 "Harness Run Ownership
-(load-bearing)".** Read that, not this file, before changing a Run, Delivery,
-Turn, or Activity path. This document is retained as the derivation and the
-historical record.
+**The Run/Delivery/Turn/Activity ownership rules and invariants now live in
+`AGENTS.md` §2 "Harness Run Ownership (load-bearing)".** Read those there before
+changing one of those paths — they are restated in full and do not need this
+file. `AGENTS.md` does **not** carry the runtime-supervision contracts, which
+remain binding here and were accepted with PR3/PR4:
+
+- §3.6 — blocking work, supervision, and shutdown ownership.
+- §5 — session runtime ownership, the activation-before-reclamation interlock,
+  and the work-supervisor interfaces.
+
+Read those two sections before touching session activation, reclamation, work
+lanes, or shutdown. The rest of this document is retained as the derivation and
+the historical record.
 
 This is the execution plan, not the investigation log. The original detailed
 diagnosis and its review history remain available in Git before `fe821905`.
@@ -27,7 +37,7 @@ numbers or old ownership assumptions.
 | Teardown-interrupted Run settlement | **#1140 merged**; supersedes closed #1131 |
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
-| Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; PR4B dropped — no reproducer surfaced |
+| Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; PR4B unopened — its crash-matrix gate was never run |
 | Scheduled/watch terminal-time truth and cron liveness | **Closed 2026-08-07 — not reproduced.** See §7 |
 
 The post-plan architecture is load-bearing (now also recorded in `AGENTS.md`):
@@ -1057,9 +1067,20 @@ matrix against #1139. If the accepted Message, stable Activity receipt, and
 local-settlement-only marker already close the reproduced window, record that
 evidence and add no state.
 
-Superseded 2026-08-07: PR4B is dropped and this plan is archived. The paragraph
-below states the bar a future PR4B-shaped change would have had to clear; it no
-longer authorizes one.
+Status 2026-08-07: PR4B stays unopened and this plan is archived. State the
+reason precisely, because it is not the reason the other units closed. The
+premature-success and stuck-Run claims were **disproven** by production data.
+PR4B is not: the crash matrix above was never run, and production queries cannot
+substitute for it, since none of them kill a process inside the outbound-send
+window. What production does say is only that the symptom has not appeared
+organically — across 630 recorded deliveries, zero sit with an attempt open and
+no receipt, zero share a `dedupe_key`, and the only repeated dispatch hashes are
+empty-text rows and a user resending the same message by hand. That is an
+absence of signal, not a closed window.
+
+So the gate is unchanged rather than satisfied: PR4B opens if someone runs the
+matrix and reproduces something, or if the symptom shows up in the field. The
+paragraph below still states the bar such a change must clear.
 
 Only a remaining concrete ambiguity may open a separate PR4B contract review.
 That review must name the missing fact, prove the existing Activity owner cannot
@@ -1199,11 +1220,18 @@ matrix, and the answer closes both claims.
 
 Thirty days of production Runs, plus an all-time check for stuck rows:
 
-- **No Run has ever been left nonterminal.** All 1551 rows are `succeeded`,
+- **No Run has ever been left nonterminal.** All 1553 rows are `succeeded`,
   `failed`, or `canceled`. Zero rows sit nonterminal past two hours, all-time.
-- **Cron liveness is healthy.** All three enabled cron definitions fired on
-  schedule: `7 9 * * *` at 08-07T01:10Z, `0 11 * * *` at 08-07T03:00Z, and
-  `30 9 * * wed` at 08-05T03:39Z. No silent scheduler death.
+- **No cron occurrence has been missed.** A single recent fire per definition
+  would only prove the scheduler is alive today, so every expected occurrence was
+  enumerated from each definition's own `created_at` and stored `timezone` and
+  matched against Run rows. `7 9 * * *` (`Asia/Shanghai`, created 06-23) is the
+  only definition with meaningful history: 46 of 46 expected daily occurrences
+  produced a Run, zero missing days, firing at 01:07Z = 09:07 CST. The other two
+  enabled definitions are young — `0 11 * * *` was created 08-04 and has 4 of 4
+  expected fires; `30 9 * * wed` was created 08-05 and has had no scheduled
+  Wednesday since. So the strong claim holds for the daily definition across 46
+  days, and the other two support only current liveness.
 - **Result-less successes are by design.** 6/6 command tasks return no result
   text because a command task is silent on success; the remainder are `<silent>`
   agent replies.
@@ -1215,22 +1243,29 @@ So the settlement order was compared directly, joining `agent_runs` →
 `agent_runs.completed_at - session_turns.terminal_at`:
 
 ```text
-run settles <50ms before its Turn       84
-run settles 50-1000ms before             1
-run settles 1-60s before                 1     (worst case -1.05s)
-run settles >1s after                    9
-Turn still non-terminal when Run settled 0
+run terminal 1-60s before its Turn        12     (worst case -1.054s)
+run terminal 50ms-1s before              211
+run terminal <50ms before                139
+run terminal at/after its Turn            24
+still in flight (run running, turn active)  1
+                                        ----
+total                                    387
+Runs terminal while their Turn was not     0
 ```
 
-Every one of those Turns carries `terminal_evidence_kind = terminal_result`, so
-the Turn had a real natural completion in hand. The worst case is 1.05 s of
-write ordering inside one settlement sequence, not a Run claiming success ahead
-of its execution.
+The buckets are exhaustive over the join — they sum to the full 387, with the
+one live row named rather than filtered away. The last line is checked against
+current durable state, not inferred from the timing: no row exists where the
+Run carries a terminal status and its Turn does not. All 386 settled Turns carry
+a real completion (`terminal_result` 382, `runner_release` 3, `service_shutdown`
+1). The worst case is 1.054 s of write ordering inside one settlement sequence,
+not a Run claiming success ahead of its execution.
 
-Coverage limit, stated plainly: 104 of 1373 Runs in the window link all the way
-through to a `session_turns` row (387 bind a Delivery at all; `watch_runtime`
-Runs are waiter commands with no agent Turn and never do). The check is
-therefore exact for Turn-bound Runs and silent about the rest.
+Coverage limit, stated plainly: 387 of 1553 Runs link all the way through to a
+`session_turns` row, which is every Run that binds a Delivery but one currently
+open. `watch_runtime` Runs are waiter commands with no agent Turn and never
+bind one. The check is therefore exact for Turn-bound Runs and silent about the
+rest.
 
 On that evidence the old premature-success claim is **disproven** for Turn-bound
 Runs rather than merely unproven — they settle late, not early. Per this plan's
@@ -1330,7 +1365,8 @@ dropped: PR7R evidence matrix (#1212 closed) — claims closed by
 
 PR3 and PR4 stayed separate: PR3 defined session ownership/reclamation; PR4
 replaced serial polling as the normal executor. PR4B was gated on a
-current-master reproducer that never surfaced and is dropped with the rest.
+current-master crash reproducer. That matrix was never run, so PR4B is unopened
+rather than closed; the gate in §6 still stands.
 
 The blank-cause batch sweep found in §7 is tracked as an ordinary bug outside
 this plan. It does not reopen the plan and does not inherit the evidence-gate,
